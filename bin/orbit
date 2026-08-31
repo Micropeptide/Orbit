@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""orbit — terminal chat with Orbit, from the shell.
+
+  orbit                 interactive      orbit "question"   one-shot
+  orbit --resume        continue last    orbit --stop       stop the local model
+  orbit --ui            open the web app
+  /new /compact /tools /memory /settings /history /reset   in-session
+"""
+import os, sys
+# Run under the install's own venv wherever we were launched from — a bare
+# `python3 bin/orbit` would otherwise miss every dependency.
+_BIN = os.path.dirname(os.path.abspath(__file__))
+_VENV = os.path.join(os.path.dirname(_BIN), "venv", "bin", "python")
+if os.path.exists(_VENV) and os.path.realpath(sys.executable) != os.path.realpath(_VENV):
+    os.execv(_VENV, [_VENV, os.path.abspath(__file__), *sys.argv[1:]])
+import os, sys, subprocess
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import qqcore as q
+C = q.C
+
+def main():
+    if "--stop" in sys.argv:
+        print(q.stop_server()); return
+    if "--ui" in sys.argv:
+        os.execv(os.path.join(q.ROOT, "bin", "orbit-ui"), ["orbit-ui"])
+    argv   = [a for a in sys.argv[1:] if not a.startswith("--")]
+    resume = "--resume" in sys.argv
+
+    tools, errs = q.active_tools()
+    for name, e in errs.items(): print(C(f"  ! MCP '{name}': {e}", "31"))
+    q.ensure_model(lambda s: print(C("  " + s, "2;33"), flush=True))
+
+    msgs = [{"role": "system", "content": q.system_prompt()}]
+    if resume and os.path.exists(q.session_path("last-session")):
+        m, _ = q.session_load("last-session")
+        if m: msgs = m; print(C(f"(resumed {len(m)} messages)", "2"))
+
+    def emit(kind, p):
+        if kind == "thinking_delta" and q.S.get("show_thinking"):
+            print(C(p, "2;35"), end="", flush=True)
+        elif kind == "content_delta":
+            print(p, end="", flush=True)
+        elif kind == "tool":
+            args = ", ".join(f"{k}={str(v)[:50]}" for k, v in p["args"].items())
+            print(C(f"\n  ⚙ {p['name']}({args})", "2;33"), flush=True)
+
+    def approve(fn, a, reason):
+        if not sys.stdin.isatty(): return False
+        print(C(f"\n  !! {reason} — {fn}", "1;31"))
+        for k, v in (a or {}).items(): print(C(f"     {k}: {str(v)[:200]}", "2"))
+        return input(C("  allow? [y/N] ", "1;31")).strip().lower() in ("y", "yes")
+
+    if argv:
+        q.turn(msgs, " ".join(argv), tools, emit=emit, approve=approve)
+        print(); q.session_save("last-session", msgs); return
+
+    print(C(f"{q.NAME} v{q.VERSION} · {q.MODEL} · {len(tools)} tools", "1"))
+    print(C(q.ROOT, "2"))
+    print(C("/new /compact /tools /memory /settings /ui · Ctrl-D quits", "2"))
+    while True:
+        try: line = input(C("\nyou › ", "1;36")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print(); q.session_save("last-session", msgs); break
+        if not line: continue
+        if line in ("/new", "/reset"):
+            q.reload_settings()
+            msgs = [{"role":"system","content":q.system_prompt()}]; print("(new chat)"); continue
+        if line == "/history": print(f"({len(msgs)} messages)"); continue
+        if line == "/tools":
+            for t in tools: print("  ", t["function"]["name"]);
+            continue
+        if line == "/memory":
+            for m in q.memory_list(): print(f"   {m['name']:24} {m['title'][:60]}")
+            if not q.memory_list(): print("   (no memories yet)")
+            continue
+        if line == "/settings":
+            print(f"   settings file: {q.SETTINGS}")
+            print(f"   thinking={q.S.get('thinking')} shell={q.S.get('shell_enabled')} "
+                  f"write_any={q.S.get('write_any')} rounds={q.S.get('max_tool_rounds')}")
+            print(f"   server: {q.S.get('server')}")
+            print("   edit them in the web UI:  qq --ui")
+            continue
+        if line == "/ui":
+            subprocess.Popen([os.path.join(q.ROOT,"bin","orbit-ui")]); print("(web UI starting)"); continue
+        if line == "/compact":
+            msgs, s = q.compact(msgs); print(C("(compacted)\n" + s[:600], "2")); continue
+        print(C("  › ", "1;32"), end="", flush=True)
+        try:
+            q.turn(msgs, line, tools, emit=emit, approve=approve); print()
+            q.session_save("last-session", msgs)
+        except Exception as e:
+            print(f"\n[error: {e}]")
+
+if __name__ == "__main__":
+    main()

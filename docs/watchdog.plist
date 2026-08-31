@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Stops the local model server after idle_min minutes. Replace both paths. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.orbit.watchdog</string>
+  <key>ProgramArguments</key>
+  <array><string>/ABSOLUTE/PATH/TO/Orbit/bin/orbit-idle-watchdog</string></array>
+  <key>StartInterval</key><integer>300</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/ABSOLUTE/PATH/TO/Orbit/logs/watchdog.log</string>
+  <key>StandardErrorPath</key><string>/ABSOLUTE/PATH/TO/Orbit/logs/watchdog.log</string>
+</dict>
+</plist>

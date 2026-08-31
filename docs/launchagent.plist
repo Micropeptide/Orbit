@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Keeps the Orbit web app running. Replace BOTH paths with your install. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.orbit.ui</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/Orbit/bin/orbit-ui</string>
+    <string>--no-open</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>1</integer>
+  <key>StandardOutPath</key><string>/ABSOLUTE/PATH/TO/Orbit/logs/ui.log</string>
+  <key>StandardErrorPath</key><string>/ABSOLUTE/PATH/TO/Orbit/logs/ui.log</string>
+</dict>
+</plist>

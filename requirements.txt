@@ -1,0 +1,12 @@
+# Orbit's dependencies. Nothing here talks to a server unless you ask it to.
+requests>=2.31          # http, tool calls, model endpoints
+markitdown>=0.1.2       # pdf/docx/xlsx/pptx -> text, for papers and attachments
+beautifulsoup4>=4.12    # html cleanup when fetching pages
+lxml>=5.0               # parser markitdown and bs4 lean on
+ddgs>=9.0               # web search without an API key
+pypdfium2>=4.0          # pdf rendering for page thumbnails
+pillow>=10.0            # image handling and thumbnails
+matplotlib>=3.8         # plots the python tool can produce
+numpy>=1.26             # numerics for that same tool
+pandas>=2.0             # tables for that same tool
+anthropic>=1.0          # the Claude API path (unused unless you add a key)

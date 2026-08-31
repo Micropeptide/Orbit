@@ -1,0 +1,4 @@
+{
+  "comment": "MCP servers Orbit connects to, spawned on demand. Same shape as Claude Desktop's config.",
+  "mcpServers": {}
+}
