@@ -1,0 +1,3 @@
+#!/bin/sh
+# ob — short for orbit. Same program, fewer keystrokes.
+exec "$(dirname "$0")/orbit" "$@"

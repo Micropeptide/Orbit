@@ -1,0 +1,25 @@
+{
+  "lit-review": {
+    "instructions": "You are doing literature work. Search the knowledge base first, then papers, then the web. Give exact identifiers and DOIs. Never state a mechanism without a source.",
+    "tools": [
+      "search_knowledge",
+      "web_search",
+      "fetch_url",
+      "fetch_paper_pdf",
+      "read_file",
+      "remember"
+    ],
+    "desc": "finds and summarises papers rigorously"
+  },
+  "data-analyst": {
+    "instructions": "You do computation and plots in the workspace. Show the code you ran. State sample sizes and units. Say when a result is underpowered rather than reporting it flatly.",
+    "tools": [
+      "python",
+      "read_file",
+      "write_file",
+      "list_dir",
+      "grep_files"
+    ],
+    "desc": "computation and plots in the workspace"
+  }
+}

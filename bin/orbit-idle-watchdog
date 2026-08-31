@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Orbit: stop the local model server after N idle minutes (N from settings.json).
+Safe: requires a stale metrics fingerprint AND no open connections."""
+import os, sys
+# Run under the install's own venv wherever we were launched from — a bare
+# `python3 bin/orbit` would otherwise miss every dependency.
+_BIN = os.path.dirname(os.path.abspath(__file__))
+_VENV = os.path.join(os.path.dirname(_BIN), "venv", "bin", "python")
+if os.path.exists(_VENV) and os.path.realpath(sys.executable) != os.path.realpath(_VENV):
+    os.execv(_VENV, [_VENV, os.path.abspath(__file__), *sys.argv[1:]])
+import hashlib, json, os, subprocess, sys, time, urllib.request
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import qqcore as q
+
+IDLE = float(os.environ.get("ORBIT_IDLE_MIN") or os.environ.get("QQ_IDLE_MIN")
+             or q.S.get("idle_min", 20))
+STATE = os.path.join(q.CONFIG, "idle-state.json")
+LOG   = os.path.join(q.LOGS, "watchdog.log")
+def log(m):
+    open(LOG, "a").write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {m}\n")
+
+if IDLE <= 0: sys.exit(0)
+if not q.probe(3):
+    if os.path.exists(STATE): os.remove(STATE)
+    sys.exit(0)
+try:
+    with urllib.request.urlopen(f"http://127.0.0.1:{q.PORT}/metrics", timeout=6) as r:
+        fp = hashlib.sha1(json.dumps(json.load(r).get("latest"), sort_keys=True,
+                                     default=str).encode()).hexdigest()
+except Exception:
+    sys.exit(0)
+now = time.time()
+try: st = json.load(open(STATE))
+except Exception: st = {}
+if st.get("fp") != fp:
+    json.dump({"fp": fp, "since": now}, open(STATE, "w")); sys.exit(0)
+idle_min = (now - st.get("since", now)) / 60.0
+if idle_min < IDLE: sys.exit(0)
+try:
+    r = subprocess.run(["lsof","-nP",f"-iTCP:{q.PORT}","-sTCP:ESTABLISHED"],
+                       capture_output=True, text=True, timeout=10)
+    busy = len([l for l in r.stdout.splitlines() if l.strip()][1:]) > 0
+except Exception:
+    busy = True
+if busy:
+    log(f"idle {idle_min:.0f}m but a connection is open — deferring"); sys.exit(0)
+log(f"stopped server after {idle_min:.0f} min idle ({q.stop_server()})")
+if os.path.exists(STATE): os.remove(STATE)

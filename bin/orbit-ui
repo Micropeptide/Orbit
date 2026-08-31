@@ -1,0 +1,1106 @@
+#!/usr/bin/env python3
+"""orbit-ui — the browser front-end for Orbit: chats, models, settings, memory."""
+import os, sys
+# Run under the install's own venv wherever we were launched from — a bare
+# `python3 bin/orbit` would otherwise miss every dependency.
+_BIN = os.path.dirname(os.path.abspath(__file__))
+_VENV = os.path.join(os.path.dirname(_BIN), "venv", "bin", "python")
+if os.path.exists(_VENV) and os.path.realpath(sys.executable) != os.path.realpath(_VENV):
+    os.execv(_VENV, [_VENV, os.path.abspath(__file__), *sys.argv[1:]])
+import base64, http.server, urllib.parse as _up, json, os, queue, socketserver, sys, threading, time, uuid, webbrowser
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import qqcore as q
+
+PORT = int(os.environ.get("ORBIT_UI_PORT") or os.environ.get("QQ_UI_PORT") or 8899)
+ALLOWED_HOSTS   = {f"127.0.0.1:{PORT}", f"localhost:{PORT}", f"[::1]:{PORT}"}
+ALLOWED_ORIGINS = {f"http://{h}" for h in ALLOWED_HOSTS}
+WEB  = os.path.join(q.ROOT, "web")
+LOCK = threading.Lock()          # guards the registry itself
+PENDING = {}                     # id -> {"event": Event, "allow": bool}
+STATES = {}                      # sid -> State  (chats can run in parallel)
+MAX_PARALLEL = 3
+_APPROVE_SEQ = [0]
+
+
+def parse_multipart(rfile, ctype, length):
+    """Minimal multipart/form-data parser (cgi was removed in Python 3.13).
+    Returns (filename, bytes) for the first file part, or (None, None)."""
+    if "boundary=" not in ctype: return None, None
+    boundary = ctype.split("boundary=", 1)[1].strip().strip('"')
+    data = rfile.read(int(length or 0))
+    sep = ("--" + boundary).encode()
+    for part in data.split(sep):
+        if b"filename=" not in part: continue
+        head, _, body = part.partition(b"\r\n\r\n")
+        if not _: continue
+        disp = head.decode("utf-8", "replace")
+        fn = disp.split("filename=", 1)[1].split('"')[1] if 'filename="' in disp else "upload.bin"
+        if not fn: continue
+        return fn, body.rstrip(b"\r\n-")
+    return None, None
+
+def new_sid(): return time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
+
+class State:
+    def __init__(self):
+        self.sid   = new_sid()
+        self.msgs  = [{"role": "system", "content": q.system_prompt()}]
+        self.title = None
+        self.agent = None
+        self.temp = False          # temporary chat: never written to disk
+        self.project = None
+        self.sys_override = None   # per-chat system prompt
+        self.tools, self.tool_errors = q.active_tools()
+        self.lock = threading.Lock()   # one turn at a time *per chat*
+        self.busy_since = 0
+        self.cancel = threading.Event()
+        # live buffer: lets you switch away mid-answer and rejoin it later
+        self.live = {"thinking": "", "content": "", "tools": [],
+                     "status": "", "done": True, "seq": 0}
+        self.flags = {}            # pin/archive/tags set before the first save
+        self.model = None          # None = whatever the default model is
+    def reset(self):
+        self.sid   = new_sid()
+        self.msgs  = [{"role": "system", "content": q.system_prompt_for(self.agent, self.project)}]
+        self.title = None
+        self.temp = False
+        self.sys_override = None
+        # keep self.lock: replacing it while a turn holds it would break exclusion
+        self.busy_since = 0
+        self.cancel = threading.Event()
+        self.live = {"thinking": "", "content": "", "tools": [],
+                     "status": "", "done": True, "seq": 0}
+        self.flags = {}
+        self.model = None
+    def refresh_tools(self):
+        specs, self.tool_errors = q.active_tools()
+        self.tools = q.tools_for(self.agent, specs)
+
+S = State()                        # the chat the browser is currently looking at
+
+# Code is imported once at start, so edits to qqcore.py/qq-ui do not take effect
+# until this process restarts. Record what we loaded so the UI can say so.
+LOADED_AT = time.time()
+CODE_FILES = [os.path.join(q.ROOT, "bin", "qqcore.py"),
+              os.path.join(q.ROOT, "bin", "qq-ui"),
+              os.path.join(q.ROOT, "web", "index.html")]
+
+def code_is_stale():
+    newest, who = 0, None
+    for f in CODE_FILES:
+        try: m = os.path.getmtime(f)
+        except OSError: continue
+        if m > newest: newest, who = m, os.path.basename(f)
+    # index.html is re-read per request, so only the python files force a restart
+    stale = [os.path.basename(f) for f in CODE_FILES[:2]
+             if os.path.exists(f) and os.path.getmtime(f) > LOADED_AT]
+    return {"stale": bool(stale), "files": stale,
+            "loaded_at": LOADED_AT, "newest": newest, "newest_file": who}
+
+def fresh_state(temp=False):
+    """A new chat gets its own State object. Resetting the global one in place
+    used to yank the state out from under a turn that was still generating, so
+    its answer was written into the new chat -- or lost."""
+    global S
+    old = S
+    st = State()
+    st.agent, st.project = old.agent, old.project
+    st.msgs = [{"role": "system", "content": q.system_prompt_for(st.agent, st.project)}]
+    st.temp = temp
+    if old.lock.locked():
+        STATES.setdefault(old.sid, old)   # keep it reachable until it finishes
+    STATES[st.sid] = st
+    S = st
+    prune_states()
+    return st
+
+def prune_states():
+    """Drop finished chats you are no longer looking at, so STATES cannot grow
+    without bound over a long session. Takes no lock: callers may hold it."""
+    idle = [k for k, v in list(STATES.items())
+            if v is not S and not v.lock.locked()]
+    for k in (idle[:-20] if len(idle) > 20 else []):
+        STATES.pop(k, None)
+
+def get_state(sid=None, create=True):
+    """State for one conversation. Chats run independently, so a turn in one
+    can continue while you read or ask something in another."""
+    if not sid or sid == S.sid:
+        STATES.setdefault(S.sid, S)
+        return S
+    with LOCK:
+        st = STATES.get(sid)
+        if st is None and create:
+            st = State()
+            st.sid = sid
+            try:
+                msgs, title = q.session_load(sid)
+                st.msgs, st.title = msgs, title
+                raw = json.load(open(q.session_path(sid)))
+                if isinstance(raw, dict): st.project = raw.get("project")
+            except Exception:
+                pass
+            STATES[sid] = st
+        return st or S
+
+def running_sids():
+    return [sid for sid, st in list(STATES.items()) if st.lock.locked()]
+
+def jdump(o): return json.dumps(o, default=str)
+
+def save_session(st=None):
+    """No-op for temporary chats — they must leave no trace."""
+    st = st or S
+    if st.temp: return
+    extra = {}
+    try:
+        old = json.load(open(q.session_path(st.sid)))
+        if isinstance(old, dict):
+            for k in ("pinned", "archived", "tags", "order"):
+                if k in old: extra[k] = old[k]
+    except Exception: pass
+    extra.update(getattr(st, "flags", None) or {})   # pins set before the first save
+    if getattr(st, "model", None): extra["model"] = st.model
+    if st.sys_override: extra["sys_override"] = st.sys_override
+    if st.project: extra["project"] = st.project
+    q.session_save(st.sid, st.msgs, st.title, extra)
+
+class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def log_message(self, *a): pass
+
+    def _send(self, code, body, ctype="application/json"):
+        b = body.encode() if isinstance(body, str) else body
+        self.send_response(code); self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(b))); self.end_headers()
+        try: self.wfile.write(b)
+        except (BrokenPipeError, ConnectionResetError): pass
+
+    def _body(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        try: return json.loads(self.rfile.read(n) or "{}")
+        except ValueError: return {}
+
+    # ------------------------------------------------------------ GET
+    # This server has no login, so anything a page can make your browser send here
+    # runs with your full permissions. Refuse requests another site set in motion,
+    # and refuse a Host we do not recognise (DNS rebinding).
+    SAME_SITE = ("same-origin", "none")
+
+    def _origin_ok(self):
+        site = self.headers.get("Sec-Fetch-Site")
+        if site and site not in self.SAME_SITE:
+            return False
+        origin = self.headers.get("Origin")
+        if origin and origin not in ALLOWED_ORIGINS:
+            return False
+        host = (self.headers.get("Host") or "").strip()
+        if host and host not in ALLOWED_HOSTS:
+            return False
+        return True
+
+    def _refuse_cross_site(self):
+        self._send(403, jdump({"error": "cross-site request refused"}))
+
+    def do_GET(self):
+        if not self._origin_ok(): return self._refuse_cross_site()
+        try:
+            return self._get(self.path.split("?")[0])
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            try: self._send(500, jdump({"error": f"{type(e).__name__}: {e}"}))
+            except Exception: pass
+
+    def _get(self, _p):
+        p = self.path.split("?")[0]
+        if p == "/":
+            try: return self._send(200, open(os.path.join(WEB, "index.html"), "rb").read(),
+                                   "text/html; charset=utf-8")
+            except OSError: return self._send(500, "index.html missing", "text/plain")
+        if p == "/api/info":
+            return self._send(200, jdump({
+                "tools": sorted(t["function"]["name"] for t in S.tools),
+                "all_tools": q.all_known_tools(),
+                "tool_errors": S.tool_errors, "root": q.ROOT, "sid": S.sid,
+                "title": S.title, "settings": q.S, "status": q.server_status(),
+                "agent": S.agent, "agents": q.agents_load()}))
+        if p == "/manifest.json":
+            return self._send(200, open(os.path.join(WEB, "manifest.json"), "rb").read(),
+                              "application/manifest+json")
+        if p.startswith("/icons/"):
+            name = os.path.basename(p)          # basename: nothing escapes web/icons
+            fp = os.path.join(WEB, "icons", name)
+            if not name.endswith(".png") or not os.path.isfile(fp):
+                return self._send(404, b"", "text/plain")
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            body = open(fp, "rb").read()
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            try: self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError): pass
+            return
+        if p == "/api/running":
+            return self._send(200, jdump({"running": running_sids(), "max": MAX_PARALLEL}))
+        if p == "/api/code":
+            return self._send(200, jdump(code_is_stale()))
+        if p.startswith("/api/live/"):
+            sid = p.rsplit("/", 1)[-1]
+            st = STATES.get(sid)
+            if not st:
+                return self._send(200, jdump({"known": False, "running": False}))
+            lv = dict(st.live)
+            lv["known"] = True
+            lv["running"] = st.lock.locked()
+            return self._send(200, jdump(lv))
+        if p == "/api/status":
+            st = q.server_status()
+            st["context"] = q.context_state(S.msgs, S.sid)
+            return self._send(200, jdump(st))
+        if p == "/api/health":   return self._send(200, jdump(q.health_check()))
+        if p == "/api/default_prompt":
+            return self._send(200, jdump({"text": q.BASE_SYSTEM}))
+        if p == "/api/context":
+            return self._send(200, jdump(q.context_state(S.msgs, S.sid)))
+        if p == "/api/sessions":
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            off = int((qs.get("offset") or [0])[0]); lim = int((qs.get("limit") or [80])[0])
+            allx = q.session_list()
+            return self._send(200, jdump({"items": allx[off:off+lim], "total": len(allx),
+                                          "offset": off, "limit": lim}))
+        if p == "/api/memory":   return self._send(200, jdump(q.memory_list()))
+        if p.startswith("/api/memory/"):
+            return self._send(200, jdump({"name": p.rsplit("/",1)[-1],
+                                          "text": q.memory_read(p.rsplit("/",1)[-1])}))
+        if p == "/api/instructions":
+            return self._send(200, jdump({"text": q.read_instructions()}))
+        if p == "/api/mcp":      return self._send(200, jdump(q.mcp_config()))
+        if p == "/api/prompts":  return self._send(200, jdump(q.prompts_load()))
+        if p == "/api/knowledge": return self._send(200, jdump(q.know_docs()))
+        if p == "/api/skills":   return self._send(200, jdump(q.skills_list()))
+        if p == "/api/models":
+            return self._send(200, jdump({
+                "models": q.model_catalogue(),
+                "current": S.model or q.MODELS.load(q.ROOT).get("default") or "",
+                "default": q.MODELS.load(q.ROOT).get("default") or "",
+                "providers": q.MODELS.load(q.ROOT)["providers"],
+                "keys": q.secrets_masked()}))
+        if p == "/api/projects":  return self._send(200, jdump(q.projects_load()))
+        if p == "/api/about":
+            return self._send(200, jdump({"version": q.VERSION, "github": q.GITHUB,
+                "root": q.ROOT, "model": q.probe() or "stopped",
+                "tools": sorted(t["function"]["name"] for t in S.tools),
+                "counts": {"sessions": len(q.session_list()), "memories": len(q.memory_list()),
+                           "skills": len(q.skills_list()), "knowledge": len(q.know_docs()),
+                           "agents": len(q.agents_load()), "projects": len(q.projects_load()),
+                           "files": len(q.list_files(limit=5000))}}))
+        if p == "/api/trash":     return self._send(200, jdump(q.trash_list()))
+        if p == "/api/tags":      return self._send(200, jdump(q.all_tags()))
+        if p == "/api/schedule":
+            d = q.sched_load()
+            for j in d.get("jobs", []): j["next"] = q.sched_next(j)
+            return self._send(200, jdump(d))
+        if p == "/api/secrets":   return self._send(200, jdump(q.secrets_masked()))
+        if p == "/api/ledger":
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            sid = (qs.get("sid") or [None])[0]
+            return self._send(200, jdump({"session": q.ledger_summary(sid or S.sid),
+                                          "all": q.ledger_summary()}))
+        if p == "/api/searchchats":
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            term = (qs.get("q") or [""])[0]
+            return self._send(200, jdump(q.search_chats(term)))
+        if p == "/api/state":
+            return self._send(200, jdump({"sid": S.sid, "title": S.title, "temp": S.temp,
+                                          "agent": S.agent, "sys_override": S.sys_override, "project": S.project}))
+        if p == "/api/files":
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            off = int((qs.get("offset") or [0])[0]); lim = int((qs.get("limit") or [60])[0])
+            prov = q.provenance()
+            files = q.list_files(limit=5000)
+            for f in files:
+                pv = prov.get(f["rel"]) or {}
+                f["from_sid"] = pv.get("sid"); f["from_title"] = pv.get("title")
+            q.prune_thumbs()
+            return self._send(200, jdump({"items": files[off:off+lim], "total": len(files),
+                                          "offset": off, "limit": lim}))
+        if p.startswith("/api/thumb/"):
+            rel = _up.unquote(p[len("/api/thumb/"):])
+            t = q.thumb_for(rel)
+            if not t: return self._send(404, b"", "text/plain")
+            return self._send(200, open(t, "rb").read(), "image/jpeg")
+        if p.startswith("/api/skill/"):
+            n = p.rsplit("/",1)[-1]
+            return self._send(200, jdump({"name": n, "text": q.skill_read(n)}))
+        if p == "/api/agents":   return self._send(200, jdump({"agents": q.agents_load(),
+                                                               "active": S.agent}))
+        if p.startswith("/vendor/"):
+            fp = os.path.normpath(os.path.join(WEB, p.lstrip("/")))
+            if not fp.startswith(os.path.join(WEB, "vendor")) or not os.path.exists(fp):
+                return self._send(404, b"", "text/plain")
+            ct = ("text/css" if fp.endswith(".css") else
+                  "application/javascript" if fp.endswith(".js") else
+                  "font/woff2" if fp.endswith(".woff2") else "application/octet-stream")
+            return self._send(200, open(fp, "rb").read(), ct)
+        if p == "/api/export":
+            # ?id= exports that chat. Without it this always exported whatever chat
+            # you happened to be viewing, so "export" on a sidebar row saved the
+            # wrong conversation.
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            wanted = (qs.get("id") or [""])[0]
+            msgs, title = S.msgs, S.title
+            if wanted and wanted != S.sid:
+                try: msgs, title = q.session_load(wanted)
+                except Exception:
+                    return self._send(404, jdump({"error": "no such chat"}))
+            lines = []
+            for m in render(msgs):
+                lines.append(("## You\n\n" if m["role"]=="user" else "## Orbit\n\n") + m["text"])
+            body = f"# {title or 'Chat'}\n\n" + "\n\n".join(lines)
+            self.send_response(200)
+            self.send_header("Content-Type","text/markdown; charset=utf-8")
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="{(title or "chat")[:40].replace(chr(34),"")}.md"')
+            b = body.encode(); self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            try: self.wfile.write(b)
+            except Exception: pass
+            return
+        if p.startswith("/api/session/"):
+            sid = p.rsplit("/", 1)[-1]
+            try:
+                # Look the chat up by its own id. Mutating the global S here used to
+                # hijack whichever chat was mid-answer, so its reply was appended to
+                # — and saved over — the chat you had just clicked on.
+                stt = get_state(sid)
+                on_disk = os.path.exists(q.session_path(sid))
+                if on_disk and not stt.lock.locked():   # never disturb a chat mid-answer
+                    msgs, title = q.session_load(sid)
+                    stt.sid, stt.msgs, stt.title = sid, msgs, title
+                    try:
+                        raw = json.load(open(q.session_path(sid)))
+                        stt.project = raw.get("project") if isinstance(raw, dict) else None
+                        stt.model = raw.get("model") if isinstance(raw, dict) else None
+                    except Exception: stt.project, stt.model = None, None
+                globals()["S"] = stt               # the chat the browser is looking at
+                q.ACTIVE_PROJECT["id"] = stt.project
+                msgs, title = list(stt.msgs), stt.title
+                return self._send(200, jdump({"ok": True, "sid": sid, "title": title,
+                                              "messages": render(msgs),
+                                              "context": q.context_state(msgs, sid),
+                                              "running": bool(stt and stt.lock.locked()),
+                                              "live": (dict(stt.live) if stt and stt.lock.locked()
+                                                       else None)}))
+            except Exception as e:
+                return self._send(404, jdump({"error": str(e)}))
+        if p.startswith("/api/ws/"):
+            rel = _up.unquote(p[len("/api/ws/"):])
+            fp = os.path.normpath(os.path.join(q.WORKSPACE, rel))
+            if not fp.startswith(os.path.abspath(q.WORKSPACE)) or not os.path.exists(fp):
+                return self._send(404, b"", "text/plain")
+            ext = fp.rsplit(".", 1)[-1].lower()
+            ct = {"png":"image/png","jpg":"image/jpeg","jpeg":"image/jpeg","svg":"image/svg+xml",
+                  "gif":"image/gif","webp":"image/webp"}.get(ext, "application/octet-stream")
+            return self._send(200, open(fp, "rb").read(), ct)
+        if p.startswith("/api/file/"):
+            name = os.path.basename(p.rsplit("/", 1)[-1])
+            fp = os.path.join(q.UPLOADS, name)
+            if not os.path.exists(fp): return self._send(404, b"", "text/plain")
+            ext = name.rsplit(".", 1)[-1].lower()
+            ct = {"png":"image/png","jpg":"image/jpeg","jpeg":"image/jpeg",
+                  "gif":"image/gif","webp":"image/webp"}.get(ext, "application/octet-stream")
+            return self._send(200, open(fp, "rb").read(), ct)
+        self._send(404, "{}")
+
+    # ------------------------------------------------------------ POST
+    def do_POST(self):
+        if not self._origin_ok(): return self._refuse_cross_site()
+        try:
+            return self._post(self.path.split("?")[0])
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            try: self._send(500, jdump({"error": f"{type(e).__name__}: {e}"}))
+            except Exception: pass
+
+    def _post(self, _p):
+        p = self.path.split("?")[0]
+        if p == "/api/upload": return self._upload()
+        if p == "/api/knowledge/upload": return self._upload(to_knowledge=True)
+        if p == "/api/chat":   return self._chat()
+        d = self._body()
+        if p == "/api/new":
+            with LOCK: q.reload_settings()
+            fresh_state()
+            return self._send(200, jdump({"sid": S.sid}))
+        if p == "/api/compact":
+            with LOCK:
+                before = len(S.msgs)
+                S.msgs, summary = q.compact(S.msgs)
+                save_session()
+            return self._send(200, jdump({"before": before, "after": len(S.msgs), "summary": summary}))
+        if p == "/api/delete":
+            return self._send(200, jdump({"ok": q.session_delete(d.get("id",""))}))
+        if p == "/api/settings":
+            with LOCK:
+                merged = q._deep_merge(q.load_settings(), d.get("settings") or {})
+                q.save_settings(merged); q.reload_settings(); S.refresh_tools()
+                if S.msgs and S.msgs[0]["role"] == "system":
+                    S.msgs[0]["content"] = q.system_prompt()
+            return self._send(200, jdump({"settings": q.S,
+                                          "tools": sorted(t["function"]["name"] for t in S.tools),
+                                          "tool_errors": S.tool_errors}))
+        if p == "/api/instructions":
+            q.write_instructions(d.get("text",""))
+            with LOCK:
+                if S.msgs and S.msgs[0]["role"] == "system": S.msgs[0]["content"] = q.system_prompt()
+            return self._send(200, jdump({"ok": True}))
+        if p == "/api/memory/save":
+            name = q.memory_write(d.get("name","note"), d.get("text",""))
+            with LOCK:
+                if S.msgs and S.msgs[0]["role"] == "system": S.msgs[0]["content"] = q.system_prompt()
+            return self._send(200, jdump({"ok": True, "name": name}))
+        if p == "/api/memory/delete":
+            ok = q.memory_delete(d.get("name",""))
+            with LOCK:
+                if S.msgs and S.msgs[0]["role"] == "system": S.msgs[0]["content"] = q.system_prompt()
+            return self._send(200, jdump({"ok": ok}))
+        if p == "/api/mcp/save":
+            q.mcp_save(d.get("config") or {"mcpServers": {}})
+            with LOCK: S.refresh_tools()
+            return self._send(200, jdump({"ok": True, "tool_errors": S.tool_errors,
+                                          "tools": sorted(t["function"]["name"] for t in S.tools)}))
+        if p == "/api/session/rename":
+            sid, new = d.get("id") or S.sid, (d.get("title") or "").strip()[:80]
+            if not new: return self._send(400, jdump({"error": "empty title"}))
+            try:
+                st = STATES.get(sid)
+                if os.path.exists(q.session_path(sid)):
+                    msgs, _ = q.session_load(sid)
+                    q.session_save(sid, msgs, new)
+                elif st is None and sid != S.sid:
+                    return self._send(404, jdump({"error": "no such chat"}))
+                # a chat with nothing in it yet has no file: keep the name in memory
+                # and let the first save carry it to disk
+                for target in {st, S if S.sid == sid else None}:
+                    if target is not None: target.title = new
+                return self._send(200, jdump({"ok": True, "title": new}))
+            except Exception as e:
+                return self._send(404, jdump({"error": str(e)}))
+        if p == "/api/memory/suggest":
+            try:
+                with LOCK: items = q.suggest_memories(S.msgs)
+                return self._send(200, jdump({"items": items}))
+            except Exception as e:
+                return self._send(200, jdump({"items": [], "error": str(e)}))
+        if p == "/api/truncate":
+            idx = int(d.get("index", 0))
+            # edits belong to the chat the browser names, not to whatever chat the
+            # server happens to have open
+            want = d.get("id")
+            if want and want != S.sid:
+                return self._send(409, jdump({"error": "open that chat first"}))
+            with LOCK:
+                keep, seen = [], 0
+                for m in S.msgs:
+                    if m.get("role") == "user":
+                        if seen == idx: break
+                        seen += 1
+                    keep.append(m)
+                S.msgs = keep
+                save_session()
+            return self._send(200, jdump({"ok": True, "n": len(S.msgs)}))
+        if p == "/api/files/delete":
+            return self._send(200, jdump({"ok": q.delete_file(d.get("rel",""))}))
+        if p == "/api/skills/save":
+            n = q.skill_write(d.get("name","skill"), d.get("text",""))
+            return self._send(200, jdump({"ok": True, "name": n}))
+        if p == "/api/skills/delete":
+            return self._send(200, jdump({"ok": q.skill_delete(d.get("name",""))}))
+        if p == "/api/knowledge/delete":
+            ok = q.know_delete(d.get("name",""))
+            return self._send(200, jdump({"ok": ok, "docs": q.know_docs()}))
+        if p == "/api/knowledge/reindex":
+            return self._send(200, jdump(q.know_reindex()))
+        if p == "/api/agents/save":
+            ag = q.agents_load()
+            if not str(d.get("name", "")).strip():
+                return self._send(400, jdump({"error": "an agent needs a name"}))
+            ag[d["name"].strip()] = {"instructions": d.get("instructions",""),
+                                         "tools": d.get("tools") or None,
+                                         "desc": d.get("desc","")}
+            q.agents_save(ag)
+            return self._send(200, jdump({"ok": True, "agents": ag}))
+        if p == "/api/agents/delete":
+            ag = q.agents_load(); ag.pop(d.get("name",""), None); q.agents_save(ag)
+            if S.agent == d.get("name"): S.agent = None
+            return self._send(200, jdump({"ok": True, "agents": ag}))
+        if p == "/api/agent/select":
+            with LOCK:
+                S.agent = d.get("name") or None
+                S.refresh_tools()
+                if S.msgs and S.msgs[0]["role"] == "system":
+                    S.msgs[0]["content"] = q.system_prompt_for(S.agent, S.project)
+            return self._send(200, jdump({"active": S.agent,
+                "tools": sorted(t["function"]["name"] for t in S.tools)}))
+        if p == "/api/session/flag":
+            sid = d.get("id") or S.sid
+            if not os.path.exists(q.session_path(sid)):
+                # a chat with nothing in it yet: remember the flag until it is saved
+                st = get_state(sid)
+                for k in ("pinned", "archived"):
+                    if k in d: st.flags[k] = bool(d[k])
+                return self._send(200, jdump({"ok": True, "pending": True}))
+            try:
+                raw = json.load(open(q.session_path(sid)))
+                if not isinstance(raw, dict): raw = {"messages": raw, "title": None}
+                for k in ("pinned", "archived"):
+                    if k in d: raw[k] = bool(d[k])
+                json.dump(raw, open(q.session_path(sid), "w"))
+                return self._send(200, jdump({"ok": True}))
+            except Exception as e:
+                return self._send(404, jdump({"error": str(e)}))
+        if p == "/api/approve":
+            rec = PENDING.get(d.get("id"))
+            if not rec: return self._send(404, jdump({"error": "no such request"}))
+            rec["allow"] = bool(d.get("allow"))
+            rec["event"].set()
+            return self._send(200, jdump({"ok": True}))
+        if p == "/api/knowledge/project":
+            q.know_set_project(d.get("name",""), d.get("project") or None)
+            return self._send(200, jdump({"ok": True}))
+        if p == "/api/projects/save":
+            pid, pr = q.project_upsert(d.get("id"), name=d.get("name"),
+                description=d.get("description"), instructions=d.get("instructions"),
+                color=d.get("color"), order=d.get("order"))
+            return self._send(200, jdump({"id": pid, "project": pr}))
+        if p == "/api/projects/delete":
+            return self._send(200, jdump({"ok": q.project_delete(d.get("id"))}))
+        if p == "/api/session/assign":
+            q.session_meta(d.get("id"), project=d.get("project"))
+            with LOCK:
+                if S.sid == d.get("id"):
+                    S.project = d.get("project")
+                    q.ACTIVE_PROJECT["id"] = S.project
+                    S.msgs[0]["content"] = q.system_prompt_for(S.agent, S.project)
+            return self._send(200, jdump({"ok": True}))
+        if p == "/api/session/reorder":
+            ids = d.get("order") or []
+            for i, sid in enumerate(ids):
+                q.session_meta(sid, order=i)
+            return self._send(200, jdump({"ok": True, "reordered": len(ids)}))
+        if p == "/api/session/sort_recent":
+            for s_ in q.session_list():
+                if s_.get("order") is not None:
+                    raw = json.load(open(q.session_path(s_["id"])))
+                    if isinstance(raw, dict):
+                        raw.pop("order", None)
+                        q._atomic_write(q.session_path(s_["id"]), raw)
+            q._SESS_CACHE["key"] = None
+            return self._send(200, jdump({"ok": True}))
+        if p == "/api/model/select":
+            # per chat, so a Claude answer and a local one can sit side by side
+            mid = (d.get("id") or "").strip() or None
+            st = get_state(d.get("sid")) if d.get("sid") else S
+            if mid and mid.startswith("local-dir:"):
+                return self._send(409, jdump({
+                    "error": "that local model is not loaded",
+                    "switch": mid.split(":", 1)[1]}))
+            with LOCK:
+                st.model = mid
+                if not st.temp and os.path.exists(q.session_path(st.sid)): save_session(st)
+                else: st.flags["model"] = mid
+                if st is S: q.ACTIVE_MODEL["id"] = mid
+            spec = q.current_model(mid)
+            return self._send(200, jdump({"ok": True, "id": mid,
+                                          "resolved": spec and spec["id"]}))
+        if p == "/api/model/default":
+            cfg = q.MODELS.load(q.ROOT); cfg["default"] = (d.get("id") or "").strip()
+            q.MODELS.save(q.ROOT, cfg)
+            return self._send(200, jdump({"default": cfg["default"]}))
+        if p == "/api/model/local_switch":
+            # restarting the server takes a while; the UI polls status after
+            return self._send(200, jdump(q.switch_local_model(d.get("name") or "")))
+        if p == "/api/model/fetch":
+            cfg = q.MODELS.load(q.ROOT)
+            pid = d.get("provider") or ""
+            prov = cfg["providers"].get(pid)
+            if not prov: return self._send(404, jdump({"error": "no such provider"}))
+            sec = q.secrets_load()
+            key = sec.get(prov.get("key") or "") or os.environ.get(prov.get("key") or "") or ""
+            res = q.MODELS.fetch_models(prov, key)
+            if res.get("error"): return self._send(200, jdump(res))
+            have = {(m["provider"], m["model"]) for m in cfg["models"]}
+            for m in res["models"]:
+                if (pid, m["model"]) not in have:
+                    cfg["models"].append({**m, "provider": pid})
+            q.MODELS.save(q.ROOT, cfg)
+            return self._send(200, jdump({"found": len(res["models"]),
+                                          "models": q.model_catalogue()}))
+        if p == "/api/model/forget":
+            cfg = q.MODELS.load(q.ROOT)
+            mid = d.get("id") or ""
+            cfg["models"] = [m for m in cfg["models"]
+                             if q.MODELS.model_id(m["provider"], m["model"]) != mid]
+            if mid not in cfg["hidden"]: cfg["hidden"].append(mid)
+            q.MODELS.save(q.ROOT, cfg)
+            return self._send(200, jdump({"ok": True, "models": q.model_catalogue()}))
+        if p == "/api/model/provider":
+            cfg = q.MODELS.load(q.ROOT)
+            pid = (d.get("id") or "").strip()
+            if not pid: return self._send(400, jdump({"error": "a provider needs an id"}))
+            cfg["providers"][pid] = {**cfg["providers"].get(pid, {}),
+                                     **{k: v for k, v in (d.get("provider") or {}).items()
+                                        if k in ("label","kind","base_url","key","note")}}
+            q.MODELS.save(q.ROOT, cfg)
+            return self._send(200, jdump({"ok": True, "providers": cfg["providers"]}))
+        if p == "/api/project/select":
+            with LOCK:
+                S.project = d.get("id") or None
+                q.ACTIVE_PROJECT["id"] = S.project
+                S.msgs[0]["content"] = q.system_prompt_for(S.agent, S.project)
+                save_session()
+            return self._send(200, jdump({"project": S.project}))
+        if p == "/api/temp":
+            with LOCK:
+                q.reload_settings()
+            fresh_state(temp=bool(d.get("on", True)))
+            return self._send(200, jdump({"temp": S.temp, "sid": S.sid}))
+        if p == "/api/burn":
+            with LOCK:
+                was = S.sid
+                try:
+                    if os.path.exists(q.session_path(was)): os.remove(q.session_path(was))
+                except OSError: pass
+            fresh_state(temp=True)
+            return self._send(200, jdump({"ok": True, "erased": was, "sid": S.sid}))
+        if p == "/api/sysprompt":
+            with LOCK:
+                S.sys_override = (d.get("text") or "").strip() or None
+                base = q.system_prompt_for(S.agent)
+                S.msgs[0]["content"] = (base + "\n\n## This chat\n" + S.sys_override
+                                        if S.sys_override else base)
+                save_session()
+            return self._send(200, jdump({"ok": True}))
+        if p == "/api/branch":
+            new = q.session_branch(d.get("id") or S.sid, int(d.get("index", 0)), d.get("title"))
+            return self._send(200, jdump({"sid": new}))
+        if p == "/api/tag":
+            sid = d.get("id") or S.sid
+            tags = d.get("tags") or []
+            if not os.path.exists(q.session_path(sid)):
+                get_state(sid).flags["tags"] = tags
+                return self._send(200, jdump({"ok": True, "pending": True}))
+            raw = q.session_meta(sid, tags=tags)
+            return self._send(200, jdump({"ok": bool(raw)}))
+        if p == "/api/trash/restore":
+            return self._send(200, jdump({"ok": q.trash_restore(d.get("name",""))}))
+        if p == "/api/trash/purge":
+            return self._send(200, jdump({"purged": q.trash_purge(d.get("name") or None)}))
+        if p == "/api/secrets/save":
+            return self._send(200, jdump(q.secrets_save(d.get("secrets") or {})))
+        if p == "/api/schedule/save":
+            cfg = q.sched_load()
+            jobs = {j["id"]: j for j in cfg.get("jobs", [])}
+            job = d.get("job") or {}
+            # A job with no prompt used to be accepted, and then fired a full agent
+            # turn on the next tick because it had never run.
+            if not str(job.get("prompt", "")).strip():
+                return self._send(400, jdump({"error": "a task needs a prompt"}))
+            if not str(job.get("name", "")).strip():
+                job["name"] = str(job["prompt"]).strip()[:40]
+            job.setdefault("id", "job" + os.urandom(3).hex())
+            jobs[job["id"]] = {**jobs.get(job["id"], {}), **job}
+            cfg["jobs"] = list(jobs.values()); q.sched_save(cfg)
+            return self._send(200, jdump(cfg))
+        if p == "/api/schedule/delete":
+            cfg = q.sched_load()
+            cfg["jobs"] = [j for j in cfg.get("jobs", []) if j.get("id") != d.get("id")]
+            q.sched_save(cfg)
+            return self._send(200, jdump(cfg))
+        if p == "/api/schedule/run":
+            jid = d.get("id")
+            job = next((j for j in q.sched_load().get("jobs", []) if j["id"] == jid), None)
+            if not job: return self._send(404, jdump({"error": "no such job"}))
+            threading.Thread(target=run_job, args=(job,), daemon=True).start()
+            return self._send(200, jdump({"started": jid}))
+        if p == "/api/skill/capture":
+            with LOCK: name = q.capture_skill(S.msgs, d.get("name") or "captured-skill")
+            return self._send(200, jdump({"ok": bool(name), "name": name}))
+        if p == "/api/support":
+            return self._send(200, jdump({"rows": q.support_check(d.get("answer",""),
+                                                                  d.get("sources") or [])}))
+        if p == "/api/citations":
+            return self._send(200, jdump({"rows": q.check_citations(d.get("text",""))}))
+        if p == "/api/backup":
+            return self._send(200, jdump(q.export_setup()))
+        if p == "/api/restore":
+            return self._send(200, jdump(q.import_setup(d.get("path",""), d.get("what"))))
+        if p == "/api/h2/jobs":
+            return self._send(200, jdump(q.cluster_jobs_detailed()))
+        if p == "/api/h2/log":
+            return self._send(200, jdump({"log": q.cluster_job_log(d.get("id"), d.get("lines", 80))}))
+        if p == "/api/h2/estimate":
+            return self._send(200, jdump(q.cluster_estimate(d.get("name","")) or {}))
+        if p == "/api/h2/poll":
+            return self._send(200, jdump(q.cluster_poll()))
+        if p == "/api/knowledge/from_upload":
+            rel = d.get("rel","")
+            src = os.path.normpath(os.path.join(q.WORKSPACE, rel))
+            if not os.path.exists(src): return self._send(404, jdump({"error":"missing"}))
+            q.know_add_bytes(os.path.basename(src), open(src,"rb").read())
+            return self._send(200, jdump(q.know_reindex()))
+        if p == "/api/files/rename":
+            old = os.path.normpath(os.path.join(q.WORKSPACE, d.get("rel","")))
+            new = os.path.normpath(os.path.join(os.path.dirname(old),
+                                                os.path.basename(d.get("name","renamed"))))
+            ok = (old.startswith(os.path.abspath(q.WORKSPACE)) and
+                  new.startswith(os.path.abspath(q.WORKSPACE)) and os.path.isfile(old))
+            if ok:
+                try: os.replace(old, new)
+                except OSError: ok = False
+            return self._send(200, jdump({"ok": ok}))
+        if p == "/api/cancel":
+            st = get_state(d.get("sid"), create=False)
+            st.cancel.set()
+            return self._send(200, jdump({"ok": True, "sid": st.sid}))
+        if p == "/api/running":
+            return self._send(200, jdump({"running": running_sids(),
+                                          "max": MAX_PARALLEL}))
+        if p == "/api/prompts/save":
+            pr = q.prompts_load(); pr[d.get("name","untitled")] = {"text": d.get("text",""),
+                                                                   "desc": d.get("desc","")}
+            q.prompts_save(pr)
+            return self._send(200, jdump({"ok": True, "prompts": pr}))
+        if p == "/api/prompts/delete":
+            pr = q.prompts_load(); pr.pop(d.get("name",""), None); q.prompts_save(pr)
+            return self._send(200, jdump({"ok": True, "prompts": pr}))
+        if p == "/api/continue":
+            return self._send(200, jdump({"ok": True,
+                "message": "Continue from where you stopped. Check `plan` for outstanding "
+                           "steps and finish them. Do not restate what you already did."}))
+        if p == "/api/retry_harder":
+            with LOCK:
+                while S.msgs and S.msgs[-1].get("role") != "user":
+                    S.msgs.pop()
+                last = S.msgs.pop() if S.msgs and S.msgs[-1].get("role") == "user" else None
+            if not last: return self._send(200, jdump({"ok": False}))
+            c = last.get("content")
+            text = c if isinstance(c, str) else " ".join(
+                x.get("text","") for x in c if isinstance(x, dict))
+            return self._send(200, jdump({"ok": True, "content": text}))
+        if p == "/api/regenerate":
+            with LOCK:
+                while S.msgs and S.msgs[-1]["role"] != "user":
+                    S.msgs.pop()
+                last = S.msgs.pop() if S.msgs and S.msgs[-1]["role"] == "user" else None
+            return self._send(200, jdump({"ok": bool(last),
+                "content": last.get("content") if last else None}))
+        if p == "/api/server/start":
+            try:
+                q.reload_settings()
+                m = q.ensure_model()
+                return self._send(200, jdump({"msg": f"running · {m}", "status": q.server_status()}))
+            except Exception as e:
+                return self._send(200, jdump({"msg": f"start failed: {e}"}))
+        if p == "/api/restart_ui":
+            # launchd has KeepAlive, so exiting brings us straight back on new code
+            threading.Timer(0.4, lambda: os._exit(0)).start()
+            return self._send(200, jdump({"ok": True, "msg": "restarting the interface…"}))
+        if p == "/api/server/stop":
+            return self._send(200, jdump({"msg": q.stop_server()}))
+        if p == "/api/server/restart":
+            try:
+                q.reload_settings()
+                m = q.restart_server()
+                return self._send(200, jdump({"msg": f"restarted · {m}", "status": q.server_status()}))
+            except Exception as e:
+                return self._send(200, jdump({"msg": f"restart failed: {e}"}))
+        if p == "/api/system_preview":
+            return self._send(200, jdump({"text": q.system_prompt()}))
+        self._send(404, "{}")
+
+    def _upload(self, to_knowledge=False):
+        ctype = self.headers.get("Content-Type", "")
+        if "multipart/form-data" not in ctype:
+            return self._send(400, jdump({"error": "expected multipart"}))
+        fname, raw = parse_multipart(self.rfile, ctype, self.headers.get("Content-Length"))
+        if not fname or raw is None:
+            return self._send(400, jdump({"error": "no file"}))
+        safe = os.path.basename(fname).replace(" ", "_")
+        if to_knowledge:
+            path = os.path.join(q.KNOW, safe)
+            open(path, "wb").write(raw)
+            stats = q.know_reindex()
+            return self._send(200, jdump({"kind": "knowledge", "name": safe, **stats}))
+        name = f"{int(time.time())}-{safe}"
+        path = os.path.join(q.UPLOADS, name)
+        q.CURRENT_SID.update(sid=S.sid, title=S.title)
+        open(path, "wb").write(raw)
+        ext = safe.rsplit(".", 1)[-1].lower() if "." in safe else ""
+        try: q.record_file(os.path.relpath(path, q.WORKSPACE), "upload")
+        except Exception: pass
+        if ext in ("png","jpg","jpeg","gif","webp"):
+            mime = "image/jpeg" if ext in ("jpg","jpeg") else f"image/{ext}"
+            return self._send(200, jdump({"kind":"image","name":safe,"path":path,
+                "url": f"/api/file/{name}",
+                "data_url": f"data:{mime};base64," + base64.b64encode(raw).decode()}))
+        try: text = q._md(path)
+        except Exception as e: text = f"(could not extract text: {e})"
+        return self._send(200, jdump({"kind":"file","name":safe,"path":path,
+                                      "chars":len(text),"preview":text[:400]}))
+
+    def _chat(self):
+        d = self._body()
+        st = get_state(d.get("sid"))
+        def _refuse(msg):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream"); self.end_headers()
+            try:
+                self.wfile.write(f"data: {jdump({'k':'error','p':msg})}\n\n".encode())
+                self.wfile.write(f"data: {jdump({'k':'end','p':{}})}\n\n".encode())
+            except Exception: pass
+        if len(running_sids()) >= MAX_PARALLEL and not st.lock.locked():
+            return _refuse(f"{MAX_PARALLEL} chats are already generating. "
+                           "Wait for one to finish, or stop it.")
+        if not st.lock.acquire(blocking=False):
+            waited = int(time.time() - st.busy_since)
+            return _refuse(f"This chat is already generating (started {waited}s ago). "
+                           "Press Stop to interrupt it.")
+        st.busy_since = time.time()
+        st.cancel.clear()
+        st.live = {"thinking": "", "content": "", "tools": [],
+                   "status": "", "done": False, "seq": 0}
+        text = d.get("message", "")
+        atts = d.get("attachments") or []
+        effort = d.get("effort")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        Q = queue.Queue()
+
+        def work():
+            try:
+                parts, notes = [], []
+                for a in atts:
+                    if a.get("kind") == "image":
+                        parts.append({"type":"image_url","image_url":{"url":a["data_url"]}})
+                    else:
+                        notes.append(f"[attached file: {a['name']} — read it with read_file at {a['path']}]")
+                body = text + (("\n" + "\n".join(notes)) if notes else "")
+                content = ([{"type":"text","text":body}] + parts) if parts else body
+                first = st.title is None
+                if True:
+                    if first:
+                        st.title = " ".join(str(text).split())[:60] or "(untitled)"
+                    # write immediately: a running chat must be visible in the sidebar
+                    st.msgs.append({"role": "user", "content": content})
+                    save_session(st)
+                    st.msgs.pop()
+                    def _approve(fn, a, reason):
+                        _APPROVE_SEQ[0] += 1
+                        rid = f"ap{_APPROVE_SEQ[0]}"
+                        ev = threading.Event()
+                        PENDING[rid] = {"event": ev, "allow": False}
+                        Q.put(("approval_request", {"id": rid, "name": fn, "args": a,
+                                                    "reason": reason}))
+                        ok = ev.wait(timeout=300)
+                        rec = PENDING.pop(rid, {})
+                        return bool(rec.get("allow")) if ok else False
+
+                    def _emit(k, p):
+                        lv = st.live                      # keep a copy so you can rejoin later
+                        if   k == "thinking_delta": lv["thinking"] += p
+                        elif k == "content_delta":  lv["content"]  += p
+                        elif k == "tool":
+                            lv["tools"].append({"name": p.get("name"), "args": p.get("args")})
+                        elif k in ("server_starting", "stagnation", "autocompact"):
+                            # a tab that rejoins mid-answer needs to see this too,
+                            # otherwise a cold start looks like a hung chat
+                            lv["status"] = (p or {}).get("msg") or k.replace("_", " ")
+                        lv["seq"] += 1
+                        if k == "tool_result" and q.LAST_IMAGES:
+                            p = dict(p or {})
+                            p["images"] = [os.path.relpath(i, q.WORKSPACE) for i in q.LAST_IMAGES]
+                            q.LAST_IMAGES = []
+                        if k == "tool_result" and (p or {}).get("name") == "write_file" and q.LAST_DIFF:
+                            p = dict(p or {}); p["diff"] = dict(q.LAST_DIFF); q.LAST_DIFF.clear()
+                        Q.put((k, p))
+                    q.CURRENT_SID.update(sid=st.sid, title=st.title)
+                    q.ACTIVE_PROJECT["id"] = st.project
+                    q.ACTIVE_MODEL["id"] = st.model
+                    prev_effort = q.S.get("reasoning_effort")
+                    if effort: q.S["reasoning_effort"] = effort
+                    st.msgs, did, pct = q.maybe_autocompact(st.msgs, emit=lambda k, p: Q.put((k, p)))
+                    if did: save_session(st)
+                    _t0 = time.time()
+                    q.turn(st.msgs, content, st.tools, emit=_emit, approve=_approve,
+                           cancel=st.cancel)
+                    try:
+                        stats = q.server_status().get("last") or {}
+                        q.ledger_add(st.sid, seconds=round(time.time() - _t0, 1),
+                                     prompt_tokens=stats.get("prompt_tokens"),
+                                     completion_tokens=stats.get("completion_tokens"))
+                        tot = (stats.get("prompt_tokens") or 0) + (stats.get("completion_tokens") or 0)
+                        if tot: q.SESSION_TOKENS[st.sid] = tot
+                    except Exception: pass
+                    save_session(st)
+                if first and not st.cancel.is_set():
+                    try:
+                        auto = autotitle(st.msgs)
+                        if auto:
+                            st.title = auto
+                            save_session(st)
+                    except Exception:
+                        pass
+                Q.put(("end", {"sid": st.sid, "title": st.title}))
+            except Exception as e:
+                Q.put(("error", f"{type(e).__name__}: {e}")); Q.put(("end", {}))
+            finally:
+                st.live["done"] = True
+                if st.temp:
+                    try: q.redact_server_log()
+                    except Exception: pass
+                try: st.lock.release()
+                except RuntimeError: pass
+        threading.Thread(target=work, daemon=True).start()
+        while True:
+            kind, payload = Q.get()
+            try:
+                self.wfile.write(f"data: {jdump({'k':kind,'p':payload})}\n\n".encode())
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            if kind == "end": return
+
+def autotitle(msgs):
+    """Ask the model for a short title once the first exchange exists."""
+    convo = []
+    for m in msgs[1:5]:
+        c = m.get("content")
+        if isinstance(c, list):
+            c = " ".join(x.get("text","") for x in c if x.get("type") == "text")
+        if c and m.get("role") in ("user","assistant"):
+            convo.append(f"{m['role']}: {str(c)[:600]}")
+    if not convo: return None
+    ask = ("Give a short title for this conversation: 3-6 words, no quotes, no punctuation "
+           "at the end, plain nouns. Reply with the title only.\n\n" + "\n".join(convo))
+    out = q.stream_call([{"role":"system","content":"You write short, specific titles."},
+                         {"role":"user","content":ask}], None, think=False)
+    t = (out.get("content") or "").strip().strip('"').splitlines()[0][:60]
+    return t or None
+
+import re as _re
+def render(msgs):
+    out, pending_imgs, pending_tools = [], [], []
+    for m in msgs:
+        if m.get("role") == "tool":
+            # recover plots and tool names so a reloaded chat looks like the live one
+            body = str(m.get("content") or "")
+            mm = _re.search(r"\[created images: ([^\]]+)\]", body)
+            if mm: pending_imgs += [x.strip() for x in mm.group(1).split(",") if x.strip()]
+            if m.get("name"): pending_tools.append(m["name"])
+            continue
+        if m.get("role") not in ("user", "assistant"): continue
+        c = m.get("content")
+        if isinstance(c, list):
+            out.append({"role": m["role"],
+                        "text": " ".join(x.get("text","") for x in c if x.get("type")=="text"),
+                        "images": [x["image_url"]["url"] for x in c if x.get("type")=="image_url"],
+                        "plots": [], "tools": []})
+        elif c:
+            out.append({"role": m["role"], "text": c, "images": [],
+                        "plots": [f"/api/ws/{i}" for i in pending_imgs] if m["role"]=="assistant" else [],
+                        "tools": pending_tools if m["role"]=="assistant" else [],
+                        # which model wrote this, so a reopened chat is honest about it
+                        "model": m.get("model") if m["role"] == "assistant" else None})
+        if m.get("role") == "assistant":
+            pending_imgs, pending_tools = [], []
+    return out
+
+JOBS_INFLIGHT = set()
+
+def _stamp_started(job_id):
+    """Claim the job before running it. last_run was only written on completion,
+    so a job that was still running when the UI restarted fired all over again."""
+    cfg = q.sched_load()
+    for j in cfg.get("jobs", []):
+        if j.get("id") == job_id:
+            j["last_run"] = time.time()
+    q.sched_save(cfg)
+
+def run_job(job):
+    """Execute one scheduled prompt in its own throwaway session."""
+    started = time.time()
+    _stamp_started(job.get("id"))
+    try:
+        msgs = [{"role": "system", "content": q.system_prompt_for(job.get("agent"))}]
+        specs, _ = q.active_tools()
+        tools = q.tools_for(job.get("agent"), specs)
+        out = q.turn(msgs, job.get("prompt", ""), tools, approve=lambda *a: False)
+        sid = "sched-" + time.strftime("%Y%m%d-%H%M%S")
+        q.session_save(sid, msgs, f"[scheduled] {job.get('name') or job['id']}")
+        result = (out or "")[:400]
+        ok = True
+    except Exception as e:
+        result, ok, sid = f"{type(e).__name__}: {e}", False, None
+    cfg = q.sched_load()
+    for j in cfg.get("jobs", []):
+        if j.get("id") == job.get("id"):
+            j["last_run"] = time.time(); j["last_ok"] = ok
+            j["last_result"] = result; j["last_sid"] = sid
+            j["seconds"] = round(time.time() - started, 1)
+    q.sched_save(cfg)
+    q._SESS_CACHE["key"] = None
+    return result
+
+def scheduler_loop():
+    def _due_jobs():
+        for job in q.sched_load().get("jobs", []):
+            jid = job.get("id")
+            if jid in JOBS_INFLIGHT or not q.sched_due(job):
+                continue
+            # in its own thread: a scheduled job is a full model turn, and running
+            # it here stalled every other chore for as long as it took
+            JOBS_INFLIGHT.add(jid)
+            def _go(j=job, i=jid):
+                try: run_job(j)
+                finally: JOBS_INFLIGHT.discard(i)
+            threading.Thread(target=_go, daemon=True).start()
+
+    def _watch_h2():
+        if not q.S.get("watch_cluster_jobs"): return
+        for f in q.cluster_poll().get("finished", []):
+            q.LOG_SAFETY("h2_watch", {"job": f.get("id")}, "finished", f.get("name", ""))
+
+    # Each chore is isolated: one blanket try meant a hiccup in the scheduler
+    # silently cancelled the log redaction and the trash purge for that minute.
+    chores = [("scheduled jobs", _due_jobs),
+              ("cluster watch", _watch_h2),
+              ("trash purge",    q.trash_purge),
+              ("log redaction",  q.redact_server_log)]
+    time.sleep(20)
+    while True:
+        for name, fn in chores:
+            try: fn()
+            except Exception as e:
+                print(f"[maintenance] {name} failed: {type(e).__name__}: {e}", flush=True)
+        time.sleep(60)
+
+class Srv(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+if __name__ == "__main__":
+    # This was never started: scheduled tasks only ever ran when you pressed
+    # "run now", and the trash was never auto-purged.
+    threading.Thread(target=scheduler_loop, daemon=True).start()
+    with Srv(("127.0.0.1", PORT), H) as s:
+        url = f"http://127.0.0.1:{PORT}"
+        print(f"Orbit → {url}   ({len(S.tools)} tools)   root={q.ROOT}   Ctrl-C to stop")
+        for n, e in S.tool_errors.items(): print(f"  ! MCP '{n}': {e}")
+        if "--no-open" not in sys.argv: webbrowser.open(url)
+        try: s.serve_forever()
+        except KeyboardInterrupt: print("\nstopped")

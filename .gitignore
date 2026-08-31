@@ -1,0 +1,22 @@
+# Orbit keeps everything in one folder. These are yours, not the app's.
+venv/
+config/*.json
+!config/*.default.json
+config/instructions.md
+config/.history/
+memory/*
+!memory/.gitkeep
+knowledge/*
+!knowledge/.gitkeep
+sessions/
+workspace/
+uploads/
+trash/
+logs/
+backups/
+skills/*
+!skills/.gitkeep
+!skills/example-*.md
+__pycache__/
+*.pyc
+.DS_Store
