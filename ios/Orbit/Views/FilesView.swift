@@ -81,21 +81,16 @@ struct FilesView: View {
 
     @ViewBuilder
     private func icon(for f: RemoteFile) -> some View {
-        if f.isImage, let url = thumbURL(f) {
-            AsyncImage(url: url) { img in
-                img.resizable().aspectRatio(contentMode: .fill)
-            } placeholder: {
-                Image(systemName: "photo").foregroundStyle(.secondary)
+        if f.isImage {
+            // through RemoteImage, not AsyncImage: the thumbnail endpoint needs
+            // the pairing token like everything else
+            RemoteImage(path: "/api/thumb/\(f.rel)") {
+                AnyView(Image(systemName: "photo").foregroundStyle(.secondary))
             }
             .clipShape(.rect(cornerRadius: 9))
         } else {
             Image(systemName: f.symbol).font(.title3).foregroundStyle(.tint)
         }
-    }
-
-    private func thumbURL(_ f: RemoteFile) -> URL? {
-        guard let p = state.pairing, let base = p.base else { return nil }
-        return URL(string: "/api/thumb/\(f.rel)", relativeTo: base)
     }
 
     private func load() async {

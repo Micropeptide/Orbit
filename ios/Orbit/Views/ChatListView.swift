@@ -7,6 +7,10 @@ struct ChatListView: View {
     @State private var hits: [SearchHit] = []
     @State private var searching = false
     @State private var searchTask: Task<Void, Never>?
+    @State private var renaming: ChatSummary?
+    @State private var newTitle = ""
+    @State private var showArchived = false
+    @State private var jump: SearchHit?
 
     /// A full hostname does not fit a phone title bar and says nothing
     /// useful past the first word.
@@ -17,7 +21,8 @@ struct ChatListView: View {
     }
 
     private var shown: [ChatSummary] {
-        let base = state.chats.filter { $0.archived != true }
+        let base = state.chats.filter { showArchived ? $0.archived == true
+                                                     : $0.archived != true }
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
         let matched = q.isEmpty ? base
             : base.filter { $0.displayTitle.lowercased().contains(q) }
@@ -37,7 +42,7 @@ struct ChatListView: View {
                     if !hits.isEmpty {
                         Section("In messages") {
                             ForEach(hits) { hit in
-                                Button { goToChat = hit.sid } label: {
+                                Button { jump = hit } label: {
                                     VStack(alignment: .leading, spacing: 3) {
                                         Text(hit.chatTitle)
                                             .font(.footnote.weight(.medium))
@@ -75,6 +80,34 @@ struct ChatListView: View {
                                       systemImage: chat.pinned == true ? "pin.slash" : "pin")
                             }
                             .tint(.orange)
+                            Button {
+                                Task { await state.setArchived(chat.id, !(chat.archived ?? false)) }
+                            } label: {
+                                Label(chat.archived == true ? "Unarchive" : "Archive",
+                                      systemImage: "archivebox")
+                            }
+                            .tint(.gray)
+                        }
+                        .contextMenu {
+                            Button {
+                                newTitle = chat.displayTitle; renaming = chat
+                            } label: { Label("Rename", systemImage: "pencil") }
+                            Button {
+                                Task { await state.setPinned(chat.id, !(chat.pinned ?? false)) }
+                            } label: {
+                                Label(chat.pinned == true ? "Unpin" : "Pin",
+                                      systemImage: "pin")
+                            }
+                            Button {
+                                Task { await state.setArchived(chat.id, !(chat.archived ?? false)) }
+                            } label: {
+                                Label(chat.archived == true ? "Unarchive" : "Archive",
+                                      systemImage: "archivebox")
+                            }
+                            Divider()
+                            Button(role: .destructive) {
+                                Task { await state.delete(chat.id) }
+                            } label: { Label("Move to bin", systemImage: "trash") }
                         }
                     }
                     if shown.isEmpty { empty }
@@ -88,6 +121,16 @@ struct ChatListView: View {
             .onChange(of: search) { _, q in runSearch(q) }
             .navigationDestination(for: String.self) { ChatView(sid: $0) }
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Menu {
+                        Picker("Show", selection: $showArchived) {
+                            Label("Active", systemImage: "tray").tag(false)
+                            Label("Archived", systemImage: "archivebox").tag(true)
+                        }
+                    } label: {
+                        Image(systemName: showArchived ? "archivebox.fill" : "line.3.horizontal.decrease")
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         Task {
@@ -98,6 +141,19 @@ struct ChatListView: View {
             }
             .navigationDestination(item: $goToChat) { ChatView(sid: $0) }
             .navigationDestination(item: $state.deepLink) { ChatView(sid: $0) }
+            .navigationDestination(item: $jump) { hit in
+                ChatView(sid: hit.sid, highlight: hit.index)
+            }
+            .alert("Rename chat", isPresented: Binding(
+                get: { renaming != nil },
+                set: { if !$0 { renaming = nil } })) {
+                TextField("Title", text: $newTitle)
+                Button("Save") {
+                    if let c = renaming { Task { await state.rename(c.id, to: newTitle) } }
+                    renaming = nil
+                }
+                Button("Cancel", role: .cancel) { renaming = nil }
+            }
             .task {
                 await state.refreshRunning()
                 Cache.prune(keeping: state.chats.map(\.id))

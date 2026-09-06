@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import PhotosUI
+import UserNotifications
 
 /// The one object the views watch.
 ///
@@ -29,6 +30,9 @@ final class AppState: ObservableObject {
     // what is going up with the next message
     @Published var attachments: [Attachment] = []
     @Published var uploading = false
+    /// Whether the app is in the background, so a finished answer can announce itself.
+    var backgrounded = false
+    var graceTask: UIBackgroundTaskIdentifier = .invalid
 
     // the answer in flight --------------------------------------------------
     @Published var streaming = false
@@ -190,6 +194,7 @@ final class AppState: ObservableObject {
     }
 
     private func beginLive() {
+        askForNotificationsIfUseful()
         streaming = true
         liveText = ""; liveThinking = ""; liveTools = []; liveStatus = ""
         liveModel = models.first { $0.id == currentModel }?.display ?? ""
@@ -217,6 +222,33 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// A long answer finishing while you are in another app is exactly when you
+    /// want to be told. iOS gives a backgrounded app a short grace period; we
+    /// hold it open, keep reading the stream, and post a local notification when
+    /// the answer lands. If iOS suspends us first the answer is still safe on
+    /// the Mac — you just find it there instead of being tapped on the shoulder.
+    func notifyIfBackgrounded(title: String, body: String) {
+        guard backgrounded else { return }
+        let c = UNMutableNotificationContent()
+        c.title = title
+        c.body = String(body.prefix(240))
+        c.sound = .default
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil))
+    }
+
+    /// Asked the first time an answer is actually generating — the only moment
+    /// the permission means anything to you. Asking at launch is a prompt with
+    /// no context attached, which is how you teach someone to tap Don't Allow.
+    private static var askedForNotifications = false
+
+    func askForNotificationsIfUseful() {
+        guard !Self.askedForNotifications else { return }
+        Self.askedForNotifications = true
+        UNUserNotificationCenter.current()
+            .requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
     private func finishLive(sid: String) {
         if !liveText.isEmpty || !liveThinking.isEmpty {
             messages.append(Message(role: "assistant", text: liveText,
@@ -225,8 +257,12 @@ final class AppState: ObservableObject {
                                     thinking: liveThinking.isEmpty ? nil : liveThinking))
             Cache.saveMessages(messages, for: sid)
         }
+        let answered = liveText
         streaming = false
         liveText = ""; liveThinking = ""; liveTools = []; liveStatus = ""
+        if !answered.isEmpty {
+            notifyIfBackgrounded(title: openChat?.title ?? "Orbit", body: answered)
+        }
         Task { await loadChats() }
     }
 
@@ -282,6 +318,39 @@ final class AppState: ObservableObject {
         chats.removeAll { $0.id == id }
         Cache.saveChats(chats)
         if openChat?.sid == id { openChat = nil; messages = [] }
+    }
+
+    func rename(_ id: String, to title: String) async {
+        guard let server else { return }
+        let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        do {
+            try await server.rename(id, to: clean)
+            if let i = chats.firstIndex(where: { $0.id == id }) { chats[i].title = clean }
+            if openChat?.sid == id { openChat?.title = clean }
+            Cache.saveChats(chats)
+        } catch { lastError = error.localizedDescription }
+    }
+
+    func setArchived(_ id: String, _ on: Bool) async {
+        guard let server else { return }
+        try? await server.setFlag(id, archived: on)
+        if let i = chats.firstIndex(where: { $0.id == id }) { chats[i].archived = on }
+        Cache.saveChats(chats)
+        await loadChats()
+    }
+
+    /// A conversation as Markdown, for the share sheet.
+    func markdown(for id: String) -> String {
+        let title = chats.first { $0.id == id }?.displayTitle ?? "Chat"
+        var out = ["# \(title)", ""]
+        for m in messages {
+            out.append(m.isUser ? "## You" : "## \(m.model ?? "Orbit")")
+            out.append("")
+            out.append(m.text)
+            out.append("")
+        }
+        return out.joined(separator: "\n")
     }
 
     func setPinned(_ id: String, _ on: Bool) async {
@@ -371,5 +440,27 @@ extension AppState {
             if let v = out[key] as? String { payload[key] = v }
         }
         attachments.append(Attachment(name: name, kind: kind, payload: payload))
+    }
+}
+
+// ------------------------------------------------------ background grace period
+
+import UIKit
+
+extension AppState {
+    /// Ask iOS to keep us running a little longer so a streaming answer can land.
+    /// Roughly 30 seconds; not a promise, which is why the Mac remains the one
+    /// that actually holds the answer.
+    func beginBackgroundGrace() {
+        guard graceTask == .invalid else { return }
+        graceTask = UIApplication.shared.beginBackgroundTask(withName: "orbit.answer") {
+            [weak self] in self?.endBackgroundGrace()
+        }
+    }
+
+    func endBackgroundGrace() {
+        guard graceTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(graceTask)
+        graceTask = .invalid
     }
 }

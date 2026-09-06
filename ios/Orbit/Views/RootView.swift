@@ -2,6 +2,7 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject var state: AppState
+    @Environment(\.horizontalSizeClass) private var width
 
     var body: some View {
         Group {
@@ -9,8 +10,12 @@ struct RootView: View {
                 // .tabItem rather than the iOS 18 `Tab` type, so this still runs
                 // on iOS 17 devices.
                 TabView {
-                    ChatListView()
-                        .tabItem { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
+                    // On an iPad or a landscape Max, the list and the
+                    // conversation sit side by side.
+                    Group {
+                        if width == .regular { SplitChats() } else { ChatListView() }
+                    }
+                    .tabItem { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
                     FilesView()
                         .tabItem { Label("Files", systemImage: "folder") }
                     SettingsView()

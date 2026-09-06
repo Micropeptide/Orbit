@@ -41,6 +41,21 @@ it if a phone goes missing.
   cached, so the app opens to something when the Mac is asleep. A banner says
   so rather than pretending.
 
+## What the app does
+
+| | |
+|---|---|
+| **Chats** | live list, pin, archive, rename, bin, share as Markdown |
+| **Search** | titles *and* the text of every message; tapping a hit jumps to that line and flashes it |
+| **Conversation** | streaming, markdown with fenced code, collapsible thinking, tool chips, approval prompts |
+| **Plots and images** | matplotlib output and attachments render inline; tap to zoom and pan |
+| **Models** | per-conversation picker; each answer names the model that wrote it |
+| **Files** | grouped by origin, thumbnails, QuickLook preview, swipe to bin |
+| **Attachments** | a photo or a file from the Files app, uploaded and sent with your message |
+| **Offline** | last chat list and recent conversations cached; a banner says when it is stale |
+| **Notifications** | if an answer finishes while you are in another app, it tells you |
+| **iPad and landscape** | list beside conversation |
+
 ## Building it
 
 Requires Xcode 16+ and [XcodeGen](https://github.com/yonaskolb/XcodeGen).
