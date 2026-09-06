@@ -5,6 +5,8 @@ struct MessageBubble: View {
     var isLast = false
     var onEdit: ((Message) -> Void)? = nil
     var onRegenerate: (() -> Void)? = nil
+    var onQuote: ((Message) -> Void)? = nil
+    @State private var shareImage: ShareImage?
 
     /// Uploaded images come back as data: URLs, which UIImage cannot read directly.
     static func decodeDataURL(_ s: String) -> Data? {
@@ -13,6 +15,7 @@ struct MessageBubble: View {
     }
 
     var body: some View {
+        Group {
         if message.isUser {
             VStack(alignment: .trailing, spacing: 7) {
             ForEach(message.images ?? [], id: \.self) { src in
@@ -32,6 +35,9 @@ struct MessageBubble: View {
                         Button {
                             UIPasteboard.general.string = message.text
                         } label: { Label("Copy", systemImage: "doc.on.doc") }
+                        if let onQuote {
+                            Button { onQuote(message) } label: { Label("Quote", systemImage: "text.quote") }
+                        }
                         if let onEdit {
                             Button { onEdit(message) } label: {
                                 Label("Edit and resend", systemImage: "pencil.line")
@@ -67,6 +73,12 @@ struct MessageBubble: View {
                 ShareLink(item: message.text) {
                     Label("Share", systemImage: "square.and.arrow.up")
                 }
+                Button { shareAsImage() } label: {
+                    Label("Share as image", systemImage: "photo.on.rectangle")
+                }
+                if let onQuote {
+                    Button { onQuote(message) } label: { Label("Quote", systemImage: "text.quote") }
+                }
                 if isLast, let onRegenerate {
                     Button { onRegenerate() } label: {
                         Label("Ask again", systemImage: "arrow.clockwise")
@@ -74,6 +86,37 @@ struct MessageBubble: View {
                 }
             }
         }
+        }
+        .sheet(item: $shareImage) { ActivityView(items: [$0.image]).ignoresSafeArea() }
+    }
+
+    /// The answer as a picture — for a group chat that would mangle Markdown.
+    @MainActor private func shareAsImage() {
+        let renderer = ImageRenderer(content: AnswerCard(text: message.text, model: message.model))
+        renderer.scale = 3
+        if let img = renderer.uiImage { shareImage = ShareImage(image: img) }
+    }
+}
+
+/// A rendered answer with a small byline, sized for sharing.
+struct AnswerCard: View {
+    let text: String
+    let model: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image("OrbitMark").resizable().scaledToFit().frame(width: 22, height: 22)
+                Text("Orbit").font(.subheadline.weight(.semibold))
+                if let model, !model.isEmpty {
+                    Text("· \(model)").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            MarkdownText(text)
+        }
+        .padding(18)
+        .frame(width: 380, alignment: .leading)
+        .background(Color(.systemBackground))
     }
 }
 
@@ -93,6 +136,8 @@ struct MarkdownText: View {
                 switch block {
                 case .code(let language, let code):
                     CodeBlock(language: language, code: code)
+                case .table(let rows):
+                    TableBlock(rows: rows)
                 case .text(let markdown):
                     Text(Self.attributed(markdown))
                         .textSelection(.enabled)
@@ -102,7 +147,7 @@ struct MarkdownText: View {
         }
     }
 
-    private static func attributed(_ s: String) -> AttributedString {
+    static func attributed(_ s: String) -> AttributedString {
         (try? AttributedString(
             markdown: s,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
@@ -112,10 +157,11 @@ struct MarkdownText: View {
     enum Block {
         case text(String)
         case code(language: String, code: String)
+        case table(rows: [[String]])
 
-        /// Split on ``` fences. Deliberately simple: it handles what models
-        /// actually emit, and never loses characters — anything unrecognised
-        /// stays text rather than disappearing.
+        /// Split on ``` fences and pipe tables. Deliberately simple: it handles
+        /// what models actually emit, and never loses characters — anything
+        /// unrecognised stays text rather than disappearing.
         static func parse(_ raw: String) -> [Block] {
             var blocks: [Block] = []
             var buffer: [String] = []
@@ -129,7 +175,10 @@ struct MarkdownText: View {
                 buffer = []
             }
 
-            for line in raw.components(separatedBy: .newlines) {
+            let lines = raw.components(separatedBy: .newlines)
+            var i = 0
+            while i < lines.count {
+                let line = lines[i]
                 if line.hasPrefix("```") {
                     if inCode {
                         blocks.append(.code(language: language,
@@ -141,9 +190,25 @@ struct MarkdownText: View {
                             .trimmingCharacters(in: .whitespaces)
                         inCode = true
                     }
-                    continue
+                    i += 1; continue
                 }
-                if inCode { code.append(line) } else { buffer.append(line) }
+                if inCode { code.append(line); i += 1; continue }
+                // a pipe table: header row, separator row, then the body
+                if line.trimmingCharacters(in: .whitespaces).hasPrefix("|"),
+                   i + 1 < lines.count, isSeparator(lines[i + 1]) {
+                    flushText()
+                    var rows = [cells(line)]
+                    var j = i + 2
+                    while j < lines.count,
+                          lines[j].trimmingCharacters(in: .whitespaces).hasPrefix("|") {
+                        rows.append(cells(lines[j])); j += 1
+                    }
+                    let width = rows.map(\.count).max() ?? 0
+                    blocks.append(.table(rows: rows.map {
+                        $0 + Array(repeating: "", count: width - $0.count) }))
+                    i = j; continue
+                }
+                buffer.append(line); i += 1
             }
             // an answer cut off mid-fence still shows what arrived
             if inCode && !code.isEmpty {
@@ -152,6 +217,44 @@ struct MarkdownText: View {
             flushText()
             return blocks
         }
+
+        static func isSeparator(_ s: String) -> Bool {
+            let t = s.trimmingCharacters(in: .whitespaces)
+            guard t.contains("-") else { return false }
+            let rest = t.filter { !"|:- ".contains($0) }
+            return rest.isEmpty
+        }
+
+        static func cells(_ s: String) -> [String] {
+            var t = s.trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("|") { t.removeFirst() }
+            if t.hasSuffix("|") { t.removeLast() }
+            return t.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+        }
+    }
+}
+
+/// A Markdown table as a real grid: header, rule, rows; scrolls sideways when wide.
+struct TableBlock: View {
+    let rows: [[String]]
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { i, row in
+                    GridRow {
+                        ForEach(Array(row.enumerated()), id: \.offset) { _, cell in
+                            Text(MarkdownText.attributed(cell))
+                                .font(i == 0 ? .subheadline.weight(.semibold) : .subheadline)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    if i == 0 { Divider().gridCellUnsizedAxes(.horizontal) }
+                }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 9)
+        }
+        .background(.quaternary.opacity(0.28), in: .rect(cornerRadius: 10))
     }
 }
 
@@ -169,7 +272,7 @@ struct CodeBlock: View {
                 Button {
                     UIPasteboard.general.string = code
                     withAnimation { copied = true }
-                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    Haptics.success()
                     Task {
                         try? await Task.sleep(nanoseconds: 1_500_000_000)
                         withAnimation { copied = false }

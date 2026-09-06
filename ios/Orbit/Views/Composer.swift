@@ -11,6 +11,17 @@ struct Composer: View {
     var typing: FocusState<Bool>.Binding
     var modelName: String
     var onPickModel: () -> Void
+    /// Returns true when it handled a `/command`, so the text is not sent as a message.
+    var onCommand: ((String) -> Bool)? = nil
+
+    static let commands: [(String, String)] = [
+        ("/new", "start a new chat"), ("/model", "change the model"),
+        ("/compact", "compact the history"), ("/find", "find in this chat"),
+    ]
+    private var commandHints: [(String, String)] {
+        guard draft.hasPrefix("/"), !draft.contains(" ") else { return [] }
+        return Self.commands.filter { $0.0.hasPrefix(draft.lowercased()) }
+    }
 
     @State private var showAttachMenu = false
     @State private var showLibrary = false
@@ -42,9 +53,10 @@ struct Composer: View {
             .padding(.top, 6)
             .accessibilityLabel("Model: \(modelName). Tap to change.")
             if !state.attachments.isEmpty || state.uploading { attachmentStrip }
+            if !commandHints.isEmpty { commandStrip }
             HStack(alignment: .bottom, spacing: 8) {
                 Button {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    Haptics.tap()
                     showAttachMenu = true
                 } label: {
                     Image(systemName: "plus")
@@ -77,7 +89,8 @@ struct Composer: View {
                     Button {
                         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                         draft = ""
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        Haptics.tap()
+                        if text.hasPrefix("/"), onCommand?(text) == true { return }
                         Task { await state.send(text) }
                     } label: {
                         Image(systemName: "arrow.up")
@@ -88,6 +101,7 @@ struct Composer: View {
                             .foregroundStyle(.white)
                     }
                     .disabled(!canSend)
+                    .keyboardShortcut(.return, modifiers: .command)
                     .accessibilityLabel("Send")
                 }
             }
@@ -128,6 +142,31 @@ struct Composer: View {
                 Task { for u in urls { await state.attach(fileAt: u) } }
             }
         }
+    }
+
+    /// Type "/" and the commands offer themselves.
+    private var commandStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(commandHints, id: \.0) { cmd, what in
+                    Button {
+                        draft = ""
+                        Haptics.tap()
+                        _ = onCommand?(cmd)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Text(cmd).font(.caption.monospaced().weight(.semibold))
+                            Text(what).font(.caption).foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(.quaternary.opacity(0.5), in: .capsule)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12).padding(.top, 8)
+        }
+        .frame(height: 40)
     }
 
     /// What is going up with the next message, and how to change your mind.

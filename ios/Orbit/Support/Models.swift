@@ -98,6 +98,55 @@ struct ModelList: Codable {
     var `default`: String?
 }
 
+/// The Mac's automatic backup — where it goes and when it last ran.
+struct BackupStatus: Codable {
+    var enabled: Bool
+    var dest: String
+    var every_hours: Int
+    var keep: Int
+    var icloud: Bool
+    var in_icloud: Bool
+    var count: Int
+    var last: BackupEntry?
+    var backups: [BackupEntry]?
+    var total_bytes: Int?
+    var include_workspace: Bool?
+    var include_secrets: Bool?
+}
+
+struct BackupEntry: Codable, Identifiable, Hashable {
+    var name: String
+    var bytes: Int
+    var mtime: Double
+    var id: String { name }
+    var date: Date { Date(timeIntervalSince1970: mtime) }
+}
+
+/// Something in the Mac's bin, waiting to be purged or put back.
+struct TrashItem: Codable, Identifiable, Hashable {
+    var name: String
+    var kind: String
+    var original: String?
+    var deleted: Double
+    var age_days: Double?
+    var purges_in_days: Double?
+    var title: String?
+    var bytes: Int?
+
+    var id: String { name }
+    var displayName: String {
+        if let t = title, !t.isEmpty { return t }
+        return name.components(separatedBy: "__").last ?? name
+    }
+    var subtitle: String {
+        var bits = [kind == "session" ? "chat" : kind]
+        let f = RelativeDateTimeFormatter(); f.unitsStyle = .abbreviated
+        bits.append("binned " + f.localizedString(for: Date(timeIntervalSince1970: deleted), relativeTo: .now))
+        if let p = purges_in_days { bits.append("purged in \(max(0, Int(p))) d") }
+        return bits.joined(separator: " · ")
+    }
+}
+
 struct ProjectInfo: Identifiable, Hashable {
     var id: String
     var name: String

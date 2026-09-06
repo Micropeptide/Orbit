@@ -244,7 +244,7 @@ struct QRScannerView: UIViewControllerRepresentable {
                   let obj = objects.first as? AVMetadataMachineReadableCodeObject,
                   let value = obj.stringValue else { return }
             handled = true
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            Haptics.success()
             session.stopRunning()
             onFound?(value)
         }

@@ -14,7 +14,14 @@ struct ChatView: View {
     @State private var renaming = false
     @State private var newTitle = ""
     @State private var confirmBin = false
+    @State private var finding = false
+    @State private var findText = ""
+    @State private var findAt = 0
+    @State private var jumpTo: Int?
+    @State private var pdfURL: URL?
+    @FocusState private var findFocused: Bool
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var typing: Bool
 
     var body: some View {
@@ -22,7 +29,12 @@ struct ChatView: View {
         // that keeps the transcript's own inset correct, so text scrolls under
         // the navigation bar instead of starting behind it.
         transcript
-            .safeAreaInset(edge: .top, spacing: 0) { ConnectionBanner() }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                VStack(spacing: 0) {
+                    ConnectionBanner()
+                    if finding { findBar }
+                }
+            }
             .safeAreaInset(edge: .bottom, spacing: 0) { composer }
             .navigationTitle(state.openChat?.title ?? "New chat")
             .navigationBarTitleDisplayMode(.inline)
@@ -33,6 +45,7 @@ struct ChatView: View {
                         Button { showModels = true } label: {
                             Label("Change model", systemImage: "cpu")
                         }
+                        .keyboardShortcut("k", modifiers: .command)
                         Button { renaming = true; newTitle = state.openChat?.title ?? "" } label: {
                             Label("Rename", systemImage: "pencil")
                         }
@@ -40,6 +53,19 @@ struct ChatView: View {
                                   preview: SharePreview(state.openChat?.title ?? "Chat")) {
                             Label("Share as Markdown", systemImage: "square.and.arrow.up")
                         }
+                        Button {
+                            UIPasteboard.general.string = state.markdown(for: sid)
+                            Haptics.success()
+                        } label: {
+                            Label("Copy as text", systemImage: "doc.on.doc")
+                        }
+                        Button { makePDF() } label: {
+                            Label("Share as PDF", systemImage: "doc.richtext")
+                        }
+                        Button { finding = true; findFocused = true } label: {
+                            Label("Find in chat", systemImage: "magnifyingglass")
+                        }
+                        .keyboardShortcut("f", modifiers: .command)
                         Button {
                             Task { await state.compactCurrent() }
                         } label: {
@@ -71,10 +97,12 @@ struct ChatView: View {
                 Text("It stays in the bin on your Mac for the retention period.")
             }
             .sheet(isPresented: $showModels) { ModelPickerView() }
+            .sheet(item: $pdfURL) { ActivityView(items: [$0]).ignoresSafeArea() }
             .onChange(of: state.draftPrefill) { _, text in
                 guard let text else { return }
                 draft = text; typing = true; state.draftPrefill = nil
             }
+            .onChange(of: draft) { _, text in Drafts.save(sid, text) }
             .alert("Approve this?", isPresented: approvalBinding) {
                 Button("Allow", role: .destructive) {
                     Task { await state.answer(approval: true) }
@@ -94,9 +122,7 @@ struct ChatView: View {
                 set: { if !$0 { state.pendingApproval = nil } })
     }
 
-    private var currentModelName: String {
-        state.models.first { $0.id == state.currentModel }?.display ?? "model"
-    }
+    private var currentModelName: String { state.currentModelName }
 
     // ------------------------------------------------------------ transcript
 
@@ -123,7 +149,8 @@ struct ChatView: View {
                         MessageBubble(message: m,
                                       isLast: i == state.messages.count - 1,
                                       onEdit: { msg in Task { await state.editAndResend(msg) } },
-                                      onRegenerate: { Task { await state.regenerate() } })
+                                      onRegenerate: { Task { await state.regenerate() } },
+                                      onQuote: { msg in quote(msg) })
                             .id(m.id)
                             .padding(.horizontal, flashed == i ? 8 : 0)
                             .padding(.vertical, flashed == i ? 6 : 0)
@@ -142,9 +169,21 @@ struct ChatView: View {
             .scrollDismissesKeyboard(.interactively)
             .onChange(of: state.messages.count) { _, _ in scroll(proxy) }
             .onChange(of: state.liveText) { _, _ in scroll(proxy) }
+            .onChange(of: jumpTo) { _, i in
+                guard let i else { return }
+                withAnimation(reduceMotion ? nil : .default) {
+                    proxy.scrollTo("row-\(i)", anchor: .center)
+                    flashed = i
+                }
+                jumpTo = nil
+            }
             .onAppear { scroll(proxy, animated: false) }
+            .modifier(AnswerTextSize())
             .task(id: sid) {
+                // what you were typing here last time, unless something is being handed in
+                draft = Drafts.load(sid)
                 await state.open(sid)
+                if let text = state.draftPrefill { draft = text; typing = true; state.draftPrefill = nil }
                 // a search hit: land on that message and flash it once the rows exist
                 guard let h = highlight, h < state.messages.count, flashed == nil else { return }
                 try? await Task.sleep(nanoseconds: 250_000_000)
@@ -175,7 +214,100 @@ struct ChatView: View {
 
     private func scroll(_ proxy: ScrollViewProxy, animated: Bool = true) {
         let go = { proxy.scrollTo("bottom", anchor: .bottom) }
-        if animated { withAnimation(.easeOut(duration: 0.18)) { go() } } else { go() }
+        if animated && !reduceMotion { withAnimation(.easeOut(duration: 0.18)) { go() } } else { go() }
+    }
+
+    // ------------------------------------------------------------ find
+
+    private var findMatches: [Int] {
+        let q = findText.trimmingCharacters(in: .whitespaces).lowercased()
+        guard q.count >= 2 else { return [] }
+        return state.messages.enumerated().compactMap { $0.element.text.lowercased().contains(q) ? $0.offset : nil }
+    }
+
+    private var findBar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("Find in this chat", text: $findText)
+                .textFieldStyle(.plain)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .focused($findFocused)
+                .submitLabel(.search)
+                .onSubmit { step(1) }
+                .onChange(of: findText) { _, _ in
+                    findAt = 0
+                    if let first = findMatches.first { jumpTo = first }
+                }
+            if !findMatches.isEmpty {
+                Text("\(findAt + 1) of \(findMatches.count)")
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            } else if findText.count >= 2 {
+                Text("none").font(.caption).foregroundStyle(.secondary)
+            }
+            Button { step(-1) } label: { Image(systemName: "chevron.up") }
+                .disabled(findMatches.isEmpty)
+            Button { step(1) } label: { Image(systemName: "chevron.down") }
+                .disabled(findMatches.isEmpty)
+            Button("Done") { finding = false; findText = ""; flashed = nil }
+                .font(.callout.weight(.semibold))
+        }
+        .padding(.horizontal, 14).padding(.vertical, 9)
+        .background(.bar)
+        .overlay(Divider(), alignment: .bottom)
+    }
+
+    private func step(_ by: Int) {
+        let m = findMatches
+        guard !m.isEmpty else { return }
+        findAt = ((findAt + by) % m.count + m.count) % m.count
+        jumpTo = m[findAt]
+    }
+
+    // ------------------------------------------------------------ commands
+
+    /// `/new`, `/model`, `/compact`, `/find` — typed, or tapped from the strip.
+    private func command(_ raw: String) -> Bool {
+        switch raw.lowercased().split(separator: " ").first.map(String.init) ?? "" {
+        case "/new":
+            Task { if let sid = await state.newChat() { state.deepLink = sid } }
+        case "/model":   showModels = true
+        case "/compact": Task { await state.compactCurrent() }
+        case "/find":
+            finding = true; findFocused = true
+            let rest = raw.split(separator: " ", maxSplits: 1).dropFirst().joined()
+            if !rest.isEmpty { findText = rest }
+        default: return false
+        }
+        return true
+    }
+
+    /// The whole conversation as one PDF page, for anyone without Orbit.
+    @MainActor private func makePDF() {
+        let title = state.openChat?.title ?? "Chat"
+        let page = TranscriptPage(title: title, messages: state.messages)
+        let renderer = ImageRenderer(content: page)
+        renderer.proposedSize = .init(width: 612, height: nil)
+        let safe = title.replacingOccurrences(of: "/", with: "-").prefix(60)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(safe).pdf")
+        renderer.render { size, draw in
+            var box = CGRect(origin: .zero, size: size)
+            guard let consumer = CGDataConsumer(url: url as CFURL),
+                  let pdf = CGContext(consumer: consumer, mediaBox: &box, nil) else { return }
+            pdf.beginPDFPage(nil)
+            draw(pdf)
+            pdf.endPDFPage()
+            pdf.closePDF()
+        }
+        pdfURL = url
+    }
+
+    /// Put a message into the composer as a quote, so a follow-up can point at it.
+    private func quote(_ m: Message) {
+        let quoted = m.text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { "> " + $0 }.joined(separator: "\n")
+        draft = (draft.isEmpty ? "" : draft + "\n") + quoted + "\n\n"
+        typing = true
     }
 
     private var liveBubble: some View {
@@ -219,7 +351,8 @@ struct ChatView: View {
 
     private var composer: some View {
         Composer(draft: $draft, typing: $typing, modelName: currentModelName,
-                 onPickModel: { showModels = true })
+                 onPickModel: { showModels = true },
+                 onCommand: { command($0) })
     }
 }
 
@@ -250,5 +383,35 @@ struct ThinkingBlock: View {
                     .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 9))
             }
         }
+    }
+}
+
+/// A conversation laid out for paper. Plots are left out; the words are what travel.
+struct TranscriptPage: View {
+    let title: String
+    let messages: [Message]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
+                Image("OrbitMark").resizable().scaledToFit().frame(width: 22, height: 22)
+                Text(title).font(.title3.weight(.semibold))
+            }
+            ForEach(messages) { m in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(m.isUser ? "You" : (m.model ?? "Orbit"))
+                        .font(.caption.smallCaps()).foregroundStyle(.secondary)
+                    if m.isUser {
+                        Text(m.text)
+                    } else {
+                        MarkdownText(m.text)
+                    }
+                }
+            }
+        }
+        .padding(36)
+        .frame(width: 612, alignment: .leading)
+        .background(Color.white)
+        .environment(\.colorScheme, .light)
     }
 }

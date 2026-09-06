@@ -1209,7 +1209,7 @@ async function openSettings(tab){
  host.innerHTML=`<div class=modal><div class=sheet>
   <header><b>Settings</b><div class=tabs>
    <button data-t=general>General</button><button data-t=models>Models &amp; keys</button>
-   <button data-t=phone>Phone</button>
+   <button data-t=phone>Phone</button><button data-t=backup>Backup</button>
    <button data-t=model>Local server</button>
    <button data-t=tools>Tools</button><button data-t=memory>Memory</button>
    <button data-t=mcp>MCP</button><button data-t=library>Library →</button>
@@ -1342,6 +1342,53 @@ async function openSettings(tab){
    const rot=$('#rot'); if(rot)rot.onclick=async()=>{
     if(!confirm('Rotate the pairing token? Every paired device must scan again.'))return;
     if(await apiPost('/api/remote/rotate',{},'rotating')){toast('new token');render('phone')}};
+  }
+  if(name==='backup'){
+   const b=await (await fetch('/api/backup/status')).json();
+   const when=t=>t?new Date(t*1000).toLocaleString():'never';
+   const size=n=>n>1e6?(n/1e6).toFixed(1)+' MB':Math.round(n/1e3)+' KB';
+   body.innerHTML=`<div class=sec>Automatic backup
+     <small>— chats, memory, skills, knowledge and settings, once a day</small></div>
+    <label class=memrow style="cursor:pointer;align-items:flex-start">
+     <input type=checkbox id=bk_on ${b.enabled?'checked':''} style="margin-top:3px">
+     <span><b>Back up automatically</b><br><span class=note>${b.icloud
+       ?'Into iCloud Drive › Orbit Backups, so a lost Mac costs a restore, not the conversations.'
+       :'iCloud Drive is not set up on this Mac, so archives stay in Orbit\'s own backups folder.'}</span></span></label>
+    <div class=grid style="margin-top:10px">
+     <label>Folder</label><input id=bk_dest value="${esc(b.dest)}">
+     <label>Every</label><input id=bk_every type=number min=1 value="${b.every_hours}">
+     <label>Keep</label><input id=bk_keep type=number min=1 value="${b.keep}">
+    </div>
+    <div class=hint2>Every: hours between archives. Keep: how many recent archives to hold on to.</div>
+    <label class=memrow style="cursor:pointer"><input type=checkbox id=bk_ws ${b.include_workspace?'checked':''}>
+     <span>Include the workspace folder <span class=note>— files it made; can be large</span></span></label>
+    <label class=memrow style="cursor:pointer"><input type=checkbox id=bk_sec ${b.include_secrets?'checked':''}>
+     <span>Include API keys and the pairing token <span class=note>— off, so a stolen archive cannot spend your keys</span></span></label>
+    <div style="display:flex;gap:8px;margin-top:10px">
+     <button class=ghost id=bk_save>Save</button><button class=ghost id=bk_now>Back up now</button></div>
+    <div class=sec style="margin-top:16px">Archives
+     <small>— last ${b.last?when(b.last.mtime):'never'} · ${b.count} kept · ${size(b.total_bytes||0)}</small></div>
+    ${(b.backups||[]).map(x=>`<div class=memrow><span style="flex:1"><b>${esc(x.name)}</b><br>
+       <span class=note>${when(x.mtime)} · ${size(x.bytes)}</span></span>
+       <button class=ghost data-restore="${esc(x.name)}">Put back what is missing</button></div>`).join('')
+     ||'<div class=note>No archives yet.</div>'}
+    <div class=hint2 style="margin-top:10px">Restoring only adds chats, memory, skills and knowledge
+     the Mac no longer has. It never overwrites what is here now.</div>`;
+   $('#bk_save').onclick=async()=>{
+    const d=await apiPost('/api/backup/settings',{enabled:$('#bk_on').checked,dest:$('#bk_dest').value,
+      every_hours:+$('#bk_every').value,keep:+$('#bk_keep').value,
+      include_workspace:$('#bk_ws').checked,include_secrets:$('#bk_sec').checked},'saving');
+    if(d){toast('saved');render('backup')}};
+   $('#bk_on').onchange=async()=>{
+    if(await apiPost('/api/backup/settings',{enabled:$('#bk_on').checked},'saving'))
+     toast($('#bk_on').checked?'automatic backup on':'automatic backup off')};
+   $('#bk_now').onclick=async()=>{
+    const d=await apiPost('/api/backup/now',{},'writing the archive');
+    if(d){toast('wrote '+d.name);render('backup')}};
+   body.querySelectorAll('[data-restore]').forEach(x=>x.onclick=async()=>{
+    if(!confirm('Put back what this archive has and the Mac no longer does? Nothing here is overwritten.'))return;
+    const d=await apiPost('/api/backup/restore_missing',{name:x.dataset.restore},'restoring');
+    if(d)toast(d.n?('put back '+d.n+' files'):'nothing was missing')});
   }
   if(name==='models'){
    await loadModels();

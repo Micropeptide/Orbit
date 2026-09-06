@@ -43,6 +43,12 @@ enum Cache {
         read("chat-\(safe(sid)).json", as: [Message].self)
     }
 
+    /// When the offline copy of a chat was written, if there is one.
+    static func messagesDate(_ sid: String) -> Date? {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: file("chat-\(safe(sid)).json").path)
+        return attrs?[.modificationDate] as? Date
+    }
+
     /// Keep the on-disk copy from growing without bound: the most recent chats
     /// are the ones you open on a phone.
     static func prune(keeping ids: [String], limit: Int = 40) {

@@ -90,6 +90,7 @@ struct ZoomableImage: View {
     var close: () -> Void
     @State private var scale: CGFloat = 1
     @State private var offset: CGSize = .zero
+    @State private var saved = false
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -110,13 +111,37 @@ struct ZoomableImage: View {
                 .onTapGesture(count: 2) {
                     withAnimation { scale = scale > 1 ? 1 : 2.5; offset = .zero }
                 }
-            Button(action: close) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.title)
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(.white, .black.opacity(0.4))
+            HStack(spacing: 14) {
+                Button {
+                    // the image is in the cache by the time it is on screen
+                    guard let img = ImageCache.shared.image(for: path) else { return }
+                    UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil)
+                    Haptics.success()
+                    withAnimation { saved = true }
+                    Task { try? await Task.sleep(nanoseconds: 1_600_000_000); withAnimation { saved = false } }
+                } label: {
+                    Image(systemName: saved ? "checkmark.circle.fill" : "square.and.arrow.down.fill")
+                        .font(.title)
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, .black.opacity(0.4))
+                }
+                .accessibilityLabel("Save to Photos")
+                Button(action: close) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title)
+                        .symbolRenderingMode(.palette)
+                        .foregroundStyle(.white, .black.opacity(0.4))
+                }
+                .accessibilityLabel("Close")
             }
             .padding(18)
+            if saved {
+                Text("Saved to Photos").font(.footnote.weight(.medium))
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                    .background(.thinMaterial, in: .capsule)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                    .padding(.bottom, 40)
+            }
         }
         .statusBarHidden()
     }
