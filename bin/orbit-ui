@@ -7,13 +7,21 @@ _BIN = os.path.dirname(os.path.abspath(__file__))
 _VENV = os.path.join(os.path.dirname(_BIN), "venv", "bin", "python")
 if os.path.exists(_VENV) and os.path.realpath(sys.executable) != os.path.realpath(_VENV):
     os.execv(_VENV, [_VENV, os.path.abspath(__file__), *sys.argv[1:]])
-import base64, http.server, urllib.parse as _up, json, os, queue, socketserver, sys, threading, time, uuid, webbrowser
+import atexit, base64, http.server, urllib.parse as _up, json, os, queue, socketserver, sys, threading, time, uuid, webbrowser
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import qqcore as q
 
 PORT = int(os.environ.get("ORBIT_UI_PORT") or os.environ.get("QQ_UI_PORT") or 8899)
-ALLOWED_HOSTS   = {f"127.0.0.1:{PORT}", f"localhost:{PORT}", f"[::1]:{PORT}"}
-ALLOWED_ORIGINS = {f"http://{h}" for h in ALLOWED_HOSTS}
+import remote as REMOTE
+
+def remote_mode():
+    return (q.S.get("remote_access") or {}).get("mode", "off")
+
+def allowed_hosts():
+    return REMOTE.reachable_hosts(remote_mode(), PORT)
+
+def allowed_origins():
+    return {f"http://{h}" for h in allowed_hosts()}
 WEB  = os.path.join(q.ROOT, "web")
 LOCK = threading.Lock()          # guards the registry itself
 PENDING = {}                     # id -> {"event": Event, "allow": bool}
@@ -192,18 +200,62 @@ class H(http.server.BaseHTTPRequestHandler):
         if site and site not in self.SAME_SITE:
             return False
         origin = self.headers.get("Origin")
-        if origin and origin not in ALLOWED_ORIGINS:
+        if origin and origin not in allowed_origins():
             return False
         host = (self.headers.get("Host") or "").strip()
-        if host and host not in ALLOWED_HOSTS:
+        if host and host not in allowed_hosts():
             return False
         return True
+
+    def _from_loopback(self):
+        peer = (self.client_address or ("",))[0]
+        return peer in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
+    def _token_ok(self):
+        """A request off this machine must prove it was paired."""
+        auth = self.headers.get("Authorization") or ""
+        if auth.startswith("Bearer ") and REMOTE.token_matches(q.ROOT, auth[7:].strip()):
+            return True
+        if REMOTE.token_matches(q.ROOT, (self.headers.get("X-Orbit-Token") or "").strip()):
+            return True
+        # a phone browser keeps it in an HttpOnly cookie after one ?t= visit
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "orbit_token" and REMOTE.token_matches(q.ROOT, v.strip()):
+                return True
+        return False
+
+    def _authorised(self):
+        if self._from_loopback():
+            return True                      # you, at the machine, as before
+        if remote_mode() == "off":
+            return False
+        if self._token_ok():
+            return True
+        # the one exception: GET /?t=<token>, which is how a phone browser pairs.
+        # The token is still verified — this only lets the request reach that check.
+        if self.command == "GET" and self.path.startswith("/?t="):
+            return True
+        return False
+
+    def _refuse_unauthorised(self):
+        body = jdump({"error": "this Orbit needs pairing — scan the QR in "
+                               "Settings -> Phone access"})
+        b = body.encode()
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("WWW-Authenticate", 'Bearer realm="Orbit"')
+        self.send_header("Content-Length", str(len(b)))
+        self.end_headers()
+        try: self.wfile.write(b)
+        except Exception: pass
 
     def _refuse_cross_site(self):
         self._send(403, jdump({"error": "cross-site request refused"}))
 
     def do_GET(self):
         if not self._origin_ok(): return self._refuse_cross_site()
+        if not self._authorised(): return self._refuse_unauthorised()
         try:
             return self._get(self.path.split("?")[0])
         except Exception as e:
@@ -214,6 +266,19 @@ class H(http.server.BaseHTTPRequestHandler):
     def _get(self, _p):
         p = self.path.split("?")[0]
         if p == "/":
+            # One visit to /?t=<token> stores it as an HttpOnly cookie, so the web
+            # app works from a phone browser without the token sitting in history.
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            tok = (qs.get("t") or [""])[0]
+            if tok and REMOTE.token_matches(q.ROOT, tok):
+                self.send_response(303)
+                self.send_header("Location", "/")
+                self.send_header("Set-Cookie",
+                                 f"orbit_token={tok}; Path=/; HttpOnly; SameSite=Lax; "
+                                 f"Max-Age={365*24*3600}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             try: return self._send(200, open(os.path.join(WEB, "index.html"), "rb").read(),
                                    "text/html; charset=utf-8")
             except OSError: return self._send(500, "index.html missing", "text/plain")
@@ -279,6 +344,13 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/prompts":  return self._send(200, jdump(q.prompts_load()))
         if p == "/api/knowledge": return self._send(200, jdump(q.know_docs()))
         if p == "/api/skills":   return self._send(200, jdump(q.skills_list()))
+        if p == "/api/remote":
+            return self._send(200, jdump(REMOTE.status(q.ROOT, remote_mode(), PORT)))
+        if p == "/api/remote/qr":
+            png = REMOTE.pair_qr_png(q.ROOT, remote_mode(), PORT)
+            if not png:
+                return self._send(404, jdump({"error": "no reachable address yet"}))
+            return self._send(200, png, "image/png")
         if p == "/api/models":
             return self._send(200, jdump({
                 "models": q.model_catalogue(),
@@ -416,6 +488,7 @@ class H(http.server.BaseHTTPRequestHandler):
     # ------------------------------------------------------------ POST
     def do_POST(self):
         if not self._origin_ok(): return self._refuse_cross_site()
+        if not self._authorised(): return self._refuse_unauthorised()
         try:
             return self._post(self.path.split("?")[0])
         except Exception as e:
@@ -598,6 +671,24 @@ class H(http.server.BaseHTTPRequestHandler):
                         q._atomic_write(q.session_path(s_["id"]), raw)
             q._SESS_CACHE["key"] = None
             return self._send(200, jdump({"ok": True}))
+        if p == "/api/remote/mode":
+            want = (d.get("mode") or "off").strip()
+            if want not in ("off", "tailscale", "lan"):
+                return self._send(400, jdump({"error": "mode must be off, tailscale or lan"}))
+            if want == "tailscale" and not REMOTE.tailscale_ip():
+                return self._send(409, jdump({
+                    "error": "Tailscale is not running — start it, then try again"}))
+            cfg = dict(q.S.get("remote_access") or {})
+            cfg["mode"] = want
+            q.S["remote_access"] = cfg
+            q.save_settings(q.S)
+            if want != "off": REMOTE.load_token(q.ROOT, create=True)
+            return self._send(200, jdump({"ok": True, "mode": want,
+                                          "restart_required": True}))
+        if p == "/api/remote/rotate":
+            REMOTE.rotate_token(q.ROOT)
+            return self._send(200, jdump({"ok": True,
+                                          "note": "every paired device must scan again"}))
         if p == "/api/model/select":
             # per chat, so a Claude answer and a local one can sit side by side
             mid = (d.get("id") or "").strip() or None
@@ -1097,8 +1188,27 @@ if __name__ == "__main__":
     # This was never started: scheduled tasks only ever ran when you pressed
     # "run now", and the trash was never auto-purged.
     threading.Thread(target=scheduler_loop, daemon=True).start()
-    with Srv(("127.0.0.1", PORT), H) as s:
+    mode = remote_mode()
+    addrs = REMOTE.bind_addresses(mode)
+    if mode != "off":
+        REMOTE.load_token(q.ROOT, create=True)     # pairing needs one to exist
+        REMOTE.advertise(PORT)
+        atexit.register(REMOTE.stop_advertising)
+    # One listener per address. Loopback is always first, so the desktop app is
+    # never taken away by a remote-access setting.
+    extra = []
+    for a in addrs[1:]:
+        try:
+            srv = Srv((a, PORT), H)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            extra.append(a)
+        except OSError as e:
+            print(f"  ! could not listen on {a}: {e}")
+    with Srv((addrs[0], PORT), H) as s:
         url = f"http://127.0.0.1:{PORT}"
+        if mode != "off":
+            print(f"  phone access: {mode} · listening on {', '.join(addrs)} "
+                  f"({REMOTE.best_url(mode, PORT) or 'address pending'})")
         print(f"Orbit → {url}   ({len(S.tools)} tools)   root={q.ROOT}   Ctrl-C to stop")
         for n, e in S.tool_errors.items(): print(f"  ! MCP '{n}': {e}")
         if "--no-open" not in sys.argv: webbrowser.open(url)

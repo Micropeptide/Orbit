@@ -20,3 +20,9 @@ skills/*
 __pycache__/
 *.pyc
 .DS_Store
+
+# Xcode
+ios/Orbit.xcodeproj/
+ios/build/
+ios/DerivedData/
+*.xcuserstate

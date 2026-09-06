@@ -1209,6 +1209,7 @@ async function openSettings(tab){
  host.innerHTML=`<div class=modal><div class=sheet>
   <header><b>Settings</b><div class=tabs>
    <button data-t=general>General</button><button data-t=models>Models &amp; keys</button>
+   <button data-t=phone>Phone</button>
    <button data-t=model>Local server</button>
    <button data-t=tools>Tools</button><button data-t=memory>Memory</button>
    <button data-t=mcp>MCP</button><button data-t=library>Library →</button>
@@ -1301,6 +1302,46 @@ async function openSettings(tab){
    const sm=draft.sampling||{};
    $('#s_temp').value=sm.temperature??'';$('#s_top_p').value=sm.top_p??'';
    $('#s_top_k').value=sm.top_k??'';$('#s_pres').value=sm.presence_penalty??'';
+  }
+  if(name==='phone'){
+   const r=await (await fetch('/api/remote')).json();
+   const ts=r.tailscale||{};
+   const modes=[['off','Off','Only this Mac can reach Orbit. The default.'],
+     ['tailscale','Tailscale','Reachable from anywhere on your tailnet, and bound to the tailnet interface only — the port is not on whatever Wi-Fi you are using.'],
+     ['lan','Local network','Reachable from this Wi-Fi. Simplest at home; do not use on a network you do not trust.']];
+   body.innerHTML=`<div class=sec>Phone access
+     <small>— off by default; Orbit has no login, so nothing reaches it unpaired</small></div>
+    ${modes.map(([v,label,why])=>`<label class=memrow style="cursor:pointer;align-items:flex-start">
+      <input type=radio name=rmode value="${v}" ${r.mode===v?'checked':''} style="margin-top:3px">
+      <span><b>${label}</b><br><span class=note>${why}</span></span></label>`).join('')}
+    ${r.hint?`<div class=hint2 style="color:var(--warn);margin-top:8px">${esc(r.hint)}</div>`:''}
+    <div class=sec style="margin-top:16px">Status</div>
+    <div class=grid>
+     <label>Reachable at</label><input readonly value="${esc(r.url||'— not reachable yet')}">
+     <label>Tailscale</label><input readonly value="${ts.installed?(ts.running?('connected · '+(ts.name||ts.ip)):'installed, not connected'):'not installed'}">
+     <label>This network</label><input readonly value="${esc(r.lan_ip||'unknown')}">
+    </div>
+    ${r.enabled&&r.url?`<div class=sec style="margin-top:16px">Pair a device</div>
+      <div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap">
+       <img src="/api/remote/qr?ts=${Date.now()}" width=190 height=190
+            style="border-radius:12px;background:#fff;padding:8px">
+       <div style="flex:1;min-width:220px">
+        <div class=note>Scan it with the Orbit app on your iPhone. The code carries
+         the address and a one-time pairing token; the token is stored in the
+         phone's Keychain and never typed.</div>
+        <button class=ghost id=rot style="margin-top:10px">Rotate token</button>
+        <div class=hint2>Rotating unpairs every device — use it if a phone is lost.</div>
+       </div></div>`
+      :'<div class=note style="margin-top:12px">Turn on a mode above, then restart, to pair a device.</div>'}
+    <div class=hint2 style="margin-top:14px">Changing the mode needs a restart —
+     use <b>Save &amp; restart server</b> below, or the Restart button in the sidebar.</div>`;
+   body.querySelectorAll('input[name=rmode]').forEach(b=>b.onchange=async()=>{
+    const d=await apiPost('/api/remote/mode',{mode:b.value},'changing phone access');
+    if(d){toast('saved — restart to apply');render('phone')}
+    else render('phone')});
+   const rot=$('#rot'); if(rot)rot.onclick=async()=>{
+    if(!confirm('Rotate the pairing token? Every paired device must scan again.'))return;
+    if(await apiPost('/api/remote/rotate',{},'rotating')){toast('new token');render('phone')}};
   }
   if(name==='models'){
    await loadModels();
