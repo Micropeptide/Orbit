@@ -1,9 +1,11 @@
 import SwiftUI
+import UserNotifications
 
 @main
 struct OrbitApp: App {
     @StateObject private var state = AppState()
     @Environment(\.scenePhase) private var phase
+    @State private var router = NotificationRouter()
 
     var body: some Scene {
         WindowGroup {
@@ -13,6 +15,9 @@ struct OrbitApp: App {
                     _ = state.pair(from: url)      // orbit://pair?… from the QR
                 }
                 .task {
+                    // tapping "answer ready" opens that chat
+                    router.open = { sid in state.deepLink = sid }
+                    UNUserNotificationCenter.current().delegate = router
                     #if DEBUG
                     // Development only: pair without the camera or the system's
                     // "Open in Orbit?" prompt. Never compiled into a release.
@@ -41,5 +46,19 @@ struct OrbitApp: App {
                 }
 
         }
+    }
+}
+
+/// Routes a tapped notification to the chat it announced.
+final class NotificationRouter: NSObject, UNUserNotificationCenterDelegate {
+    var open: ((String) -> Void)?
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler done: @escaping () -> Void) {
+        if let sid = response.notification.request.content.userInfo["sid"] as? String {
+            Task { @MainActor in self.open?(sid) }
+        }
+        done()
     }
 }

@@ -126,9 +126,13 @@ struct SearchHit: Identifiable, Codable, Hashable {
     var title: String?
     var role: String
     var index: Int
+    /// Position among the messages the app displays (the Mac skips tool
+    /// records when it renders). Older Macs only send `index`.
+    var row: Int?
     var snippet: String
     var mtime: Double
 
     var id: String { "\(sid)-\(index)" }
+    var rowIndex: Int { row ?? index }
     var chatTitle: String { (title?.isEmpty == false ? title! : "New chat") }
 }

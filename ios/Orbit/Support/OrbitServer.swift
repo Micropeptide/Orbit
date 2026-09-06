@@ -105,6 +105,19 @@ actor OrbitServer {
         try await get("/api/models", as: ModelList.self)
     }
 
+    func projects() async throws -> [ProjectInfo] {
+        struct P: Codable { var name: String; var color: String?; var instructions: String? }
+        let data = try await run(try request("/api/projects"))
+        let dict = (try? JSONDecoder().decode([String: P].self, from: data)) ?? [:]
+        return dict.map { ProjectInfo(id: $0.key, name: $0.value.name, color: $0.value.color,
+                                      instructions: $0.value.instructions) }
+                   .sorted { $0.name < $1.name }
+    }
+
+    func setDefaultModel(_ id: String) async throws {
+        try await post("/api/model/default", ["id": id])
+    }
+
     func running() async throws -> [String] {
         struct R: Codable { var running: [String] }
         return try await get("/api/running", as: R.self).running
@@ -247,6 +260,19 @@ actor OrbitServer {
 
     func stop(_ sid: String) async throws {
         try await post("/api/cancel", ["sid": sid])
+    }
+
+    /// Cut the conversation back to before the given user message (ordinal
+    /// among user messages, which is how the Mac counts).
+    func truncate(_ sid: String, atUserIndex index: Int, check: String? = nil) async throws {
+        var body: [String: Any] = ["id": sid, "index": index]
+        // the Mac refuses if the message at that index does not start like this
+        if let check, !check.isEmpty { body["check"] = String(check.prefix(80)) }
+        try await post("/api/truncate", body)
+    }
+
+    func addToKnowledge(rel: String) async throws {
+        try await post("/api/knowledge/from_upload", ["rel": rel])
     }
 
     func compact(_ sid: String) async throws {

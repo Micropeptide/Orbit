@@ -11,6 +11,8 @@ struct FilesView: View {
     @State private var search = ""
     @State private var preview: URL?
     @State private var failed: String?
+    @State private var shareURL: URL?
+    @State private var toast: String?
 
     private var groups: [(String, [RemoteFile])] {
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
@@ -45,6 +47,28 @@ struct FilesView: View {
                                                 Task { await bin(f) }
                                             } label: { Label("Bin", systemImage: "trash") }
                                         }
+                                        .swipeActions(edge: .leading) {
+                                            Button { share(f) } label: {
+                                                Label("Share", systemImage: "square.and.arrow.up")
+                                            }.tint(.blue)
+                                        }
+                                        .contextMenu {
+                                            Button { open(f) } label: {
+                                                Label("Preview", systemImage: "eye")
+                                            }
+                                            Button { share(f) } label: {
+                                                Label("Share", systemImage: "square.and.arrow.up")
+                                            }
+                                            Button {
+                                                Task { await addToKnowledge(f) }
+                                            } label: {
+                                                Label("Add to Knowledge", systemImage: "books.vertical")
+                                            }
+                                            Divider()
+                                            Button(role: .destructive) {
+                                                Task { await bin(f) }
+                                            } label: { Label("Move to bin", systemImage: "trash") }
+                                        }
                                 }
                             }
                         }
@@ -58,7 +82,20 @@ struct FilesView: View {
             .refreshable { await load() }
             .task { await load() }
             .quickLookPreview($preview)
-            .alert("Couldn't open that", isPresented: .constant(failed != nil)) {
+            .sheet(item: $shareURL) { url in
+                ActivityView(items: [url]).ignoresSafeArea()
+            }
+            .overlay(alignment: .bottom) {
+                if let toast {
+                    Text(toast).font(.footnote.weight(.medium))
+                        .padding(.horizontal, 14).padding(.vertical, 9)
+                        .background(.thinMaterial, in: .capsule)
+                        .padding(.bottom, 12)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .alert("Couldn't do that", isPresented: Binding(
+                get: { failed != nil }, set: { if !$0 { failed = nil } })) {
                 Button("OK") { failed = nil }
             } message: { Text(failed ?? "") }
         }
@@ -103,8 +140,34 @@ struct FilesView: View {
 
     private func bin(_ f: RemoteFile) async {
         guard let server = state.server else { return }
-        try? await server.deleteFile(rel: f.rel)
-        files.removeAll { $0.rel == f.rel }
+        do {
+            try await server.deleteFile(rel: f.rel)
+            files.removeAll { $0.rel == f.rel }
+            await flash("Moved to the bin on your Mac")
+        } catch { failed = error.localizedDescription }
+    }
+
+    private func share(_ f: RemoteFile) {
+        guard let server = state.server else { return }
+        Task {
+            do { shareURL = try await server.download(rel: f.rel, name: f.name) }
+            catch { failed = error.localizedDescription }
+        }
+    }
+
+    /// A paper you downloaded on the phone becomes searchable on the Mac.
+    private func addToKnowledge(_ f: RemoteFile) async {
+        guard let server = state.server else { return }
+        do {
+            try await server.addToKnowledge(rel: f.rel)
+            await flash("Added to Knowledge — it is searchable now")
+        } catch { failed = error.localizedDescription }
+    }
+
+    private func flash(_ text: String) async {
+        withAnimation { toast = text }
+        try? await Task.sleep(nanoseconds: 2_200_000_000)
+        withAnimation { toast = nil }
     }
 
     /// Files stay on the Mac, so opening one downloads it to a temporary spot
@@ -155,4 +218,16 @@ struct RemoteFile: Identifiable, Codable, Hashable {
         if let from = from_title, !from.isEmpty { bits.append("from “\(from)”") }
         return bits.joined(separator: " · ")
     }
+}
+
+
+extension URL: @retroactive Identifiable { public var id: String { absoluteString } }
+
+/// The system share sheet.
+struct ActivityView: UIViewControllerRepresentable {
+    var items: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
 }

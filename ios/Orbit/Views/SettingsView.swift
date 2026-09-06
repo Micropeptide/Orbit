@@ -10,6 +10,20 @@ struct SettingsView: View {
                 ServerControlView()
 
                 Section {
+                    Picker("New chats use", selection: Binding(
+                        get: { state.defaultModel ?? state.currentModel ?? "" },
+                        set: { id in Task { await state.setDefaultModel(id) } })) {
+                        ForEach(state.models.filter(\.isReady)) { m in
+                            Text(m.display).tag(m.id)
+                        }
+                    }
+                } header: {
+                    Text("Default model")
+                } footer: {
+                    Text("Each chat can still pick its own from the label above the message box.")
+                }
+
+                Section {
                     LabeledContent("Mac", value: state.pairing?.name ?? "—")
                     LabeledContent("Address") {
                         Text(state.pairing?.url ?? "—")

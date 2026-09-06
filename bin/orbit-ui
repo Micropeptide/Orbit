@@ -17,8 +17,16 @@ import remote as REMOTE
 def remote_mode():
     return (q.S.get("remote_access") or {}).get("mode", "off")
 
+_HOSTS = {"at": 0.0, "v": set()}
+
 def allowed_hosts():
-    return REMOTE.reachable_hosts(remote_mode(), PORT)
+    """Cached for 30 s: working it out means asking `ipconfig` and `tailscale`,
+    and a screenful of thumbnails is fifty requests in a second."""
+    now = time.time()
+    if now - _HOSTS["at"] > 30 or not _HOSTS["v"]:
+        _HOSTS["v"] = REMOTE.reachable_hosts(remote_mode(), PORT)
+        _HOSTS["at"] = now
+    return _HOSTS["v"]
 
 def allowed_origins():
     return {f"http://{h}" for h in allowed_hosts()}
@@ -441,6 +449,8 @@ class H(http.server.BaseHTTPRequestHandler):
             return
         if p.startswith("/api/session/"):
             sid = p.rsplit("/", 1)[-1]
+            if not sid:
+                return self._send(400, jdump({"error": "which chat?"}))
             try:
                 # Look the chat up by its own id. Mutating the global S here used to
                 # hijack whichever chat was mid-answer, so its reply was appended to
@@ -573,11 +583,18 @@ class H(http.server.BaseHTTPRequestHandler):
             want = d.get("id")
             if want and want != S.sid:
                 return self._send(409, jdump({"error": "open that chat first"}))
+            # a client counting from a stale copy must not cut the wrong turn:
+            # if it says what the message starts with, hold it to that
+            check = str(d.get("check") or "").strip()[:80]
             with LOCK:
                 keep, seen = [], 0
                 for m in S.msgs:
                     if m.get("role") == "user":
-                        if seen == idx: break
+                        if seen == idx:
+                            if check and not _msg_text(m).strip().startswith(check):
+                                return self._send(409, jdump({
+                                    "error": "that chat changed elsewhere — reopen it and try again"}))
+                            break
                         seen += 1
                     keep.append(m)
                 S.msgs = keep
@@ -672,6 +689,7 @@ class H(http.server.BaseHTTPRequestHandler):
             q._SESS_CACHE["key"] = None
             return self._send(200, jdump({"ok": True}))
         if p == "/api/remote/mode":
+            _HOSTS["at"] = 0.0          # the cached host list belongs to the old mode
             want = (d.get("mode") or "off").strip()
             if want not in ("off", "tailscale", "lan"):
                 return self._send(400, jdump({"error": "mode must be off, tailscale or lan"}))
@@ -1084,6 +1102,13 @@ def autotitle(msgs):
     return t or None
 
 import re as _re
+def _msg_text(m):
+    """The text of a stored message, whether plain or a text+image list."""
+    c = m.get("content")
+    if isinstance(c, list):
+        return " ".join(x.get("text", "") for x in c if x.get("type") == "text")
+    return str(c or "")
+
 def render(msgs):
     out, pending_imgs, pending_tools = [], [], []
     for m in msgs:

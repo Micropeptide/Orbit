@@ -10,6 +10,7 @@ struct ChatListView: View {
     @State private var renaming: ChatSummary?
     @State private var newTitle = ""
     @State private var showArchived = false
+    @State private var project: String? = nil        // nil = all projects
     @State private var jump: SearchHit?
 
     /// A full hostname does not fit a phone title bar and says nothing
@@ -23,6 +24,7 @@ struct ChatListView: View {
     private var shown: [ChatSummary] {
         let base = state.chats.filter { showArchived ? $0.archived == true
                                                      : $0.archived != true }
+                              .filter { project == nil || $0.project == project }
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
         let matched = q.isEmpty ? base
             : base.filter { $0.displayTitle.lowercased().contains(q) }
@@ -131,9 +133,21 @@ struct ChatListView: View {
                             Label("Active", systemImage: "tray").tag(false)
                             Label("Archived", systemImage: "archivebox").tag(true)
                         }
+                        if !state.projects.isEmpty {
+                            // projects are folders, in the Telegram sense
+                            Picker("Project", selection: $project) {
+                                Label("All projects", systemImage: "folder").tag(String?.none)
+                                ForEach(state.projects) { p in
+                                    Label(p.name, systemImage: "folder.fill").tag(String?.some(p.id))
+                                }
+                            }
+                        }
                     } label: {
-                        Image(systemName: showArchived ? "archivebox.fill" : "line.3.horizontal.decrease")
+                        Image(systemName: (showArchived || project != nil)
+                              ? "line.3.horizontal.decrease.circle.fill"
+                              : "line.3.horizontal.decrease.circle")
                     }
+                    .accessibilityLabel("Filter chats")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -141,12 +155,13 @@ struct ChatListView: View {
                             if let sid = await state.newChat() { goToChat = sid }
                         }
                     } label: { Image(systemName: "square.and.pencil") }
+                    .accessibilityLabel("New chat")
                 }
             }
             .navigationDestination(item: $goToChat) { ChatView(sid: $0) }
             .navigationDestination(item: $state.deepLink) { ChatView(sid: $0) }
             .navigationDestination(item: $jump) { hit in
-                ChatView(sid: hit.sid, highlight: hit.index)
+                ChatView(sid: hit.sid, highlight: hit.rowIndex)
             }
             .alert("Rename chat", isPresented: Binding(
                 get: { renaming != nil },

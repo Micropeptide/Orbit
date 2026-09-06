@@ -26,7 +26,7 @@ under each answer names the model that wrote it.*
 - **Guardrails that hold.** Destructive commands are blocked or need your approval per call; writes stay in the workspace; the Python tool cannot be used as a shell; fetched web content is fenced and scanned for prompt injection.
 - **Built for long work.** Projects with shared instructions, skills loaded on demand, durable memory, scheduled prompts, and three conversations generating at once.
 - **Plain files in one folder.** Chats, notes and settings are JSON and Markdown you can open in Finder. Delete the folder and Orbit is gone.
-- **There is an iPhone app.** Same chats, live from your Mac over Tailscale or your local network, paired by QR and gated by a token. Off by default.
+- **There is an iPhone app.** Same chats, live from your Mac over Tailscale or your local network, paired by QR and gated by a token. Photos, camera and files as attachments; message search; edit-and-resend; start, stop or switch the local model server from the phone. Off by default.
 
 ---
 
@@ -256,6 +256,20 @@ Everything is editable in Settings; the files are plain JSON if you prefer.
 
 The Mac stays the source of truth; the iPhone app is a window onto it — the same
 conversations, live, with the same model picker and a Files tab.
+
+- Chats grouped by day; pin, archive, rename, bin; filter by project; search
+  titles and the text of every message and jump straight to the line.
+- Streaming answers with Markdown, code blocks, collapsible thinking and tool
+  chips; long-press a message to copy, share, edit-and-resend or ask again.
+- Attach photos from the library, a picture from the camera, or any file from
+  the Files app. Plots and pictures render inline; tap to zoom.
+- A Files tab for everything Orbit made or you attached — QuickLook preview,
+  share sheet, "Add to Knowledge", swipe to bin.
+- Start, stop, restart or switch the local model server from Settings, and set
+  the default model for new chats.
+- If the phone loses the connection mid-answer the Mac carries on and the app
+  rejoins; a finished answer notifies you and the notification opens the chat.
+- Works offline from a cached copy, side by side on iPad.
 
 Turn it on in **Settings → Phone**, choose Tailscale (anywhere) or Local network
 (same Wi-Fi), and scan the QR. Remote access is off until you do, and every
