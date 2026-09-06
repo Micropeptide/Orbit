@@ -26,6 +26,7 @@ under each answer names the model that wrote it.*
 - **Guardrails that hold.** Destructive commands are blocked or need your approval per call; writes stay in the workspace; the Python tool cannot be used as a shell; fetched web content is fenced and scanned for prompt injection.
 - **Built for long work.** Projects with shared instructions, skills loaded on demand, durable memory, scheduled prompts, and three conversations generating at once.
 - **Plain files in one folder.** Chats, notes and settings are JSON and Markdown you can open in Finder. Delete the folder and Orbit is gone.
+- **There is an iPhone app.** Same chats, live from your Mac over Tailscale or your local network, paired by QR and gated by a token. Off by default.
 
 ---
 
@@ -248,6 +249,20 @@ Everything is editable in Settings; the files are plain JSON if you prefer.
 | `shell_enabled` | false | Whether the model may run shell commands at all. |
 | `write_any` | false | Whether writes may leave the workspace. |
 | `cloak_fallback` | true | Retry bot-walled pages through a stealth browser if installed. |
+
+---
+
+## On your phone
+
+The Mac stays the source of truth; the iPhone app is a window onto it — the same
+conversations, live, with the same model picker and a Files tab.
+
+Turn it on in **Settings → Phone**, choose Tailscale (anywhere) or Local network
+(same Wi-Fi), and scan the QR. Remote access is off until you do, and every
+request from off the machine carries a token compared in constant time.
+
+Build the app with Xcode from `ios/`, or open the web link the same panel shows
+and add it to your Home Screen. Full details in [docs/phone.md](docs/phone.md).
 
 ---
 

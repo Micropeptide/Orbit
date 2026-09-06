@@ -259,6 +259,21 @@ def cli_stream(backend, model, messages, emit=None, cancel=None, timeout=900,
         rc = proc.wait()
 
     text = final or ("".join(live) if live else "\n\n".join(whole))
+
+    # A signed-out CLI exits 0 and prints its complaint as the answer, which then
+    # gets saved as though the model had said it. Surface it as the failure it is.
+    low = text.strip().lower()
+    for marker, fix in (
+        ("failed to authenticate", "sign in again"),
+        ("oauth session expired", "sign in again"),
+        ("not logged in", "sign in"),
+        ("please run `claude login`", "sign in"),
+        ("authentication_error", "check the credentials"),
+    ):
+        if low.startswith(marker) or (marker in low and len(low) < 300):
+            raise RuntimeError(
+                f"{b['bin']} is not signed in ({text.strip()[:120]}). "
+                f"Open a terminal, run `{b['bin']}`, {fix}, then try again.")
     if killed["why"] == "timeout" and not text:
         raise RuntimeError(f"{b['bin']} produced nothing within {timeout}s")
     if not text and rc not in (0, None):

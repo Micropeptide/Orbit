@@ -1,0 +1,269 @@
+import SwiftUI
+import PhotosUI
+import UniformTypeIdentifiers
+
+struct ChatView: View {
+    let sid: String
+    @EnvironmentObject var state: AppState
+    @State private var draft = ""
+    @State private var showModels = false
+    @State private var photo: PhotosPickerItem?
+    @State private var showFiles = false
+    @FocusState private var typing: Bool
+
+    var body: some View {
+        // The banner and composer are safe-area insets rather than VStack rows:
+        // that keeps the transcript's own inset correct, so text scrolls under
+        // the navigation bar instead of starting behind it.
+        transcript
+            .safeAreaInset(edge: .top, spacing: 0) { ConnectionBanner() }
+            .safeAreaInset(edge: .bottom, spacing: 0) { composer }
+            .navigationTitle(state.openChat?.title ?? "New chat")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { showModels = true } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "cpu")
+                            Text(currentModelName).lineLimit(1)
+                        }
+                        .font(.caption)
+                    }
+                }
+            }
+            .sheet(isPresented: $showModels) { ModelPickerView() }
+            .task(id: sid) { await state.open(sid) }
+            .alert("Approve this?", isPresented: approvalBinding) {
+                Button("Allow", role: .destructive) {
+                    Task { await state.answer(approval: true) }
+                }
+                Button("Refuse", role: .cancel) {
+                    Task { await state.answer(approval: false) }
+                }
+            } message: {
+                if let p = state.pendingApproval {
+                    Text("\(p.name)\n\n\(p.reason)")
+                }
+            }
+    }
+
+    private var approvalBinding: Binding<Bool> {
+        Binding(get: { state.pendingApproval != nil },
+                set: { if !$0 { state.pendingApproval = nil } })
+    }
+
+    private var currentModelName: String {
+        state.models.first { $0.id == state.currentModel }?.display ?? "model"
+    }
+
+    // ------------------------------------------------------------ transcript
+
+    private var transcript: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    ForEach(state.messages) { m in
+                        MessageBubble(message: m).id(m.id)
+                    }
+                    if state.streaming { liveBubble.id("live") }
+                    if let e = state.lastError, !state.streaming { errorNote(e) }
+                    Color.clear.frame(height: 8).id("bottom")
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 14)
+            }
+            .defaultScrollAnchor(.bottom)          // open at the newest message
+            .scrollDismissesKeyboard(.interactively)
+            .onChange(of: state.messages.count) { _, _ in scroll(proxy) }
+            .onChange(of: state.liveText) { _, _ in scroll(proxy) }
+            .onAppear { scroll(proxy, animated: false) }
+        }
+    }
+
+    /// Shown in the transcript where the answer would have been, because that
+    /// is where you are looking when it fails.
+    private func errorNote(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(text).font(.footnote)
+                Button("Dismiss") { state.lastError = nil }
+                    .font(.caption).buttonStyle(.plain).foregroundStyle(.tint)
+            }
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.orange.opacity(0.10), in: .rect(cornerRadius: 10))
+    }
+
+    private func scroll(_ proxy: ScrollViewProxy, animated: Bool = true) {
+        let go = { proxy.scrollTo("bottom", anchor: .bottom) }
+        if animated { withAnimation(.easeOut(duration: 0.18)) { go() } } else { go() }
+    }
+
+    private var liveBubble: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(state.liveModel.isEmpty ? currentModelName : state.liveModel)
+                .font(.caption2.smallCaps())
+                .foregroundStyle(.secondary)
+
+            ForEach(state.liveTools, id: \.self) { t in
+                Text(t)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.orange)
+                    .padding(.vertical, 5).padding(.horizontal, 9)
+                    .background(.orange.opacity(0.10), in: .rect(cornerRadius: 7))
+            }
+
+            if !state.liveStatus.isEmpty && state.liveText.isEmpty {
+                HStack(spacing: 7) {
+                    ProgressView().controlSize(.mini)
+                    Text(state.liveStatus).font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+
+            if !state.liveText.isEmpty {
+                MarkdownText(state.liveText)
+            } else if state.liveStatus.isEmpty {
+                HStack(spacing: 7) {
+                    ProgressView().controlSize(.mini)
+                    Text("thinking").font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+
+            if !state.liveThinking.isEmpty {
+                ThinkingBlock(text: state.liveThinking)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // ------------------------------------------------------------ composer
+
+    private var composer: some View {
+        VStack(spacing: 0) {
+            Divider()
+            if !state.attachments.isEmpty { attachmentStrip }
+            HStack(alignment: .bottom, spacing: 10) {
+                Menu {
+                    Button {
+                        showFiles = true
+                    } label: { Label("Choose a file", systemImage: "folder") }
+                    // photos get their own entry: it is the common case
+                } label: {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.title2).foregroundStyle(.secondary)
+                } primaryAction: {
+                    showFiles = true
+                }
+                .overlay(alignment: .center) {
+                    PhotosPicker(selection: $photo, matching: .images) {
+                        Color.clear
+                    }
+                    .allowsHitTesting(false)
+                }
+
+                TextField("Ask anything", text: $draft, axis: .vertical)
+                    .lineLimit(1...6)
+                    .focused($typing)
+                    .padding(.horizontal, 13).padding(.vertical, 9)
+                    .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 19))
+                    .disabled(state.streaming)
+
+                if state.streaming {
+                    Button {
+                        Task { await state.stopGenerating() }
+                    } label: {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.title2).foregroundStyle(.red)
+                    }
+                } else {
+                    Button {
+                        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !text.isEmpty else { return }
+                        draft = ""
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        Task { await state.send(text) }
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill").font(.title2)
+                    }
+                    .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+        }
+        .background(.bar)
+        .photosPicker(isPresented: .constant(false), selection: $photo)
+        .onChange(of: photo) { _, item in
+            guard let item else { return }
+            Task { await state.attach(photo: item); photo = nil }
+        }
+        .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item]) { result in
+            if case .success(let url) = result {
+                Task { await state.attach(fileAt: url) }
+            }
+        }
+    }
+
+    /// What is going up with the next message, and how to change your mind.
+    private var attachmentStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(state.attachments) { a in
+                    HStack(spacing: 6) {
+                        Image(systemName: a.kind == "image" ? "photo" : "doc")
+                            .font(.caption)
+                        Text(a.name).font(.caption).lineLimit(1)
+                        Button {
+                            state.attachments.removeAll { $0.id == a.id }
+                        } label: { Image(systemName: "xmark.circle.fill").font(.caption) }
+                            .buttonStyle(.plain).foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 9).padding(.vertical, 6)
+                    .background(.quaternary.opacity(0.5), in: .capsule)
+                }
+                if state.uploading {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.mini)
+                        Text("uploading").font(.caption).foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 9).padding(.vertical, 6)
+                }
+            }
+            .padding(.horizontal, 14).padding(.top, 8)
+        }
+        .frame(height: 44)
+    }
+}
+
+/// Reasoning, folded away. Open it when you want to see how it got there.
+struct ThinkingBlock: View {
+    let text: String
+    @State private var open = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) { open.toggle() }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: open ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                    Text("thinking").font(.caption)
+                }
+                .foregroundStyle(.secondary)
+            }
+            if open {
+                Text(text)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 9))
+            }
+        }
+    }
+}
