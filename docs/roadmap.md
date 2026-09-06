@@ -14,9 +14,9 @@ window onto it.
 - [x] Compact a long chat's history from the ⋯ menu
 - [x] Rejoin an answer already running on the Mac; survive a dropped connection
 - [x] Type the next message while the current answer streams
-- [ ] Reply-to quoting: long-press → Quote, so a follow-up points at one paragraph
+- [x] Reply-to quoting: long-press → Quote, so a follow-up points at one paragraph
 - [ ] Tap a citation or DOI in an answer to open the paper in the Files tab
-- [ ] Tables rendered as tables (Markdown pipes → a scrolling grid)
+- [x] Tables rendered as tables (Markdown pipes → a scrolling grid)
 - [ ] LaTeX rendered inline for equations
 - [ ] Syntax colouring in code blocks
 - [ ] "Continue" button when an answer stops at the token limit
@@ -32,13 +32,13 @@ window onto it.
 - [x] Attach from library, camera or Files; thumbnails in the strip
 - [ ] Dictation button that transcribes on-device (SFSpeechRecognizer) before sending
 - [ ] Hold-to-talk voice message: transcribe, show the text, send on release
-- [ ] Slash commands: `/model`, `/compact`, `/new`, `/search`, matching the Mac palette
+- [x] Slash commands: `/new`, `/model`, `/compact`, `/find`
 - [ ] Prompt library: saved prompts from the Mac, inserted with `/`
-- [ ] Draft persistence per chat — leave and come back to what you were typing
+- [x] Draft persistence per chat — leave and come back to what you were typing
 - [ ] Paste an image straight into the composer
 - [ ] Paste a URL and get a chip offering "fetch and attach the page"
 - [ ] Multi-line editor sheet for long messages
-- [ ] Send with ⌘↩ on an external keyboard
+- [x] Send with ⌘↩ on an external keyboard
 - [ ] Text scanning from the camera (Live Text) into the composer
 
 ## Attachments and media
@@ -52,7 +52,7 @@ window onto it.
 - [ ] Audio file attachment, transcribed on the Mac
 - [ ] Attachment upload progress per file, with cancel
 - [ ] Retry a failed upload without re-picking it
-- [ ] Save an inline plot to the Photos app
+- [x] Save an inline plot to the Photos app
 - [ ] Share an inline plot directly from its zoom view
 
 ## Files
@@ -60,24 +60,24 @@ window onto it.
 - [x] Grouped by origin with thumbnails; QuickLook preview; share sheet
 - [x] Add to Knowledge; swipe to bin
 - [ ] Folders view mirroring the workspace tree, not only the flat list
-- [ ] Sort by name, size, date; filter by type
+- [x] Sort by name, size, date; filter by type
 - [ ] Recently opened on this phone, at the top
 - [ ] Open a CSV as a scrolling table rather than a PDF-ish preview
 - [ ] Markdown files rendered, not raw
 - [ ] Edit a text or Markdown file on the phone and save it back to the Mac
 - [ ] Rename and move files
 - [ ] Multi-select for bulk share or bin
-- [ ] "Ask about this file" — opens a new chat with the file attached
+- [x] "Ask about this file" — opens a new chat with the file attached
 - [ ] Storage summary: how much the workspace holds, biggest files
-- [ ] Bin view with restore
+- [x] Bin view with restore
 
 ## Search and organisation
 
 - [x] Search titles and message text; jump to the exact line and flash it
 - [x] Pinned / Today / Yesterday / This week / Earlier grouping
 - [x] Archive, filter by project
-- [ ] Tags shown on chat rows and filterable
-- [ ] Search inside one conversation, with next/previous
+- [x] Tags shown on chat rows
+- [x] Search inside one conversation, with next/previous
 - [ ] Search files by content, not only name
 - [ ] Search scoped to a project or a date range
 - [ ] Recent searches remembered
@@ -147,12 +147,13 @@ window onto it.
 
 ## Sync and offline
 
+- [x] Automatic daily backup of the Mac's chats, memory, skills, knowledge and settings into iCloud Drive; restore adds only what is missing
 - [x] Last chat list and recent conversations cached; stale banner
 - [x] Cache excluded from iCloud backup
 - [ ] Queue a message while offline and send it when the Mac is back
 - [ ] Background refresh (BGAppRefreshTask) so the list is fresh when opened
 - [ ] Delta sync: fetch only chats changed since the last look
-- [ ] Prefetch the last N conversations for the plane
+- [x] Prefetch the last N conversations for the plane
 - [ ] Cache size setting and "clear" with the size shown
 - [ ] Conflict notice if a chat was edited on the Mac while the phone showed a stale copy
 
@@ -172,7 +173,7 @@ window onto it.
 - [x] Token in the Keychain, this-device-only; constant-time compare on the Mac
 - [x] Deletions go to the bin, never past it
 - [x] Edit-and-resend refuses if the chat changed elsewhere
-- [ ] Face ID to open the app (optional)
+- [x] Face ID to open the app (optional)
 - [ ] Face ID before approving a shell command
 - [ ] Per-device tokens, so one phone can be revoked without the others
 - [ ] Paired devices list on the Mac with last-seen time
@@ -187,7 +188,7 @@ window onto it.
 - [x] Tailscale or LAN modes with dual listeners
 - [ ] Automatic fallback: try LAN first, then the tailnet address, remembering both
 - [ ] Wake-on-LAN packet from the phone when the Mac is asleep
-- [ ] Connection quality indicator (latency to the Mac)
+- [x] Connection quality indicator (latency to the Mac)
 - [ ] Pair a second Mac and switch between them
 - [ ] Re-pair by tapping a link in Messages from the Mac (orbit:// URL)
 - [ ] Handoff: continue on the Mac the chat you are reading on the phone
@@ -195,7 +196,7 @@ window onto it.
 ## iPad, Mac and Watch
 
 - [x] Sidebar and detail side by side on iPad and landscape
-- [ ] Keyboard shortcuts on iPad (⌘N new chat, ⌘F search, ⌘K model)
+- [x] Keyboard shortcuts on iPad (⌘N new chat, ⌘F find, ⌘K model, ⌘↩ send)
 - [ ] Multiple windows on iPad
 - [ ] Drag a file from the Files app onto a chat
 - [ ] Mac Catalyst build for a second Mac that is not the one running Orbit
@@ -207,27 +208,27 @@ window onto it.
 - [x] Labels on the toolbar and composer controls
 - [ ] Dynamic Type verified at the largest sizes
 - [ ] VoiceOver rotor for messages, code blocks, tool chips
-- [ ] Reduce Motion respected for the flash and scroll animations
+- [x] Reduce Motion respected for the flash and scroll animations
 - [ ] High-contrast mode for bubbles
 - [ ] Localisation: Chinese and Spanish first
 
 ## Settings
 
 - [x] Local model server; default model; offline cache; unpair; about
-- [ ] Theme: system, light, dark, and an accent colour
-- [ ] Font size for answers, independent of Dynamic Type
-- [ ] Haptics on/off
+- [x] Theme: system, light, dark
+- [x] Font size for answers, independent of Dynamic Type
+- [x] Haptics on/off
 - [ ] Send-with-return toggle
 - [ ] Default project for new chats
 - [ ] Data usage: photo quality (1600 px / original) and thumbnail prefetch on cellular
-- [ ] Diagnostics: last errors, server version, a "copy report" button
+- [x] Diagnostics: last errors, server version, a "copy report" button
 
 ## Sharing and export
 
 - [x] Share a chat as Markdown; share a file; share an answer
-- [ ] Export a chat as PDF with the plots inline
-- [ ] Copy a chat as plain text or as JSON
-- [ ] Share an answer as an image card
+- [x] Export a chat as PDF (words; plots are left out)
+- [x] Copy a chat as plain text
+- [x] Share an answer as an image card
 - [ ] Open in… for any file (Pages, Numbers, GoodNotes)
 - [ ] AirDrop a file to the Mac's workspace from the phone
 

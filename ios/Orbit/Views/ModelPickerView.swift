@@ -32,7 +32,7 @@ struct ModelPickerView: View {
                                         }
                                     }
                                     Spacer()
-                                    if m.id == state.currentModel {
+                                    if m.id == state.effectiveModelID {
                                         Image(systemName: "checkmark").foregroundStyle(.tint)
                                     }
                                 }

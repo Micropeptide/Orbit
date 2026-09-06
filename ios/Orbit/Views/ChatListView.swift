@@ -155,6 +155,7 @@ struct ChatListView: View {
                             if let sid = await state.newChat() { goToChat = sid }
                         }
                     } label: { Image(systemName: "square.and.pencil") }
+                    .keyboardShortcut("n", modifiers: .command)
                     .accessibilityLabel("New chat")
                 }
             }
@@ -237,6 +238,15 @@ struct ChatListView: View {
                 Text(relative(chat.date) + (chat.n > 0 ? " · \(chat.n) messages" : " · empty"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let tags = chat.tags, !tags.isEmpty {
+                    HStack(spacing: 4) {
+                        ForEach(tags.prefix(3), id: \.self) { t in
+                            Text(t).font(.caption2)
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(.quaternary.opacity(0.5), in: .capsule)
+                        }
+                    }
+                }
             }
             Spacer(minLength: 0)
         }

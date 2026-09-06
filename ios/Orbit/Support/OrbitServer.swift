@@ -101,6 +101,21 @@ actor OrbitServer {
         try await get("/api/session/\(id)", as: ChatDetail.self)
     }
 
+    /// Read a chat without making it the Mac's open one — for caching in the
+    /// background, which must not move what the desktop is looking at.
+    func peek(_ id: String) async throws -> ChatDetail {
+        try await get("/api/peek/\(id)", as: ChatDetail.self)
+    }
+
+    func trash() async throws -> [TrashItem] {
+        try await get("/api/trash", as: [TrashItem].self)
+    }
+
+    func restore(name: String) async throws -> Bool {
+        struct R: Codable { var ok: Bool? }
+        return (try? JSONDecoder().decode(R.self, from: try await post("/api/trash/restore", ["name": name])))?.ok ?? false
+    }
+
     func models() async throws -> ModelList {
         try await get("/api/models", as: ModelList.self)
     }
@@ -229,6 +244,34 @@ actor OrbitServer {
         let r = try JSONDecoder().decode(R.self, from: data)
         if let e = r.error { throw Failure.server(400, e) }
         return "now serving \(r.serving ?? folder)"
+    }
+
+    // ------------------------------------------------------------ backup
+
+    func backupStatus() async throws -> BackupStatus {
+        try await get("/api/backup/status", as: BackupStatus.self)
+    }
+
+    /// Write an archive now. Returns its file name.
+    func backupNow() async throws -> String {
+        struct R: Codable { var name: String?; var error: String? }
+        var req = try request("/api/backup/now", method: "POST", body: [:])
+        req.timeoutInterval = 120
+        let r = try JSONDecoder().decode(R.self, from: try await run(req))
+        if let e = r.error { throw Failure.server(400, e) }
+        return r.name ?? "done"
+    }
+
+    func setBackup(_ changes: [String: Any]) async throws -> BackupStatus {
+        try JSONDecoder().decode(BackupStatus.self, from: try await post("/api/backup/settings", changes))
+    }
+
+    /// Put back whatever the archive has that the Mac no longer does. Adds only.
+    func restoreMissing(from name: String) async throws -> Int {
+        struct R: Codable { var n: Int?; var error: String? }
+        let r = try JSONDecoder().decode(R.self, from: try await post("/api/backup/restore_missing", ["name": name]))
+        if let e = r.error { throw Failure.server(400, e) }
+        return r.n ?? 0
     }
 
     // ------------------------------------------------------------ writing

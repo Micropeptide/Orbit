@@ -14,6 +14,9 @@ final class AppState: ObservableObject {
     // pairing -------------------------------------------------------------
     @Published var pairing: Pairing? { didSet { rebuildServer() } }
     @Published var reachable: Bool? = nil          // nil = not checked yet
+    @Published var latencyMS: Int?                 // round trip of the last health check
+    /// Which tab is showing — so a deep link from Files can land in Chats.
+    @Published var tab = "chats"
     @Published var lastError: String?
 
     // content -------------------------------------------------------------
@@ -33,6 +36,10 @@ final class AppState: ObservableObject {
     @Published var attachments: [Attachment] = []
     @Published var uploading = false
     @Published var localServer = LocalServer()
+    // the Mac's automatic backup
+    @Published var backup: BackupStatus?
+    @Published var backupBusy = false
+    @Published var backupNote: String?
     /// Whether the app is in the background, so a finished answer can announce itself.
     var backgrounded = false
     var graceTask: UIBackgroundTaskIdentifier = .invalid
@@ -104,6 +111,24 @@ final class AppState: ObservableObject {
         localServer = LocalServer()
     }
 
+    /// `currentModel` as the catalogue knows it. A stored local id can drift
+    /// from the catalogue's (the Mac names the local model differently when its
+    /// server is stopped); anything `local:` still means the local model.
+    var effectiveModelID: String? { catalogueID(for: currentModel) }
+
+    func catalogueID(for id: String?) -> String? {
+        guard let id else { return nil }
+        if models.contains(where: { $0.id == id }) { return id }
+        if id.hasPrefix("local:") {
+            return models.first { $0.provider == "local" && $0.id.hasPrefix("local:") }?.id ?? id
+        }
+        return id
+    }
+
+    var currentModelName: String {
+        models.first { $0.id == effectiveModelID }?.display ?? "model"
+    }
+
     // ------------------------------------------------------------ loading
 
     func refreshEverything() async {
@@ -117,7 +142,9 @@ final class AppState: ObservableObject {
     func checkReachable() async {
         guard let server else { reachable = false; return }
         do {
+            let t0 = Date()
             _ = try await server.health()
+            latencyMS = Int(Date().timeIntervalSince(t0) * 1000)
             reachable = true
             lastError = nil
         } catch {
@@ -133,6 +160,7 @@ final class AppState: ObservableObject {
             chats = list
             Cache.saveChats(list)
             lastError = nil
+            Task { await prefetch(list) }
         } catch {
             lastError = error.localizedDescription
             if chats.isEmpty { chats = Cache.loadChats() }   // offline: show what we have
@@ -149,6 +177,18 @@ final class AppState: ObservableObject {
             // than showing a chip that reads "model"
             let chosen = [m.current, m.default].compactMap { $0 }.first { !$0.isEmpty }
             currentModel = chosen ?? m.models.first { $0.provider == "local" && $0.isReady }?.id
+        }
+    }
+
+    /// The last few conversations, fetched quietly so they open offline too.
+    /// Reads through `peek`, which does not move what the Mac has open.
+    private func prefetch(_ list: [ChatSummary]) async {
+        guard let server else { return }
+        for c in list.filter({ $0.archived != true }).prefix(8) {
+            if let d = Cache.messagesDate(c.id), d.timeIntervalSince1970 >= c.mtime { continue }
+            if let detail = try? await server.peek(c.id) {
+                Cache.saveMessages(detail.messages, for: c.id)
+            }
         }
     }
 
@@ -181,8 +221,15 @@ final class AppState: ObservableObject {
         do {
             let d = try await server.chat(id)
             openChat = d
-            messages = d.messages
-            Cache.saveMessages(d.messages, for: id)
+            var fresh = d.messages
+            // Mid-answer the Mac may not have written the question yet (it starts
+            // the model server first). Keep the one we showed rather than losing it.
+            if liveSid == id, streaming, let mine = messages.last, mine.isUser,
+               fresh.last?.isUser != true {
+                fresh.append(mine)
+            }
+            messages = fresh
+            Cache.saveMessages(fresh, for: id)
             await loadModels()
             // already attached (SSE or poll) when it is the chat we are watching
             if d.running == true, liveSid != id { await rejoin(id) }
@@ -450,6 +497,16 @@ final class AppState: ObservableObject {
     /// Text the composer should pick up — set by "edit and resend".
     @Published var draftPrefill: String?
 
+    /// A new chat with a workspace file already attached, opened in the Chats tab.
+    func askAbout(file: RemoteFile) async {
+        guard let sid = await newChat() else { return }
+        attachments = [Attachment(name: file.name, kind: "file",
+                                  payload: ["kind": "file", "name": file.name, "rel": file.rel])]
+        draftPrefill = "About the attached file: "
+        tab = "chats"
+        deepLink = sid
+    }
+
     private func userOrdinal(of message: Message) -> Int? {
         guard let i = messages.firstIndex(where: { $0.id == message.id }) else { return nil }
         return messages[..<i].filter(\.isUser).count
@@ -691,5 +748,40 @@ extension AppState {
             localServer.note = error.localizedDescription
         }
         await refreshServer()
+    }
+}
+
+// --------------------------------------------------------------------- backup
+
+extension AppState {
+    func refreshBackup() async {
+        guard let server else { return }
+        if let b = try? await server.backupStatus() { backup = b }
+    }
+
+    func backupNow() async {
+        guard let server else { return }
+        backupBusy = true
+        defer { backupBusy = false }
+        do { backupNote = "wrote \(try await server.backupNow())" }
+        catch { backupNote = error.localizedDescription }
+        await refreshBackup()
+    }
+
+    func setBackup(enabled: Bool) async {
+        guard let server else { return }
+        do { backup = try await server.setBackup(["enabled": enabled]) }
+        catch { backupNote = error.localizedDescription }
+    }
+
+    func restoreMissing(from entry: BackupEntry) async {
+        guard let server else { return }
+        backupBusy = true
+        defer { backupBusy = false }
+        do {
+            let n = try await server.restoreMissing(from: entry.name)
+            backupNote = n == 0 ? "nothing was missing" : "put back \(n) file\(n == 1 ? "" : "s")"
+            await loadChats()
+        } catch { backupNote = error.localizedDescription }
     }
 }

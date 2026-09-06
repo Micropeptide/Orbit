@@ -376,6 +376,7 @@ class H(http.server.BaseHTTPRequestHandler):
                            "agents": len(q.agents_load()), "projects": len(q.projects_load()),
                            "files": len(q.list_files(limit=5000))}}))
         if p == "/api/trash":     return self._send(200, jdump(q.trash_list()))
+        if p == "/api/backup/status": return self._send(200, jdump(q.backup_status()))
         if p == "/api/tags":      return self._send(200, jdump(q.all_tags()))
         if p == "/api/schedule":
             d = q.sched_load()
@@ -447,6 +448,21 @@ class H(http.server.BaseHTTPRequestHandler):
             try: self.wfile.write(b)
             except Exception: pass
             return
+        if p.startswith("/api/peek/"):
+            # read a chat without making it the open one — for a phone caching
+            # conversations in the background, which must not move the desktop
+            sid = p.rsplit("/", 1)[-1]
+            if not sid:
+                return self._send(400, jdump({"error": "which chat?"}))
+            st = STATES.get(sid)
+            if st is not None:
+                msgs, title, running = list(st.msgs), st.title, st.lock.locked()
+            else:
+                try: msgs, title = q.session_load(sid)
+                except Exception: return self._send(404, jdump({"error": "no such chat"}))
+                running = False
+            return self._send(200, jdump({"ok": True, "sid": sid, "title": title,
+                                          "messages": render(msgs), "running": running}))
         if p.startswith("/api/session/"):
             sid = p.rsplit("/", 1)[-1]
             if not sid:
@@ -843,6 +859,12 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._send(200, jdump({"rows": q.check_citations(d.get("text",""))}))
         if p == "/api/backup":
             return self._send(200, jdump(q.export_setup()))
+        if p == "/api/backup/now":
+            return self._send(200, jdump(q.backup_now("manual")))
+        if p == "/api/backup/settings":
+            return self._send(200, jdump(q.backup_set(d if isinstance(d, dict) else {})))
+        if p == "/api/backup/restore_missing":
+            return self._send(200, jdump(q.backup_restore_missing(d.get("name"))))
         if p == "/api/restore":
             return self._send(200, jdump(q.import_setup(d.get("path",""), d.get("what"))))
         if p == "/api/h2/jobs":
@@ -997,7 +1019,14 @@ class H(http.server.BaseHTTPRequestHandler):
                     if a.get("kind") == "image":
                         parts.append({"type":"image_url","image_url":{"url":a["data_url"]}})
                     else:
-                        notes.append(f"[attached file: {a['name']} — read it with read_file at {a['path']}]")
+                        # a file already in the workspace can be named by its relative
+                        # path; anything that escapes the workspace is ignored
+                        path = a.get("path")
+                        if not path and a.get("rel"):
+                            cand = os.path.abspath(os.path.join(q.WORKSPACE, str(a["rel"])))
+                            if cand.startswith(os.path.abspath(q.WORKSPACE) + os.sep): path = cand
+                        if not path: continue
+                        notes.append(f"[attached file: {a['name']} — read it with read_file at {path}]")
                 body = text + (("\n" + "\n".join(notes)) if notes else "")
                 content = ([{"type":"text","text":body}] + parts) if parts else body
                 first = st.title is None
@@ -1196,6 +1225,7 @@ def scheduler_loop():
     chores = [("scheduled jobs", _due_jobs),
               ("cluster watch", _watch_h2),
               ("trash purge",    q.trash_purge),
+              ("backup",         q.backup_auto),
               ("log redaction",  q.redact_server_log)]
     time.sleep(20)
     while True:

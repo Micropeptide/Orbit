@@ -3,7 +3,7 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject var state: AppState
     @Environment(\.horizontalSizeClass) private var width
-    @State private var tab = Self.initialTab
+    @AppStorage("theme") private var theme = "system"
 
     /// Development only: `ORBIT_TAB=files|settings` opens on that tab so the
     /// simulator can be screenshotted without a finger. Compiled out of release.
@@ -16,11 +16,12 @@ struct RootView: View {
     }
 
     var body: some View {
+        LockGate {
         Group {
             if state.isPaired {
                 // .tabItem rather than the iOS 18 `Tab` type, so this still runs
                 // on iOS 17 devices.
-                TabView(selection: $tab) {
+                TabView(selection: $state.tab) {
                     // On an iPad or a landscape Max, the list and the
                     // conversation sit side by side.
                     Group {
@@ -40,6 +41,9 @@ struct RootView: View {
             }
         }
         .animation(.default, value: state.isPaired)
+        }
+        .preferredColorScheme(Appearance.scheme(theme))
+        .onAppear { state.tab = Self.initialTab }
     }
 }
 

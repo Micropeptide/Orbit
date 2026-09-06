@@ -44,7 +44,18 @@ it if a phone goes missing.
 | **Offline** | last chat list and recent conversations cached on the phone; a banner says when the copy is stale |
 | **Answers survive a dropped connection** | if the phone loses the stream mid-answer the Mac carries on; the app rejoins the running answer rather than showing an error |
 | **Notifications** | if an answer finishes while you are in another app it tells you; tapping the notification opens that chat |
-| **iPad and landscape** | list beside conversation |
+| **iPad and landscape** | list beside conversation; ⌘N new chat, ⌘K model, ⌘F find, ⌘↩ send on a keyboard |
+| **Find in chat** | ⋯ → Find (or type `/find`): steps through matches and flashes each |
+| **Slash commands** | type `/` — `/new`, `/model`, `/compact`, `/find` |
+| **Quote** | long-press any message → Quote puts it in the composer as a `>` block |
+| **Tables and code** | Markdown pipe tables render as real grids; fenced code gets a copy button |
+| **Share** | a chat as Markdown, plain text or a one-page PDF; an answer as text or as an image card; a plot straight to Photos |
+| **Drafts** | what you were typing in each chat is still there when you come back |
+| **Backup** | Settings shows the Mac's automatic backup (see below); back up now, list archives, put back what is missing |
+| **Bin** | what you binned on the Mac, with Restore |
+| **Appearance** | light/dark, larger answer text, haptics on/off |
+| **Face ID** | optional lock whenever Orbit comes to the front |
+| **Diagnostics** | one tap copies a short report (versions, address, model server, last error — no chat content, no token) |
 
 ### What it deliberately does not do
 
@@ -54,6 +65,21 @@ it if a phone goes missing.
 - "Edit and resend" sends the Mac the text of the message it is about to cut
   back to. If the conversation changed elsewhere in the meantime the Mac
   refuses rather than cutting the wrong turn.
+
+## Automatic backup
+
+Once a day the Mac archives what cannot be re-downloaded — chats, memory,
+skills, knowledge and settings — into **iCloud Drive › Orbit Backups** when the
+Mac has iCloud Drive, otherwise into Orbit's own `backups/auto` folder. It skips
+days when nothing changed, keeps the most recent fourteen archives, and leaves
+API keys and the pairing token out unless you tick them in.
+
+Turn it on or off, change the folder, or back up now under **Settings → Backup**
+on the Mac; the phone shows the same status and can trigger a backup.
+
+Restoring is deliberately one-directional: **Put back what is missing** adds
+chats, memory, skills and knowledge the archive has and the Mac no longer does.
+It never overwrites what is on disk now.
 
 There is a long list of what it could do next in [roadmap.md](roadmap.md).
 

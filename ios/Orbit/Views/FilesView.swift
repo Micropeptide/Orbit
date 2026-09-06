@@ -13,17 +13,19 @@ struct FilesView: View {
     @State private var failed: String?
     @State private var shareURL: URL?
     @State private var toast: String?
+    @State private var sort: FileSort = .newest
+    @State private var type: FileType = .all
 
     private var groups: [(String, [RemoteFile])] {
         let q = search.trimmingCharacters(in: .whitespaces).lowercased()
-        let matched = q.isEmpty ? files
-            : files.filter { $0.name.lowercased().contains(q) }
+        let matched = (q.isEmpty ? files : files.filter { $0.name.lowercased().contains(q) })
+            .filter(type.matches)
         let order = ["generated": 0, "uploaded": 1, "papers": 2]
         let titles = ["generated": "Made by Orbit", "uploaded": "You attached",
                       "papers": "Papers"]
         return Dictionary(grouping: matched) { $0.area ?? "generated" }
             .sorted { (order[$0.key] ?? 9) < (order[$1.key] ?? 9) }
-            .map { (titles[$0.key] ?? $0.key.capitalized, $0.value.sorted { $0.mtime > $1.mtime }) }
+            .map { (titles[$0.key] ?? $0.key.capitalized, $0.value.sorted(by: sort.order)) }
     }
 
     var body: some View {
@@ -64,6 +66,11 @@ struct FilesView: View {
                                             } label: {
                                                 Label("Add to Knowledge", systemImage: "books.vertical")
                                             }
+                                            Button {
+                                                Task { await state.askAbout(file: f) }
+                                            } label: {
+                                                Label("Ask Orbit about it", systemImage: "bubble.left.and.text.bubble.right")
+                                            }
                                             Divider()
                                             Button(role: .destructive) {
                                                 Task { await bin(f) }
@@ -79,6 +86,22 @@ struct FilesView: View {
             .navigationTitle("Files")
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $search, prompt: "Search files")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Picker("Sort", selection: $sort) {
+                            ForEach(FileSort.allCases, id: \.self) { Text($0.label).tag($0) }
+                        }
+                        Picker("Show", selection: $type) {
+                            ForEach(FileType.allCases, id: \.self) { Text($0.label).tag($0) }
+                        }
+                    } label: {
+                        Image(systemName: type == .all ? "line.3.horizontal.decrease.circle"
+                                                       : "line.3.horizontal.decrease.circle.fill")
+                    }
+                    .accessibilityLabel("Sort and filter")
+                }
+            }
             .refreshable { await load() }
             .task { await load() }
             .quickLookPreview($preview)
@@ -177,6 +200,40 @@ struct FilesView: View {
         Task {
             do { preview = try await server.download(rel: f.rel, name: f.name) }
             catch { failed = error.localizedDescription }
+        }
+    }
+}
+
+enum FileSort: CaseIterable {
+    case newest, name, size
+    var label: String {
+        switch self { case .newest: return "Newest first"; case .name: return "By name"; case .size: return "Largest first" }
+    }
+    var order: (RemoteFile, RemoteFile) -> Bool {
+        switch self {
+        case .newest: return { $0.mtime > $1.mtime }
+        case .name:   return { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        case .size:   return { ($0.bytes ?? 0) > ($1.bytes ?? 0) }
+        }
+    }
+}
+
+enum FileType: CaseIterable {
+    case all, images, pdf, docs, data, code
+    var label: String {
+        switch self {
+        case .all: return "Everything"; case .images: return "Pictures"; case .pdf: return "PDFs"
+        case .docs: return "Documents"; case .data: return "Tables"; case .code: return "Code"
+        }
+    }
+    func matches(_ f: RemoteFile) -> Bool {
+        switch self {
+        case .all:    return true
+        case .images: return f.isImage
+        case .pdf:    return f.ext == "pdf"
+        case .docs:   return ["md", "txt", "docx", "doc", "pptx", "rtf"].contains(f.ext)
+        case .data:   return ["csv", "tsv", "xlsx", "json"].contains(f.ext)
+        case .code:   return ["py", "swift", "js", "sh", "r", "ipynb"].contains(f.ext)
         }
     }
 }

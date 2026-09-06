@@ -109,7 +109,7 @@ struct ServerControlView: View {
     private func button(_ title: String, _ symbol: String, role: ButtonRole? = nil,
                         action: @escaping () async -> Void) -> some View {
         Button(role: role) {
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            Haptics.press()
             Task { await action() }
         } label: {
             Label(title, systemImage: symbol)

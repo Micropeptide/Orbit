@@ -244,8 +244,34 @@ ACTIVE_MODEL = {"id": None}
 
 MTPLX_MODELS = os.path.expanduser("~/.mtplx/models")
 
+LOCAL_NAMES = os.path.join(ROOT, "config", "local_names.json")
+
+def _local_names():
+    try: return json.load(open(LOCAL_NAMES))
+    except Exception: return {}
+
+def _remember_local_name(folder, served):
+    """MTPLX serves a folder under its own short name. Remember the pairing so
+    the model keeps one id whether the server is up or not — otherwise a chat's
+    stored model stopped matching the catalogue every time the watchdog stopped
+    the server, and the picker showed "model"."""
+    if not folder or not served or _local_names().get(folder) == served: return
+    names = _local_names(); names[folder] = served
+    try:
+        with open(LOCAL_NAMES, "w") as f: json.dump(names, f, indent=1)
+    except OSError: pass
+
 def local_model_name():
-    """What the local server is serving, or would serve once started."""
+    """What the local server is serving, or would serve once started — by the
+    name it serves under."""
+    folder = local_model_configured()
+    m = MODEL or probe(1)
+    if m:
+        _remember_local_name(folder, m)
+        return m
+    return _local_names().get(folder) or folder
+
+def _local_model_name_legacy():
     if MODEL: return MODEL
     m = probe(1)
     if m: return m
@@ -2687,6 +2713,132 @@ def plan_pending():
     return [s for s in CURRENT_PLAN.get("steps", []) if not s.get("done")]
 
 # ==================================================================== SELF-REPAIR
+# ==================================================================== AUTOMATIC BACKUP
+# One archive a day of what cannot be re-downloaded — chats, memory, skills,
+# knowledge, settings — into iCloud Drive when the Mac has it, so a lost or
+# wiped machine costs a restore, not the conversations. Secrets stay out unless
+# asked for, and a restore never overwrites what is on disk now.
+ICLOUD = os.path.expanduser("~/Library/Mobile Documents/com~apple~CloudDocs")
+BACKUP_PARTS = ("sessions", "memory", "skills", "knowledge", "config")
+
+def backup_config():
+    c = dict(S.get("backup") or {})
+    have_icloud = os.path.isdir(ICLOUD)
+    c.setdefault("enabled", have_icloud)
+    c.setdefault("every_hours", 24)
+    c.setdefault("keep", 14)
+    c.setdefault("dest", os.path.join(ICLOUD, "Orbit Backups") if have_icloud
+                         else os.path.join(ROOT, "backups", "auto"))
+    c.setdefault("include_workspace", False)
+    c.setdefault("include_secrets", False)
+    return c
+
+def backup_list(cfg=None):
+    cfg = cfg or backup_config()
+    d = cfg["dest"]
+    if not os.path.isdir(d): return []
+    out = []
+    for n in sorted(os.listdir(d)):
+        if n.startswith("orbit-") and n.endswith(".tar.gz"):
+            p = os.path.join(d, n)
+            try: out.append({"name": n, "bytes": os.path.getsize(p), "mtime": os.path.getmtime(p)})
+            except OSError: pass
+    return out
+
+def backup_now(reason="manual"):
+    import tarfile
+    cfg = backup_config()
+    os.makedirs(cfg["dest"], exist_ok=True)
+    name = f"orbit-{time.strftime('%Y%m%d-%H%M%S')}.tar.gz"
+    tmp = os.path.join(cfg["dest"], "." + name + ".part")
+    include = list(BACKUP_PARTS) + (["workspace"] if cfg.get("include_workspace") else [])
+    keep_secrets = bool(cfg.get("include_secrets"))
+    def _filter(ti):
+        n = ti.name
+        if "__pycache__" in n or n.endswith(".pyc") or "/.history/" in n: return None
+        if not keep_secrets and (n.endswith("secrets.json") or n.endswith(".remote_token")):
+            return None
+        return ti
+    with tarfile.open(tmp, "w:gz") as tar:
+        for rel in include:
+            p = os.path.join(ROOT, rel)
+            if os.path.exists(p): tar.add(p, arcname=rel, filter=_filter)
+    final = os.path.join(cfg["dest"], name)
+    os.replace(tmp, final)                       # never a half-written archive
+    keep = int(cfg.get("keep") or 14)
+    for old in backup_list(cfg)[:-keep]:
+        try: os.remove(os.path.join(cfg["dest"], old["name"]))
+        except OSError: pass
+    LOG_SAFETY("backup", {"reason": reason}, "written", name)
+    return {"name": name, "path": final, "bytes": os.path.getsize(final)}
+
+def _newest_change():
+    newest = 0.0
+    for rel in BACKUP_PARTS:
+        p = os.path.join(ROOT, rel)
+        for root_, _, files in os.walk(p):
+            if "/.history" in root_: continue
+            for f in files:
+                try: newest = max(newest, os.path.getmtime(os.path.join(root_, f)))
+                except OSError: pass
+    return newest
+
+def backup_auto():
+    """Maintenance chore. Skips when disabled, when the last archive is recent,
+    or when nothing has changed since it — so an idle Mac adds no archives."""
+    cfg = backup_config()
+    if not cfg.get("enabled"): return
+    lst = backup_list(cfg)
+    last = lst[-1]["mtime"] if lst else 0
+    if time.time() - last < float(cfg.get("every_hours") or 24) * 3600: return
+    if lst and _newest_change() <= last: return
+    backup_now("automatic")
+
+def backup_status():
+    cfg = backup_config()
+    lst = backup_list(cfg)
+    return {**cfg, "icloud": os.path.isdir(ICLOUD),
+            "in_icloud": cfg["dest"].startswith(ICLOUD),
+            "count": len(lst), "last": (lst[-1] if lst else None),
+            "backups": lst[::-1][:20], "total_bytes": sum(b["bytes"] for b in lst)}
+
+def backup_set(changes):
+    cfg = backup_config()
+    for k in ("enabled", "include_workspace", "include_secrets"):
+        if k in changes: cfg[k] = bool(changes[k])
+    for k in ("every_hours", "keep"):
+        if k in changes:
+            try: cfg[k] = max(1, int(changes[k]))
+            except (TypeError, ValueError): pass
+    if changes.get("dest"):
+        cfg["dest"] = os.path.abspath(os.path.expanduser(str(changes["dest"])))
+    S["backup"] = cfg
+    save_settings(S)
+    return backup_status()
+
+def backup_restore_missing(name):
+    """Put back what a backup has and the live folders do not — chats, memory,
+    skills, knowledge. Never overwrites: whatever is on disk now wins."""
+    import tarfile
+    cfg = backup_config()
+    p = os.path.join(cfg["dest"], os.path.basename(str(name or "")))
+    if not os.path.isfile(p): return {"error": "no such backup"}
+    root = os.path.abspath(ROOT) + os.sep
+    added = []
+    with tarfile.open(p, "r:gz") as tar:
+        for m in tar.getmembers():
+            if not m.isfile(): continue
+            if m.name.split("/")[0] not in ("sessions", "memory", "skills", "knowledge"): continue
+            tgt = os.path.normpath(os.path.join(ROOT, m.name))
+            if not tgt.startswith(root) or os.path.exists(tgt): continue
+            os.makedirs(os.path.dirname(tgt), exist_ok=True)
+            src = tar.extractfile(m)
+            if src is None: continue
+            with src, open(tgt, "wb") as out: out.write(src.read())
+            added.append(m.name)
+    LOG_SAFETY("backup_restore", {"name": name}, "restored", f"{len(added)} files")
+    return {"ok": True, "n": len(added), "added": added[:50]}
+
 BACKUPS = os.path.join(ROOT, "backups")
 os.makedirs(BACKUPS, exist_ok=True)
 # qq / qq-ui are now one-line shims; patching those would edit the shim and
