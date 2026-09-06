@@ -81,9 +81,10 @@ struct PairingView: View {
 
     private var header: some View {
         VStack(spacing: 10) {
-            Image(systemName: "circle.dotted.circle")
-                .font(.system(size: 52, weight: .light))
-                .foregroundStyle(.tint)
+            Image("OrbitMark")
+                .resizable().scaledToFit()
+                .frame(width: 84, height: 84)
+                .shadow(color: .black.opacity(0.12), radius: 10, y: 4)
             Text("Your Mac holds everything")
                 .font(.title3.weight(.semibold))
             Text("Orbit keeps your chats, notes and papers on your Mac. "

@@ -30,6 +30,7 @@ final class AppState: ObservableObject {
     // what is going up with the next message
     @Published var attachments: [Attachment] = []
     @Published var uploading = false
+    @Published var localServer = LocalServer()
     /// Whether the app is in the background, so a finished answer can announce itself.
     var backgrounded = false
     var graceTask: UIBackgroundTaskIdentifier = .invalid
@@ -136,7 +137,11 @@ final class AppState: ObservableObject {
         guard let server else { return }
         if let m = try? await server.models() {
             models = m.models
-            currentModel = m.current ?? m.default
+            // a chat with no choice of its own answers with the default, and the
+            // default with nothing configured is the local model — say so, rather
+            // than showing a chip that reads "model"
+            let chosen = [m.current, m.default].compactMap { $0 }.first { !$0.isEmpty }
+            currentModel = chosen ?? m.models.first { $0.provider == "local" && $0.isReady }?.id
         }
     }
 
@@ -395,6 +400,7 @@ struct Attachment: Identifiable, Hashable {
     var name: String
     var kind: String                 // "image" or "file"
     var payload: [String: String]    // exactly what /api/chat expects back
+    var thumbnail: UIImage? = nil
 
     static func == (a: Attachment, b: Attachment) -> Bool { a.id == b.id }
     func hash(into h: inout Hasher) { h.combine(id) }
@@ -402,16 +408,31 @@ struct Attachment: Identifiable, Hashable {
 
 extension AppState {
     func attach(photo item: PhotosPickerItem) async {
+        do {
+            guard let data = try await item.loadTransferable(type: Data.self),
+                  let image = UIImage(data: data) else {
+                lastError = "That photo couldn't be read."; return
+            }
+            await attach(image: image)
+        } catch {
+            lastError = "Couldn't attach that photo. \(error.localizedDescription)"
+        }
+    }
+
+    /// A 12-megapixel HEIC is 4 MB the model will never look at closely. Send
+    /// a 1600-pixel JPEG instead: quick over Tailscale, still plenty to read.
+    func attach(image: UIImage) async {
         guard let server else { return }
         uploading = true
         defer { uploading = false }
+        let small = image.downscaled(maxSide: 1600)
+        guard let jpeg = small.jpegData(compressionQuality: 0.85) else { return }
+        let name = "photo-\(Int(Date.now.timeIntervalSince1970)).jpg"
         do {
-            guard let data = try await item.loadTransferable(type: Data.self) else { return }
-            let name = "photo-\(Int(Date.now.timeIntervalSince1970)).jpg"
-            let out = try await server.upload(data: data, filename: name, mime: "image/jpeg")
-            addAttachment(from: out, fallbackName: name)
+            let out = try await server.upload(data: jpeg, filename: name, mime: "image/jpeg")
+            addAttachment(from: out, fallbackName: name, thumbnail: small.downscaled(maxSide: 120))
         } catch {
-            lastError = "Couldn't attach that photo. \(error.localizedDescription)"
+            lastError = "Couldn't upload that photo. \(error.localizedDescription)"
         }
     }
 
@@ -432,14 +453,16 @@ extension AppState {
         }
     }
 
-    private func addAttachment(from out: [String: Any], fallbackName: String) {
+    private func addAttachment(from out: [String: Any], fallbackName: String,
+                               thumbnail: UIImage? = nil) {
         let kind = (out["kind"] as? String) ?? "file"
         let name = (out["name"] as? String) ?? fallbackName
         var payload: [String: String] = ["kind": kind, "name": name]
         for key in ["path", "data_url", "url"] {
             if let v = out[key] as? String { payload[key] = v }
         }
-        attachments.append(Attachment(name: name, kind: kind, payload: payload))
+        attachments.append(Attachment(name: name, kind: kind, payload: payload,
+                                      thumbnail: thumbnail))
     }
 }
 
@@ -462,5 +485,80 @@ extension AppState {
         guard graceTask != .invalid else { return }
         UIApplication.shared.endBackgroundTask(graceTask)
         graceTask = .invalid
+    }
+}
+
+
+extension UIImage {
+    func downscaled(maxSide: CGFloat) -> UIImage {
+        let longest = max(size.width, size.height)
+        guard longest > maxSide else { return self }
+        let scale = maxSide / longest
+        let target = CGSize(width: size.width * scale, height: size.height * scale)
+        return UIGraphicsImageRenderer(size: target).image { _ in
+            draw(in: CGRect(origin: .zero, size: target))
+        }
+    }
+}
+
+// ------------------------------------------------------------- the local model
+
+/// What the Mac's model server is doing, and the knobs to change it.
+struct LocalServer: Equatable {
+    var running = false
+    var model: String?
+    var memoryGB: Double?
+    var installed: [String] = []          // model folders on the Mac
+    var serving: String?                  // the folder currently configured
+    var busy = false                      // a start/stop/switch in flight
+    var note: String?                     // last message from the Mac
+}
+
+extension AppState {
+    func refreshServer() async {
+        guard let server else { return }
+        if let st = try? await server.serverStatus() {
+            localServer.running = st.running
+            localServer.model = st.model
+            localServer.memoryGB = st.memory_gb
+        }
+        if let m = try? await server.models() {
+            models = m.models
+            currentModel = m.current ?? m.default
+            let serving = m.models.first { $0.provider == "local" && $0.id.hasPrefix("local:") }
+            localServer.serving = serving?.display
+            localServer.installed = m.models
+                .filter { $0.provider == "local" }
+                .map { $0.id.hasPrefix("local-dir:") ? String($0.id.dropFirst("local-dir:".count))
+                                                     : $0.display }
+        }
+    }
+
+    func serverAction(_ action: OrbitServer.ServerAction) async {
+        guard let server else { return }
+        localServer.busy = true
+        localServer.note = action == .stop ? "stopping…" : "loading weights — about 15 seconds"
+        defer { localServer.busy = false }
+        do {
+            let msg = try await server.serverAction(action)
+            localServer.note = msg
+        } catch {
+            localServer.note = error.localizedDescription
+        }
+        await refreshServer()
+    }
+
+    func switchLocalModel(_ folder: String) async {
+        guard let server else { return }
+        localServer.busy = true
+        localServer.note = "switching to \(folder) — the server restarts"
+        defer { localServer.busy = false }
+        do {
+            let msg = try await server.switchLocalModel(folder)
+            localServer.note = msg
+        } catch {
+            localServer.note = error.localizedDescription
+        }
+        await refreshServer()
     }
 }
