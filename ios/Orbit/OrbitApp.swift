@@ -25,12 +25,21 @@ struct OrbitApp: App {
                     #endif
                 }
                 .onChange(of: phase) { _, new in
-                    // coming back from the lock screen should show the truth,
-                    // not whatever was on screen twenty minutes ago
-                    if new == .active {
+                    state.backgrounded = (new != .active)
+                    switch new {
+                    case .active:
+                        // coming back from the lock screen should show the truth,
+                        // not whatever was on screen twenty minutes ago
+                        state.endBackgroundGrace()
                         Task { await state.refreshEverything() }
+                    case .background:
+                        // hold the app awake briefly so an answer in flight can
+                        // finish and announce itself
+                        if state.streaming { state.beginBackgroundGrace() }
+                    default: break
                     }
                 }
+
         }
     }
 }

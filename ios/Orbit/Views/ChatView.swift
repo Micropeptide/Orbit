@@ -4,6 +4,10 @@ import UniformTypeIdentifiers
 
 struct ChatView: View {
     let sid: String
+    /// Index of the message a search hit pointed at, so the view can land there
+    /// and flash it rather than dumping you at the end of a long conversation.
+    var highlight: Int? = nil
+    @State private var flashed: Int? = nil
     @EnvironmentObject var state: AppState
     @State private var draft = ""
     @State private var showModels = false
@@ -21,6 +25,12 @@ struct ChatView: View {
             .navigationTitle(state.openChat?.title ?? "New chat")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    ShareLink(item: state.markdown(for: sid),
+                              preview: SharePreview(state.openChat?.title ?? "Chat")) {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { showModels = true } label: {
                         HStack(spacing: 4) {
@@ -62,8 +72,14 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
-                    ForEach(state.messages) { m in
-                        MessageBubble(message: m).id(m.id)
+                    ForEach(Array(state.messages.enumerated()), id: \.element.id) { i, m in
+                        MessageBubble(message: m)
+                            .id(m.id)
+                            .padding(.horizontal, flashed == i ? 8 : 0)
+                            .padding(.vertical, flashed == i ? 6 : 0)
+                            .background(flashed == i ? Color.yellow.opacity(0.18) : .clear,
+                                        in: .rect(cornerRadius: 10))
+                            .id("row-\(i)")
                     }
                     if state.streaming { liveBubble.id("live") }
                     if let e = state.lastError, !state.streaming { errorNote(e) }
@@ -77,6 +93,17 @@ struct ChatView: View {
             .onChange(of: state.messages.count) { _, _ in scroll(proxy) }
             .onChange(of: state.liveText) { _, _ in scroll(proxy) }
             .onAppear { scroll(proxy, animated: false) }
+            .onChange(of: state.messages.count) { _, count in
+                guard let h = highlight, h < count, flashed == nil else { return }
+                // wait for the rows to exist before asking to scroll to one
+                Task {
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    withAnimation { proxy.scrollTo("row-\(h)", anchor: .center) }
+                    withAnimation { flashed = h }
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    withAnimation { flashed = nil }
+                }
+            }
         }
     }
 

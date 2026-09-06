@@ -3,8 +3,22 @@ import SwiftUI
 struct MessageBubble: View {
     let message: Message
 
+    /// Uploaded images come back as data: URLs, which UIImage cannot read directly.
+    static func decodeDataURL(_ s: String) -> Data? {
+        guard let comma = s.firstIndex(of: ","), s.hasPrefix("data:") else { return nil }
+        return Data(base64Encoded: String(s[s.index(after: comma)...]))
+    }
+
     var body: some View {
         if message.isUser {
+            VStack(alignment: .trailing, spacing: 7) {
+            ForEach(message.images ?? [], id: \.self) { src in
+                if let data = Self.decodeDataURL(src), let ui = UIImage(data: data) {
+                    Image(uiImage: ui).resizable().aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: 220, maxHeight: 220)
+                        .clipShape(.rect(cornerRadius: 13))
+                }
+            }
             HStack {
                 Spacer(minLength: 40)
                 Text(message.text)
@@ -12,6 +26,8 @@ struct MessageBubble: View {
                     .padding(.horizontal, 14).padding(.vertical, 10)
                     .background(.tint.opacity(0.14), in: .rect(cornerRadius: 17))
             }
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
         } else {
             VStack(alignment: .leading, spacing: 7) {
                 if let model = message.model, !model.isEmpty {
@@ -24,6 +40,7 @@ struct MessageBubble: View {
                         .padding(.vertical, 5).padding(.horizontal, 9)
                         .background(.orange.opacity(0.10), in: .rect(cornerRadius: 7))
                 }
+                ForEach(message.plots ?? [], id: \.self) { MessageImage(path: $0) }
                 MarkdownText(message.text)
                 if let thinking = message.thinking, !thinking.isEmpty {
                     ThinkingBlock(text: thinking)

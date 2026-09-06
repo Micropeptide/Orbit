@@ -121,6 +121,11 @@ actor OrbitServer {
         return (l.running ?? false, l.content ?? "", l.thinking ?? "")
     }
 
+    /// Any authenticated GET returning bytes — images, thumbnails, downloads.
+    func fetchRaw(_ path: String) async throws -> Data {
+        try await run(try request(path))
+    }
+
     /// Search inside every conversation, not just their titles.
     func search(_ q: String) async throws -> [SearchHit] {
         let escaped = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? q
