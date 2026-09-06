@@ -27,34 +27,35 @@ time. Loopback is exempt, so nothing about using Orbit at the Mac changes.
 **Rotate token** in the same panel invalidates every paired device at once. Use
 it if a phone goes missing.
 
-## The app
-
-- **Chats** — the same conversations, live. Search titles *and* the text of
-  every message. Swipe to pin or bin. Pull to refresh.
-- **Files** — everything Orbit made or you attached, previewed with QuickLook,
-  grouped by where it came from.
-- **Model picker** — per conversation, exactly as on the Mac. Each answer is
-  labelled with the model that wrote it.
-- **Attachments** — a photo or a file from the Files app, uploaded to the Mac
-  and sent with your next message.
-- **Offline** — the last copy of your chat list and recent conversations is
-  cached, so the app opens to something when the Mac is asleep. A banner says
-  so rather than pretending.
-
 ## What the app does
 
 | | |
 |---|---|
-| **Chats** | live list, pin, archive, rename, bin, share as Markdown |
+| **Chats** | live list grouped by day, pin, archive, rename, bin, share as Markdown; filter by project |
 | **Search** | titles *and* the text of every message; tapping a hit jumps to that line and flashes it |
-| **Conversation** | streaming, markdown with fenced code, collapsible thinking, tool chips, approval prompts |
-| **Plots and images** | matplotlib output and attachments render inline; tap to zoom and pan |
-| **Models** | per-conversation picker; each answer names the model that wrote it |
-| **Files** | grouped by origin, thumbnails, QuickLook preview, swipe to bin |
-| **Attachments** | a photo or a file from the Files app, uploaded and sent with your message |
-| **Offline** | last chat list and recent conversations cached; a banner says when it is stale |
-| **Notifications** | if an answer finishes while you are in another app, it tells you |
+| **Conversation** | streaming answers, Markdown with fenced code and a copy button, collapsible thinking, tool chips, approval prompts |
+| **Message actions** | long-press: copy, share, *edit and resend* (cuts the conversation back to that point on the Mac), *ask again* on the last answer |
+| **Compact history** | summarises the older turns of a long chat on the Mac, from the ⋯ menu |
+| **Attachments** | photos from the library, a picture from the camera, or any file from the Files app — uploaded to the Mac and sent with the next message. Photos are downscaled to 1600 px before upload |
+| **Plots and images** | matplotlib output and attached pictures render inline; tap to zoom and pan |
+| **Models** | per-conversation picker above the message box; each answer names the model that wrote it. Settings sets the default for new chats |
+| **Local model server** | Settings shows whether the model server on the Mac is running and how much memory it holds; start, stop, restart, or switch to another installed model folder |
+| **Files** | everything Orbit made or you attached, grouped by origin, with thumbnails; QuickLook preview, share sheet, *Add to Knowledge*, swipe to bin |
+| **Offline** | last chat list and recent conversations cached on the phone; a banner says when the copy is stale |
+| **Answers survive a dropped connection** | if the phone loses the stream mid-answer the Mac carries on; the app rejoins the running answer rather than showing an error |
+| **Notifications** | if an answer finishes while you are in another app it tells you; tapping the notification opens that chat |
 | **iPad and landscape** | list beside conversation |
+
+### What it deliberately does not do
+
+- It never stores a conversation the Mac has not accepted. The cache is for
+  reading when the Mac is asleep; it is not a second database.
+- Deleting a chat or a file moves it to the bin on the Mac, never past it.
+- "Edit and resend" sends the Mac the text of the message it is about to cut
+  back to. If the conversation changed elsewhere in the meantime the Mac
+  refuses rather than cutting the wrong turn.
+
+There is a long list of what it could do next in [roadmap.md](roadmap.md).
 
 ## Building it
 

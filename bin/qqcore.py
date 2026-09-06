@@ -2090,16 +2090,19 @@ def search_chats(query, limit=40):
         except Exception: continue
         msgs = raw.get("messages") if isinstance(raw, dict) else raw
         title = (raw.get("title") if isinstance(raw, dict) else None) or "(untitled)"
+        row = -1                                    # position among displayed messages
         for i, m in enumerate(msgs or []):
             if m.get("role") not in ("user", "assistant"): continue
             c = m.get("content")
             if isinstance(c, list):
                 c = " ".join(x.get("text","") for x in c if isinstance(x, dict))
             if not c: continue
+            row += 1
             low = str(c).lower()
             k = low.find(q_low)
             if k >= 0:
                 hits.append({"sid": f[:-5], "title": title, "role": m["role"], "index": i,
+                             "row": row,
                              "snippet": str(c)[max(0,k-70):k+130].replace("\n", " "),
                              "mtime": os.path.getmtime(p)})
                 break

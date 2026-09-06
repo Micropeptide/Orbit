@@ -23,7 +23,7 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: Orbit
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
-        INFOPLIST_KEY_NSCameraUsageDescription: "Scanning the pairing QR code shown by Orbit on your Mac."
+        INFOPLIST_KEY_NSCameraUsageDescription: "Scanning the pairing QR code on your Mac, and taking photos to send in a chat."
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Finding your Mac running Orbit on this network."
         INFOPLIST_KEY_NSBonjourServices: "_orbit._tcp"
         INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Attaching an image to a conversation."

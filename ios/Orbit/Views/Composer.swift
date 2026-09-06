@@ -9,6 +9,8 @@ struct Composer: View {
     @EnvironmentObject var state: AppState
     @Binding var draft: String
     var typing: FocusState<Bool>.Binding
+    var modelName: String
+    var onPickModel: () -> Void
 
     @State private var showAttachMenu = false
     @State private var showLibrary = false
@@ -23,6 +25,22 @@ struct Composer: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // Which model answers is the single fact you most want in view, so it
+            // lives here rather than in a toolbar that folds it away when cramped.
+            Button(action: onPickModel) {
+                HStack(spacing: 5) {
+                    Image(systemName: "cpu").font(.caption2)
+                    Text(state.streaming && !state.liveModel.isEmpty ? state.liveModel : modelName)
+                        .font(.caption.weight(.medium)).lineLimit(1)
+                    Image(systemName: "chevron.up.chevron.down").font(.caption2)
+                }
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10).padding(.vertical, 4)
+                .background(.quaternary.opacity(0.35), in: .capsule)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 6)
+            .accessibilityLabel("Model: \(modelName). Tap to change.")
             if !state.attachments.isEmpty || state.uploading { attachmentStrip }
             HStack(alignment: .bottom, spacing: 8) {
                 Button {
@@ -43,7 +61,6 @@ struct Composer: View {
                     .padding(.horizontal, 14).padding(.vertical, 9)
                     .background(.background, in: .rect(cornerRadius: 20))
                     .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(.quaternary))
-                    .disabled(state.streaming)
 
                 if state.streaming {
                     Button {

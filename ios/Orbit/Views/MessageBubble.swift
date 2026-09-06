@@ -2,6 +2,9 @@ import SwiftUI
 
 struct MessageBubble: View {
     let message: Message
+    var isLast = false
+    var onEdit: ((Message) -> Void)? = nil
+    var onRegenerate: (() -> Void)? = nil
 
     /// Uploaded images come back as data: URLs, which UIImage cannot read directly.
     static func decodeDataURL(_ s: String) -> Data? {
@@ -25,6 +28,16 @@ struct MessageBubble: View {
                     .textSelection(.enabled)
                     .padding(.horizontal, 14).padding(.vertical, 10)
                     .background(.tint.opacity(0.14), in: .rect(cornerRadius: 17))
+                    .contextMenu {
+                        Button {
+                            UIPasteboard.general.string = message.text
+                        } label: { Label("Copy", systemImage: "doc.on.doc") }
+                        if let onEdit {
+                            Button { onEdit(message) } label: {
+                                Label("Edit and resend", systemImage: "pencil.line")
+                            }
+                        }
+                    }
             }
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
@@ -51,6 +64,14 @@ struct MessageBubble: View {
                 Button {
                     UIPasteboard.general.string = message.text
                 } label: { Label("Copy", systemImage: "doc.on.doc") }
+                ShareLink(item: message.text) {
+                    Label("Share", systemImage: "square.and.arrow.up")
+                }
+                if isLast, let onRegenerate {
+                    Button { onRegenerate() } label: {
+                        Label("Ask again", systemImage: "arrow.clockwise")
+                    }
+                }
             }
         }
     }

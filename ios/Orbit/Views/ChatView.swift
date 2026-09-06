@@ -11,6 +11,10 @@ struct ChatView: View {
     @EnvironmentObject var state: AppState
     @State private var draft = ""
     @State private var showModels = false
+    @State private var renaming = false
+    @State private var newTitle = ""
+    @State private var confirmBin = false
+    @Environment(\.dismiss) private var dismiss
     @FocusState private var typing: Bool
 
     var body: some View {
@@ -25,23 +29,52 @@ struct ChatView: View {
             .toolbar(.hidden, for: .tabBar)     // inside a conversation the keyboard needs the room
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    ShareLink(item: state.markdown(for: sid),
-                              preview: SharePreview(state.openChat?.title ?? "Chat")) {
-                        Image(systemName: "square.and.arrow.up")
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showModels = true } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "cpu")
-                            Text(currentModelName).lineLimit(1)
+                    Menu {
+                        Button { showModels = true } label: {
+                            Label("Change model", systemImage: "cpu")
                         }
-                        .font(.caption)
+                        Button { renaming = true; newTitle = state.openChat?.title ?? "" } label: {
+                            Label("Rename", systemImage: "pencil")
+                        }
+                        ShareLink(item: state.markdown(for: sid),
+                                  preview: SharePreview(state.openChat?.title ?? "Chat")) {
+                            Label("Share as Markdown", systemImage: "square.and.arrow.up")
+                        }
+                        Button {
+                            Task { await state.compactCurrent() }
+                        } label: {
+                            Label("Compact history", systemImage: "arrow.down.right.and.arrow.up.left")
+                        }
+                        Divider()
+                        Button(role: .destructive) { confirmBin = true } label: {
+                            Label("Move to bin", systemImage: "trash")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
                     }
+                    .accessibilityLabel("Chat options")
+                    .disabled(state.streaming)
                 }
             }
+            .alert("Rename chat", isPresented: $renaming) {
+                TextField("Title", text: $newTitle)
+                Button("Save") { Task { await state.rename(sid, to: newTitle) } }
+                Button("Cancel", role: .cancel) {}
+            }
+            .confirmationDialog("Move this chat to the bin?", isPresented: $confirmBin,
+                                titleVisibility: .visible) {
+                Button("Move to bin", role: .destructive) {
+                    Task { await state.delete(sid); dismiss() }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("It stays in the bin on your Mac for the retention period.")
+            }
             .sheet(isPresented: $showModels) { ModelPickerView() }
-            .task(id: sid) { await state.open(sid) }
+            .onChange(of: state.draftPrefill) { _, text in
+                guard let text else { return }
+                draft = text; typing = true; state.draftPrefill = nil
+            }
             .alert("Approve this?", isPresented: approvalBinding) {
                 Button("Allow", role: .destructive) {
                     Task { await state.answer(approval: true) }
@@ -87,7 +120,10 @@ struct ChatView: View {
                         .padding(.top, 80).padding(.horizontal, 24)
                     }
                     ForEach(Array(state.messages.enumerated()), id: \.element.id) { i, m in
-                        MessageBubble(message: m)
+                        MessageBubble(message: m,
+                                      isLast: i == state.messages.count - 1,
+                                      onEdit: { msg in Task { await state.editAndResend(msg) } },
+                                      onRegenerate: { Task { await state.regenerate() } })
                             .id(m.id)
                             .padding(.horizontal, flashed == i ? 8 : 0)
                             .padding(.vertical, flashed == i ? 6 : 0)
@@ -107,16 +143,15 @@ struct ChatView: View {
             .onChange(of: state.messages.count) { _, _ in scroll(proxy) }
             .onChange(of: state.liveText) { _, _ in scroll(proxy) }
             .onAppear { scroll(proxy, animated: false) }
-            .onChange(of: state.messages.count) { _, count in
-                guard let h = highlight, h < count, flashed == nil else { return }
-                // wait for the rows to exist before asking to scroll to one
-                Task {
-                    try? await Task.sleep(nanoseconds: 250_000_000)
-                    withAnimation { proxy.scrollTo("row-\(h)", anchor: .center) }
-                    withAnimation { flashed = h }
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    withAnimation { flashed = nil }
-                }
+            .task(id: sid) {
+                await state.open(sid)
+                // a search hit: land on that message and flash it once the rows exist
+                guard let h = highlight, h < state.messages.count, flashed == nil else { return }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                withAnimation { proxy.scrollTo("row-\(h)", anchor: .center) }
+                withAnimation { flashed = h }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                withAnimation { flashed = nil }
             }
         }
     }
@@ -183,7 +218,8 @@ struct ChatView: View {
     // ------------------------------------------------------------ composer
 
     private var composer: some View {
-        Composer(draft: $draft, typing: $typing)
+        Composer(draft: $draft, typing: $typing, modelName: currentModelName,
+                 onPickModel: { showModels = true })
     }
 }
 

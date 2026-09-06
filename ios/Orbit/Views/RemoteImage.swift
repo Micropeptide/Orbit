@@ -32,6 +32,7 @@ struct RemoteImage<Placeholder: View>: View {
     }
 
     private func load() async {
+        failed = false
         if let hit = ImageCache.shared.image(for: path) { image = hit; return }
         guard let server = state.server else { failed = true; return }
         do {

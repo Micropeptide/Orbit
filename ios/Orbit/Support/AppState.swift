@@ -22,6 +22,8 @@ final class AppState: ObservableObject {
     @Published var messages: [Message] = []
     @Published var models: [ModelInfo] = []
     @Published var currentModel: String?
+    /// What a brand-new chat answers with, set on the Mac.
+    @Published var defaultModel: String?
     @Published var runningChats: Set<String> = []
     /// Set to push a conversation onto the stack — used by deep links today and
     /// by notification taps later.
@@ -92,11 +94,14 @@ final class AppState: ObservableObject {
     }
 
     func unpair() {
-        streamTask?.cancel(); pollTask?.cancel()
+        detachLive()
         Keychain.clear()
         Cache.clear()
         pairing = nil
         chats = []; messages = []; openChat = nil; reachable = nil
+        models = []; projects = []; attachments = []
+        currentModel = nil; defaultModel = nil; deepLink = nil
+        localServer = LocalServer()
     }
 
     // ------------------------------------------------------------ loading
@@ -106,6 +111,7 @@ final class AppState: ObservableObject {
         guard reachable == true else { return }
         await loadChats()
         await loadModels()
+        await loadProjects()
     }
 
     func checkReachable() async {
@@ -137,6 +143,7 @@ final class AppState: ObservableObject {
         guard let server else { return }
         if let m = try? await server.models() {
             models = m.models
+            defaultModel = m.default
             // a chat with no choice of its own answers with the default, and the
             // default with nothing configured is the local model — say so, rather
             // than showing a chip that reads "model"
@@ -150,8 +157,21 @@ final class AppState: ObservableObject {
         if let r = try? await server.running() { runningChats = Set(r) }
     }
 
+    /// Stop watching whatever is streaming, without stopping it on the Mac.
+    private func detachLive() {
+        streamTask?.cancel(); pollTask?.cancel()
+        flushTask?.cancel(); flushTask = nil; pendingText = ""
+        streaming = false; liveSid = nil
+        liveText = ""; liveThinking = ""; liveTools = []; liveStatus = ""
+        pendingApproval = nil
+    }
+
     func open(_ id: String) async {
-        guard let server else { return }
+        guard let server, !id.isEmpty else { return }
+        if streaming, liveSid != nil, liveSid != id {
+            // leave the old answer running on the Mac; just stop watching it here
+            detachLive()
+        }
         // show the cached copy immediately; the network fills it in
         if let cached = Cache.loadMessages(id), !cached.isEmpty {
             messages = cached
@@ -164,7 +184,8 @@ final class AppState: ObservableObject {
             messages = d.messages
             Cache.saveMessages(d.messages, for: id)
             await loadModels()
-            if d.running == true { await rejoin(id) }
+            // already attached (SSE or poll) when it is the chat we are watching
+            if d.running == true, liveSid != id { await rejoin(id) }
         } catch {
             lastError = error.localizedDescription
         }
@@ -181,34 +202,79 @@ final class AppState: ObservableObject {
             : ([text] + going.map { "📎 \($0.name)" })
                 .filter { !$0.isEmpty }.joined(separator: "\n")
         messages.append(Message(role: "user", text: label))
-        beginLive()
+        beginLive(for: sid)
 
         streamTask = Task {
+            var dropped = false
             do {
                 for try await ev in await server.send(sid: sid, message: text,
                                                       attachments: going.map(\.payload)) {
                     if Task.isCancelled { break }
+                    // a chat you have since left keeps generating on the Mac;
+                    // its tokens must not land in the one you are looking at
+                    guard liveSid == sid else { break }
                     apply(ev)
                 }
             } catch {
-                lastError = error.localizedDescription
-                liveStatus = ""
+                // A dropped connection is not a failed answer: the Mac carries on.
+                // Rejoin through the live buffer rather than reporting an error.
+                if liveSid == sid, (try? await server.live(sid).running) == true {
+                    dropped = true
+                } else if liveSid == sid {
+                    lastError = error.localizedDescription
+                    liveStatus = ""
+                }
             }
-            finishLive(sid: sid)
+            if dropped { await rejoin(sid) }
+            else if liveSid == sid {
+                let failed = lastError != nil
+                finishLive(sid: sid)
+                // whether the Mac kept the message is its call; ask rather than guess
+                if failed { await open(sid) }
+            }
         }
     }
 
-    private func beginLive() {
+    /// Which chat the live buffer belongs to. Events for any other chat are ignored.
+    private(set) var liveSid: String?
+    private var pendingText = ""
+    private var flushTask: Task<Void, Never>?
+
+    private func beginLive(for sid: String) {
         askForNotificationsIfUseful()
+        liveSid = sid
         streaming = true
+        flushTask?.cancel(); flushTask = nil
         liveText = ""; liveThinking = ""; liveTools = []; liveStatus = ""
+        pendingText = ""
         liveModel = models.first { $0.id == currentModel }?.display ?? ""
         pendingApproval = nil
     }
 
+    /// Tokens arrive faster than a phone can re-render Markdown. Batch them and
+    /// publish about twenty times a second — indistinguishable to the eye, and
+    /// the parser runs 20 times a second instead of 200.
+    private func queueText(_ t: String) {
+        pendingText += t
+        guard flushTask == nil else { return }
+        flushTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.liveText += self.pendingText
+            self.pendingText = ""
+            self.liveStatus = ""
+            self.flushTask = nil
+        }
+    }
+
+    private func flushText() {
+        flushTask?.cancel(); flushTask = nil
+        if !pendingText.isEmpty { liveText += pendingText; pendingText = "" }
+    }
+
     private func apply(_ ev: StreamEvent) {
         switch ev {
-        case .content(let t):  liveText += t; liveStatus = ""
+        case .content(let t):  queueText(t)
         case .thinking(let t): liveThinking += t
         case .model(let m):    liveModel = m
         case .tool(let n, let a): liveTools.append(a.isEmpty ? n : "\(n)(\(a))")
@@ -232,12 +298,13 @@ final class AppState: ObservableObject {
     /// hold it open, keep reading the stream, and post a local notification when
     /// the answer lands. If iOS suspends us first the answer is still safe on
     /// the Mac — you just find it there instead of being tapped on the shoulder.
-    func notifyIfBackgrounded(title: String, body: String) {
+    func notifyIfBackgrounded(title: String, body: String, sid: String? = nil) {
         guard backgrounded else { return }
         let c = UNMutableNotificationContent()
         c.title = title
         c.body = String(body.prefix(240))
         c.sound = .default
+        if let sid { c.userInfo = ["sid": sid] }     // tapping it opens that chat
         UNUserNotificationCenter.current().add(
             UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil))
     }
@@ -255,6 +322,9 @@ final class AppState: ObservableObject {
     }
 
     private func finishLive(sid: String) {
+        flushText()
+        guard liveSid == sid || liveSid == nil else { return }
+        liveSid = nil
         if !liveText.isEmpty || !liveThinking.isEmpty {
             messages.append(Message(role: "assistant", text: liveText,
                                     tools: liveTools.isEmpty ? nil : liveTools,
@@ -266,7 +336,7 @@ final class AppState: ObservableObject {
         streaming = false
         liveText = ""; liveThinking = ""; liveTools = []; liveStatus = ""
         if !answered.isEmpty {
-            notifyIfBackgrounded(title: openChat?.title ?? "Orbit", body: answered)
+            notifyIfBackgrounded(title: openChat?.title ?? "Orbit", body: answered, sid: sid)
         }
         Task { await loadChats() }
     }
@@ -274,11 +344,12 @@ final class AppState: ObservableObject {
     /// Reconnect to an answer already running on the Mac.
     func rejoin(_ sid: String) async {
         guard let server else { return }
+        liveSid = sid
         streaming = true
         liveStatus = "picking up an answer already running"
         pollTask?.cancel()
         pollTask = Task {
-            while !Task.isCancelled {
+            while !Task.isCancelled, liveSid == sid {
                 guard let s = try? await server.live(sid) else { break }
                 liveText = s.content
                 liveThinking = s.thinking
@@ -294,10 +365,26 @@ final class AppState: ObservableObject {
     }
 
     func stopGenerating() async {
-        guard let server, let sid = openChat?.sid else { return }
+        guard let server, let sid = liveSid ?? openChat?.sid else { return }
         try? await server.stop(sid)
         streamTask?.cancel(); pollTask?.cancel()
         finishLive(sid: sid)
+    }
+
+    // ------------------------------------------------------------ projects
+
+    @Published var projects: [ProjectInfo] = []
+
+    func loadProjects() async {
+        guard let server else { return }
+        if let p = try? await server.projects() { projects = p }
+    }
+
+    func setDefaultModel(_ id: String) async {
+        guard let server else { return }
+        try? await server.setDefaultModel(id)
+        defaultModel = id
+        await loadModels()
     }
 
     // ------------------------------------------------------------ actions
@@ -308,6 +395,7 @@ final class AppState: ObservableObject {
         openChat = ChatDetail(sid: sid, title: nil, messages: [])
         messages = []
         await loadChats()
+        await loadModels()
         return sid
     }
 
@@ -320,6 +408,7 @@ final class AppState: ObservableObject {
     func delete(_ id: String) async {
         guard let server else { return }
         try? await server.delete(id)
+        if liveSid == id { detachLive() }
         chats.removeAll { $0.id == id }
         Cache.saveChats(chats)
         if openChat?.sid == id { openChat = nil; messages = [] }
@@ -358,6 +447,49 @@ final class AppState: ObservableObject {
         return out.joined(separator: "\n")
     }
 
+    /// Text the composer should pick up — set by "edit and resend".
+    @Published var draftPrefill: String?
+
+    private func userOrdinal(of message: Message) -> Int? {
+        guard let i = messages.firstIndex(where: { $0.id == message.id }) else { return nil }
+        return messages[..<i].filter(\.isUser).count
+    }
+
+    /// Remove this user message and everything after it on the Mac, then put its
+    /// text back in the composer to be changed.
+    func editAndResend(_ message: Message) async {
+        guard let server, let sid = openChat?.sid, message.isUser,
+              let ord = userOrdinal(of: message) else { return }
+        do {
+            try await server.truncate(sid, atUserIndex: ord, check: message.text)
+            await open(sid)
+            draftPrefill = message.text
+        } catch { lastError = error.localizedDescription }
+    }
+
+    /// Ask again from the last user message, discarding the answer it got.
+    func regenerate() async {
+        guard let last = messages.last(where: \.isUser) else { return }
+        guard let server, let sid = openChat?.sid, let ord = userOrdinal(of: last) else { return }
+        do {
+            try await server.truncate(sid, atUserIndex: ord, check: last.text)
+            await open(sid)
+            await send(last.text)
+        } catch { lastError = error.localizedDescription }
+    }
+
+    /// Summarise the older turns of the open chat on the Mac and reload it.
+    func compactCurrent() async {
+        guard let server, let sid = openChat?.sid else { return }
+        liveStatus = "compacting…"
+        do {
+            try await server.compact(sid)
+            await open(sid)
+            lastError = nil
+        } catch { lastError = error.localizedDescription }
+        liveStatus = ""
+    }
+
     func setPinned(_ id: String, _ on: Bool) async {
         guard let server else { return }
         try? await server.setFlag(id, pinned: on)
@@ -381,7 +513,7 @@ extension AppState {
         let env = ProcessInfo.processInfo.environment
         guard let want = env["ORBIT_OPEN_CHAT"] else { return }
         let sid = want == "first" ? chats.first?.id : want
-        guard let sid else { return }
+        guard let sid, !sid.isEmpty else { return }
         await open(sid)
         deepLink = sid
         if let text = env["ORBIT_SEND"], !text.isEmpty {
@@ -522,12 +654,11 @@ extension AppState {
             localServer.model = st.model
             localServer.memoryGB = st.memory_gb
         }
-        if let m = try? await server.models() {
-            models = m.models
-            currentModel = m.current ?? m.default
-            let serving = m.models.first { $0.provider == "local" && $0.id.hasPrefix("local:") }
+        await loadModels()
+        do {
+            let serving = models.first { $0.provider == "local" && $0.id.hasPrefix("local:") }
             localServer.serving = serving?.display
-            localServer.installed = m.models
+            localServer.installed = models
                 .filter { $0.provider == "local" }
                 .map { $0.id.hasPrefix("local-dir:") ? String($0.id.dropFirst("local-dir:".count))
                                                      : $0.display }
