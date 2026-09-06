@@ -63,7 +63,9 @@ struct ChatListView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    ForEach(shown) { chat in
+                    ForEach(dayGroups, id: \.0) { day, chats in
+                     Section(day) {
+                      ForEach(chats) { chat in
                         NavigationLink(value: chat.id) {
                             row(chat)
                         }
@@ -109,6 +111,8 @@ struct ChatListView: View {
                                 Task { await state.delete(chat.id) }
                             } label: { Label("Move to bin", systemImage: "trash") }
                         }
+                      }
+                     }
                     }
                     if shown.isEmpty { empty }
                 }
@@ -177,24 +181,58 @@ struct ChatListView: View {
         }
     }
 
-    private func row(_ chat: ChatSummary) -> some View {
-        HStack(spacing: 10) {
-            if state.runningChats.contains(chat.id) {
-                ProgressView().controlSize(.mini)
-            } else if chat.pinned == true {
-                Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.orange)
+    /// Pinned first, then by day — the way a person looks for a conversation.
+    private var dayGroups: [(String, [ChatSummary])] {
+        let cal = Calendar.current
+        func label(_ c: ChatSummary) -> String {
+            if c.pinned == true { return "Pinned" }
+            if cal.isDateInToday(c.date) { return "Today" }
+            if cal.isDateInYesterday(c.date) { return "Yesterday" }
+            if let week = cal.date(byAdding: .day, value: -7, to: .now), c.date > week {
+                return "This week"
             }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(chat.displayTitle)
-                    .lineLimit(1)
-                    .font(.body)
-                Text(relative(chat.date) + (chat.n > 0 ? " · \(chat.n) messages" : ""))
-                    .font(.caption2)
+            return "Earlier"
+        }
+        let order = ["Pinned": 0, "Today": 1, "Yesterday": 2, "This week": 3, "Earlier": 4]
+        return Dictionary(grouping: shown, by: label)
+            .sorted { (order[$0.key] ?? 9) < (order[$1.key] ?? 9) }
+            .map { ($0.key, $0.value) }
+    }
+
+    private func row(_ chat: ChatSummary) -> some View {
+        HStack(spacing: 12) {
+            ZStack {
+                Circle().fill(avatarColor(chat.id).gradient)
+                if state.runningChats.contains(chat.id) {
+                    ProgressView().controlSize(.mini).tint(.white)
+                } else {
+                    Text(String(chat.displayTitle.prefix(1)).uppercased())
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.white)
+                }
+            }
+            .frame(width: 40, height: 40)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 5) {
+                    Text(chat.displayTitle).lineLimit(1).font(.body)
+                    if chat.pinned == true {
+                        Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.orange)
+                    }
+                }
+                Text(relative(chat.date) + (chat.n > 0 ? " · \(chat.n) messages" : " · empty"))
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Spacer()
+            Spacer(minLength: 0)
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, 3)
+    }
+
+    /// A stable colour per chat, from its id — the same chat always gets the same one.
+    private func avatarColor(_ id: String) -> Color {
+        let palette: [Color] = [.blue, .indigo, .purple, .teal, .green, .orange, .pink, .cyan]
+        let h = id.unicodeScalars.reduce(0) { ($0 &* 31) &+ Int($1.value) }
+        return palette[abs(h) % palette.count]
     }
 
     private var empty: some View {

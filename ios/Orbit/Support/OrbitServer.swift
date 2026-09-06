@@ -183,6 +183,41 @@ actor OrbitServer {
         return obj
     }
 
+    // ------------------------------------------------------------ local model
+
+    struct ServerStatus: Codable {
+        var running: Bool
+        var model: String?
+        var memory_gb: Double?
+    }
+
+    func serverStatus() async throws -> ServerStatus {
+        try await get("/api/status", as: ServerStatus.self)
+    }
+
+    enum ServerAction: String { case start, stop, restart }
+
+    /// Start, stop or restart the model server on the Mac. A start can take
+    /// ~15 s while the weights load, so the timeout is generous.
+    func serverAction(_ a: ServerAction) async throws -> String {
+        struct R: Codable { var msg: String? }
+        var req = try request("/api/server/\(a.rawValue)", method: "POST", body: [:])
+        req.timeoutInterval = 300
+        let data = try await run(req)
+        return (try? JSONDecoder().decode(R.self, from: data))?.msg ?? "done"
+    }
+
+    /// Point the Mac at a different model folder and restart it.
+    func switchLocalModel(_ folder: String) async throws -> String {
+        struct R: Codable { var ok: Bool?; var serving: String?; var error: String? }
+        var req = try request("/api/model/local_switch", method: "POST", body: ["name": folder])
+        req.timeoutInterval = 300
+        let data = try await run(req)
+        let r = try JSONDecoder().decode(R.self, from: data)
+        if let e = r.error { throw Failure.server(400, e) }
+        return "now serving \(r.serving ?? folder)"
+    }
+
     // ------------------------------------------------------------ writing
 
     func newChat() async throws -> String {

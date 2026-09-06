@@ -11,8 +11,6 @@ struct ChatView: View {
     @EnvironmentObject var state: AppState
     @State private var draft = ""
     @State private var showModels = false
-    @State private var photo: PhotosPickerItem?
-    @State private var showFiles = false
     @FocusState private var typing: Bool
 
     var body: some View {
@@ -24,6 +22,7 @@ struct ChatView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) { composer }
             .navigationTitle(state.openChat?.title ?? "New chat")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar(.hidden, for: .tabBar)     // inside a conversation the keyboard needs the room
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     ShareLink(item: state.markdown(for: sid),
@@ -72,6 +71,21 @@ struct ChatView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
+                    if state.messages.isEmpty && !state.streaming {
+                        VStack(spacing: 10) {
+                            Image("OrbitMark").resizable().scaledToFit()
+                                .frame(width: 56, height: 56).opacity(0.9)
+                            Text("Ask anything").font(.headline)
+                            Text("It will search the web, read your papers, run Python, "
+                                 + "or query NCBI when it needs to — you don't name the tool.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                            Text("Answering with \(currentModelName)")
+                                .font(.caption2).foregroundStyle(.tertiary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 80).padding(.horizontal, 24)
+                    }
                     ForEach(Array(state.messages.enumerated()), id: \.element.id) { i, m in
                         MessageBubble(message: m)
                             .id(m.id)
@@ -169,99 +183,7 @@ struct ChatView: View {
     // ------------------------------------------------------------ composer
 
     private var composer: some View {
-        VStack(spacing: 0) {
-            Divider()
-            if !state.attachments.isEmpty { attachmentStrip }
-            HStack(alignment: .bottom, spacing: 10) {
-                Menu {
-                    Button {
-                        showFiles = true
-                    } label: { Label("Choose a file", systemImage: "folder") }
-                    // photos get their own entry: it is the common case
-                } label: {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.title2).foregroundStyle(.secondary)
-                } primaryAction: {
-                    showFiles = true
-                }
-                .overlay(alignment: .center) {
-                    PhotosPicker(selection: $photo, matching: .images) {
-                        Color.clear
-                    }
-                    .allowsHitTesting(false)
-                }
-
-                TextField("Ask anything", text: $draft, axis: .vertical)
-                    .lineLimit(1...6)
-                    .focused($typing)
-                    .padding(.horizontal, 13).padding(.vertical, 9)
-                    .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 19))
-                    .disabled(state.streaming)
-
-                if state.streaming {
-                    Button {
-                        Task { await state.stopGenerating() }
-                    } label: {
-                        Image(systemName: "stop.circle.fill")
-                            .font(.title2).foregroundStyle(.red)
-                    }
-                } else {
-                    Button {
-                        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !text.isEmpty else { return }
-                        draft = ""
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        Task { await state.send(text) }
-                    } label: {
-                        Image(systemName: "arrow.up.circle.fill").font(.title2)
-                    }
-                    .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
-        }
-        .background(.bar)
-        .photosPicker(isPresented: .constant(false), selection: $photo)
-        .onChange(of: photo) { _, item in
-            guard let item else { return }
-            Task { await state.attach(photo: item); photo = nil }
-        }
-        .fileImporter(isPresented: $showFiles, allowedContentTypes: [.item]) { result in
-            if case .success(let url) = result {
-                Task { await state.attach(fileAt: url) }
-            }
-        }
-    }
-
-    /// What is going up with the next message, and how to change your mind.
-    private var attachmentStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(state.attachments) { a in
-                    HStack(spacing: 6) {
-                        Image(systemName: a.kind == "image" ? "photo" : "doc")
-                            .font(.caption)
-                        Text(a.name).font(.caption).lineLimit(1)
-                        Button {
-                            state.attachments.removeAll { $0.id == a.id }
-                        } label: { Image(systemName: "xmark.circle.fill").font(.caption) }
-                            .buttonStyle(.plain).foregroundStyle(.secondary)
-                    }
-                    .padding(.horizontal, 9).padding(.vertical, 6)
-                    .background(.quaternary.opacity(0.5), in: .capsule)
-                }
-                if state.uploading {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.mini)
-                        Text("uploading").font(.caption).foregroundStyle(.secondary)
-                    }
-                    .padding(.horizontal, 9).padding(.vertical, 6)
-                }
-            }
-            .padding(.horizontal, 14).padding(.top, 8)
-        }
-        .frame(height: 44)
+        Composer(draft: $draft, typing: $typing)
     }
 }
 

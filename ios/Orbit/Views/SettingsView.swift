@@ -7,10 +7,16 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("Connected to") {
+                ServerControlView()
+
+                Section {
                     LabeledContent("Mac", value: state.pairing?.name ?? "—")
-                    LabeledContent("Address", value: state.pairing?.url ?? "—")
-                        .font(.caption.monospaced())
+                    LabeledContent("Address") {
+                        Text(state.pairing?.url ?? "—")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1).truncationMode(.middle)
+                    }
                     HStack {
                         Text("Reachable")
                         Spacer()
@@ -28,7 +34,11 @@ struct SettingsView: View {
                     if let e = state.lastError {
                         Text(e).font(.caption).foregroundStyle(.secondary)
                     }
-                    Button("Check again") { Task { await state.refreshEverything() } }
+                    Button("Check again") {
+                        Task { await state.refreshEverything(); await state.refreshServer() }
+                    }
+                } header: {
+                    Text("Connected to")
                 }
 
                 Section {
@@ -50,9 +60,23 @@ struct SettingsView: View {
                     Text("Removes the token from this phone's Keychain and deletes the "
                          + "offline copy. Nothing on your Mac changes.")
                 }
+
+                Section {
+                    LabeledContent("Version",
+                                   value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")
+                    Link(destination: URL(string: "https://github.com/Micropeptide/Orbit")!) {
+                        LabeledContent("Source", value: "github.com/Micropeptide/Orbit")
+                    }
+                } header: {
+                    Text("About")
+                } footer: {
+                    Text("Built by Micropeptide · MIT licensed")
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
+            .task { await state.refreshServer() }
+            .refreshable { await state.refreshEverything(); await state.refreshServer() }
             .confirmationDialog("Unpair this phone?", isPresented: $confirmUnpair,
                                 titleVisibility: .visible) {
                 Button("Unpair", role: .destructive) { state.unpair() }
