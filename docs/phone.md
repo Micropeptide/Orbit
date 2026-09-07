@@ -36,6 +36,9 @@ Mac — you scan once.
 The phone needs the Tailscale app connected to the same tailnet. If Orbit says
 it can't reach the Mac, that is the first thing to check.
 
+How this path was arrived at, and every way it failed first, is written up
+for anyone building something similar in [tailnet-playbook.md](tailnet-playbook.md).
+
 ## What the app does
 
 | | |
