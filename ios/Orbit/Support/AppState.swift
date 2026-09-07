@@ -86,8 +86,12 @@ final class AppState: ObservableObject {
                              uniquingKeysWith: { a, _ in a })
         guard let base = map["url"], let token = map["token"], !base.isEmpty, !token.isEmpty
         else { return false }
+        let alts = (map["alts"] ?? "").split(separator: ",").map(String.init)
+            .map { $0.hasSuffix("/") ? String($0.dropLast()) : $0 }
+            .filter { !$0.isEmpty }
         pairing = Pairing(url: base.hasSuffix("/") ? String(base.dropLast()) : base,
-                          token: token, name: map["name"] ?? "Mac")
+                          token: token, name: map["name"] ?? "Mac",
+                          alts: alts.isEmpty ? nil : alts)
         Task { await refreshEverything() }
         return true
     }
@@ -140,17 +144,44 @@ final class AppState: ObservableObject {
     }
 
     func checkReachable() async {
-        guard let server else { reachable = false; return }
+        guard let server, let p = pairing else { reachable = false; return }
         do {
             let t0 = Date()
             _ = try await server.health()
             latencyMS = Int(Date().timeIntervalSince(t0) * 1000)
             reachable = true
             lastError = nil
+            await learnAlternates()
         } catch {
+            // The address in the QR is not always the one that works from here
+            // (no MagicDNS on this phone, a new DHCP lease). Try the others the
+            // Mac listed and keep whichever answers.
+            for alt in p.alts ?? [] where alt != p.url {
+                let probe = OrbitServer(pairing: Pairing(url: alt, token: p.token, name: p.name, alts: p.alts))
+                if (try? await probe.health()) == true {
+                    var swapped = p
+                    swapped.url = alt
+                    swapped.alts = Array(Set((p.alts ?? []) + [p.url])).sorted()
+                    pairing = swapped                // rebuilds the client, saved to the Keychain
+                    reachable = true
+                    lastError = nil
+                    return
+                }
+            }
             reachable = false
             lastError = error.localizedDescription
         }
+    }
+
+    /// Once connected, remember every address the Mac answers on.
+    private func learnAlternates() async {
+        guard let server, var p = pairing else { return }
+        guard let found = try? await server.alternates() else { return }
+        var all = Set(found.alts)
+        if let u = found.url, !u.isEmpty { all.insert(u) }
+        all.remove(p.url)
+        let list = all.sorted()
+        if list != (p.alts ?? []) { p.alts = list.isEmpty ? nil : list; pairing = p }
     }
 
     func loadChats() async {

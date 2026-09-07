@@ -89,8 +89,18 @@ actor OrbitServer {
     // ------------------------------------------------------------ reading
 
     func health() async throws -> Bool {
-        _ = try await run(try request("/api/running"))
+        var req = try request("/api/running")
+        req.timeoutInterval = 6          // a wrong address must fail fast, not in 30 s
+        _ = try await run(req)
         return true
+    }
+
+    /// The addresses the Mac currently answers on, so a paired phone keeps
+    /// learning them without rescanning.
+    func alternates() async throws -> (url: String?, alts: [String]) {
+        struct R: Codable { var url: String?; var alts: [String]? }
+        let r = try await get("/api/remote", as: R.self)
+        return (r.url, r.alts ?? [])
     }
 
     func chats(limit: Int = 100) async throws -> [ChatSummary] {
