@@ -282,7 +282,9 @@ The app has its own page at [Micropeptide/Orbit-iOS](https://github.com/Micropep
 with an unsigned IPA in the [releases](https://github.com/Micropeptide/Orbit-iOS/releases/latest)
 for sideloading (AltStore, Sideloadly, Apple Configurator). Or build it with Xcode
 from `ios/` here, or open the web link the same panel shows and add it to your
-Home Screen. Full details in [docs/phone.md](docs/phone.md).
+Home Screen. Full details in [docs/phone.md](docs/phone.md); how the Tailscale
+path works — and what went wrong before it did — in
+[docs/tailnet-playbook.md](docs/tailnet-playbook.md).
 
 ---
 
