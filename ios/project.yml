@@ -51,5 +51,9 @@ targets:
           - CFBundleURLName: uk.runtian.orbit.pair
             CFBundleURLSchemes: [orbit]
         UIBackgroundModes: [processing]
+        # Plain HTTP to your own Mac. On a LAN that is your network; over
+        # Tailscale it travels inside WireGuard. ATS would otherwise refuse the
+        # tailnet address (only .local and private ranges count as "local").
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+          NSAllowsArbitraryLoads: true
