@@ -1,0 +1,74 @@
+#!/bin/sh
+# Build Orbit for your paired iPhone and install it, over USB or Wi-Fi.
+#
+# A free Apple ID signs an app for seven days; after that iOS refuses to open
+# it. Running this every few days re-signs and reinstalls in place — the
+# pairing in the Keychain and the offline copy survive. With a paid Apple
+# Developer membership the profile lasts a year and this is only needed for
+# updates.
+#
+#   orbit-phone-install            build and install if the last build is >3 days old
+#   orbit-phone-install --force    always
+#
+# Device and team are found automatically (first paired iPhone, first Apple
+# Development certificate). Override in config/phone.json:
+#   {"device": "<CoreDevice identifier>", "team": "<TEAMID>"}
+set -e
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+LOG="$ROOT/logs/phone-install.log"
+mkdir -p "$ROOT/logs"
+say() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG"; }
+
+CFG="$ROOT/config/phone.json"
+DEVICE=""; TEAM=""
+if [ -f "$CFG" ]; then
+  DEVICE=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("device",""))' "$CFG" 2>/dev/null || true)
+  TEAM=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("team",""))' "$CFG" 2>/dev/null || true)
+fi
+if [ -z "$DEVICE" ]; then
+  TMP=$(mktemp); xcrun devicectl list devices --json-output "$TMP" >/dev/null 2>&1 || true
+  DEVICE=$(python3 - "$TMP" <<'PY'
+import json, sys
+try: d = json.load(open(sys.argv[1]))
+except Exception: sys.exit(0)
+for dev in d.get("result", {}).get("devices", []):
+    hw = dev.get("hardwareProperties", {})
+    if hw.get("deviceType") == "iPhone" or "iPhone" in hw.get("marketingName", ""):
+        print(dev.get("identifier", "")); break
+PY
+  ); rm -f "$TMP"
+fi
+if [ -z "$TEAM" ]; then
+  TEAM=$(security find-certificate -c "Apple Development" -p 2>/dev/null \
+         | openssl x509 -noout -subject 2>/dev/null | sed -n 's/.*OU *= *\([A-Z0-9]*\).*/\1/p' | head -1)
+fi
+[ -n "$DEVICE" ] || { say "no paired iPhone found — plug it in once and trust this Mac"; exit 1; }
+[ -n "$TEAM" ]   || { say "no Apple Development certificate — sign in to Xcode → Settings → Accounts once"; exit 1; }
+
+# not reachable (off, away, or asleep) → try again another day, quietly
+if ! xcrun devicectl device info details --device "$DEVICE" >/dev/null 2>&1; then
+  say "iPhone not reachable right now; skipped"; exit 0
+fi
+
+APP=$(ls -d "$HOME"/Library/Developer/Xcode/DerivedData/Orbit-*/Build/Products/Release-iphoneos/Orbit.app 2>/dev/null | head -1)
+if [ "$1" != "--force" ] && [ -n "$APP" ] && [ -z "$(find "$APP" -maxdepth 0 -mtime +3)" ]; then
+  say "last build is under four days old; nothing to do (use --force to reinstall)"; exit 0
+fi
+
+cd "$ROOT/ios"
+[ -d Orbit.xcodeproj ] || xcodegen generate >/dev/null
+say "building for $DEVICE (team $TEAM)"
+if ! xcodebuild -project Orbit.xcodeproj -scheme Orbit -configuration Release \
+      -destination "platform=iOS,id=$DEVICE" \
+      -allowProvisioningUpdates -allowProvisioningDeviceRegistration \
+      DEVELOPMENT_TEAM="$TEAM" CODE_SIGN_STYLE=Automatic build >>"$LOG" 2>&1; then
+  say "build failed — see $LOG"; exit 1
+fi
+APP=$(ls -d "$HOME"/Library/Developer/Xcode/DerivedData/Orbit-*/Build/Products/Release-iphoneos/Orbit.app | head -1)
+if xcrun devicectl device install app --device "$DEVICE" "$APP" >>"$LOG" 2>&1; then
+  EXP=$(security cms -D -i "$APP/embedded.mobileprovision" 2>/dev/null \
+        | plutil -extract ExpirationDate raw -o - - 2>/dev/null || true)
+  say "installed; signed until ${EXP:-?}"
+else
+  say "install failed — see $LOG"; exit 1
+fi
