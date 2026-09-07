@@ -22,12 +22,12 @@ under each answer names the model that wrote it.*
 - **One model per conversation — your choice.** A local MLX model that never leaves the Mac, the coding CLI you are already signed into (`claude`, `codex`, `opencode`, `qwen` — no API key), or a hosted API. Each answer is labelled with the model that wrote it.
 - **Your own library, searched before the web.** Drop in PDFs, Word files, spreadsheets or notes; Orbit indexes them locally with BM25 — no embedding service, nothing uploaded — and cites the file it used.
 - **Frugal with context on purpose.** A fresh conversation costs about 7.9k tokens with all 42 tools loaded, so a 27B local model on a 48 GB M4 Max runs the whole thing with room to work.
+- **There is an iPhone app.** Same chats, live from your Mac — over Tailscale (HTTPS through Tailscale Serve, a real certificate) or your local network — paired by QR and gated by a token. Photos, camera and files as attachments; search inside and across chats; edit-and-resend, quote, tables, share as PDF or image; start, stop or switch the local model server from the phone. Off by default.
 - **It actually does the work.** Python in a workspace with plots inline, files it writes tracked back to the chat that made them, PubMed / NCBI / UniProt / AlphaFold lookups, paper PDFs by DOI, and any MCP server you add.
 - **Guardrails that hold.** Destructive commands are blocked or need your approval per call; writes stay in the workspace; the Python tool cannot be used as a shell; fetched web content is fenced and scanned for prompt injection.
 - **Built for long work.** Projects with shared instructions, skills loaded on demand, durable memory, scheduled prompts, and three conversations generating at once.
 - **Plain files in one folder.** Chats, notes and settings are JSON and Markdown you can open in Finder. Delete the folder and Orbit is gone.
 - **Backed up without thinking about it.** Once a day the Mac archives chats, memory, skills, knowledge and settings into iCloud Drive (API keys left out); restoring only ever adds what is missing.
-- **There is an iPhone app.** Same chats, live from your Mac — over Tailscale (HTTPS through Tailscale Serve, a real certificate) or your local network — paired by QR and gated by a token. Photos, camera and files as attachments; search inside and across chats; edit-and-resend, quote, tables, share as PDF or image; start, stop or switch the local model server from the phone. Off by default.
 
 ---
 
