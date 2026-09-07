@@ -178,6 +178,28 @@ def best_url(mode, port):
     return ""
 
 
+def alt_urls(mode, port):
+    """Other addresses this Mac answers on in the same mode. A phone tries them
+    when the first fails, so a tailnet without MagicDNS, or a new DHCP lease,
+    does not mean re-pairing. Never crosses modes: tailscale stays tailnet-only."""
+    out = []
+    if mode == "tailscale":
+        ip = tailscale_ip()
+        if ip: out.append(f"http://{ip}:{port}")
+    elif mode == "lan":
+        host = socket.gethostname()
+        if not host.endswith(".local"): host += ".local"
+        out.append(f"http://{host}:{port}")
+        ip = lan_ip()
+        if ip: out.append(f"http://{ip}:{port}")
+    best = best_url(mode, port)
+    seen, uniq = set(), []
+    for u in out:
+        if u and u != best and u not in seen:
+            seen.add(u); uniq.append(u)
+    return uniq
+
+
 def status(root, mode, port):
     """Everything the settings panel needs to explain the current state."""
     ts_ip, ts_name = tailscale_ip(), tailscale_name()
@@ -188,7 +210,7 @@ def status(root, mode, port):
                 "then restart Orbit." if ts_installed else
                 "Tailscale is not installed. Use LAN mode, or install Tailscale "
                 "to reach this Mac from anywhere.")
-    return {
+    return {"alts": alt_urls(mode, port), 
         "mode": mode,
         "enabled": mode != "off",
         "url": best_url(mode, port),
@@ -208,7 +230,7 @@ def pair_payload(root, mode, port):
     url = best_url(mode, port)
     if not url: return {}
     tok = load_token(root, create=True)
-    return {"v": 1, "url": url, "token": tok,
+    return {"v": 1, "url": url, "token": tok, "alts": alt_urls(mode, port),
             "web": f"{url}/?t={tok}",     # for a phone browser or the PWA
             "name": socket.gethostname().replace(".local", "")}
 
@@ -217,8 +239,11 @@ def pair_uri(root, mode, port):
     p = pair_payload(root, mode, port)
     if not p: return ""
     from urllib.parse import quote
-    return (f"orbit://pair?url={quote(p['url'])}&token={quote(p['token'])}"
-            f"&name={quote(p['name'])}")
+    uri = (f"orbit://pair?url={quote(p['url'])}&token={quote(p['token'])}"
+           f"&name={quote(p['name'])}")
+    if p.get("alts"):
+        uri += "&alts=" + quote(",".join(p["alts"]))
+    return uri
 
 
 def pair_qr_png(root, mode, port, box=8):

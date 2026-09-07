@@ -7,6 +7,8 @@ struct Pairing: Codable, Equatable {
     var url: String          // http://host:port, no trailing slash
     var token: String
     var name: String         // the Mac's name, for the UI
+    /// Other addresses the same Mac answers on; tried when `url` fails.
+    var alts: [String]? = nil
 
     var base: URL? { URL(string: url) }
 }
