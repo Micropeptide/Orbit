@@ -26,7 +26,8 @@ under each answer names the model that wrote it.*
 - **Guardrails that hold.** Destructive commands are blocked or need your approval per call; writes stay in the workspace; the Python tool cannot be used as a shell; fetched web content is fenced and scanned for prompt injection.
 - **Built for long work.** Projects with shared instructions, skills loaded on demand, durable memory, scheduled prompts, and three conversations generating at once.
 - **Plain files in one folder.** Chats, notes and settings are JSON and Markdown you can open in Finder. Delete the folder and Orbit is gone.
-- **There is an iPhone app.** Same chats, live from your Mac over Tailscale or your local network, paired by QR and gated by a token. Photos, camera and files as attachments; message search; edit-and-resend; start, stop or switch the local model server from the phone. Off by default.
+- **Backed up without thinking about it.** Once a day the Mac archives chats, memory, skills, knowledge and settings into iCloud Drive (API keys left out); restoring only ever adds what is missing.
+- **There is an iPhone app.** Same chats, live from your Mac — over Tailscale (HTTPS through Tailscale Serve, a real certificate) or your local network — paired by QR and gated by a token. Photos, camera and files as attachments; search inside and across chats; edit-and-resend, quote, tables, share as PDF or image; start, stop or switch the local model server from the phone. Off by default.
 
 ---
 
