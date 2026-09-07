@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Re-signs and reinstalls the iPhone app every night if the phone is
+     reachable, so a free Apple ID's seven-day signature never runs out.
+     Replace BOTH paths with your install. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.orbit.phone-refresh</string>
+  <key>ProgramArguments</key>
+  <array><string>/ABSOLUTE/PATH/TO/Orbit/bin/orbit-phone-install</string></array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>30</integer></dict>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>/ABSOLUTE/PATH/TO/Orbit/logs/phone-install.log</string>
+  <key>StandardErrorPath</key><string>/ABSOLUTE/PATH/TO/Orbit/logs/phone-install.log</string>
+</dict>
+</plist>

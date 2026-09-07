@@ -96,6 +96,26 @@ open Orbit.xcodeproj
 Select your team under Signing & Capabilities and run. A free Apple ID works for
 personal use; the build lasts seven days before it needs re-signing.
 
+### Installing from the terminal, and keeping it installed
+
+`bin/orbit-phone-install` builds a Release copy signed for your paired iPhone
+and installs it over USB or Wi-Fi. It finds the phone and your Apple
+Development certificate on its own (override in `config/phone.json` with
+`{"device": "...", "team": "..."}`), and installs *over* the existing app, so
+the pairing and the offline copy survive.
+
+- **Free Apple ID** — the signature lasts seven days, then iOS refuses to open
+  the app. Load [docs/phone-refresh.plist](phone-refresh.plist) as a LaunchAgent
+  (edit the two paths) and the Mac re-signs and reinstalls every night the phone
+  is reachable; the script does nothing while the last build is under four days
+  old. Also limited to three sideloaded apps per phone.
+- **Apple Developer Program** (paid) — the same command signs for a year, and
+  TestFlight builds last 90 days. Nothing else changes.
+
+The first time, the phone asks you to trust the developer: **Settings → General
+→ VPN & Device Management → your Apple ID → Trust**. Then open Orbit and scan
+the QR from the Mac.
+
 ## Reaching it from a phone browser instead
 
 If you would rather not build the app, the QR panel also shows a web link. Open
