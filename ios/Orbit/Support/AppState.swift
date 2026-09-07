@@ -56,6 +56,11 @@ final class AppState: ObservableObject {
     private(set) var server: OrbitServer?
     private var streamTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
+    /// Watches the open chat for changes made elsewhere — the Mac's browser,
+    /// another phone — and pulls them in. The count of raw messages on the
+    /// Mac is the thing compared; it moves when anyone sends or answers.
+    private var watchTask: Task<Void, Never>?
+    private var watchedCount: Int?
 
     init() {
         pairing = Keychain.load()
@@ -106,6 +111,7 @@ final class AppState: ObservableObject {
 
     func unpair() {
         detachLive()
+        watchTask?.cancel(); watchTask = nil
         Keychain.clear()
         Cache.clear()
         pairing = nil
@@ -237,6 +243,7 @@ final class AppState: ObservableObject {
     /// Stop watching whatever is streaming, without stopping it on the Mac.
     private func detachLive() {
         streamTask?.cancel(); pollTask?.cancel()
+        watchTask?.cancel(); watchTask = nil
         flushTask?.cancel(); flushTask = nil; pendingText = ""
         streaming = false; liveSid = nil
         liveText = ""; liveThinking = ""; liveTools = []; liveStatus = ""
@@ -270,8 +277,38 @@ final class AppState: ObservableObject {
             await loadModels()
             // already attached (SSE or poll) when it is the chat we are watching
             if d.running == true, liveSid != id { await rejoin(id) }
+            watch(id, loaded: d.n)
         } catch {
             lastError = error.localizedDescription
+        }
+    }
+
+    /// Poll the Mac every few seconds while this chat is on screen. A change
+    /// made from the Mac's own browser shows up here without leaving the chat;
+    /// an answer started there is joined mid-stream.
+    private func watch(_ id: String, loaded: Int?) {
+        watchTask?.cancel()
+        watchedCount = loaded
+        watchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                guard let self, !Task.isCancelled, self.openChat?.sid == id,
+                      !self.backgrounded, let server = self.server else { continue }
+                guard let s = try? await server.stamp(id) else { continue }
+                if self.streaming { self.watchedCount = s.n; continue }   // our own turn moves it
+                if s.running, self.liveSid == nil {
+                    await self.rejoin(id)                                   // someone else's turn
+                } else if let seen = self.watchedCount, s.n != seen {
+                    // changed elsewhere: read it without moving what the Mac has open
+                    if let d = try? await server.peek(id) {
+                        self.messages = d.messages
+                        if let t = d.title { self.openChat?.title = t }
+                        Cache.saveMessages(d.messages, for: id)
+                    }
+                    Task { await self.loadChats() }
+                }
+                self.watchedCount = s.n
+            }
         }
     }
 

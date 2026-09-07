@@ -452,6 +452,22 @@ class H(http.server.BaseHTTPRequestHandler):
             try: self.wfile.write(b)
             except Exception: pass
             return
+        if p.startswith("/api/stamp/"):
+            # cheap "has anything changed?" for a client showing this chat:
+            # message count, whether it is generating, and when it was last saved
+            sid = p.rsplit("/", 1)[-1]
+            if not sid:
+                return self._send(400, jdump({"error": "which chat?"}))
+            st = STATES.get(sid)
+            if st is not None:
+                n, running = len(st.msgs), st.lock.locked()
+            else:
+                try: n, running = len(q.session_load(sid)[0]), False
+                except Exception: return self._send(404, jdump({"error": "no such chat"}))
+            try: mtime = os.path.getmtime(q.session_path(sid))
+            except OSError: mtime = 0
+            return self._send(200, jdump({"sid": sid, "n": n, "running": running, "mtime": mtime,
+                                          "seq": (st.live.get("seq") if st is not None else 0)}))
         if p.startswith("/api/peek/"):
             # read a chat without making it the open one — for a phone caching
             # conversations in the background, which must not move the desktop
@@ -489,7 +505,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 q.ACTIVE_PROJECT["id"] = stt.project
                 msgs, title = list(stt.msgs), stt.title
                 return self._send(200, jdump({"ok": True, "sid": sid, "title": title,
-                                              "messages": render(msgs),
+                                              "messages": render(msgs), "n": len(msgs),
                                               "context": q.context_state(msgs, sid),
                                               "running": bool(stt and stt.lock.locked()),
                                               "live": (dict(stt.live) if stt and stt.lock.locked()

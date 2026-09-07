@@ -117,6 +117,13 @@ actor OrbitServer {
         try await get("/api/peek/\(id)", as: ChatDetail.self)
     }
 
+    /// Has this chat changed on the Mac? Cheap enough to ask every few seconds.
+    func stamp(_ id: String) async throws -> (n: Int, running: Bool) {
+        struct S: Codable { var n: Int; var running: Bool }
+        let s = try await get("/api/stamp/\(id)", as: S.self)
+        return (s.n, s.running)
+    }
+
     func trash() async throws -> [TrashItem] {
         try await get("/api/trash", as: [TrashItem].self)
     }

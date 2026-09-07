@@ -835,6 +835,7 @@ async function openSession(id){
  const d=await (await fetch('/api/session/'+id)).json();
  if(d.error)return sysline('could not open: '+d.error);
  sid=d.sid;$('#title').textContent=d.title||'(untitled)';wrap.innerHTML='';
+ WATCH_SID=d.sid;WATCH_N=(typeof d.n==='number')?d.n:null;   // what this page now shows
  syncBusy();
  if(d.running)setTimeout(()=>attachLive(d.sid,d.live||{}),60);
  const CAP=40;
@@ -1733,6 +1734,29 @@ async function refreshRunning(){
   if(badge)badge.textContent=RUNNING.size?`${RUNNING.size} running`:'';
  }catch(e){}}
 setInterval(refreshRunning,2000);
+
+// A chat can change under you -- a message sent from the phone, or another
+// window. Ask the Mac for a cheap stamp of the open chat every few seconds and
+// re-read it when the count moves; join an answer someone else started.
+let WATCH_N=null, WATCH_SID=null;
+async function watchOpenChat(){
+ if(!sid||busy||livePoll||switching||document.hidden)return;
+ try{
+  const st=await (await fetch('/api/stamp/'+sid)).json();
+  if(st.error)return;
+  if(WATCH_SID!==sid||WATCH_N===null){WATCH_SID=sid;WATCH_N=st.n;return}   // no baseline yet
+  if(st.n!==WATCH_N||st.running){
+   WATCH_N=st.n;
+   const typing=q.value, hadFocus=document.activeElement===q;  // keep what you were typing
+   await openSession(sid);
+   q.value=typing; if(hadFocus)q.focus();
+  }
+ }catch(e){}
+}
+setInterval(watchOpenChat,3000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)watchOpenChat()});
+// and the list itself, so a chat that moved on another device moves here too
+setInterval(()=>{if(!busy&&!document.hidden)loadSessions()},15000);
 
 async function refreshStatus(){
  try{const s=await (await fetch('/api/status')).json();
