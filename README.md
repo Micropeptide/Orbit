@@ -276,8 +276,13 @@ Turn it on in **Settings → Phone**, choose Tailscale (anywhere) or Local netwo
 (same Wi-Fi), and scan the QR. Remote access is off until you do, and every
 request from off the machine carries a token compared in constant time.
 
-Build the app with Xcode from `ios/`, or open the web link the same panel shows
-and add it to your Home Screen. Full details in [docs/phone.md](docs/phone.md).
+<p align="center"><img src="docs/screenshots/phone.png" width="260" alt="Orbit for iPhone"></p>
+
+The app has its own page at [Micropeptide/Orbit-iOS](https://github.com/Micropeptide/Orbit-iOS),
+with an unsigned IPA in the [releases](https://github.com/Micropeptide/Orbit-iOS/releases/latest)
+for sideloading (AltStore, Sideloadly, Apple Configurator). Or build it with Xcode
+from `ios/` here, or open the web link the same panel shows and add it to your
+Home Screen. Full details in [docs/phone.md](docs/phone.md).
 
 ---
 
