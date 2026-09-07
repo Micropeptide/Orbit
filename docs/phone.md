@@ -54,6 +54,7 @@ for anyone building something similar in [tailnet-playbook.md](tailnet-playbook.
 | **Local model server** | Settings shows whether the model server on the Mac is running and how much memory it holds; start, stop, restart, or switch to another installed model folder |
 | **Files** | everything Orbit made or you attached, grouped by origin, with thumbnails; QuickLook preview, share sheet, *Add to Knowledge*, swipe to bin |
 | **Offline** | last chat list and recent conversations cached on the phone; a banner says when the copy is stale |
+| **Both sides stay in step** | a message sent from the phone appears in the Mac's browser within a few seconds, and the other way round; an answer started on one device is joined mid-stream on the other |
 | **Answers survive a dropped connection** | if the phone loses the stream mid-answer the Mac carries on; the app rejoins the running answer rather than showing an error |
 | **Notifications** | if an answer finishes while you are in another app it tells you; tapping the notification opens that chat |
 | **iPad and landscape** | list beside conversation; ⌘N new chat, ⌘K model, ⌘F find, ⌘↩ send on a keyboard |

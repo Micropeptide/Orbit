@@ -69,6 +69,9 @@ struct ChatDetail: Codable {
     var sid: String
     var title: String?
     var messages: [Message]
+    /// Raw message count on the Mac (system and tool records included) — the
+    /// number the change watcher compares against.
+    var n: Int?
     var running: Bool?
     var context: ContextState?
 }
