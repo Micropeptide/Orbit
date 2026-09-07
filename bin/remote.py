@@ -158,6 +158,9 @@ def reachable_hosts(mode, port):
     if mode == "tailscale":
         for h in (tailscale_ip(), tailscale_name()):
             if h: hosts.add(f"{h}:{port}")
+        for host, p in serve_map(port):          # what a phone sends through Serve
+            hosts.add(f"{host}:{p}")
+            if p == 443: hosts.add(host)
     elif mode == "lan":
         ip = lan_ip()
         if ip: hosts.add(f"{ip}:{port}")
@@ -169,6 +172,8 @@ def reachable_hosts(mode, port):
 def best_url(mode, port):
     """The address to hand a phone. MagicDNS first — it outlives a DHCP lease."""
     if mode == "tailscale":
+        for host, p in serve_map(port):          # HTTPS with a real certificate
+            return f"https://{host}" if p == 443 else f"https://{host}:{p}"
         host = tailscale_name() or tailscale_ip()
         if host: return f"http://{host}:{port}"
         return ""
@@ -178,13 +183,61 @@ def best_url(mode, port):
     return ""
 
 
+def serve_map(port):
+    """Tailscale Serve mappings that front this port: [(host, https_port)].
+    Serve terminates TLS with a real certificate on the MagicDNS name and hands
+    the request to loopback — the same door other tailnet apps use."""
+    for b in TAILSCALE_BINS:
+        if not os.path.exists(b): continue
+        try:
+            st = json.loads(subprocess.run([b, "serve", "status", "--json"],
+                            capture_output=True, text=True, timeout=5).stdout or "{}")
+        except Exception:
+            continue
+        out = []
+        for hostport, cfg in (st.get("Web") or {}).items():
+            h = ((cfg.get("Handlers") or {}).get("/") or {})
+            if (h.get("Proxy") or "").rstrip("/") == f"http://127.0.0.1:{port}":
+                host, _, p = hostport.rpartition(":")
+                try: out.append((host, int(p or 443)))
+                except ValueError: pass
+        return out
+    return []
+
+
+def ensure_serve(port, prefer=8443):
+    """Front the loopback listener with Tailscale Serve, on the first free
+    HTTPS port from `prefer` up. Idempotent, persistent (--bg), and quiet when
+    Tailscale or HTTPS certificates are not available — the plain tailnet
+    listener still works then."""
+    have = serve_map(port)
+    if have: return have
+    for b in TAILSCALE_BINS:
+        if not os.path.exists(b): continue
+        try:
+            st = json.loads(subprocess.run([b, "serve", "status", "--json"],
+                            capture_output=True, text=True, timeout=5).stdout or "{}")
+            taken = {int(k) for k in (st.get("TCP") or {})}
+            https = prefer
+            while https in taken: https += 1
+            r = subprocess.run([b, "serve", "--bg", f"--https={https}", f"http://127.0.0.1:{port}"],
+                               capture_output=True, text=True, timeout=20)
+        except Exception:
+            return []
+        return serve_map(port) if r.returncode == 0 else []
+    return []
+
+
 def alt_urls(mode, port):
     """Other addresses this Mac answers on in the same mode. A phone tries them
     when the first fails, so a tailnet without MagicDNS, or a new DHCP lease,
     does not mean re-pairing. Never crosses modes: tailscale stays tailnet-only."""
     out = []
     if mode == "tailscale":
-        ip = tailscale_ip()
+        ip, name = tailscale_ip(), tailscale_name()
+        for host, p in serve_map(port):
+            out.append(f"https://{host}" if p == 443 else f"https://{host}:{p}")
+        if name: out.append(f"http://{name}:{port}")
         if ip: out.append(f"http://{ip}:{port}")
     elif mode == "lan":
         host = socket.gethostname()
