@@ -29,7 +29,7 @@ def allowed_hosts():
     return _HOSTS["v"]
 
 def allowed_origins():
-    return {f"http://{h}" for h in allowed_hosts()}
+    return {s + h for h in allowed_hosts() for s in ("http://", "https://")}
 WEB  = os.path.join(q.ROOT, "web")
 LOCK = threading.Lock()          # guards the registry itself
 PENDING = {}                     # id -> {"event": Event, "allow": bool}
@@ -217,7 +217,11 @@ class H(http.server.BaseHTTPRequestHandler):
 
     def _from_loopback(self):
         peer = (self.client_address or ("",))[0]
-        return peer in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+        if peer not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+            return False
+        # Tailscale Serve hands a phone's request to us over loopback. The
+        # forwarding headers say so; that phone is not you at the machine.
+        return not (self.headers.get("X-Forwarded-For") or self.headers.get("Tailscale-User-Login"))
 
     def _token_ok(self):
         """A request off this machine must prove it was paired."""
@@ -1249,6 +1253,10 @@ if __name__ == "__main__":
         REMOTE.load_token(q.ROOT, create=True)     # pairing needs one to exist
         REMOTE.advertise(PORT)
         atexit.register(REMOTE.stop_advertising)
+        if mode == "tailscale":
+            served = REMOTE.ensure_serve(PORT)
+            if served:
+                print("  tailscale serve: https on " + ", ".join(f"{h}:{p}" for h, p in served))
     # One listener per address. Loopback is always first, so the desktop app is
     # never taken away by a remote-access setting.
     extra = []

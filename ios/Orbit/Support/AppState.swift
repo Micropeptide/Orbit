@@ -156,7 +156,13 @@ final class AppState: ObservableObject {
             // The address in the QR is not always the one that works from here
             // (no MagicDNS on this phone, a new DHCP lease). Try the others the
             // Mac listed and keep whichever answers.
-            for alt in p.alts ?? [] where alt != p.url {
+            var candidates = p.alts ?? []
+            // a Mac fronted by Tailscale Serve answers over https at its MagicDNS
+            // name; a phone paired before that was set up can find it unaided
+            if p.url.hasPrefix("http://"), let host = URL(string: p.url)?.host, host.hasSuffix(".ts.net") {
+                candidates += ["https://\(host):8443", "https://\(host)"]
+            }
+            for alt in candidates where alt != p.url {
                 let probe = OrbitServer(pairing: Pairing(url: alt, token: p.token, name: p.name, alts: p.alts))
                 if (try? await probe.health()) == true {
                     var swapped = p

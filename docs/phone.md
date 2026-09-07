@@ -11,7 +11,7 @@ login and anything that can reach it can run code on your machine.
 | Mode | What it does | Use it when |
 |---|---|---|
 | **Off** | Only the Mac itself can reach Orbit | the default |
-| **Tailscale** | Binds the tailnet address *only* — the port is not on whatever Wi-Fi you are on | you want it to work from anywhere |
+| **Tailscale** | Fronted by **Tailscale Serve**: HTTPS with a real certificate at your Mac's MagicDNS name (`https://<mac>.<tailnet>.ts.net:8443`), the same door other tailnet apps use. The plain port is bound to the tailnet address only, never to whatever Wi-Fi you are on | you want it to work from anywhere |
 | **Local network** | Binds every interface | you are at home on a network you trust |
 
 Pick one, restart, and a QR code appears. Scan it with the app.
@@ -26,6 +26,15 @@ time. Loopback is exempt, so nothing about using Orbit at the Mac changes.
 
 **Rotate token** in the same panel invalidates every paired device at once. Use
 it if a phone goes missing.
+
+Requests arriving through Tailscale Serve reach Orbit over loopback with
+forwarding headers; Orbit treats those as remote, so the token still applies.
+The QR also lists fallback addresses (the tailnet IP, the `.local` name on a
+LAN) and the app tries them by itself, then keeps learning new ones from the
+Mac — you scan once.
+
+The phone needs the Tailscale app connected to the same tailnet. If Orbit says
+it can't reach the Mac, that is the first thing to check.
 
 ## What the app does
 
