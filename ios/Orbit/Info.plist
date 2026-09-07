@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Orbit</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -34,9 +36,38 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_orbit._tcp</string>
+	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Scanning the pairing QR code on your Mac, and taking photos to send in a chat.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Unlocking Orbit when you have asked it to lock.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Finding your Mac running Orbit on this network.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Saving a plot or picture from a conversation to your Photos.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Attaching an image to a conversation.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>processing</string>
+	</array>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 </dict>
 </plist>

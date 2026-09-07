@@ -20,21 +20,33 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: uk.runtian.orbit
-        INFOPLIST_KEY_CFBundleDisplayName: Orbit
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
-        INFOPLIST_KEY_NSCameraUsageDescription: "Scanning the pairing QR code on your Mac, and taking photos to send in a chat."
-        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Finding your Mac running Orbit on this network."
-        INFOPLIST_KEY_NSBonjourServices: "_orbit._tcp"
-        INFOPLIST_KEY_NSPhotoLibraryUsageDescription: "Attaching an image to a conversation."
-        INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription: "Saving a plot or picture from a conversation to your Photos."
-        INFOPLIST_KEY_NSFaceIDUsageDescription: "Unlocking Orbit when you have asked it to lock."
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         ENABLE_USER_SCRIPT_SANDBOXING: NO
+    # Everything below goes into Info.plist itself. INFOPLIST_KEY_* build
+    # settings are ignored when a plist file is supplied, which once shipped a
+    # build with no launch screen (letterboxed on modern phones) and no camera
+    # usage string (iOS kills the app the moment the QR scanner opens).
     info:
       path: Orbit/Info.plist
       properties:
+        CFBundleDisplayName: Orbit
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSCameraUsageDescription: "Scanning the pairing QR code on your Mac, and taking photos to send in a chat."
+        NSLocalNetworkUsageDescription: "Finding your Mac running Orbit on this network."
+        NSBonjourServices: ["_orbit._tcp"]
+        NSPhotoLibraryUsageDescription: "Attaching an image to a conversation."
+        NSPhotoLibraryAddUsageDescription: "Saving a plot or picture from a conversation to your Photos."
+        NSFaceIDUsageDescription: "Unlocking Orbit when you have asked it to lock."
         CFBundleURLTypes:
           - CFBundleURLName: uk.runtian.orbit.pair
             CFBundleURLSchemes: [orbit]
