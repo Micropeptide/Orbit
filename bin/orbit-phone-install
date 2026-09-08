@@ -45,9 +45,14 @@ fi
 [ -n "$DEVICE" ] || { say "no paired iPhone found — plug it in once and trust this Mac"; exit 1; }
 [ -n "$TEAM" ]   || { say "no Apple Development certificate — sign in to Xcode → Settings → Accounts once"; exit 1; }
 
-# not reachable (off, away, or asleep) → try again another day, quietly
-if ! xcrun devicectl device info details --device "$DEVICE" >/dev/null 2>&1; then
-  say "iPhone not reachable right now; skipped"; exit 0
+# not reachable (off, away, asleep, or off this Wi-Fi) → try again another
+# day, quietly. `device info details` alone returns 0 on cached/stale info
+# even when the device is actually unreachable, so ask `list devices` for its
+# live state instead — that's what actually distinguishes "paired but not
+# here right now" from "here".
+STATE=$(xcrun devicectl list devices 2>/dev/null | awk -v id="$DEVICE" '$0 ~ id { for (i=1;i<=NF;i++) if ($i=="available" || $i=="unavailable") print $i }')
+if [ "$STATE" != "available" ]; then
+  say "iPhone not reachable right now (state: ${STATE:-unknown}); skipped"; exit 0
 fi
 
 APP=$(ls -d "$HOME"/Library/Developer/Xcode/DerivedData/Orbit-*/Build/Products/Release-iphoneos/Orbit.app 2>/dev/null | head -1)
