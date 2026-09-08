@@ -317,11 +317,12 @@ struct ChatView: View {
                 .foregroundStyle(.secondary)
 
             ForEach(state.liveTools, id: \.self) { t in
+                let auto = t.hasPrefix("✓ auto-approved")
                 Text(t)
                     .font(.caption.monospaced())
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(auto ? .green : .orange)
                     .padding(.vertical, 5).padding(.horizontal, 9)
-                    .background(.orange.opacity(0.10), in: .rect(cornerRadius: 7))
+                    .background((auto ? Color.green : Color.orange).opacity(0.10), in: .rect(cornerRadius: 7))
             }
 
             if !state.liveStatus.isEmpty && state.liveText.isEmpty {

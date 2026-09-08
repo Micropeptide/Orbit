@@ -187,6 +187,9 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
  color:var(--err);background:color-mix(in srgb,var(--err) 6%,transparent);border-radius:7px}
 .injwarn{border-left:3px solid var(--warn);padding:7px 11px;margin:7px 0;font-size:12.5px;
  color:var(--warn);background:color-mix(in srgb,var(--warn) 8%,transparent);border-radius:7px}
+.autoappr{border-left:3px solid var(--ok);padding:6px 11px;margin:6px 0;font-size:12.5px;
+ color:var(--ok);background:color-mix(in srgb,var(--ok) 7%,transparent);border-radius:7px;
+ font-family:var(--mono)}
 .navtabs{display:flex;gap:4px;padding:8px 12px 4px}
 .navtabs button{flex:1;padding:5px 0;font-size:12px;border:1px solid var(--line);border-radius:7px;
  background:none;color:var(--mut);cursor:pointer;font-family:inherit}
@@ -805,9 +808,11 @@ function attachLive(theSid, initial){
   if(!lv.content&&!lv.thinking&&lv.status)
    a.bub.innerHTML='<span class=working>'+esc(lv.status)+'<span class=dots></span></span>';
   (lv.tools||[]).slice(a.tools.childElementCount).forEach(t=>{
-   const c=el('<div class=tool></div>');
-   c.textContent='* '+t.name+'('+Object.entries(t.args||{})
-     .map(([k,v])=>k+'='+String(v).slice(0,60)).join(', ')+')';
+   const auto=(t.name||'').startsWith('✓ auto-approved: ');
+   const name=auto?t.name.slice('✓ auto-approved: '.length):t.name;
+   const args='('+Object.entries(t.args||{}).map(([k,v])=>k+'='+String(v).slice(0,60)).join(', ')+')';
+   const c=el(auto?'<div class=autoappr></div>':'<div class=tool></div>');
+   c.textContent=(auto?'✓ auto-approved — ':'* ')+name+args;
    a.tools.appendChild(c)});
   if(lv.thinking){a.think.style.display='';a.think.open=!lv.content;
    a.think.querySelector('.body').textContent=lv.thinking}
@@ -1088,6 +1093,8 @@ async function go(opts){
      yes.onclick=()=>send(true);no.onclick=()=>send(false);
      btns.appendChild(yes);btns.appendChild(no);box.appendChild(btns);
      a.tools.appendChild(box);bottom()}
+    else if(m.k==='auto_approved'){const b=el('<div class=autoappr></div>');
+     b.textContent='✓ auto-approved — '+m.p.reason+' ('+m.p.name+')';a.tools.appendChild(b);bottom()}
     else if(m.k==='blocked'){const b=el('<div class=blocked></div>');
      b.textContent='Blocked: '+m.p.reason+' ('+m.p.name+')';a.tools.appendChild(b);bottom()}
     else if(m.k==='injection'){const b=el('<div class=injwarn></div>');
@@ -1481,15 +1488,39 @@ async function openSettings(tab){
   if(name==='tools'){
    const en=draft.tools_enabled||{};
    const names=[...new Set([...(info.all_tools||[]),...(info.tools||[])])];
-   body.innerHTML=`<div class=sec>Permissions</div><div class=grid>
+   const mode=draft.autonomy_mode||'ask';
+   const AUTOMODES=[
+    ['ask','Ask every time','the default — every risky action stops for your explicit approval, like today'],
+    ['auto','Auto-approve safe actions',
+     'file edits and deletions that stay inside the workspace run without asking; anything that reaches the rest of the machine, the network, or your own source still asks'],
+    ['full','Full computer access',
+     'like Claude Code’s --dangerously-skip-permissions — turns on shell, write-anywhere and cluster write for this session, and runs everything else without asking. A short list of machine-wide actions (sudo, shutdown, the keychain, publishing a package, rewriting git history, force-pushing, deleting quota) still always asks, and a hard floor (wiping a disk, a fork bomb, a reverse shell, piping a download into a shell, killing every process, anything aimed at a protected path like your home directory) is never approvable at all, in any mode.'],
+   ];
+   body.innerHTML=`<div class=sec>Autonomy <small>— how much it can do without asking first</small></div>
+    ${AUTOMODES.map(([v,label,why])=>`<label class=memrow style="cursor:pointer;align-items:flex-start">
+      <input type=radio name=automode value="${v}" ${mode===v?'checked':''} style="margin-top:3px">
+      <span><b>${label}</b><br><span class=note>${esc(why)}</span></span></label>`).join('')}
+    <div class=hint2 style="margin:8px 0 4px">Every action is written to <code>logs/safety.log</code>
+     regardless of mode, including which ones ran unattended.</div>
+    <div class=sec>Permissions</div><div class=grid>
      <label>Code execution</label><div class=sw><input type=checkbox id=t_code><span class=note>the python tool runs real code on your Mac</span></div>
-     <label>Enable shell</label><div class=sw><input type=checkbox id=t_shell><span class=note>lets the model run shell commands</span></div>
-     <label>the cluster write access</label><div class=sw><input type=checkbox id=t_h2><span class=note>qsub / qdel / remote commands — read-only status always works</span></div>
-     <label>Write anywhere</label><div class=sw><input type=checkbox id=t_wany><span class=note>otherwise writes stay in workspace/</span></div>
+     <label>Enable shell</label><div class=sw><input type=checkbox id=t_shell><span class=note>lets the model run shell commands ${mode==='full'?'— on anyway, from Full access':''}</span></div>
+     <label>the cluster write access</label><div class=sw><input type=checkbox id=t_h2><span class=note>qsub / qdel / remote commands — read-only status always works ${mode==='full'?'— on anyway, from Full access':''}</span></div>
+     <label>Write anywhere</label><div class=sw><input type=checkbox id=t_wany><span class=note>otherwise writes stay in workspace/ ${mode==='full'?'— on anyway, from Full access':''}</span></div>
     </div><div class=sec>Available tools</div><div class=toolgrid id=tg></div>`;
    $('#t_code').checked=draft.code_execution!==false;
    $('#t_h2').checked=!!draft.cluster_write;
    $('#t_shell').checked=!!draft.shell_enabled;$('#t_wany').checked=!!draft.write_any;
+   body.querySelectorAll('input[name=automode]').forEach(r=>r.onchange=()=>{
+    if(r.value==='full'&&!confirm(
+      "Full computer access lets Orbit run shell commands, write anywhere on this Mac, and "+
+      "reach the cluster without asking first — for the rest of this session, across every chat.\n\n"+
+      "It still always asks before: sudo, shutting down, the keychain, publishing a package, "+
+      "rewriting git history, force-pushing, or destructive SQL. It will never wipe a disk, run a "+
+      "fork bomb, open a reverse shell, pipe a download into a shell, kill every process, or touch "+
+      "a protected path like your home directory — no mode lifts those.\n\nTurn it on?")){
+     render('tools');return}
+    draft.autonomy_mode=r.value;render('tools')});
    const tg=$('#tg');
    const groups={'built-in':[],'paperfetch':[],'zotero':[],'other MCP':[]};
    names.forEach(n=>{
@@ -1516,7 +1547,7 @@ async function openSettings(tab){
   }
   if(name==='memory'){
    body.innerHTML=`<div class=sec>General instructions <small>— always prepended, like a CLAUDE.md</small></div>
-    <textarea class=ta id=m_ins placeholder="e.g. I'm a graduate student in molecular biology. Prefer concise answers with citations, and always show the units."></textarea>
+    <textarea class=ta id=m_ins placeholder="e.g. I'm a plant epigenetics PhD student at UCLA. Prefer concise answers with citations. Always give exact AGI gene IDs."></textarea>
     <div class=sec>Memories <small>— durable facts, injected into every chat</small></div>
     <div id=memlist></div>
     <div class=grid style="margin-top:10px"><label>New memory name</label>
@@ -1696,6 +1727,8 @@ async function openSettings(tab){
    scheduler_mode:$('#v_sched').value});draft.idle_min=Number($('#v_idle').value)}
   if($('#t_shell')){draft.shell_enabled=$('#t_shell').checked;draft.write_any=$('#t_wany').checked;
    draft.code_execution=$('#t_code').checked;draft.cluster_write=$('#t_h2').checked;
+   const am=document.querySelector('input[name=automode]:checked');
+   if(am)draft.autonomy_mode=am.value;
    const en={};document.querySelectorAll('[data-tool]').forEach(c=>{en[c.dataset.tool]=c.checked});
    draft.tools_enabled=en}
  }
@@ -2074,7 +2107,7 @@ async function renderTasks(){
   <div id=joblist></div>
   <div class=sec>New task</div>
   <div class=grid>
-   <label>Name</label><input type=text id=j_name placeholder="daily literature check">
+   <label>Name</label><input type=text id=j_name placeholder="daily RdDM literature check">
    <label>Repeat</label><select id=j_every><option value=daily>daily</option>
      <option value=weekly>weekly</option><option value=hours>every N hours</option>
      <option value=minutes>every N minutes</option></select>
@@ -2087,7 +2120,7 @@ async function renderTasks(){
      agents.map(a=>`<option>${a}</option>`).join('')}</select>
   </div>
   <textarea class=ta id=j_prompt style="min-height:110px;margin-top:9px"
-    placeholder="What should it do? e.g. Search PubMed for papers on my topic from the last 7 days and summarise the top 3 with DOIs."></textarea>
+    placeholder="What should it do? e.g. Search PubMed for new CLSY/RdDM papers from the last 7 days and summarise the top 3 with DOIs."></textarea>
   <button class=ghost id=j_add style="margin-top:9px">Add task</button>
  </div>`;
  (async()=>{
@@ -2427,10 +2460,16 @@ async function showAbout(){
     <b>Temp chat</b><span>The <code>temp</code> button starts a chat that is never written to disk. <code>burn</code> erases it instantly.</span>
    </div>
    <div class=sec>Safety</div>
-   <p style="color:var(--mut);font-size:13.5px;margin:0">Destructive commands aimed at protected paths are
-    <b>blocked outright</b>; anything else destructive needs your approval in the chat. Everything the model
-    reads from the web or a file is fenced as untrusted data and scanned for prompt-injection attempts —
-    matches raise a banner and are logged to <code>logs/safety.log</code>.</p>
+   <p style="color:var(--mut);font-size:13.5px;margin:0">A short list of actions — wiping a disk, a fork
+    bomb, a reverse shell, piping a download into a shell, killing every process, or anything aimed at a
+    protected path like your home directory — is <b>blocked outright</b>, in every mode; nothing in
+    Settings turns that off. Anything else destructive needs your approval in the chat, unless you have
+    turned on <b>Auto-approve safe actions</b> or <b>Full computer access</b> in Settings → Tools →
+    Autonomy — even then, a handful of machine-wide actions (sudo, shutting down, the keychain,
+    publishing a package, rewriting git history) still always ask. Everything the model reads from the
+    web or a file is fenced as untrusted data and scanned for prompt-injection attempts — matches raise a
+    banner and are logged to <code>logs/safety.log</code>, along with every approval, denial and
+    auto-approval.</p>
    <div class=sec>Slash commands</div>
    <div class=howto>${CMDS.map(c=>`<b><code>${c.c}</code></b><span>${esc(c.d)}</span>`).join('')}
     <b><code>/&lt;prompt&gt;</code></b><span>any saved prompt becomes its own command (Library → Prompts)</span></div>

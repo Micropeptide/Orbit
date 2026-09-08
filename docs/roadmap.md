@@ -125,6 +125,7 @@ window onto it.
 
 ## Tools and agents
 
+- [x] Autonomy modes (Ask / Auto-approve safe actions / Full computer access), set from the Mac or the phone, with a hard floor no mode lifts
 - [ ] Tool timeline in a chat: what ran, how long, what it returned (expandable)
 - [ ] Re-run a tool call with edited arguments
 - [ ] Approve-with-conditions ("allow this shell command for the rest of this chat")

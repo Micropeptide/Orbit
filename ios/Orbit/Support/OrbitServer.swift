@@ -150,6 +150,30 @@ actor OrbitServer {
         try await post("/api/model/default", ["id": id])
     }
 
+    // ------------------------------------------------------------ autonomy
+
+    struct AutonomySettings: Codable {
+        var autonomy_mode: String?
+        var shell_enabled: Bool?
+        var write_any: Bool?
+        var cluster_write: Bool?
+    }
+
+    /// `/api/settings` merges whatever you post and hands back everything —
+    /// posting nothing is how you read it.
+    func autonomy() async throws -> AutonomySettings {
+        struct R: Codable { var settings: AutonomySettings }
+        let data = try await post("/api/settings", ["settings": [String: Any]()])
+        return try JSONDecoder().decode(R.self, from: data).settings
+    }
+
+    @discardableResult
+    func setAutonomy(_ changes: [String: Any]) async throws -> AutonomySettings {
+        struct R: Codable { var settings: AutonomySettings }
+        let data = try await post("/api/settings", ["settings": changes])
+        return try JSONDecoder().decode(R.self, from: data).settings
+    }
+
     func running() async throws -> [String] {
         struct R: Codable { var running: [String] }
         return try await get("/api/running", as: R.self).running
@@ -412,6 +436,7 @@ actor OrbitServer {
         case "autocompact":    return .status("summarising earlier turns")
         case "autocompact_done", "stagnation": return .status("")
         case "blocked":        return .blocked(reason: str("reason"))
+        case "auto_approved":  return .autoApproved(name: str("name"), reason: str("reason"))
         case "approval":
             return .approval(name: str("name"), reason: str("reason"),
                              id: (p as? [String: Any])?["id"] as? String)

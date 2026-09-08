@@ -168,6 +168,7 @@ enum StreamEvent {
     case toolResult(name: String, output: String)
     case status(String)              // cold start, compaction, trimming
     case blocked(reason: String)
+    case autoApproved(name: String, reason: String)
     case approval(name: String, reason: String, id: String?)
     case error(String)
     case end(sid: String?, title: String?)

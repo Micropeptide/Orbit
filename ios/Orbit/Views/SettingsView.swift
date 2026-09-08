@@ -24,6 +24,7 @@ struct SettingsView: View {
             "Models listed: \(state.models.count) · default: \(state.defaultModel ?? "—")",
             "Chats: \(state.chats.count) · projects: \(state.projects.count)",
             "Backup: " + (state.backup.map { ($0.enabled ? "on" : "off") + " · last " + ($0.last?.name ?? "never") } ?? "unknown"),
+            "Autonomy: " + (state.autonomy?.autonomy_mode ?? "unknown"),
             "Last error: \(state.lastError ?? "none")",
         ].joined(separator: "\n")
     }
@@ -32,6 +33,7 @@ struct SettingsView: View {
         NavigationStack {
             List {
                 ServerControlView()
+                AutonomySection()
                 BackupSection()
 
                 Section {
@@ -155,9 +157,10 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
-            .task { await state.refreshServer(); await state.refreshBackup() }
+            .task { await state.refreshServer(); await state.refreshBackup(); await state.refreshAutonomy() }
             .refreshable {
-                await state.refreshEverything(); await state.refreshServer(); await state.refreshBackup()
+                await state.refreshEverything(); await state.refreshServer()
+                await state.refreshBackup(); await state.refreshAutonomy()
             }
             .confirmationDialog("Unpair this phone?", isPresented: $confirmUnpair,
                                 titleVisibility: .visible) {

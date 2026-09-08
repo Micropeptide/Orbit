@@ -64,6 +64,7 @@ for anyone building something similar in [tailnet-playbook.md](tailnet-playbook.
 | **Tables and code** | Markdown pipe tables render as real grids; fenced code gets a copy button |
 | **Share** | a chat as Markdown, plain text or a one-page PDF; an answer as text or as an image card; a plot straight to Photos |
 | **Drafts** | what you were typing in each chat is still there when you come back |
+| **Autonomy** | Settings shows and sets the same three-way autonomy mode as the Mac (Ask every time / Auto-approve safe actions / Full computer access) — a full-access confirmation from either device applies everywhere, and a chat on the Mac follows a mode changed from the phone |
 | **Backup** | Settings shows the Mac's automatic backup (see below); back up now, list archives, put back what is missing |
 | **Bin** | what you binned on the Mac, with Restore |
 | **Appearance** | light/dark, larger answer text, haptics on/off |
