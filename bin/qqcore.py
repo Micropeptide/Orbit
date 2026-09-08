@@ -82,6 +82,17 @@ DEFAULTS = {
   "autocompact_pct": 80,
   "trash_days": 30,
   "watch_cluster_jobs": False,
+  # "ask" (default) — every risky action stops for your explicit approval.
+  # "auto" — workspace-confined file operations run without asking; anything
+  #          that reaches outside the workspace, the machine, or the network
+  #          still asks. See _auto_approvable().
+  # "full" — like Claude Code's --dangerously-skip-permissions: every
+  #          "confirm"-level action runs without asking, and write-anywhere /
+  #          shell / cluster-write turn on for the session. A short list of
+  #          machine-compromising actions (NEVER_AUTO below) still always
+  #          asks, and protected paths stay hard-blocked — full access does
+  #          not lift either of those.
+  "autonomy_mode": "ask",
 }
 
 # ------------------------------------------------------------------ settings
@@ -601,8 +612,9 @@ def t_read_file(path):
 
 def t_write_file(path, content):
     p = os.path.abspath(os.path.expanduser(path))
-    if not S.get("write_any") and not p.startswith(os.path.abspath(WORKSPACE)):
-        return f"Error: writes confined to {WORKSPACE}. Enable 'write anywhere' in Settings to override."
+    if not (S.get("write_any") or full_access()) and not p.startswith(os.path.abspath(WORKSPACE)):
+        return (f"Error: writes confined to {WORKSPACE}. Enable 'write anywhere' or "
+                "'Full computer access' in Settings -> Tools to override.")
     d = file_diff(p, content)
     LAST_DIFF.clear(); LAST_DIFF.update({"path": p, **d})
     os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -615,8 +627,9 @@ def t_write_file(path, content):
     return f"{verb} {p} (+{d['added']} −{d['removed']} lines)"
 
 def t_run_shell(command):
-    if not S.get("shell_enabled"):
-        return "Error: shell is disabled. Enable it in Settings if you want this."
+    if not (S.get("shell_enabled") or full_access()):
+        return ("Error: shell is disabled. Enable it, or 'Full computer access', "
+                "in Settings -> Tools if you want this.")
     r = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=180)
     return (f"exit={r.returncode}\nstdout:\n{r.stdout[:MAXCH]}"
             + (f"\nstderr:\n{r.stderr[:2000]}" if r.stderr else ""))
@@ -805,7 +818,7 @@ def active_tools():
     """Built-ins filtered by settings, plus MCP tools."""
     en = S.get("tools_enabled") or {}
     specs = [t for t in ALL_SPECS if en.get(t["function"]["name"], True)]
-    if not S.get("shell_enabled"):
+    if not (S.get("shell_enabled") or full_access()):
         specs = [t for t in specs if t["function"]["name"] != "run_shell"]
     mcp_specs, errors = load_mcp()
     specs += [t for t in mcp_specs if en.get(t["function"]["name"], True)]
@@ -918,15 +931,24 @@ def _run_one_tool(tc, fn, args, messages, emit, approve, seen_calls):
         emit("blocked", {"name": fn, "reason": reason})
         LOG_SAFETY(fn, args, "blocked", reason)
     elif level == "confirm":
-        emit("approval", {"name": fn, "args": args, "reason": reason})
-        ok = bool(approve(fn, args, reason)) if approve else False
-        LOG_SAFETY(fn, args, "approved" if ok else "denied", reason)
-        if not ok:
-            out = (f"DENIED by the user: {reason}. Do not retry this or attempt a "
-                   "workaround. Explain what you were going to do and stop.")
-        else:
+        mode = S.get("autonomy_mode", "ask")
+        auto = (mode == "full" and fn not in NEVER_AUTO_FNS and reason not in NEVER_AUTO) or \
+               (mode == "auto" and _auto_approvable(fn, args, reason))
+        if auto:
+            emit("auto_approved", {"name": fn, "args": args, "reason": reason})
+            LOG_SAFETY(fn, args, "auto-approved", reason)
             try: out = dispatch(fn, args)
             except Exception as e: out = f"Error: {type(e).__name__}: {e}"
+        else:
+            emit("approval", {"name": fn, "args": args, "reason": reason})
+            ok = bool(approve(fn, args, reason)) if approve else False
+            LOG_SAFETY(fn, args, "approved" if ok else "denied", reason)
+            if not ok:
+                out = (f"DENIED by the user: {reason}. Do not retry this or attempt a "
+                       "workaround. Explain what you were going to do and stop.")
+            else:
+                try: out = dispatch(fn, args)
+                except Exception as e: out = f"Error: {type(e).__name__}: {e}"
     else:
         try: out = dispatch(fn, args)
         except Exception as e: out = f"Error: {type(e).__name__}: {e}"
@@ -1649,9 +1671,10 @@ def _cluster_guard(command):
 def t_cluster_run(command):
     """Run a LIGHT command on a the cluster login node (ls, grep, head, composing scripts).
     Heavy compute is refused — it must go through qsub."""
-    if not S.get("cluster_write", False):
+    if not (S.get("cluster_write", False) or full_access()):
         return ("Error: the cluster command execution is disabled. Enable "
-                "'the cluster write access' in Settings -> Tools if you want this.")
+                "'the cluster write access', or 'Full computer access', in "
+                "Settings -> Tools if you want this.")
     blocked = _cluster_guard(command)
     if blocked: return blocked
     return _h2_ssh(command, timeout=180)
@@ -1659,9 +1682,9 @@ def t_cluster_run(command):
 def t_cluster_submit(commands, name="orbit_job", cores=4, hours=8, mem_per_core="8g",
                       workdir=None, conda_env="base", array=None, dry_run=True):
     """Compose an SGE job script and submit it with qsub. Memory is PER CORE."""
-    if not S.get("cluster_write", False):
-        return ("Error: cluster submission is disabled. Enable 'cluster write access' "
-                "in Settings -> Tools.")
+    if not (S.get("cluster_write", False) or full_access()):
+        return ("Error: cluster submission is disabled. Enable 'cluster write access', "
+                "or 'Full computer access', in Settings -> Tools.")
     safe = "".join(ch for ch in str(name) if ch.isalnum() or ch in "-_") or "orbit_job"
     wd = workdir or S.get("cluster_workdir") or "$HOME/orbit-jobs"
     lines = ["#!/bin/bash", "#$ -cwd", "#$ -j y", f"#$ -o {wd}/{safe}.$JOB_ID.log",
@@ -1686,8 +1709,9 @@ def t_cluster_submit(commands, name="orbit_job", cores=4, hours=8, mem_per_core=
 
 def t_cluster_qdel(job_id):
     """Delete a queued or running job."""
-    if not S.get("cluster_write", False):
-        return "Error: cluster write access is disabled in Settings -> Tools."
+    if not (S.get("cluster_write", False) or full_access()):
+        return ("Error: cluster write access is disabled. Enable it, or "
+                "'Full computer access', in Settings -> Tools.")
     return _h2_ssh(f"qdel {int(job_id)}")
 
 for _n, _f in [("cluster_status", t_cluster_status), ("cluster_ls", t_cluster_ls),
@@ -1803,20 +1827,32 @@ def _targets_protected(blob):
     return None
 
 def risk_check(fn, args):
-    """Return (level, reason). level: 'block' | 'confirm' | None."""
+    """Return (level, reason). level: 'block' | 'confirm' | None.
+
+    'block' is never approvable, by anyone, in any mode — not even a human
+    clicking "Allow" in the chat, and not "Full computer access" either. It is
+    reserved for actions with essentially no legitimate use here and no way
+    back: wiping a disk, a fork bomb, a reverse shell, piping a download
+    straight into a shell, killing every process, and anything that targets a
+    protected path. 'confirm' is everything else destructive — always
+    approvable by you in the chat, and depending on Settings -> Tools ->
+    Autonomy, sometimes approvable automatically. See _auto_approvable().
+    """
     blob = " ".join(str(v) for v in (args or {}).values())
     low = blob.lower()
     # The python tool runs real code, so it is also a shell if you let it be:
     # subprocess.run(cmd, shell=True) walked straight past "Enable shell: off".
     # Checked first, so switching shell off is a real answer and not a suggestion.
     py_shell = fn == "python" and _re.search(SHELL_FROM_PYTHON, str(args.get("code", "")))
-    if py_shell and not S.get("shell_enabled"):
+    if py_shell and not (S.get("shell_enabled") or full_access()):
         return ("block", "python tried to run shell commands, but shell is switched "
                          "off in Settings -> Tools")
     hit = None
     for pat, why in DESTRUCTIVE:
         if _re.search(pat, low): hit = why; break
     if hit:
+        if hit in ALWAYS_BLOCK:
+            return ("block", f"{hit} — this is never approvable, in any mode")
         prot = _targets_protected(blob)
         if prot:
             return ("block", f"{hit} targeting protected path {prot}")
@@ -1833,6 +1869,49 @@ def risk_check(fn, args):
     if fn == "cluster_qdel" and str(args.get("job_id","")).strip() in ("*", "-u", ""):
         return ("block", "mass job deletion")
     return (None, None)
+
+# Destructive-pattern reasons that are never approvable at all — see risk_check.
+ALWAYS_BLOCK = {
+    "disk destruction", "raw device write", "fork bomb", "reverse shell",
+    "piping a download into a shell", "piping a download into python",
+    "mass process kill", "mass job deletion", "crontab wipe",
+}
+
+# Destructive-pattern reasons (and tool names) that always stop for your explicit
+# approval in the chat, in every autonomy mode including 'full' — they reach
+# outside the project (the machine, a shared account, a credential store, a
+# public package registry) in a way a plain file edit never does.
+NEVER_AUTO = {
+    "sudo -- runs as administrator", "shutting the machine down",
+    "removing a background service", "changing system preferences",
+    "reading the keychain", "rewriting git history", "publishing a package",
+    "destructive SQL", "file shredding", "recursive permission change",
+    "destructive git",
+}
+NEVER_AUTO_FNS = {"self_patch", "self_rollback"}
+
+def full_access():
+    """'Full computer access' — Orbit's equivalent of --dangerously-skip-permissions.
+    Implies write-anywhere, shell and cluster-write for the rest of the session,
+    and every 'confirm'-level action runs without asking *except* NEVER_AUTO,
+    which still always asks, and 'block'-level, which stays refused outright.
+    Session-wide, not a one-time consent — treat enabling it like handing over
+    the keyboard."""
+    return S.get("autonomy_mode") == "full"
+
+def _auto_approvable(fn, args, reason):
+    """Whether a 'confirm'-level action is safe enough to run without asking,
+    under autonomy mode 'auto' (deliberately conservative: reversible, workspace-
+    confined file operations only). Mode 'full' does not call this — it
+    auto-approves everything 'confirm' except NEVER_AUTO."""
+    if fn in NEVER_AUTO_FNS or reason in NEVER_AUTO:
+        return False
+    if reason and reason.endswith("(inside workspace)"):
+        return True
+    if fn == "write_file":
+        p = os.path.abspath(os.path.expanduser(str((args or {}).get("path", ""))))
+        return p.startswith(os.path.abspath(WORKSPACE) + os.sep) or p == os.path.abspath(WORKSPACE)
+    return False
 
 # Ways python code reaches a shell. Kept next to the checker that uses it.
 SHELL_FROM_PYTHON = (r"\bsubprocess\b|\bos\.(system|popen|exec[lv]|spawn)|"
@@ -2613,8 +2692,9 @@ def cluster_estimate(name_prefix):
 
 def h2_resubmit(job_id, mem_per_core=None, hours=None, cores=None):
     """Re-run a job from its saved script with more resources."""
-    if not S.get("cluster_write", False):
-        return "Error: cluster write access is disabled in Settings -> Tools."
+    if not (S.get("cluster_write", False) or full_access()):
+        return ("Error: cluster write access is disabled. Enable it, or "
+                "'Full computer access', in Settings -> Tools.")
     wd = S.get("cluster_workdir") or "$HOME/orbit-jobs"
     find = _h2_ssh(f"grep -l 'JOB_ID' {wd}/*.qsub.sh 2>/dev/null | head -5")
     edits = []

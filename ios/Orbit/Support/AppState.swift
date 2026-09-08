@@ -40,6 +40,9 @@ final class AppState: ObservableObject {
     @Published var backup: BackupStatus?
     @Published var backupBusy = false
     @Published var backupNote: String?
+    // how much it can do without asking first
+    @Published var autonomy: OrbitServer.AutonomySettings?
+    @Published var autonomyBusy = false
     /// Whether the app is in the background, so a finished answer can announce itself.
     var backgrounded = false
     var graceTask: UIBackgroundTaskIdentifier = .invalid
@@ -402,6 +405,7 @@ final class AppState: ObservableObject {
         case .toolResult:      break
         case .status(let s):   liveStatus = s
         case .blocked(let r):  liveTools.append("refused: \(r)")
+        case .autoApproved(let n, let r): liveTools.append("✓ auto-approved \(n) — \(r)")
         case .approval(let n, let r, let id):
             pendingApproval = (n, r, id ?? "")
         case .error(let e):    lastError = e
@@ -857,5 +861,24 @@ extension AppState {
             backupNote = n == 0 ? "nothing was missing" : "put back \(n) file\(n == 1 ? "" : "s")"
             await loadChats()
         } catch { backupNote = error.localizedDescription }
+    }
+}
+
+// --------------------------------------------------------------------- autonomy
+
+extension AppState {
+    func refreshAutonomy() async {
+        guard let server else { return }
+        if let a = try? await server.autonomy() { autonomy = a }
+    }
+
+    /// "ask" | "auto" | "full" — the confirm dialog for "full" lives in the view,
+    /// since only it knows whether the person actually said yes.
+    func setAutonomyMode(_ mode: String) async {
+        guard let server else { return }
+        autonomyBusy = true
+        defer { autonomyBusy = false }
+        do { autonomy = try await server.setAutonomy(["autonomy_mode": mode]) }
+        catch { lastError = error.localizedDescription }
     }
 }

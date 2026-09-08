@@ -1074,6 +1074,11 @@ class H(http.server.BaseHTTPRequestHandler):
                         elif k == "content_delta":  lv["content"]  += p
                         elif k == "tool":
                             lv["tools"].append({"name": p.get("name"), "args": p.get("args")})
+                        elif k == "auto_approved":
+                            # so a tab that rejoins mid-answer still sees what ran
+                            # unattended, not just what is still waiting on it
+                            lv["tools"].append({"name": "✓ auto-approved: " + p.get("name", ""),
+                                                "args": p.get("args")})
                         elif k in ("server_starting", "stagnation", "autocompact"):
                             # a tab that rejoins mid-answer needs to see this too,
                             # otherwise a cold start looks like a hung chat
