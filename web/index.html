@@ -569,6 +569,14 @@ function addAssistant(who){
  // thinking sits BELOW the answer so it never pushes the reply off screen
  const th=el('<details class=think><summary>thinking</summary><div class=body></div></details>');
  th.style.display='none';m.appendChild(th);
+ // The thinking box scrolls itself, independently of the page. Track
+ // whether you are near ITS bottom so a live update only follows along
+ // when you have not deliberately scrolled up to read what came before —
+ // otherwise every token yanked you back down mid-read.
+ const thBody=th.querySelector('.body');
+ thBody._stick=true;
+ thBody.addEventListener('scroll',()=>{
+  thBody._stick=thBody.scrollHeight-thBody.scrollTop-thBody.clientHeight<30});
  const acts=m.querySelector('.acts');
  const c=el('<button>copy</button>');c.onclick=()=>copy(b.dataset.raw||b.textContent);acts.appendChild(c);
  const ck=el('<button>check DOIs</button>');
@@ -804,6 +812,7 @@ function attachLive(theSid, initial){
  const note=sysline('still generating — reconnected to it');
  const a=addAssistant(modelLabel());
  a.bub.innerHTML='<span class=working>rejoining this answer<span class=dots></span></span>';
+ let thinkStarted=false;
  const paint=lv=>{
   if(!lv.content&&!lv.thinking&&lv.status)
    a.bub.innerHTML='<span class=working>'+esc(lv.status)+'<span class=dots></span></span>';
@@ -815,7 +824,10 @@ function attachLive(theSid, initial){
    c.textContent=(auto?'✓ auto-approved — ':'* ')+name+args;
    a.tools.appendChild(c)});
   if(lv.thinking){a.think.style.display='';a.think.open=!lv.content;
-   a.think.querySelector('.body').textContent=lv.thinking}
+   const body=a.think.querySelector('.body');
+   if(!thinkStarted){thinkStarted=true;body._stick=true}   // first paint: nothing to preserve yet
+   body.textContent=lv.thinking;
+   if(body._stick)body.scrollTop=body.scrollHeight}        // only if you're not reading back
   if(lv.content){a.bub.innerHTML=md(lv.content);a.bub.dataset.raw=lv.content}
   bottom()};
  paint(initial||{});
@@ -1057,11 +1069,14 @@ async function go(opts){
       a.think.style.display='';a.think.open=true;a.think.classList.add('live');
       a.think.querySelector('summary').textContent='thinking…';
       a.bub.innerHTML='';                       // drop the "working" placeholder
+      a.think.querySelector('.body')._stick=true;     // nothing to preserve yet
      }
      thinking+=m.p;
      if(!thinkPending){thinkPending=setTimeout(()=>{thinkPending=null;
       const body=a.think.querySelector('.body');
-      body.textContent=thinking;body.scrollTop=body.scrollHeight;bottom()},90)}}
+      body.textContent=thinking;
+      if(body._stick)body.scrollTop=body.scrollHeight;   // only if you're not reading back
+      bottom()},90)}}
     else if(m.k==='content_delta'){
      if(!answer&&thinking){                     // answer begins — tuck thinking away
       if(thinkPending){clearTimeout(thinkPending);thinkPending=null}
