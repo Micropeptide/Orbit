@@ -15,12 +15,12 @@ autonomy mode Orbit just got. Worth closing that gap first.
 - [x] A no-ask / ask-for-risky / ask-for-everything spectrum (Ask every time / Auto-approve safe actions / Full computer access)
 - [x] A hard floor no mode lifts (disk destruction, fork bombs, protected paths, …)
 - [x] Every decision logged, auto-approvals included (`logs/safety.log`)
-- [ ] **Per-tool, per-pattern rules** — Claude Code's `Bash(git diff:*)` style: allow this exact shell command prefix without asking, deny that one outright, regardless of autonomy mode. A `config/permissions.json` with allow/deny globs per tool.
-- [ ] A **Settings → Permissions** panel to review and edit those rules, not just toggle autonomy mode
-- [ ] "Allow this exact command for the rest of the session" as a one-click option on an approval prompt, instead of a global setting change
-- [ ] "Always allow this action from now on" that writes a permission rule from an approval prompt, so the same edit never asks twice
-- [ ] Deny rules that always refuse a pattern, independent of autonomy mode (a personal, user-authored block-list on top of the built-in one)
-- [ ] A `/doctor`-equivalent: one command that checks Python deps, the model server, `cliclick`, disk space, config file validity, and reports what's wrong
+- [x] **Per-tool, per-pattern rules** — Claude Code's `Bash(git diff:*)` style: allow this exact shell command prefix without asking, deny that one outright, regardless of autonomy mode. Lives in `permission_rules` in settings (allow/deny globs per tool via `fnmatch`), not a separate file.
+- [x] A **Settings → Permissions** panel to review and edit those rules, not just toggle autonomy mode
+- [x] "Always allow this action from now on" that writes a permission rule from an approval prompt, so the same edit never asks twice — the pattern is editable before confirming
+- [x] Deny rules that always refuse a pattern, independent of autonomy mode (a personal, user-authored block-list on top of the built-in one)
+- [x] A `/doctor`-equivalent: checks Python version and deps against `requirements.txt`, the model server, `cliclick`, disk space, config file validity, MCP command paths, knowledge index and workspace writability — `/doctor`, the command palette, or Doctor in the sidebar
+- [ ] "Allow this exact command for the rest of the session only" as a lighter one-click option — what shipped persists until removed in Settings, there's no session-only variant
 - [ ] Per-project permission overrides (a lab notebook project that's always read-only vs. one that's fully trusted)
 
 ## Hooks — user-defined scripts on lifecycle events
@@ -55,8 +55,8 @@ and (for some) the power to block the action.
 
 ## Background work
 
-- [ ] **Run a shell command in the background** and keep chatting while it runs — a `run_shell_background` tool plus a way to check its output later (`check_background(id)`), instead of `run_shell` always blocking the whole turn
-- [ ] A "background tasks" panel showing what's running, with a stop button
+- [x] **Run a shell command in the background** and keep chatting while it runs — `run_shell_background` returns a job id immediately; `check_background(id)`, `list_background()` and `stop_background(id)` round it out, instead of `run_shell` always blocking the whole turn
+- [ ] A "background tasks" panel showing what's running, with a stop button — the tools exist; there's no dedicated UI surface for them yet, only what the model reports in chat
 - [ ] The cluster job queue already works this way (`cluster_submit`/`cluster_status`) — generalise the same pattern to local long-running processes
 - [ ] Long-running Python (`python` tool) able to run in the background too, with progress checked in periodically rather than blocking on a fixed timeout
 
@@ -64,7 +64,7 @@ and (for some) the power to block the action.
 
 - [x] Config files snapshot on every write (`config/.history/`, last 20 kept)
 - [x] Chats, files and knowledge docs go to a bin, not deleted outright
-- [ ] **A checkpoint before every `write_file`** to an existing file — not just a diff shown, an actual saved previous version you can revert to with one click, independent of whether the file is in git
+- [x] **A checkpoint before every `write_file`** to an existing file — not just a diff shown, an actual saved previous version (`workspace/.checkpoints/`, last 20 kept) you can revert to with one click from Files → history, independent of whether the file is in git. Restoring itself checkpoints what was there, so it's never a one-way trip
 - [ ] `/rewind`-equivalent: step the whole conversation (and the files it touched) back to an earlier point
 - [ ] A visible "3 files changed this turn — revert all" button after a turn that wrote files
 
@@ -108,8 +108,8 @@ and (for some) the power to block the action.
 
 ## Environment and doctor
 
-- [ ] `/doctor`-equivalent self-check (see Permissions section above) surfaced as its own settings panel, not just a command
-- [ ] A visible dependency/version report — Python version, installed packages vs. requirements.txt, MTPLX version, cliclick presence
+- [x] `/doctor`-equivalent self-check (see Permissions section above), reachable as its own panel (Doctor in the sidebar) as well as a command
+- [x] A visible dependency/version report — Python version, installed packages vs. requirements.txt, cliclick presence (MTPLX version not yet included)
 - [ ] One-click "check for updates" (git fetch + diff summary) and "update" (git pull + pip install -r requirements.txt), since Orbit currently only updates by hand
 - [ ] A startup self-test that runs once after `install.sh` and reports pass/fail per subsystem (model server, phone pairing, MCP servers, cluster SSH)
 

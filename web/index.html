@@ -182,7 +182,11 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .approve .btns{display:flex;gap:8px;margin-top:8px}
 .approve button{padding:5px 13px;border-radius:8px;font:inherit;font-size:12.5px;cursor:pointer}
 .approve .yes{background:var(--err);color:#fff;border:0}
-.approve .no{background:none;border:1px solid var(--line);color:var(--fg)}
+.approve .no,.approve .always{background:none;border:1px solid var(--line);color:var(--fg)}
+.approve .alwaysrow{display:flex;gap:8px;margin-top:8px;align-items:center}
+.approve .alwaysrow input{flex:1;min-width:0;padding:5px 9px;border-radius:8px;
+ border:1px solid var(--line);background:var(--panel);color:var(--fg);font:inherit;font-size:12.5px}
+.approve .alwaysrow button{white-space:nowrap;border:1px solid var(--line);background:none;color:var(--fg)}
 .blocked{border-left:3px solid var(--err);padding:7px 11px;margin:7px 0;font-size:13px;
  color:var(--err);background:color-mix(in srgb,var(--err) 6%,transparent);border-radius:7px}
 .injwarn{border-left:3px solid var(--warn);padding:7px 11px;margin:7px 0;font-size:12.5px;
@@ -380,7 +384,8 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
   <div class=slist id=slist></div>
   <div class=foot>
     <a id=opensettings>Settings</a><a id=openmem>Memory &amp; instructions</a>
-    <a id=openprompts>Saved prompts</a><a id=openkeys>Shortcuts (?)</a><a id=openabout>About &amp; help</a>
+    <a id=openprompts>Saved prompts</a><a id=opendoctor>Doctor</a>
+    <a id=openkeys>Shortcuts (?)</a><a id=openabout>About &amp; help</a>
     <span id=fmodel></span>
   </div>
 </aside>
@@ -444,6 +449,7 @@ const CMDS=[
  {c:'/skills',d:'saved procedures'},
  {c:'/tools',d:'list active tools'},
  {c:'/status',d:'server, memory, speed'},
+ {c:'/doctor',d:'check deps, disk, server, config for problems'},
  {c:'/remember',d:'save a note to memory: /remember <text>'},
  {c:'/export',d:'download this chat as markdown'},
  {c:'/clear',d:'clear the screen only'},
@@ -967,6 +973,7 @@ async function runCmd(cmd,rest){
  if(cmd==='/status'){const s=await (await fetch('/api/status')).json();
   sysline(`${s.running?'running':'stopped'} · ${s.model||''} · ${s.memory_gb||'?'} GB · ctx ${s.context_used||0}/${s.context_max||'?'}`);
   return true}
+ if(cmd==='/doctor'){showHealth();return true}
  if(cmd==='/remember'){if(!rest){sysline('usage: /remember <text>');return true}
   const name=rest.toLowerCase().split(/\s+/).slice(0,4).join('-').replace(/[^a-z0-9-]/g,'');
   await fetch('/api/memory/save',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -1122,15 +1129,29 @@ async function go(opts){
      box.appendChild(pre);
      const btns=el('<div class=btns></div>');
      const yes=el('<button class=yes>Allow once</button>');
+     const always=el('<button class=always>Always allow…</button>');
      const no=el('<button class=no>Deny</button>');
-     const send=async allow=>{await fetch('/api/approve',{method:'POST',
-       headers:{'Content-Type':'application/json'},body:JSON.stringify({id:m.p.id,allow})});
+     const send=async(allow,extra)=>{await fetch('/api/approve',{method:'POST',
+       headers:{'Content-Type':'application/json'},
+       body:JSON.stringify({id:m.p.id,allow,...extra})});
       box.innerHTML='';box.appendChild(el(`<b>${allow?'allowed':'denied'}</b>`))};
      yes.onclick=()=>send(true);no.onclick=()=>send(false);
-     btns.appendChild(yes);btns.appendChild(no);box.appendChild(btns);
+     always.onclick=()=>{
+      const row=el('<div class=alwaysrow></div>');
+      const inp=document.createElement('input');inp.type='text';
+      inp.value=m.p.suggested_pattern||'*';inp.spellcheck=false;
+      const ok=el('<button>Always allow this</button>');
+      const cancel=el('<button>Cancel</button>');
+      ok.onclick=()=>send(true,{always:true,pattern:inp.value,
+        note:`${m.p.name}: ${inp.value}`});
+      cancel.onclick=()=>row.remove();
+      row.appendChild(inp);row.appendChild(ok);row.appendChild(cancel);
+      box.appendChild(row);always.remove()};
+     btns.appendChild(yes);btns.appendChild(always);btns.appendChild(no);box.appendChild(btns);
      a.tools.appendChild(box);bottom()}
     else if(m.k==='auto_approved'){const b=el('<div class=autoappr></div>');
-     b.textContent='✓ auto-approved — '+m.p.reason+' ('+m.p.name+')';a.tools.appendChild(b);bottom()}
+     b.textContent='✓ auto-approved — '+m.p.reason+' ('+m.p.name+')'+
+       (m.p.rule?' — matched your rule: '+m.p.rule:'');a.tools.appendChild(b);bottom()}
     else if(m.k==='blocked'){const b=el('<div class=blocked></div>');
      b.textContent='Blocked: '+m.p.reason+' ('+m.p.name+')';a.tools.appendChild(b);bottom()}
     else if(m.k==='injection'){const b=el('<div class=injwarn></div>');
@@ -1538,6 +1559,21 @@ async function openSettings(tab){
       <span><b>${label}</b><br><span class=note>${esc(why)}</span></span></label>`).join('')}
     <div class=hint2 style="margin:8px 0 4px">Every action is written to <code>logs/safety.log</code>
      regardless of mode, including which ones ran unattended.</div>
+    <div class=sec>Your own rules <small>— personal allow/deny patterns on top of the tiers above, like Claude Code's Bash(git diff:*)</small></div>
+    <div id=rulelist></div>
+    <div class=grid style="margin-top:8px">
+     <label>Tool</label><input type=text id=r_tool placeholder="* (any tool) or e.g. run_shell">
+     <label>Pattern</label><input type=text id=r_pattern placeholder="e.g. git diff* or rm -rf*">
+     <label>Note</label><input type=text id=r_note placeholder="optional — why">
+    </div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+     <button class=ghost id=r_deny>Add deny rule</button>
+     <button class=ghost id=r_allow>Add allow rule</button>
+    </div>
+    <div class=hint2>Deny always blocks that pattern, in every autonomy mode — it can only ever add
+     restriction, never lift the hard floor below. Allow pre-approves a normally-confirm-level match
+     without asking, in any mode — it can never reach a blocked action, only skip a question that would
+     otherwise have been asked.</div>
     <div class=sec>Permissions</div><div class=grid>
      <label>Code execution</label><div class=sw><input type=checkbox id=t_code><span class=note>the python tool runs real code on your Mac</span></div>
      <label>Enable shell</label><div class=sw><input type=checkbox id=t_shell><span class=note>lets the model run shell commands ${mode==='full'?'— on anyway, from Full access':''}</span></div>
@@ -1562,6 +1598,28 @@ async function openSettings(tab){
    $('#t_h2').checked=!!draft.cluster_write;
    $('#t_shell').checked=!!draft.shell_enabled;$('#t_wany').checked=!!draft.write_any;
    $('#t_screen').checked=!!draft.computer_use_enabled;
+   const rules=draft.permission_rules||{allow:[],deny:[]};
+   const rl=$('#rulelist');
+   const ruleRow=(kind,r,i)=>{const row=el('<div class=memrow></div>');
+    const b=document.createElement('b');b.textContent=(kind==='deny'?'deny ':'allow ')+(r.tool||'*');
+    b.style.color=kind==='deny'?'var(--err)':'var(--ok, #2a7)';
+    const sp=document.createElement('span');
+    sp.textContent=r.pattern+(r.note?' — '+r.note:'');
+    const del=el('<button class=ghost>remove</button>');
+    del.onclick=async()=>{await fetch('/api/permissions/remove',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({kind,index:i})});
+     openSettings('tools')};
+    row.appendChild(b);row.appendChild(sp);row.appendChild(del);return row};
+   if(!rules.deny.length&&!rules.allow.length)rl.innerHTML='<div class=note>No rules yet — none needed until you add one.</div>';
+   rules.deny.forEach((r,i)=>rl.appendChild(ruleRow('deny',r,i)));
+   rules.allow.forEach((r,i)=>rl.appendChild(ruleRow('allow',r,i)));
+   const addRule=kind=>async()=>{
+    const tool=$('#r_tool').value.trim()||'*',pattern=$('#r_pattern').value.trim();
+    if(!pattern)return;
+    await fetch('/api/permissions/add',{method:'POST',headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({kind,tool,pattern,note:$('#r_note').value.trim()})});
+    openSettings('tools')};
+   $('#r_deny').onclick=addRule('deny');$('#r_allow').onclick=addRule('allow');
    $('#t_screen').onchange=e=>{
     if(e.target.checked&&!confirm(
       "Screen control lets Orbit see your screen and click, type and press keys — in any app, "+
@@ -1939,6 +1997,8 @@ async function renderFiles(){
    rn.onclick=async()=>{const n=prompt('New name',f.name);if(!n||n===f.name)return;
     await apiPost('/api/files/rename',{rel:f.rel,name:n},'rename');renderFiles()};
    acts.appendChild(rn);
+   if(f.area==='generated'){const hi=document.createElement('button');hi.textContent='history';
+    hi.onclick=()=>showCheckpoints(f.rel,f.name);acts.appendChild(hi)}
    const kb=document.createElement('button');kb.textContent='to knowledge';
    kb.onclick=async()=>{
     if(await apiPost('/api/knowledge/from_upload',{rel:f.rel},'adding to knowledge'))
@@ -2347,6 +2407,27 @@ async function openPal(){
 
 
 
+/* ---------------- checkpoints ---------------- */
+async function showCheckpoints(rel,name){
+ const d=await (await fetch('/api/checkpoints?rel='+encodeURIComponent(rel))).json();
+ const cps=d.checkpoints||[];
+ $('#modalhost').innerHTML=`<div class=modal><div class="sheet auto" style="max-width:520px">
+  <header><b>Earlier versions — ${esc(name)}</b><button class=ghost style="margin-left:auto" id=cpx>close</button></header>
+  <div class=body id=cpbody></div></div></div>`;
+ $('#cpx').onclick=closeModal;
+ $('#modalhost').querySelector('.modal').onclick=e=>{if(e.target.classList.contains('modal'))closeModal()};
+ const b=$('#cpbody');
+ if(!cps.length){b.innerHTML='<div class=note>No earlier versions saved yet — one is kept automatically each time this file is overwritten.</div>';return}
+ cps.forEach(ts=>{const r=el('<div class=memrow></div>');
+  const sp=document.createElement('span');sp.textContent=ts.replace('.bak','').replace(/^(\d{4})(\d\d)(\d\d)-(\d\d)(\d\d)(\d\d)/,'$1-$2-$3 $4:$5:$6');
+  r.appendChild(sp);
+  const rb=el('<button class=ghost>restore</button>');
+  rb.onclick=async()=>{if(!confirm('Replace the current file with this version? (the current version is saved first, so this can be undone too)'))return;
+   const res=await (await fetch('/api/checkpoints/restore',{method:'POST',headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({rel,name:ts})})).json();
+   toast(res.message||(res.ok?'restored':'failed'));closeModal();renderFiles()};
+  r.appendChild(rb);b.appendChild(r)})}
+
 /* ---------------- health ---------------- */
 async function showHealth(){
  const rows=await (await fetch('/api/health')).json();
@@ -2624,6 +2705,7 @@ $('#settings2').onclick=()=>openSettings();
 $('#opensettings').onclick=()=>openSettings();
 $('#openmem').onclick=()=>openSettings('memory');
 $('#openprompts').onclick=()=>{libTab='prompts';showPane('lib')};
+$('#opendoctor').onclick=showHealth;
 $('#openkeys').onclick=showShortcuts;
 $('#openabout').onclick=showAbout;
 $('#openkeys').ondblclick=showOnboarding;

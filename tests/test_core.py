@@ -717,5 +717,214 @@ class TestGuardianBorrowings(unittest.TestCase):
         self.assertTrue("KNOWLEDGE.md" in out or "No other agent" in out)
 
 
+class TestPermissionRules(unittest.TestCase):
+    """Personal allow/deny patterns layered on top of the autonomy tiers —
+    deny can only ever add restriction, allow can only ever pre-approve a
+    confirm-level action, and neither can touch the built-in hard floor."""
+    def setUp(self):
+        self._saved_S = q.S
+        self._saved_save = q.save_settings
+        q.S = dict(q.DEFAULTS)
+        q.save_settings = lambda s: None
+
+    def tearDown(self):
+        q.S = self._saved_S
+        q.save_settings = self._saved_save
+
+    def test_deny_rule_blocks_a_matching_command(self):
+        q.add_permission_rule("deny", "run_shell", "rm -rf /tmp/nope*", note="test")
+        lvl, why = q.risk_check("run_shell", {"command": "rm -rf /tmp/nope-here"})
+        self.assertEqual(lvl, "block")
+        self.assertIn("denied by your own rule", why)
+
+    def test_deny_rule_does_not_affect_other_commands(self):
+        q.add_permission_rule("deny", "run_shell", "rm -rf /tmp/nope*", note="test")
+        lvl, _ = q.risk_check("run_shell", {"command": "ls -la"})
+        self.assertIsNone(lvl)
+
+    def test_allow_rule_matches_via_allowed_by_rule(self):
+        q.add_permission_rule("allow", "run_shell", "git diff*", note="test")
+        self.assertIsNotNone(q.allowed_by_rule("run_shell", {"command": "git diff --stat"}))
+        self.assertIsNone(q.allowed_by_rule("run_shell", {"command": "git push"}))
+
+    def test_allow_rule_never_lifts_the_hard_floor(self):
+        q.add_permission_rule("allow", "run_shell", "*", note="allow everything")
+        lvl, why = q.risk_check("run_shell", {"command": "rm -rf /System/Library/CoreServices"})
+        self.assertEqual(lvl, "block")
+        self.assertIn("protected path", why)
+
+    def test_allow_rule_does_not_change_risk_checks_own_verdict(self):
+        # allowed_by_rule only affects _run_one_tool's auto-approval decision;
+        # risk_check itself must keep reporting the plain 'confirm' tier.
+        q.add_permission_rule("allow", "run_shell", "*", note="allow everything")
+        lvl, _ = q.risk_check("run_shell", {"command": "rm -rf /tmp/somefile"})
+        self.assertEqual(lvl, "confirm")
+
+    def test_remove_permission_rule(self):
+        q.add_permission_rule("deny", "run_shell", "rm -rf /tmp/nope*", note="test")
+        rules = q.remove_permission_rule("deny", 0)
+        self.assertEqual(rules, [])
+        lvl, _ = q.risk_check("run_shell", {"command": "rm -rf /tmp/nope-here"})
+        self.assertEqual(lvl, "confirm")
+
+    def test_run_one_tool_wiring_references_allowed_by_rule(self):
+        import inspect
+        self.assertIn("allowed_by_rule(fn, args)", inspect.getsource(q._run_one_tool))
+
+
+class TestProtectedPathNesting(unittest.TestCase):
+    """_targets_protected regression: /System and friends must catch anything
+    nested underneath (no legitimate use at all), while /Users, /u/project and
+    other broad containers must keep matching only the bare root — Orbit's own
+    workspace and cluster_workdir legitimately live nested under those."""
+    def test_nested_never_legitimate_roots_are_caught(self):
+        for cmd in ("rm -rf /System/Library/CoreServices", "rm -rf /System",
+                    "rm -rf /Applications/Foo.app", "rm -rf /Library/LaunchDaemons/x.plist"):
+            lvl, _ = q.risk_check("run_shell", {"command": cmd})
+            self.assertEqual(lvl, "block", cmd)
+
+    def test_broad_containers_only_block_the_bare_root(self):
+        lvl, _ = q.risk_check("run_shell",
+                              {"command": "rm -rf " + os.path.expanduser("~")})
+        self.assertEqual(lvl, "block")
+        lvl, _ = q.risk_check("run_shell",
+                              {"command": f"rm -rf {q.WORKSPACE}/scratch"})
+        self.assertEqual(lvl, "confirm")
+
+    def test_broad_container_nested_paths_are_not_hard_blocked(self):
+        # a lot of legitimate work (including Orbit's own workspace) lives
+        # nested under the home directory -- only the bare root itself is a
+        # hard block
+        lvl, _ = q.risk_check("run_shell",
+            {"command": "rm -rf " + os.path.join(os.path.expanduser("~"), "some", "nested", "path")})
+        self.assertEqual(lvl, "confirm")
+
+
+class TestCheckpoints(unittest.TestCase):
+    """write_file snapshots the previous version of an existing workspace file
+    before overwriting it, and that snapshot can be restored."""
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="qqtest-cp-")
+        self._saved_ws = q.WORKSPACE
+        self._saved_cp = q.CHECKPOINTS
+        q.WORKSPACE = self.tmp
+        q.CHECKPOINTS = os.path.join(self.tmp, ".checkpoints")
+
+    def tearDown(self):
+        q.WORKSPACE = self._saved_ws
+        q.CHECKPOINTS = self._saved_cp
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_no_checkpoint_for_a_brand_new_file(self):
+        p = os.path.join(q.WORKSPACE, "new.txt")
+        q.t_write_file(p, "v1")
+        self.assertEqual(q.list_checkpoints(p), [])
+
+    def test_overwrite_creates_a_restorable_checkpoint(self):
+        p = os.path.join(q.WORKSPACE, "note.txt")
+        q.t_write_file(p, "v1")
+        time.sleep(1.1)                          # checkpoint names are second-resolution
+        q.t_write_file(p, "v2")
+        cps = q.list_checkpoints(p)
+        self.assertEqual(len(cps), 1)
+        self.assertEqual(open(p).read(), "v2")
+        q.restore_checkpoint(p, cps[0])
+        self.assertEqual(open(p).read(), "v1")
+
+    def test_restore_is_itself_undoable(self):
+        p = os.path.join(q.WORKSPACE, "note.txt")
+        q.t_write_file(p, "v1")
+        time.sleep(1.1)
+        q.t_write_file(p, "v2")
+        first = q.list_checkpoints(p)[0]
+        q.restore_checkpoint(p, first)
+        self.assertEqual(len(q.list_checkpoints(p)), 2)
+
+    def test_restore_rejects_path_traversal_in_checkpoint_name(self):
+        p = os.path.join(q.WORKSPACE, "note.txt")
+        q.t_write_file(p, "v1")
+        out = q.restore_checkpoint(p, "../../etc/passwd")
+        self.assertTrue(out.startswith("Error"))
+
+    def test_no_checkpoints_outside_the_workspace(self):
+        self.assertEqual(q.list_checkpoints("/tmp/not-in-workspace.txt"), [])
+
+
+class TestBackgroundShell(unittest.TestCase):
+    """run_shell_background hands back a job id immediately; check_background
+    and list_background poll it without blocking the caller."""
+    def setUp(self):
+        self._saved_S = q.S
+        self._saved_jobs = q.BG_JOBS
+        self._saved_out = q.BG_OUT_DIR
+        self.tmp = tempfile.mkdtemp(prefix="qqtest-bg-")
+        q.S = dict(q.DEFAULTS); q.S["shell_enabled"] = True
+        q.BG_JOBS = {}
+        q.BG_OUT_DIR = os.path.join(self.tmp, ".bg_jobs")
+
+    def tearDown(self):
+        for rec in q.BG_JOBS.values():
+            try: rec["proc"].kill()
+            except Exception: pass
+        q.S = self._saved_S
+        q.BG_JOBS = self._saved_jobs
+        q.BG_OUT_DIR = self._saved_out
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_refused_when_shell_disabled(self):
+        q.S["shell_enabled"] = False
+        out = q.t_run_shell_background("echo hi")
+        self.assertIn("disabled", out)
+
+    def test_job_runs_and_can_be_polled_to_completion(self):
+        out = q.t_run_shell_background("echo hello-bg")
+        jid = out.split()[3].rstrip(":")
+        for _ in range(50):
+            status = q.t_check_background(jid)
+            if "exited" in status: break
+            time.sleep(0.1)
+        self.assertIn("exited 0", status)
+        self.assertIn("hello-bg", status)
+
+    def test_unknown_job_id_is_an_error(self):
+        out = q.t_check_background("bg-does-not-exist")
+        self.assertTrue(out.startswith("Error"))
+
+    def test_list_background_reports_the_job(self):
+        out = q.t_run_shell_background("sleep 0.3")
+        jid = out.split()[3].rstrip(":")
+        self.assertIn(jid, q.t_list_background())
+
+    def test_stop_background_terminates_a_running_job(self):
+        out = q.t_run_shell_background("sleep 30")
+        jid = out.split()[3].rstrip(":")
+        msg = q.t_stop_background(jid)
+        self.assertIn("terminate", msg)
+        q.BG_JOBS[jid]["proc"].wait(timeout=5)
+        self.assertIsNotNone(q.BG_JOBS[jid]["proc"].poll())
+
+
+class TestDoctor(unittest.TestCase):
+    """health_check() is the backend for the Doctor panel and /doctor command —
+    every row must carry the fields the UI renders."""
+    def test_rows_have_the_expected_shape(self):
+        rows = q.health_check()
+        self.assertTrue(rows)
+        for r in rows:
+            for key in ("name", "ok", "detail", "fix", "info"):
+                self.assertIn(key, r)
+
+    def test_python_version_check_passes_on_this_interpreter(self):
+        rows = {r["name"]: r for r in q.health_check()}
+        self.assertIn("Python", rows)
+        self.assertTrue(rows["Python"]["ok"])
+
+    def test_cliclick_check_uses_absolute_paths_not_just_PATH(self):
+        # regression: shutil.which() alone misses cliclick under the launchd
+        # service's restricted PATH even when it's installed via Homebrew
+        import inspect
+        self.assertIn("_cliclick_path", inspect.getsource(q.health_check))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

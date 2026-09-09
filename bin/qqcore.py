@@ -5,7 +5,7 @@ Imported by `orbit` (CLI) and `orbit-ui` (web). Every piece of state lives in on
 folder — the one this file sits in — so the whole install is movable and
 inspectable. Set ORBIT_HOME to keep data somewhere other than the code.
 """
-import atexit, hashlib, json, os, subprocess, sys, threading, time, urllib.request, urllib.error, warnings
+import atexit, fnmatch, hashlib, json, os, subprocess, sys, threading, time, urllib.request, urllib.error, warnings
 warnings.filterwarnings("ignore")
 
 _HERE     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -99,6 +99,20 @@ DEFAULTS = {
   #          asks, and protected paths stay hard-blocked — full access does
   #          not lift either of those.
   "autonomy_mode": "ask",
+  # Personal rules on top of the autonomy tiers, same idea as Claude Code's
+  # Bash(git diff:*) allow-list: {"tool": "run_shell"|"*", "pattern": "glob",
+  # "note": "..."}. 'deny' always blocks, in every mode, checked before
+  # anything else — but never a way to lift the built-in hard floor, since it
+  # is folded into the same 'block' verdict that floor already uses. 'allow'
+  # pre-approves a 'confirm'-level match without asking again, in ANY
+  # autonomy mode — it can never reach a 'block'-level action, only skip a
+  # question that would otherwise have been asked. See risk_check().
+  "permission_rules": {"allow": [], "deny": []},
+  # A concise / explanatory / formal preset layered on the system prompt.
+  "answer_style": "default",
+  # Extra folders write_file/python/run_shell may touch without turning on
+  # "write anywhere" wholesale — each an absolute path.
+  "extra_dirs": [],
 }
 
 # ------------------------------------------------------------------ settings
@@ -616,6 +630,60 @@ def t_read_file(path):
     if not os.path.exists(p): return f"Error: no such file: {p}"
     return _md(p) or "(no readable text)"
 
+CHECKPOINTS = os.path.join(WORKSPACE, ".checkpoints")
+CHECKPOINTS_KEEP = 20
+
+def _checkpoint_dir(rel):
+    return os.path.join(CHECKPOINTS, rel)
+
+def _save_checkpoint(p):
+    """Snapshot a workspace file's current contents before write_file overwrites
+    it, so a bad edit can be undone with the actual previous file, not just a
+    diff. Only workspace files are checkpointed — write_any/full-access writes
+    elsewhere on the Mac are not (nowhere safe to keep the snapshot). A no-op
+    for a file that doesn't exist yet, since there is nothing to save."""
+    if not p.startswith(os.path.abspath(WORKSPACE) + os.sep): return
+    if not os.path.isfile(p): return
+    rel = os.path.relpath(p, WORKSPACE)
+    if rel.split(os.sep)[0] == ".checkpoints": return
+    d = _checkpoint_dir(rel)
+    os.makedirs(d, exist_ok=True)
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    dest, n = os.path.join(d, ts + ".bak"), 1
+    while os.path.exists(dest):
+        dest = os.path.join(d, f"{ts}-{n}.bak"); n += 1
+    try:
+        with open(p, "rb") as src, open(dest, "wb") as out: out.write(src.read())
+    except OSError:
+        return
+    snaps = sorted(os.listdir(d))
+    for old in snaps[:-CHECKPOINTS_KEEP]:
+        try: os.remove(os.path.join(d, old))
+        except OSError: pass
+
+def list_checkpoints(path):
+    """Saved versions of a workspace file, newest first — [] if it has none or
+    lives outside the workspace."""
+    p = os.path.abspath(os.path.expanduser(path))
+    if not p.startswith(os.path.abspath(WORKSPACE) + os.sep): return []
+    d = _checkpoint_dir(os.path.relpath(p, WORKSPACE))
+    if not os.path.isdir(d): return []
+    return sorted(os.listdir(d), reverse=True)
+
+def restore_checkpoint(path, name):
+    """Put a saved version of a workspace file back. Snapshots what's there
+    first, so restoring is itself undoable — never a one-way trip."""
+    p = os.path.abspath(os.path.expanduser(path))
+    if not p.startswith(os.path.abspath(WORKSPACE) + os.sep):
+        return "Error: checkpoints only exist for files inside the workspace."
+    d = os.path.abspath(_checkpoint_dir(os.path.relpath(p, WORKSPACE)))
+    src = os.path.abspath(os.path.join(d, name or ""))
+    if os.path.dirname(src) != d or not os.path.isfile(src):
+        return "Error: no such checkpoint."
+    _save_checkpoint(p)
+    with open(src, "rb") as f, open(p, "wb") as out: out.write(f.read())
+    return f"Restored {os.path.relpath(p, WORKSPACE)} from the {name} checkpoint."
+
 def t_write_file(path, content):
     p = os.path.abspath(os.path.expanduser(path))
     if not (S.get("write_any") or full_access()) and not p.startswith(os.path.abspath(WORKSPACE)):
@@ -623,6 +691,7 @@ def t_write_file(path, content):
                 "'Full computer access' in Settings -> Tools to override.")
     d = file_diff(p, content)
     LAST_DIFF.clear(); LAST_DIFF.update({"path": p, **d})
+    _save_checkpoint(p)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     open(p, "w").write(content)
     try:
@@ -639,6 +708,65 @@ def t_run_shell(command):
     r = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=180)
     return (f"exit={r.returncode}\nstdout:\n{r.stdout[:MAXCH]}"
             + (f"\nstderr:\n{r.stderr[:2000]}" if r.stderr else ""))
+
+BG_JOBS = {}                                       # id -> job record, this session only
+BG_SEQ = [0]
+BG_OUT_DIR = os.path.join(WORKSPACE, ".bg_jobs")
+BG_KEEP = 50                                        # finished jobs pruned beyond this
+
+def _bg_prune():
+    finished = [j for j in BG_JOBS.values() if j["proc"].poll() is not None]
+    if len(BG_JOBS) - len(finished) >= BG_KEEP: return   # don't prune a still-running job
+    for j in sorted(finished, key=lambda j: j["started"])[:max(0, len(BG_JOBS) - BG_KEEP)]:
+        BG_JOBS.pop(j["id"], None)
+
+def t_run_shell_background(command):
+    """Same as run_shell, but returns immediately with a job id instead of
+    blocking the turn — check on it later with check_background."""
+    if not (S.get("shell_enabled") or full_access()):
+        return ("Error: shell is disabled. Enable it, or 'Full computer access', "
+                "in Settings -> Tools if you want this.")
+    os.makedirs(BG_OUT_DIR, exist_ok=True)
+    _bg_prune()
+    BG_SEQ[0] += 1
+    jid = f"bg{BG_SEQ[0]}"
+    out_path = os.path.join(BG_OUT_DIR, jid + ".log")
+    outf = open(out_path, "w")
+    proc = subprocess.Popen(command, shell=True, cwd=WORKSPACE, stdout=outf,
+                            stderr=subprocess.STDOUT, text=True)
+    BG_JOBS[jid] = {"id": jid, "command": command, "started": time.time(),
+                     "proc": proc, "out_path": out_path, "outf": outf}
+    return f"Started background job {jid}: {command!r}. Poll it with check_background({jid!r})."
+
+def t_check_background(id, tail=4000):
+    rec = BG_JOBS.get(id)
+    if not rec:
+        return f"Error: no background job {id!r} — it may have finished a while ago and rolled off."
+    rc = rec["proc"].poll()
+    if rc is not None and not rec.get("outf_closed"):
+        try: rec["outf"].close()
+        except Exception: pass
+        rec["outf_closed"] = True
+    try: out = open(rec["out_path"], encoding="utf-8", errors="replace").read()
+    except OSError: out = ""
+    status = "running" if rc is None else f"exited {rc}"
+    age = int(time.time() - rec["started"])
+    return f"{id} ({rec['command']!r}) — {status}, {age}s since start\n\n{out[-tail:]}"
+
+def t_list_background():
+    if not BG_JOBS: return "No background jobs this session."
+    lines = []
+    for jid, rec in sorted(BG_JOBS.items(), key=lambda kv: kv[1]["started"]):
+        rc = rec["proc"].poll()
+        lines.append(f"{jid}: {'running' if rc is None else f'exited {rc}'} — {rec['command']}")
+    return "\n".join(lines)
+
+def t_stop_background(id):
+    rec = BG_JOBS.get(id)
+    if not rec: return f"Error: no background job {id!r}."
+    if rec["proc"].poll() is not None: return f"{id} already finished."
+    rec["proc"].terminate()
+    return f"Sent terminate to {id}."
 
 def t_fetch_paper_pdf(query, out_dir=None):
     script = os.path.join(ROOT, "vendor-tools", "paper-fetch", "scripts", "fetch.py")
@@ -711,11 +839,20 @@ CLICLICK = None
 LAST_SCREEN_IMAGE = None   # data: URL of the most recent screenshot -- the model
                            # sees it as a real image on the NEXT round, not this one
 
-def _find_cliclick():
-    global CLICLICK
+def _cliclick_path():
+    """Where cliclick actually is, if anywhere -- checked by absolute path, not
+    PATH, since the launchd service that runs Orbit has a PATH too restricted
+    to see Homebrew's bin. Read-only: never installs anything."""
     if CLICLICK: return CLICLICK
     for p in ("/opt/homebrew/bin/cliclick", "/usr/local/bin/cliclick"):
-        if os.path.exists(p): CLICLICK = p; return CLICLICK
+        if os.path.exists(p): return p
+    import shutil as _sh3
+    return _sh3.which("cliclick")
+
+def _find_cliclick():
+    global CLICLICK
+    found = _cliclick_path()
+    if found: CLICLICK = found; return CLICLICK
     # a Homebrew install is a normal, low-risk, single-purpose utility --
     # install it once so the feature works out of the box, the same way a
     # missing Python package would just get pip installed
@@ -938,7 +1075,9 @@ BUILTIN = {"web_search":t_web_search, "fetch_url":t_fetch_url, "read_file":t_rea
            "screen_look":t_screen_look, "screen_click":t_screen_click,
            "screen_move":t_screen_move, "screen_drag":t_screen_drag,
            "screen_type":t_screen_type, "screen_key":t_screen_key,
-           "screen_scroll":t_screen_scroll}
+           "screen_scroll":t_screen_scroll,
+           "run_shell_background":t_run_shell_background, "check_background":t_check_background,
+           "list_background":t_list_background, "stop_background":t_stop_background}
 
 ALL_SPECS = [
  {"type":"function","function":{"name":"web_search","description":"Search the web (DuckDuckGo). Use for current events or facts to verify.",
@@ -955,6 +1094,14 @@ ALL_SPECS = [
   "parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
  {"type":"function","function":{"name":"run_shell","description":"Run a shell command on the user's Mac.",
   "parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}},
+ {"type":"function","function":{"name":"run_shell_background","description":"Like run_shell, but returns immediately with a job id instead of blocking this turn — for anything long-running. Check on it with check_background.",
+  "parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}},
+ {"type":"function","function":{"name":"check_background","description":"Poll a job started with run_shell_background: whether it's still running or how it exited, plus its output so far.",
+  "parameters":{"type":"object","properties":{"id":{"type":"string"},"tail":{"type":"integer"}},"required":["id"]}}},
+ {"type":"function","function":{"name":"list_background","description":"List every background shell job started this session and its status.",
+  "parameters":{"type":"object","properties":{}}}},
+ {"type":"function","function":{"name":"stop_background","description":"Terminate a still-running background job by id.",
+  "parameters":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"]}}},
  {"type":"function","function":{"name":"fetch_paper_pdf","description":"Download a paper PDF by DOI or title (Unpaywall/S2/arXiv/PMC/bioRxiv fallback).",
   "parameters":{"type":"object","properties":{"query":{"type":"string"},"out_dir":{"type":"string"}},"required":["query"]}}},
  {"type":"function","function":{"name":"python","description":"Run Python code in the workspace and return its output. Use for calculations, data analysis, plotting, file processing.",
@@ -1004,7 +1151,9 @@ def active_tools():
     en = S.get("tools_enabled") or {}
     specs = [t for t in ALL_SPECS if en.get(t["function"]["name"], True)]
     if not (S.get("shell_enabled") or full_access()):
-        specs = [t for t in specs if t["function"]["name"] != "run_shell"]
+        BG_NAMES = ("run_shell", "run_shell_background", "check_background",
+                    "list_background", "stop_background")
+        specs = [t for t in specs if t["function"]["name"] not in BG_NAMES]
     if not S.get("computer_use_enabled"):
         specs = [t for t in specs if not t["function"]["name"].startswith("screen_")]
     mcp_specs, errors = load_mcp()
@@ -1135,11 +1284,14 @@ def _run_one_tool(tc, fn, args, messages, emit, approve, seen_calls):
         LOG_SAFETY(fn, args, "blocked", reason)
     elif level == "confirm":
         mode = S.get("autonomy_mode", "ask")
-        auto = (mode == "full" and fn not in NEVER_AUTO_FNS and reason not in NEVER_AUTO) or \
+        by_rule = allowed_by_rule(fn, args)
+        auto = bool(by_rule) or \
+               (mode == "full" and fn not in NEVER_AUTO_FNS and reason not in NEVER_AUTO) or \
                (mode == "auto" and _auto_approvable(fn, args, reason))
         if auto:
-            emit("auto_approved", {"name": fn, "args": args, "reason": reason})
-            LOG_SAFETY(fn, args, "auto-approved", reason)
+            emit("auto_approved", {"name": fn, "args": args, "reason": reason,
+                                   "rule": by_rule["note"] or by_rule["pattern"] if by_rule else None})
+            LOG_SAFETY(fn, args, "auto-approved (your rule)" if by_rule else "auto-approved", reason)
             try: out = dispatch(fn, args)
             except Exception as e: out = f"Error: {type(e).__name__}: {e}"
         else:
@@ -2024,22 +2176,95 @@ DESTRUCTIVE = [
 ]
 # Paths that must never be recursively touched
 PROTECTED = ["/", "/Users", os.path.expanduser("~"), "~", "$HOME", "/u/home", "/u/project",
-             "/home", "/scratch", "/System", "/Applications", "/Library"] + \
-            (S.get("protected_paths") or [])
+             "/home", "/scratch"] + (S.get("protected_paths") or [])
+
+# Roots with no legitimate use at all, not even nested — unlike /Users or
+# /u/project (which legitimately contain Orbit's own workspace/cluster_workdir,
+# so only the bare root is blocked below), nothing Orbit does ever needs to
+# reach inside these, so a target anywhere underneath is blocked too.
+NESTED_PROTECTED = ["/System", "/Applications", "/Library"]
 
 def _targets_protected(blob):
     """True if the text references a protected root as a target path."""
     expanded = blob.replace("$HOME", os.path.expanduser("~")).replace("~", os.path.expanduser("~"))
+    for p in NESTED_PROTECTED:
+        if _re.search(rf"(?:^|[\s'\"(=]){_re.escape(p)}(?=/|[\s'\")]|$)", expanded):
+            return p
     for p in PROTECTED:
         pp = os.path.expanduser(p.replace("$HOME", "~"))
         if pp in ("/",):
             if _re.search(r"[\s'\"(]/(\s|['\")]|$)", expanded): return "/"
             continue
-        # The protected root itself, and only as a whole path — "/scratch" must not
-        # match "~/project/workspace/scratch", which is an ordinary folder of yours.
+        # The protected root itself, and only as a whole path — "/scratch" must
+        # not match "~/project/workspace/scratch", an ordinary folder of yours,
+        # since a lot of legitimate work happens nested under these broad roots.
         if _re.search(rf"(?:^|[\s'\"(=]){_re.escape(pp)}/?(?=[\s'\")]|$)", expanded):
             return pp
     return None
+
+# ------------------------------------------------------------------ permission rules
+# Personal allow/deny patterns on top of the autonomy tiers. See the
+# "permission_rules" default and risk_check()/​_run_one_tool() for how they
+# fit in: deny can only ever add restriction (checked as a 'block'), allow
+# can only ever pre-answer a 'confirm' — neither can touch the built-in hard
+# floor (ALWAYS_BLOCK / protected paths), which sits underneath both.
+
+def _permission_text(fn, args):
+    """The one string a rule's pattern matches against."""
+    args = args or {}
+    for key in ("command", "path", "url", "code", "text", "query"):
+        if args.get(key): return str(args[key])
+    return " ".join(str(v) for v in args.values())
+
+def _rule_match(rules, fn, args):
+    text = _permission_text(fn, args).lower()
+    for r in rules or []:
+        if not isinstance(r, dict): continue
+        tool = str(r.get("tool") or "*").strip()
+        if tool not in ("*", fn): continue
+        pat = str(r.get("pattern") or "*").strip().lower()
+        if fnmatch.fnmatch(text, pat) or fnmatch.fnmatch(fn.lower(), pat):
+            return {"tool": tool, "pattern": pat, "note": r.get("note") or ""}
+    return None
+
+def denied_by_rule(fn, args):
+    return _rule_match((S.get("permission_rules") or {}).get("deny"), fn, args)
+
+def allowed_by_rule(fn, args):
+    return _rule_match((S.get("permission_rules") or {}).get("allow"), fn, args)
+
+def _rule_pattern_suggestion(fn, args):
+    """A sensible default pattern for 'always allow this' — the command's
+    first word or two for a shell call (so 'git diff --stat' offers
+    'git diff*', not the literal whole command), else just the tool name."""
+    text = _permission_text(fn, args).strip()
+    if fn in ("run_shell", "cluster_run") and text:
+        words = text.split()
+        head = " ".join(words[:2]) if len(words) > 1 else words[0]
+        return head + "*"
+    return "*"
+
+def add_permission_rule(kind, tool, pattern, note=""):
+    """kind: 'allow' | 'deny'. Returns the updated rule list for that kind."""
+    if kind not in ("allow", "deny"): return []
+    rules = dict(S.get("permission_rules") or {"allow": [], "deny": []})
+    lst = list(rules.get(kind) or [])
+    lst.append({"tool": tool or "*", "pattern": pattern or "*", "note": note,
+               "added": time.strftime("%Y-%m-%d %H:%M:%S")})
+    rules[kind] = lst
+    S["permission_rules"] = rules
+    save_settings(S)
+    return lst
+
+def remove_permission_rule(kind, index):
+    if kind not in ("allow", "deny"): return []
+    rules = dict(S.get("permission_rules") or {"allow": [], "deny": []})
+    lst = list(rules.get(kind) or [])
+    if 0 <= index < len(lst): lst.pop(index)
+    rules[kind] = lst
+    S["permission_rules"] = rules
+    save_settings(S)
+    return lst
 
 def risk_check(fn, args):
     """Return (level, reason). level: 'block' | 'confirm' | None.
@@ -2053,6 +2278,11 @@ def risk_check(fn, args):
     approvable by you in the chat, and depending on Settings -> Tools ->
     Autonomy, sometimes approvable automatically. See _auto_approvable().
     """
+    denied = denied_by_rule(fn, args)
+    if denied:
+        return ("block", "denied by your own rule (" + (denied["note"] or
+                f"{denied['tool']}: {denied['pattern']}") +
+                ") — remove it in Settings -> Tools -> Permissions to allow this again")
     blob = " ".join(str(v) for v in (args or {}).values())
     low = blob.lower()
     # The python tool runs real code, so it is also a shell if you let it be:
@@ -2706,8 +2936,8 @@ def system_prompt_for(agent=None, project=None):
 def health_check():
     import shutil as _sh
     out = []
-    def add(name, ok, detail, fix=""):
-        out.append({"name": name, "ok": bool(ok), "detail": detail, "fix": fix})
+    def add(name, ok, detail, fix="", info=False):
+        out.append({"name": name, "ok": bool(ok), "detail": detail, "fix": fix, "info": info})
     try:
         free = _sh.disk_usage(ROOT).free / 1e9
         add("disk space", free > 5, f"{free:.0f} GB free",
@@ -2739,6 +2969,34 @@ def health_check():
         add("workspace writable", os.access(WORKSPACE, os.W_OK), WORKSPACE)
     except Exception as e:
         add("workspace writable", False, str(e))
+    add("Python", sys.version_info >= (3, 9),
+        f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "3.9 or newer is needed")
+    try:
+        json.load(open(SETTINGS))
+        add("config file", True, SETTINGS)
+    except Exception as e:
+        add("config file", False, f"{SETTINGS}: {e}",
+            "invalid JSON — restore a snapshot from config/.history")
+    cc = _cliclick_path()
+    add("cliclick (screen control)", bool(cc), cc or "not installed",
+        "brew install cliclick — only needed for Screen control in Settings -> Tools")
+    req_path = os.path.join(ROOT, "requirements.txt")
+    if os.path.exists(req_path):
+        import importlib.metadata as _im, re as _re2
+        missing, versions = [], []
+        for line in open(req_path):
+            line = line.split("#", 1)[0].strip()
+            if not line: continue
+            name = _re2.split(r"[<>=!~\s]", line, 1)[0].strip()
+            if not name: continue
+            try: versions.append(f"{name} {_im.version(name)}")
+            except _im.PackageNotFoundError: missing.append(name)
+        add("Python packages", not missing,
+            (f"missing: {', '.join(missing)}" if missing else f"{len(versions)} installed"),
+            "pip install -r requirements.txt")
+    else:
+        add("Python packages", True, "no requirements.txt to check against", info=True)
     return out
 
 # ==================================================================== CONTEXT
