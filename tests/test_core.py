@@ -501,11 +501,71 @@ class TestSafetyHardening(unittest.TestCase):
             self.assertEqual(q.risk_check("python", {"code": code}), (None, None))
 
     def test_writes_stay_in_the_workspace(self):
-        for path in ("/tmp/qq-escape.txt", "../../../tmp/qq-escape.txt",
-                     "/etc/hosts", os.path.expanduser("~/qq-escape.txt")):
-            out = str(q.dispatch("write_file", {"path": path, "content": "x"}))
-            self.assertIn("confined", out, path)
-            self.assertFalse(os.path.exists(path) and "qq-escape" in path)
+        # isolated from whatever "write anywhere" is actually set to right now —
+        # this checks the confinement logic itself, not today's live setting
+        was = q.S.get("write_any")
+        try:
+            q.S["write_any"] = False
+            for path in ("/tmp/qq-escape.txt", "../../../tmp/qq-escape.txt",
+                         "/etc/hosts", os.path.expanduser("~/qq-escape.txt")):
+                out = str(q.dispatch("write_file", {"path": path, "content": "x"}))
+                self.assertIn("confined", out, path)
+                self.assertFalse(os.path.exists(path) and "qq-escape" in path)
+        finally:
+            q.S["write_any"] = was
+
+
+class TestOsascriptCannotBypassScreenControl(unittest.TestCase):
+    """REGRESSION: a model asked to control the screen ran raw
+    `osascript -e 'tell application "System Events" to keystroke ...'` via
+    run_shell instead of the dedicated screen_* tools, and it went straight
+    through as a plain allowed shell command — completely bypassing the
+    Screen control toggle and the confirm-level approval every screen_click/
+    screen_type call already gets. Same reasoning as the python-as-a-shell
+    check just above: walking through run_shell/python must not be a back
+    door around a safety toggle."""
+    def setUp(self):
+        self._saved_S = q.S
+        q.S = dict(q.DEFAULTS)
+
+    def tearDown(self):
+        q.S = self._saved_S
+
+    def test_keystroke_via_osascript_blocked_when_screen_control_off(self):
+        q.S["computer_use_enabled"] = False
+        q.S["shell_enabled"] = True     # isolate from the python-as-a-shell check above
+        for fn, args in (
+            ("run_shell", {"command": 'osascript -e \'tell application "System Events" to keystroke "a"\''}),
+            ("run_shell_background", {"command": 'osascript -e \'tell application "System Events" to key code 36\''}),
+            ("python", {"code": 'import subprocess\nsubprocess.run(["osascript","-e",'
+                                 '"tell application \\"System Events\\" to keystroke \\"a\\""])'}),
+        ):
+            level, why = q.risk_check(fn, args)
+            self.assertEqual(level, "block", (fn, args))
+            self.assertIn("Screen control", why)
+
+    def test_keystroke_via_osascript_needs_approval_when_screen_control_on(self):
+        q.S["computer_use_enabled"] = True
+        level, _ = q.risk_check("run_shell",
+            {"command": 'osascript -e \'tell application "System Events" to keystroke "a"\''})
+        self.assertEqual(level, "confirm")
+
+    def test_full_access_does_not_bypass_the_screen_control_requirement(self):
+        q.S["autonomy_mode"] = "full"
+        q.S["computer_use_enabled"] = False
+        level, _ = q.risk_check("run_shell",
+            {"command": 'osascript -e \'tell application "System Events" to keystroke "a"\''})
+        self.assertEqual(level, "block")
+
+    def test_read_only_osascript_queries_are_not_gated(self):
+        q.S["computer_use_enabled"] = False
+        for cmd in (
+            'osascript -e \'tell application "System Events" to get name of '
+            'first process whose frontmost is true\'',
+            "osascript -e 'tell application \"Finder\" to get name of every disk'",
+        ):
+            level, _ = q.risk_check("run_shell", {"command": cmd})
+            self.assertIsNone(level, cmd)
 
 
 class TestKnowledgeIsRecoverable(unittest.TestCase):

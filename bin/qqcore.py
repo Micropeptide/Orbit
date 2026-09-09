@@ -2292,6 +2292,17 @@ def risk_check(fn, args):
     if py_shell and not (S.get("shell_enabled") or full_access()):
         return ("block", "python tried to run shell commands, but shell is switched "
                          "off in Settings -> Tools")
+    # osascript/System Events sending real keystrokes or clicks is a screen
+    # action wearing a shell disguise -- run_shell, run_shell_background and
+    # python can all reach it, walking straight past the Screen control toggle
+    # and the confirm-level approval the dedicated screen_* tools already get.
+    # A read-only osascript query (get name of frontmost process, and so on)
+    # is untouched; only the input-sending verbs trigger this.
+    if _re.search(SCREEN_VIA_OSASCRIPT, blob, _re.I):
+        if not S.get("computer_use_enabled"):
+            return ("block", "tried to send keystrokes or clicks via osascript, but "
+                             "Screen control is switched off in Settings -> Tools")
+        return ("confirm", "a screen action (via osascript) on your Mac")
     hit = None
     for pat, why in DESTRUCTIVE:
         if _re.search(pat, low): hit = why; break
@@ -2367,6 +2378,11 @@ def _auto_approvable(fn, args, reason):
 SHELL_FROM_PYTHON = (r"\bsubprocess\b|\bos\.(system|popen|exec[lv]|spawn)|"
                      r"\bpty\.spawn|\bcommands\.getoutput|\bsh\.Command|"
                      r"\bplumbum\b|\bpexpect\b|\bos\.fork\b")
+
+# osascript/System Events sending real input (not just reading window/app state)
+# is a screen action wearing a shell disguise — run_shell, run_shell_background
+# and python can all reach it. Kept next to the checker that uses it.
+SCREEN_VIA_OSASCRIPT = r"\bosascript\b[\s\S]*?\b(?:keystroke|key code|key down|key up|click)\b"
 
 INJECTION_PATTERNS = [
     r"ignore (all |any )?(previous|prior|above|earlier) (instructions|prompts|rules)",
