@@ -609,6 +609,13 @@ function addAssistant(who){
   q.value=r.content; go({effort:'xhigh'})};
  acts.appendChild(hard);
  stamp(m);wrap.appendChild(m);bottom();return{m,think:th,tools,bub:b}}
+// A thinking trace recovered from a reopened chat -- a completed answer, or
+// one you stopped mid-stream. Shown collapsed, same as a live one once the
+// answer began; click to read it.
+function showSavedThinking(a,text){
+ a.think.style.display='';a.think.open=false;
+ a.think.querySelector('summary').textContent='thinking';
+ a.think.querySelector('.body').textContent=text}
 
 let ctxEl=null;
 function closeCtx(){if(ctxEl){ctxEl.remove();ctxEl=null}}
@@ -823,9 +830,10 @@ function attachLive(theSid, initial){
    const c=el(auto?'<div class=autoappr></div>':'<div class=tool></div>');
    c.textContent=(auto?'✓ auto-approved — ':'* ')+name+args;
    a.tools.appendChild(c)});
-  if(lv.thinking){a.think.style.display='';a.think.open=!lv.content;
+  if(lv.thinking){
    const body=a.think.querySelector('.body');
-   if(!thinkStarted){thinkStarted=true;body._stick=true}   // first paint: nothing to preserve yet
+   if(!thinkStarted){thinkStarted=true;body._stick=true;a.think.style.display='';a.think.open=!lv.content}
+   else if(lv.content&&body._stick)a.think.open=false;   // reading back? leave it open, untouched
    body.textContent=lv.thinking;
    if(body._stick)body.scrollTop=body.scrollHeight}        // only if you're not reading back
   if(lv.content){a.bub.innerHTML=md(lv.content);a.bub.dataset.raw=lv.content}
@@ -862,7 +870,8 @@ async function openSession(id){
   btn.onclick=()=>{btn.remove();
    d.messages.slice(0,older).reverse().forEach(m=>{
     const node=(m.role==='user')?addUser(m.text,m.images):(()=>{const a=addAssistant(m.model);
-     a.bub.dataset.raw=m.text;a.bub.innerHTML=md(m.text);decorate(a.bub);return a.m})();
+     a.bub.dataset.raw=m.text;a.bub.innerHTML=md(m.text);decorate(a.bub);
+     if(m.thinking)showSavedThinking(a,m.thinking);return a.m})();
     wrap.insertBefore(node,wrap.firstChild)})};
   wrap.appendChild(btn)}
  d.messages.slice(older).forEach(m=>{if(m.role==='user')addUser(m.text,m.images);
@@ -871,7 +880,9 @@ async function openSession(id){
    if((m.plots||[]).length){const box=el('<div class=imgs></div>');
     m.plots.forEach(u=>{const i=document.createElement('img');i.src=u;i.style.cursor='zoom-in';
      i.onclick=()=>window.open(u,'_blank');box.appendChild(i)});a.tools.appendChild(box)}
-   a.bub.dataset.raw=m.text;a.bub.innerHTML=md(m.text);decorate(a.bub)}});
+   a.bub.dataset.raw=m.text;a.bub.innerHTML=md(m.text);decorate(a.bub);
+   if(m.thinking)showSavedThinking(a,m.thinking);
+   if(!m.text&&!m.thinking)a.bub.innerHTML='<span style="color:var(--mut)">(stopped before it wrote anything)</span>'}});
  loadSessions();bottom();refreshStatus();loadModels();
  if(typeof sideOpen==='function'&&matchMedia('(max-width:820px)').matches)sideOpen(false)}
 
@@ -1080,9 +1091,13 @@ async function go(opts){
     else if(m.k==='content_delta'){
      if(!answer&&thinking){                     // answer begins — tuck thinking away
       if(thinkPending){clearTimeout(thinkPending);thinkPending=null}
-      a.think.querySelector('.body').textContent=thinking;
-      a.think.open=false;a.think.classList.remove('live');
+      const tbody=a.think.querySelector('.body');
+      tbody.textContent=thinking;
+      a.think.classList.remove('live');
       a.think.querySelector('summary').textContent='thinking';
+      // scrolled up to read back? leave it open and exactly where you left it —
+      // collapsing it out from under you is worse than one extra open panel
+      if(tbody._stick)a.think.open=false;
      }
      if(!answer)a.bub.innerHTML='';
      answer+=m.p;a.bub.dataset.raw=answer;

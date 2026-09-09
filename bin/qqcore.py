@@ -831,8 +831,23 @@ def dispatch(fn, args):
     return f"Error: unknown tool {fn}"
 
 # ------------------------------------------------------------------ model calls
+def _strip_reasoning(messages):
+    """Stored history keeps each turn's thinking so a reopened chat can still
+    show it, but a model should never be handed its own — or another
+    provider's — past reasoning back as input: it wasn't trained to receive
+    that, some chat templates treat the field specially, and a long-thinking
+    session would otherwise re-bill the same thinking tokens every turn.
+    Copies only the messages that actually carry it."""
+    out = messages
+    for i, m in enumerate(messages):
+        if isinstance(m, dict) and "reasoning_content" in m:
+            if out is messages: out = list(messages)   # copy on first hit only
+            out[i] = {k: v for k, v in m.items() if k != "reasoning_content"}
+    return out
+
 def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None):
     think = S.get("thinking", True) if think is None else think
+    messages = _strip_reasoning(messages)
     spec = current_model(model)
     if spec is None:
         raise RuntimeError("No model configured. Pick one in Settings -> Models.")
@@ -1026,13 +1041,17 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None):
                 except Exception: pass
             continue
         if cancel.is_set():
+            # a stop mid-stream still keeps whatever was written so far, thinking
+            # included — see reasoning_content below
             messages.append({k: v for k, v in msg.items()
-                             if k in ("role", "content", "model")})
+                             if k in ("role", "content", "model", "reasoning_content")})
             emit("done", None); return (msg.get("content") or "").strip() + "\n\n_(stopped)_"
         calls = msg.get("tool_calls") or []
-        # keep "model" so a reopened chat can say which one wrote each answer
+        # keep "model" so a reopened chat can say which one wrote each answer;
+        # keep "reasoning_content" so the thinking trace survives a reload too —
+        # stream_call() strips it back out before it is ever sent to a model
         messages.append({k: v for k, v in msg.items()
-                         if k in ("role", "content", "tool_calls", "model")})
+                         if k in ("role", "content", "tool_calls", "model", "reasoning_content")})
         if not calls:
             answer = (msg.get("content") or "").strip()
             if LAST_SOURCES:

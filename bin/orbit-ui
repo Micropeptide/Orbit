@@ -1180,12 +1180,15 @@ def render(msgs):
                         "text": " ".join(x.get("text","") for x in c if x.get("type")=="text"),
                         "images": [x["image_url"]["url"] for x in c if x.get("type")=="image_url"],
                         "plots": [], "tools": []})
-        elif c:
-            out.append({"role": m["role"], "text": c, "images": [],
+        # a stopped turn can have thinking with no answer text yet -- still show it
+        elif c or (m.get("role") == "assistant" and m.get("reasoning_content")):
+            out.append({"role": m["role"], "text": c or "", "images": [],
                         "plots": [f"/api/ws/{i}" for i in pending_imgs] if m["role"]=="assistant" else [],
                         "tools": pending_tools if m["role"]=="assistant" else [],
                         # which model wrote this, so a reopened chat is honest about it
-                        "model": m.get("model") if m["role"] == "assistant" else None})
+                        "model": m.get("model") if m["role"] == "assistant" else None,
+                        # the thinking trace, kept from a normal answer or a stop mid-stream
+                        "thinking": m.get("reasoning_content") if m["role"] == "assistant" else None})
         if m.get("role") == "assistant":
             pending_imgs, pending_tools = [], []
     return out
