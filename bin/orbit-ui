@@ -410,6 +410,11 @@ class H(http.server.BaseHTTPRequestHandler):
             q.prune_thumbs()
             return self._send(200, jdump({"items": files[off:off+lim], "total": len(files),
                                           "offset": off, "limit": lim}))
+        if p == "/api/checkpoints":
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            rel = (qs.get("rel") or [""])[0]
+            path = os.path.join(q.WORKSPACE, rel)
+            return self._send(200, jdump({"checkpoints": q.list_checkpoints(path)}))
         if p.startswith("/api/thumb/"):
             rel = _up.unquote(p[len("/api/thumb/"):])
             t = q.thumb_for(rel)
@@ -690,8 +695,24 @@ class H(http.server.BaseHTTPRequestHandler):
             rec = PENDING.get(d.get("id"))
             if not rec: return self._send(404, jdump({"error": "no such request"}))
             rec["allow"] = bool(d.get("allow"))
+            rec["always"] = bool(d.get("always"))
+            rec["pattern"] = (d.get("pattern") or "").strip()
+            rec["note"] = (d.get("note") or "").strip()
             rec["event"].set()
             return self._send(200, jdump({"ok": True}))
+        if p == "/api/checkpoints/restore":
+            path = os.path.join(q.WORKSPACE, d.get("rel") or "")
+            msg = q.restore_checkpoint(path, d.get("name") or "")
+            return self._send(200, jdump({"ok": not msg.startswith("Error"), "message": msg}))
+        if p == "/api/permissions/add":
+            with LOCK:
+                lst = q.add_permission_rule(d.get("kind",""), d.get("tool") or "*",
+                    d.get("pattern") or "*", d.get("note") or "")
+            return self._send(200, jdump({"ok": True, "rules": q.S.get("permission_rules")}))
+        if p == "/api/permissions/remove":
+            with LOCK:
+                lst = q.remove_permission_rule(d.get("kind",""), int(d.get("index", -1)))
+            return self._send(200, jdump({"ok": True, "rules": q.S.get("permission_rules")}))
         if p == "/api/knowledge/project":
             q.know_set_project(d.get("name",""), d.get("project") or None)
             return self._send(200, jdump({"ok": True}))
@@ -1061,11 +1082,16 @@ class H(http.server.BaseHTTPRequestHandler):
                         _APPROVE_SEQ[0] += 1
                         rid = f"ap{_APPROVE_SEQ[0]}"
                         ev = threading.Event()
-                        PENDING[rid] = {"event": ev, "allow": False}
+                        PENDING[rid] = {"event": ev, "allow": False, "fn": fn, "args": a}
                         Q.put(("approval_request", {"id": rid, "name": fn, "args": a,
-                                                    "reason": reason}))
+                                                    "reason": reason,
+                                                    "suggested_pattern": q._rule_pattern_suggestion(fn, a)}))
                         ok = ev.wait(timeout=300)
                         rec = PENDING.pop(rid, {})
+                        if ok and rec.get("allow") and rec.get("always"):
+                            q.add_permission_rule("allow", fn,
+                                rec.get("pattern") or q._rule_pattern_suggestion(fn, a),
+                                rec.get("note") or "")
                         return bool(rec.get("allow")) if ok else False
 
                     def _emit(k, p):
