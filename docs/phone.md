@@ -96,7 +96,9 @@ Restoring is deliberately one-directional: **Put back what is missing** adds
 chats, memory, skills and knowledge the archive has and the Mac no longer does.
 It never overwrites what is on disk now.
 
-There is a long list of what it could do next in [roadmap.md](roadmap.md).
+There is a long list of what the phone app could do next in [roadmap.md](roadmap.md),
+and a separate one for the Mac side — hooks, subagents, background tasks, finer-grained
+permissions — in [agent-roadmap.md](agent-roadmap.md).
 
 ## Building it
 
