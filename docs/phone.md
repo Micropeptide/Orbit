@@ -65,6 +65,7 @@ for anyone building something similar in [tailnet-playbook.md](tailnet-playbook.
 | **Share** | a chat as Markdown, plain text or a one-page PDF; an answer as text or as an image card; a plot straight to Photos |
 | **Drafts** | what you were typing in each chat is still there when you come back |
 | **Autonomy** | Settings shows and sets the same three-way autonomy mode as the Mac (Ask every time / Auto-approve safe actions / Full computer access) — a full-access confirmation from either device applies everywhere, and a chat on the Mac follows a mode changed from the phone |
+| **Screen control** | A separate toggle, also in Settings — lets the Mac see its own screen and click/type/press keys there. Off by default, and not turned on by Full access; still asks before a click unless Full access is also on |
 | **Backup** | Settings shows the Mac's automatic backup (see below); back up now, list archives, put back what is missing |
 | **Bin** | what you binned on the Mac, with Restore |
 | **Appearance** | light/dark, larger answer text, haptics on/off |

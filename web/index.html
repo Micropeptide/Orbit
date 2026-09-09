@@ -1543,10 +1543,33 @@ async function openSettings(tab){
      <label>Enable shell</label><div class=sw><input type=checkbox id=t_shell><span class=note>lets the model run shell commands ${mode==='full'?'— on anyway, from Full access':''}</span></div>
      <label>the cluster write access</label><div class=sw><input type=checkbox id=t_h2><span class=note>qsub / qdel / remote commands — read-only status always works ${mode==='full'?'— on anyway, from Full access':''}</span></div>
      <label>Write anywhere</label><div class=sw><input type=checkbox id=t_wany><span class=note>otherwise writes stay in workspace/ ${mode==='full'?'— on anyway, from Full access':''}</span></div>
-    </div><div class=sec>Available tools</div><div class=toolgrid id=tg></div>`;
+    </div>
+    <div class=sec>Screen control <small>— not covered by Full access; a separate decision</small></div>
+    <div class=grid>
+     <label>Screen control</label><div class=sw><input type=checkbox id=t_screen>
+      <span class=note>lets the model see your screen and click, type and press keys on this Mac — in
+       <b>any</b> app, not just the workspace</span></div>
+    </div>
+    <div class=hint2>Needs two macOS permissions you grant by hand — Settings will tell you which,
+     the first time an action is refused: <b>Screen Recording</b> (for screenshots) and
+     <b>Accessibility</b> (for clicks and keystrokes), both in System Settings → Privacy &amp; Security.
+     Nothing here can turn those on for you. A screenshot only actually gets <em>seen</em> by a
+     vision-capable model — a hosted Claude model, not the local model or a CLI-backed one — but every
+     mode still asks before a click or keystroke unless you have turned on Full access, same as any
+     other confirm-level action.</div>
+    <div class=sec>Available tools</div><div class=toolgrid id=tg></div>`;
    $('#t_code').checked=draft.code_execution!==false;
    $('#t_h2').checked=!!draft.cluster_write;
    $('#t_shell').checked=!!draft.shell_enabled;$('#t_wany').checked=!!draft.write_any;
+   $('#t_screen').checked=!!draft.computer_use_enabled;
+   $('#t_screen').onchange=e=>{
+    if(e.target.checked&&!confirm(
+      "Screen control lets Orbit see your screen and click, type and press keys — in any app, "+
+      "not just this project. A click or keystroke still always asks for your approval first, "+
+      "unless you have separately turned on Full computer access.\n\nIt needs Screen Recording and "+
+      "Accessibility granted to it by hand in System Settings → Privacy & Security — nothing here "+
+      "can grant those for you.\n\nTurn it on?")){
+     e.target.checked=false}};
    body.querySelectorAll('input[name=automode]').forEach(r=>r.onchange=()=>{
     if(r.value==='full'&&!confirm(
       "Full computer access lets Orbit run shell commands, write anywhere on this Mac, and "+
@@ -1567,7 +1590,9 @@ async function openSettings(tab){
              'search_knowledge','use_skill','list_skills','check_citations','list_dir',
              'grep_files','http_json','pubmed_search','arabidopsis_gene','sequence',
              'cluster_status','cluster_ls','cluster_read','cluster_run','cluster_submit',
-             'cluster_qdel','alphafold','uniprot','ncbi','remember','python'].includes(n))
+             'cluster_qdel','alphafold','uniprot','ncbi','remember','python',
+             'screen_look','screen_click','screen_move','screen_drag','screen_type',
+             'screen_key','screen_scroll'].includes(n))
       groups['built-in'].push(n);
     else groups['other MCP'].push(n)});
    Object.entries(groups).forEach(([g,list])=>{
@@ -1763,6 +1788,7 @@ async function openSettings(tab){
    scheduler_mode:$('#v_sched').value});draft.idle_min=Number($('#v_idle').value)}
   if($('#t_shell')){draft.shell_enabled=$('#t_shell').checked;draft.write_any=$('#t_wany').checked;
    draft.code_execution=$('#t_code').checked;draft.cluster_write=$('#t_h2').checked;
+   draft.computer_use_enabled=$('#t_screen').checked;
    const am=document.querySelector('input[name=automode]:checked');
    if(am)draft.autonomy_mode=am.value;
    const en={};document.querySelectorAll('[data-tool]').forEach(c=>{en[c.dataset.tool]=c.checked});

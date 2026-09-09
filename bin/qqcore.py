@@ -68,6 +68,12 @@ DEFAULTS = {
   "shell_enabled": False,
   "code_execution": True,
   "write_any": False,
+  # Reads the screen and drives the mouse/keyboard on this Mac. Off by
+  # default: it is categorically more powerful than a shell command — a
+  # click can be anywhere, in any app, not just this project — and needs
+  # Screen Recording + Accessibility granted to it by hand in System
+  # Settings, which nothing here can do for you.
+  "computer_use_enabled": False,
   "show_thinking": True,
   "tools_enabled": {},          # name -> bool ; missing = enabled
   "sampling": {"temperature": None, "top_p": None, "top_k": None, "presence_penalty": None},
@@ -693,6 +699,163 @@ def t_python(code, timeout=120):
         try: os.remove(path)
         except OSError: pass
 
+# ------------------------------------------------------------------ screen control
+# Reads the screen and drives the mouse/keyboard. Off by default (see
+# computer_use_enabled) and, once on, every action still goes through
+# risk_check() like anything else — see the "confirm" case for "fn ==
+# 'screen_*'" below. Two macOS permissions have to be granted BY YOU, in
+# System Settings -> Privacy & Security: Screen Recording (screenshots) and
+# Accessibility (clicks/keystrokes), to whichever process cliclick reports —
+# nothing in this file can grant them for you, and it should not try to.
+CLICLICK = None
+LAST_SCREEN_IMAGE = None   # data: URL of the most recent screenshot -- the model
+                           # sees it as a real image on the NEXT round, not this one
+
+def _find_cliclick():
+    global CLICLICK
+    if CLICLICK: return CLICLICK
+    for p in ("/opt/homebrew/bin/cliclick", "/usr/local/bin/cliclick"):
+        if os.path.exists(p): CLICLICK = p; return CLICLICK
+    # a Homebrew install is a normal, low-risk, single-purpose utility --
+    # install it once so the feature works out of the box, the same way a
+    # missing Python package would just get pip installed
+    brew = "/opt/homebrew/bin/brew" if os.path.exists("/opt/homebrew/bin/brew") else \
+           ("/usr/local/bin/brew" if os.path.exists("/usr/local/bin/brew") else None)
+    if brew:
+        try: subprocess.run([brew, "install", "cliclick"], capture_output=True, timeout=120)
+        except Exception: pass
+        for p in ("/opt/homebrew/bin/cliclick", "/usr/local/bin/cliclick"):
+            if os.path.exists(p): CLICLICK = p; return CLICLICK
+    return None
+
+def _screen_ready():
+    if not (S.get("computer_use_enabled") or False):
+        return (False, "Error: screen control is off. Turn on 'Screen control' in "
+                       "Settings -> Tools if you want this.")
+    if not _find_cliclick():
+        return (False, "Error: cliclick is not installed and Homebrew could not install "
+                       "it. Install manually: brew install cliclick")
+    return (True, "")
+
+def _click_run(*commands, timeout=15):
+    r = subprocess.run([_find_cliclick(), *commands], capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "unknown error").strip()[:300]
+        if "not allowed" in err.lower() or "accessibility" in err.lower() or not err:
+            return (False, "Error: macOS refused the action. Grant Accessibility to "
+                           "cliclick in System Settings -> Privacy & Security -> "
+                           "Accessibility, then try again.")
+        return (False, f"Error: {err}")
+    return (True, r.stdout.strip())
+
+def t_screen_look():
+    """Take a screenshot of the whole screen. It appears as an image in the very
+    next message so you can actually see it -- not just this tool's text result."""
+    global LAST_SCREEN_IMAGE
+    ok, why = _screen_ready()
+    if not ok: return why
+    import base64
+    out_dir = os.path.join(WORKSPACE, ".screenshots")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"screen-{int(time.time()*1000)}.png")
+    r = subprocess.run(["/usr/sbin/screencapture", "-x", "-t", "png", path],
+                       capture_output=True, text=True, timeout=15)
+    if r.returncode != 0 or not os.path.exists(path) or os.path.getsize(path) < 100:
+        return ("Error: screencapture failed" +
+                (f": {r.stderr.strip()}" if r.stderr else "") +
+                ". Grant Screen Recording to it in System Settings -> Privacy & "
+                "Security -> Screen Recording (the process is Terminal, or "
+                "whatever runs Orbit), then try again.")
+    dims = ""
+    try:
+        from PIL import Image
+        w, h = Image.open(path).size
+        dims = f" ({w}x{h})"
+    except Exception:
+        pass
+    data = base64.b64encode(open(path, "rb").read()).decode()
+    LAST_SCREEN_IMAGE = f"data:image/png;base64,{data}"
+    global LAST_IMAGES
+    LAST_IMAGES = [path]
+    record_file(os.path.relpath(path, WORKSPACE), "screen_look")
+    return (f"Screenshot taken{dims}. It will appear as an image in the next message "
+            "if the current model can see images -- local text-only and CLI-backed "
+            "models cannot; a hosted Claude model can.")
+
+def t_screen_click(x, y, button="left", clicks=1):
+    """Click at screen coordinates (0,0 is the top-left of the main display).
+    button: left | right. clicks: 1 or 2 (double-click)."""
+    ok, why = _screen_ready()
+    if not ok: return why
+    x, y = int(x), int(y)
+    cmd = {("left", 1): f"c:{x},{y}", ("left", 2): f"dc:{x},{y}",
+           ("right", 1): f"rc:{x},{y}"}.get((button, int(clicks)), f"c:{x},{y}")
+    ok, out = _click_run(cmd)
+    return out if ok else out or f"Clicked at {x},{y}"
+
+def t_screen_move(x, y):
+    """Move the mouse to screen coordinates without clicking (to hover)."""
+    ok, why = _screen_ready()
+    if not ok: return why
+    ok, out = _click_run(f"m:{int(x)},{int(y)}")
+    return f"Moved to {int(x)},{int(y)}" if ok else out
+
+def t_screen_drag(x1, y1, x2, y2):
+    """Press down at one point, drag to another, and release — for selecting
+    text, moving a window, or dragging a file."""
+    ok, why = _screen_ready()
+    if not ok: return why
+    ok, out = _click_run(f"dd:{int(x1)},{int(y1)}", f"dm:{int(x2)},{int(y2)}", f"du:{int(x2)},{int(y2)}")
+    return f"Dragged {x1},{y1} -> {x2},{y2}" if ok else out
+
+def t_screen_type(text):
+    """Type text into whichever app/field is currently focused."""
+    ok, why = _screen_ready()
+    if not ok: return why
+    ok, out = _click_run(f"t:{text}")
+    return f"Typed {len(text)} characters" if ok else out
+
+# cliclick's named keys, plus the handful of common aliases people actually type
+_KEY_ALIASES = {"enter": "enter", "return": "return", "escape": "esc", "esc": "esc",
+                "tab": "tab", "space": "space", "delete": "delete", "backspace": "delete",
+                "up": "arrow-up", "down": "arrow-down", "left": "arrow-left", "right": "arrow-right",
+                "pageup": "page-up", "pagedown": "page-down", "home": "home", "end": "end"}
+
+def t_screen_key(key):
+    """Press a key or chord, e.g. 'return', 'escape', 'cmd+a', 'cmd+shift+4'."""
+    ok, why = _screen_ready()
+    if not ok: return why
+    parts = [p.strip().lower() for p in str(key).split("+") if p.strip()]
+    if not parts: return "Error: no key given"
+    *mods, main = parts
+    mod_names = {"cmd": "cmd", "command": "cmd", "ctrl": "ctrl", "control": "ctrl",
+                 "alt": "alt", "option": "alt", "shift": "shift", "fn": "fn"}
+    mods = [mod_names[m] for m in mods if m in mod_names]
+    main = _KEY_ALIASES.get(main, main)
+    cmds = []
+    if mods: cmds.append("kd:" + ",".join(mods))
+    if len(main) == 1:
+        cmds.append(f"t:{main}")           # a plain letter/digit isn't a named key
+    else:
+        cmds.append(f"kp:{main}")
+    if mods: cmds.append("ku:" + ",".join(mods))
+    ok, out = _click_run(*cmds)
+    return f"Pressed {key}" if ok else out
+
+def t_screen_scroll(direction="down", amount=3, x=None, y=None):
+    """Scroll up or down. cliclick has no scroll-wheel command, so this pages
+    with the keyboard -- move the mouse over the target area first if a
+    specific pane needs the focus."""
+    ok, why = _screen_ready()
+    if not ok: return why
+    cmds = []
+    if x is not None and y is not None:
+        cmds.append(f"m:{int(x)},{int(y)}")
+    key = "page-down" if str(direction).lower().startswith("d") else "page-up"
+    cmds += [f"kp:{key}"] * max(1, min(int(amount), 20))
+    ok, out = _click_run(*cmds)
+    return f"Scrolled {direction} x{amount}" if ok else out
+
 def t_list_dir(path=".", pattern=None):
     base = os.path.expanduser(path if path not in ("", ".") else WORKSPACE)
     if not os.path.isdir(base): return f"Error: not a directory: {base}"
@@ -771,7 +934,11 @@ BUILTIN = {"web_search":t_web_search, "fetch_url":t_fetch_url, "read_file":t_rea
            "write_file":t_write_file, "run_shell":t_run_shell, "python":t_python,
            "list_dir":t_list_dir, "grep_files":t_grep_files, "http_json":t_http_json,
            "fetch_paper_pdf":t_fetch_paper_pdf, "remember":t_remember,
-           "search_agent_memory":t_search_agent_memory, "save_skill":t_save_skill}
+           "search_agent_memory":t_search_agent_memory, "save_skill":t_save_skill,
+           "screen_look":t_screen_look, "screen_click":t_screen_click,
+           "screen_move":t_screen_move, "screen_drag":t_screen_drag,
+           "screen_type":t_screen_type, "screen_key":t_screen_key,
+           "screen_scroll":t_screen_scroll}
 
 ALL_SPECS = [
  {"type":"function","function":{"name":"web_search","description":"Search the web (DuckDuckGo). Use for current events or facts to verify.",
@@ -800,6 +967,24 @@ ALL_SPECS = [
   "parameters":{"type":"object","properties":{"url":{"type":"string"},"params":{"type":"object"}},"required":["url"]}}},
  {"type":"function","function":{"name":"remember","description":"Save a durable fact about the user or their work to memory. Use when the user says to remember something, or states a lasting preference.",
   "parameters":{"type":"object","properties":{"name":{"type":"string","description":"short-kebab-case slug"},"content":{"type":"string"}},"required":["name","content"]}}},
+ {"type":"function","function":{"name":"screen_look","description":"Take a screenshot of the whole screen so you can see what is on it. Look before you click.",
+  "parameters":{"type":"object","properties":{}}}},
+ {"type":"function","function":{"name":"screen_click","description":"Click at screen coordinates. Take a screenshot first so the coordinates are right.",
+  "parameters":{"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"},
+   "button":{"type":"string","enum":["left","right"]},"clicks":{"type":"integer","description":"1 for a click, 2 for a double-click"}},
+   "required":["x","y"]}}},
+ {"type":"function","function":{"name":"screen_move","description":"Move the mouse to screen coordinates without clicking, e.g. to hover.",
+  "parameters":{"type":"object","properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"]}}},
+ {"type":"function","function":{"name":"screen_drag","description":"Press down at one point, drag to another, and release.",
+  "parameters":{"type":"object","properties":{"x1":{"type":"integer"},"y1":{"type":"integer"},
+   "x2":{"type":"integer"},"y2":{"type":"integer"}},"required":["x1","y1","x2","y2"]}}},
+ {"type":"function","function":{"name":"screen_type","description":"Type text into whichever field is currently focused. Click it first.",
+  "parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}},
+ {"type":"function","function":{"name":"screen_key","description":"Press a key or chord, e.g. 'return', 'escape', 'tab', 'cmd+a', 'cmd+shift+4'.",
+  "parameters":{"type":"object","properties":{"key":{"type":"string"}},"required":["key"]}}},
+ {"type":"function","function":{"name":"screen_scroll","description":"Scroll up or down, optionally at a specific point.",
+  "parameters":{"type":"object","properties":{"direction":{"type":"string","enum":["up","down"]},
+   "amount":{"type":"integer"},"x":{"type":"integer"},"y":{"type":"integer"}}}}},
 ]
 
 def all_known_tools():
@@ -820,6 +1005,8 @@ def active_tools():
     specs = [t for t in ALL_SPECS if en.get(t["function"]["name"], True)]
     if not (S.get("shell_enabled") or full_access()):
         specs = [t for t in specs if t["function"]["name"] != "run_shell"]
+    if not S.get("computer_use_enabled"):
+        specs = [t for t in specs if not t["function"]["name"].startswith("screen_")]
     mcp_specs, errors = load_mcp()
     specs += [t for t in mcp_specs if en.get(t["function"]["name"], True)]
     return specs, errors
@@ -927,6 +1114,7 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None)
 
 
 def _run_one_tool(tc, fn, args, messages, emit, approve, seen_calls):
+    global LAST_SCREEN_IMAGE
     sig = fn + json.dumps(args, sort_keys=True)[:400]
     seen_calls[sig] = seen_calls.get(sig, 0) + 1
     if seen_calls[sig] >= 3:
@@ -978,6 +1166,14 @@ def _run_one_tool(tc, fn, args, messages, emit, approve, seen_calls):
     emit("tool_result", {"name": fn, "output": str(out)[:600]})
     messages.append({"role":"tool","tool_call_id":tc["id"],"name":fn,
                      "content":str(out)[:MAXCH]})
+    if fn == "screen_look" and LAST_SCREEN_IMAGE:
+        # a tool result can't carry an image on every backend this talks to,
+        # so the screenshot rides in as one extra turn instead -- the model
+        # sees it on the very next round, and this only fires once per look
+        messages.append({"role": "user", "content": [
+            {"type": "text", "text": "(the screenshot from screen_look, above)"},
+            {"type": "image_url", "image_url": {"url": LAST_SCREEN_IMAGE}}]})
+        LAST_SCREEN_IMAGE = None
     return True
 
 def turn(messages, user_content, tools, emit=None, approve=None, cancel=None):
@@ -1887,6 +2083,11 @@ def risk_check(fn, args):
         return ("confirm", "roll back its own source to a backup")
     if fn == "cluster_qdel" and str(args.get("job_id","")).strip() in ("*", "-u", ""):
         return ("block", "mass job deletion")
+    if fn.startswith("screen_") and fn != "screen_look":
+        # a click or keystroke can land in ANY app, not just this project --
+        # always a 'confirm', same tiering as everything else: asks under
+        # 'ask'/'auto', auto-approved only under 'Full computer access'
+        return ("confirm", f"a screen action ({fn.replace('screen_', '')}) on your Mac")
     return (None, None)
 
 # Destructive-pattern reasons that are never approvable at all — see risk_check.
