@@ -54,12 +54,44 @@ Settings → Tools:
 | Enable shell | **off** | the model may run shell commands |
 | Write anywhere | **off** | writes stay inside `workspace/` |
 | Cluster write access | **off** | job submission and remote commands |
+| Screen control | **off** | see the screen, click, type, press keys — see below |
 
 With shell off, Python cannot be used as a back door: `subprocess`, `os.system`,
 `pty.spawn` and friends are blocked inside the Python tool. Ordinary analysis
 code — pandas, matplotlib, BioPython — is untouched. **Full computer access**
-turns all four on for the session without changing these switches on disk —
-turning autonomy back to "Ask every time" turns them back off too.
+turns the first three on for the session without changing these switches on
+disk — turning autonomy back to "Ask every time" turns them back off too.
+Screen control is **not** one of the three — see why below.
+
+## Screen control
+
+Turned on separately from everything else, because it is categorically
+different: a click or keystroke can land in *any* app, not just this project,
+and there is no path-based way to confine it the way `workspace/` confines a
+file write.
+
+- `screen_look` takes a screenshot. It is the one screen action that is
+  always allowed once the setting is on — it changes nothing on the machine.
+  It only actually gets **seen** by a vision-capable model — a hosted Claude
+  model, not the local model or a CLI-backed one, today — but it still shows
+  up inline in the chat either way, so you see what it saw.
+- `screen_click`, `screen_type`, `screen_key`, `screen_scroll`, `screen_drag`
+  and `screen_move` are `confirm`-level, like everything else destructive:
+  they ask in **Ask every time** and **Auto-approve safe actions** (screen
+  actions are never workspace-scoped, so "auto" never silently approves
+  them), and only run unattended under **Full computer access** — which
+  turning on Screen control does *not* imply, and vice versa. Both have to be
+  on for a click to happen without asking.
+
+Two macOS permissions have to be granted **by hand**, in System Settings →
+Privacy & Security — nothing in Orbit can grant them for you, and it should
+not try to: **Screen Recording** (for `screen_look`) and **Accessibility**
+(for everything that moves the mouse or types). The tool tells you which is
+missing the first time it is refused.
+
+Screenshots are saved under `workspace/.screenshots/` like anything else the
+Python tool creates, so they go to the bin on delete and are excluded from
+git the same way the rest of `workspace/` is.
 
 ## Untrusted content
 

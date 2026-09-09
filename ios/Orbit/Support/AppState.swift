@@ -881,4 +881,14 @@ extension AppState {
         do { autonomy = try await server.setAutonomy(["autonomy_mode": mode]) }
         catch { lastError = error.localizedDescription }
     }
+
+    /// Sees the screen and drives the mouse/keyboard on the Mac — off by default,
+    /// and separate from Full access on purpose. The confirm dialog lives in the view.
+    func setComputerUse(_ on: Bool) async {
+        guard let server else { return }
+        autonomyBusy = true
+        defer { autonomyBusy = false }
+        do { autonomy = try await server.setAutonomy(["computer_use_enabled": on]) }
+        catch { lastError = error.localizedDescription }
+    }
 }

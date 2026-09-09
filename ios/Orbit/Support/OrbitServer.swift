@@ -157,6 +157,7 @@ actor OrbitServer {
         var shell_enabled: Bool?
         var write_any: Bool?
         var cluster_write: Bool?
+        var computer_use_enabled: Bool?
     }
 
     /// `/api/settings` merges whatever you post and hands back everything —
