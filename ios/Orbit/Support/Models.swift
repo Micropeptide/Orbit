@@ -57,12 +57,13 @@ struct Message: Identifiable, Codable, Hashable {
     var plots: [String]?
     var tools: [String]?
     var model: String?
-    /// Reasoning, when the model exposes it. Not persisted server-side today.
+    /// Reasoning, when the model exposes it — from a live answer, or recovered
+    /// from a completed or stopped-mid-stream one the Mac saved.
     var thinking: String?
 
     var isUser: Bool { role == "user" }
 
-    enum CodingKeys: String, CodingKey { case role, text, images, plots, tools, model }
+    enum CodingKeys: String, CodingKey { case role, text, images, plots, tools, model, thinking }
 }
 
 struct ChatDetail: Codable {
