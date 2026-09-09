@@ -425,6 +425,12 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 <script>
 const $=s=>document.querySelector(s), wrap=$('#wrap'), q=$('#q'), log=$('#log');
 let atts=[], sid=null, busy=false, stoppedSid=null, RUNNING=new Set(), INFO={tools:[],settings:{}}, SESSIONS=[], PROMPTS={}, filterMode='active';
+// Chats this TAB is actively streaming right now, kept independently of RUNNING —
+// RUNNING is refreshed from the server every couple of seconds and a stale
+// response landing right as a send begins could otherwise report "not busy" for
+// a fraction of a second, which was enough for the watcher below to reload the
+// page mid-answer and orphan the real stream behind a wiped transcript.
+let SENDING=new Set();
 
 const CMDS=[
  {c:'/new',d:'start a fresh chat'},
@@ -1061,7 +1067,7 @@ async function go(opts){
  const sending=atts;atts=[];$('#chips').innerHTML='';
  if(opts.effort)sysline('retrying with '+opts.effort+' reasoning effort');
  const sendSid=sid;                       // this answer belongs to THIS chat
- RUNNING.add(sendSid); renderSessions(); syncBusy();
+ RUNNING.add(sendSid); SENDING.add(sendSid); renderSessions(); syncBusy();
  const a=addAssistant(modelLabel());
  a.bub.innerHTML='<span class=working>working<span class=dots></span></span>';
  let thinking='',answer='',lastRender=0,pendingRender=null,thinkPending=null;
@@ -1225,7 +1231,7 @@ async function go(opts){
                                             :'(no answer)';
  else {a.bub.innerHTML=md(answer);decorate(a.bub)}
  }catch(e){a.bub.innerHTML='';const x=el('<div class=err></div>');x.textContent='Error: '+e;a.m.appendChild(x)}
- RUNNING.delete(sendSid); renderSessions(); syncBusy();
+ RUNNING.delete(sendSid); SENDING.delete(sendSid); renderSessions(); syncBusy();
  if($('#files').style.display!=='none')renderFiles(); refreshFileCache();
  $('#dot').classList.remove('busy');loadSessions();refreshStatus();q.focus()}
 $('#stopgen').onclick=async()=>{
@@ -1803,7 +1809,7 @@ setInterval(refreshRunning,2000);
 // re-read it when the count moves; join an answer someone else started.
 let WATCH_N=null, WATCH_SID=null;
 async function watchOpenChat(){
- if(!sid||busy||livePoll||switching||document.hidden)return;
+ if(!sid||busy||SENDING.has(sid)||livePoll||switching||document.hidden)return;
  try{
   const st=await (await fetch('/api/stamp/'+sid)).json();
   if(st.error)return;
