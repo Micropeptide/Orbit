@@ -3411,7 +3411,7 @@ async function checkCode(){
    const b=el('<div class="staleBar reloadBar"><span>Orbit\'s page was updated — reload to get the new version.</span></div>');
    const btn=el('<button>Reload</button>');btn.onclick=()=>location.reload();b.appendChild(btn);
    document.body.appendChild(b)}
-  const bar=document.querySelector('.staleBar');
+  const bar=document.querySelector('.staleBar:not(.reloadBar)');   // not the page-reload bar
   if(c.stale&&!bar){
    const b=el(`<div class=staleBar><span>Code changed on disk (${c.files.join(', ')}) — `
      +`the running interface is out of date.</span></div>`);
