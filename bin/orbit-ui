@@ -1367,6 +1367,10 @@ def render(msgs):
             try: call_args[tc.get("id")] = json.loads(tc["function"].get("arguments") or "{}")
             except (ValueError, KeyError, TypeError): pass
         if m.get("role") not in ("user", "assistant"): continue
+        if m.get("role") == "user" and not m.get("interjection"):
+            # an answer that ended without text (stopped, gave up) never claimed
+            # its tool rows; they must not land under the next answer instead
+            pending_imgs, pending_tools, pending_detail = [], [], []
         c = m.get("content")
         if isinstance(c, list):
             out.append({"role": m["role"],
