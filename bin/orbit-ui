@@ -1353,42 +1353,45 @@ def _msg_text(m):
     return str(c or "")
 
 def render(msgs):
-    out, pending_imgs, pending_tools, pending_detail = [], [], [], []
+    """Chat messages as the page draws them. Each model step is its own entry --
+    what it said, then the tools that step called, with their results -- the
+    same order the live stream shows. Tool rows used to be attached to the next
+    message with text, so a reopened chat paired text with the wrong tools."""
+    out = []
+    owner = {}                         # tool call id -> the entry of the step that made it
     call_args = {}                     # tool call id -> its arguments, for the tool rows
     for m in msgs:
         if m.get("role") == "tool":
-            # recover plots and tool names so a reloaded chat looks like the live one
             body = str(m.get("content") or "")
+            e = owner.get(m.get("tool_call_id"))
+            if e is None: continue     # its step was never drawn (e.g. compacted away)
             mm = _re.search(r"\[created images: ([^\]]+)\]", body)
-            if mm: pending_imgs += [x.strip() for x in mm.group(1).split(",") if x.strip()]
+            if mm: e["plots"] += [f"/api/ws/{x.strip()}" for x in mm.group(1).split(",") if x.strip()]
             if m.get("name"):
-                pending_tools.append(m["name"])
-                pending_detail.append({"name": m["name"], "id": m.get("tool_call_id"),
+                e["tools"].append(m["name"])
+                e["tool_runs"].append({"name": m["name"], "id": m.get("tool_call_id"),
                                        "args": call_args.get(m.get("tool_call_id")),
                                        # a chat saved before "ok" was kept: judge it by what came back
                                        "ok": m["ok"] if "ok" in m else q._tool_ok(body),
                                        "secs": m.get("secs"),
                                        "output": body[:1500]})
             continue
-        for tc in m.get("tool_calls") or []:
+        calls = m.get("tool_calls") or []
+        for tc in calls:
             try: call_args[tc.get("id")] = json.loads(tc["function"].get("arguments") or "{}")
             except (ValueError, KeyError, TypeError): pass
         if m.get("role") not in ("user", "assistant"): continue
-        if m.get("role") == "user" and not m.get("interjection"):
-            # an answer that ended without text (stopped, gave up) never claimed
-            # its tool rows; they must not land under the next answer instead
-            pending_imgs, pending_tools, pending_detail = [], [], []
         c = m.get("content")
         if isinstance(c, list):
             out.append({"role": m["role"],
                         "text": " ".join(x.get("text","") for x in c if x.get("type")=="text"),
                         "images": [x["image_url"]["url"] for x in c if x.get("type")=="image_url"],
                         "plots": [], "tools": [], "t": m.get("t")})
-        # a stopped turn can have thinking with no answer text yet -- still show it
-        elif c or (m.get("role") == "assistant" and m.get("reasoning_content")):
+        # a stopped turn can have thinking with no answer text yet -- still show
+        # it, and a step that only called tools gets an entry for its tool rows
+        elif c or (m.get("role") == "assistant" and (m.get("reasoning_content") or calls)):
             out.append({"role": m["role"], "text": c or "", "images": [],
-                        "plots": [f"/api/ws/{i}" for i in pending_imgs] if m["role"]=="assistant" else [],
-                        "tools": pending_tools if m["role"]=="assistant" else [],
+                        "plots": [], "tools": [],
                         # which model wrote this, so a reopened chat is honest about it
                         "model": m.get("model") if m["role"] == "assistant" else None,
                         # the thinking trace, kept from a normal answer or a stop mid-stream
@@ -1399,11 +1402,8 @@ def render(msgs):
                         "t": m.get("t"),
                         # how long the answer took, what it cost, and each tool it ran
                         "secs": m.get("secs"), "usage": m.get("usage"),
-                        "tool_runs": pending_detail if m["role"] == "assistant" else []})
-            if m.get("role") == "assistant":
-                # reset only once they are attached to an entry: a tool-call step
-                # with no text and no thinking used to throw its tool rows away
-                pending_imgs, pending_tools, pending_detail = [], [], []
+                        "tool_runs": []})
+            for tc in calls: owner[tc.get("id")] = out[-1]
     return out
 
 JOBS_INFLIGHT = set()
@@ -1416,6 +1416,18 @@ def _stamp_started(job_id):
         if j.get("id") == job_id:
             j["last_run"] = time.time()
     q.sched_save(cfg)
+
+def _job_minutes(job):
+    """A job with stop_at ("06:00") must be done by then: its answer gets that
+    long, and wraps up with a summary when time runs out."""
+    return q.minutes_until(job["stop_at"]) if job.get("stop_at") else None
+
+def _job_prompt(job):
+    p = job.get("prompt", "")
+    if job.get("stop_at"):
+        p += (f"\n\n(You have until {job['stop_at']} — about {int(_job_minutes(job) or 0)} minutes. "
+              "Pace the work to finish by then; don't start something you can't complete.)")
+    return p
 
 def run_job(job):
     """Execute one scheduled prompt — in the chat it was scheduled from, with
@@ -1443,12 +1455,13 @@ def run_job(job):
                 st.msgs, _did, _pct = q.maybe_autocompact(st.msgs, sid=st.sid)
                 n0 = len(st.msgs)
                 prompt = (f"[Scheduled task “{label}”, running unattended at "
-                          f"{time.strftime('%H:%M')}]\n{job.get('prompt', '')}")
+                          f"{time.strftime('%H:%M')}]\n{_job_prompt(job)}")
                 st.refresh_tools()
                 out = q.turn(st.msgs, prompt, st.tools, emit=_live_emitter(st),
                              approve=lambda *a: False, cancel=st.cancel,
                              inbox=st.inbox, interrupt=st.interrupt, sid=st.sid,
-                             checkpoint=lambda: save_session(st), project=st.project)
+                             checkpoint=lambda: save_session(st), project=st.project,
+                             max_minutes=_job_minutes(job))
                 st.running = False
                 save_session(st)
                 _learn_later(st, n0)
@@ -1468,8 +1481,8 @@ def run_job(job):
             specs, _ = q.active_tools(pid)
             tools = q.tools_for(job.get("agent"), specs)
             result_sid = "sched-" + time.strftime("%Y%m%d-%H%M%S")
-            out = q.turn(msgs, job.get("prompt", ""), tools, approve=lambda *a: False,
-                         sid=result_sid, project=pid)
+            out = q.turn(msgs, _job_prompt(job), tools, approve=lambda *a: False,
+                         sid=result_sid, project=pid, max_minutes=_job_minutes(job))
             # filed under its project, so a project's scheduled runs sit with its chats
             q.session_save(result_sid, msgs, f"[scheduled] {label}", {"project": pid} if pid else None)
         result, ok = (out or "")[:400], True

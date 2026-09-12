@@ -637,8 +637,9 @@ function modelLabel(id){
 function addAssistant(who,ts){
  const m=el('<div class="msg a"><div class=who><span class=byline></span><span class=acts></span></div></div>');
  m.querySelector('.byline').textContent=who||modelLabel();
- const tools=el('<div></div>');m.appendChild(tools);
+ // a step reads in the order it happened: what it said, then the tools it called
  const b=el('<div class=bub></div>');m.appendChild(b);
+ const tools=el('<div></div>');m.appendChild(tools);
  // thinking sits BELOW the answer so it never pushes the reply off screen
  const th=el('<details class=think><summary>thinking</summary><div class=body></div></details>');
  th.style.display='none';m.appendChild(th);
@@ -1254,7 +1255,17 @@ async function go(opts){
  if(stoppedSid===sendSid)stoppedSid=null;  // a Stop applies to the answer it stopped, not the next
  if(!/^continue\b/i.test(t)&&PLANS[sendSid]){delete PLANS[sendSid];drawPlanDock()}  // the server starts a new plan too
  RUNNING.add(sendSid); SENDING.add(sendSid); renderSessions(); syncBusy();
- let a=addAssistant(modelLabel());       // replaced when it reads a note you sent mid-answer
+ let a=addAssistant(modelLabel());       // replaced at each new step, and when it reads a note
+ // Each model step gets its own block -- its thinking, what it said, then the
+ // tools it called -- so you can see which text went with which tools. They
+ // all used to pile into one block, tools on top and every step's text below.
+ const nextStep=()=>{
+  if(!a.tools.querySelector('details.tool,div.tool,.autoappr,.blocked,.approve'))return false;
+  if(pendingRender){clearTimeout(pendingRender);pendingRender=null}
+  if(thinkPending){clearTimeout(thinkPending);thinkPending=null;a.think.querySelector('.body').textContent=thinking}
+  if(answer){a.bub.innerHTML=md(answer);decorate(a.bub)}else a.bub.remove();
+  a.think.classList.remove('live');if(thinking)a.think.querySelector('summary').textContent=thoughtFor();
+  a=addAssistant(modelLabel());thinking='';answer='';return true};
  a.bub.innerHTML='<span class=working>working<span class=dots></span></span>';
  let thinking='',answer='',lastRender=0,pendingRender=null,thinkPending=null;
  const t0=performance.now(), trows={};      // trows: live tool rows by call id
@@ -1272,6 +1283,7 @@ async function go(opts){
     let m;try{m=JSON.parse(ln.slice(6))}catch(_){continue}
     // a finished call closes its row; the plan/diff/images branches below still run
     if(m.k==='tool_result'&&m.p&&m.p.id&&trows[m.p.id])finishTool(trows[m.p.id],m.p);
+    if(m.k==='thinking_delta'||m.k==='content_delta')nextStep();
     if(m.k==='thinking_delta'){
      if(!thinking){                             // first reasoning token
       tThink=performance.now();
@@ -2697,14 +2709,13 @@ function stamp(node,ts){
  if(ts===null)return;
  const d=ts?new Date(ts*1000):new Date();
  const t=document.createElement('span');t.className='ts';
- t.style.cssText='margin-left:auto;color:var(--dim);font-size:10.5px;opacity:0;transition:opacity .2s';
+ // always shown, not just on hover: when each step was written is part of reading it
+ t.style.cssText='margin-left:auto;color:var(--dim);font-size:10.5px;opacity:.8';
  const hm=d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
  t.textContent=d.toDateString()===new Date().toDateString()?hm
   :d.toLocaleDateString([], {month:'short',day:'numeric'})+', '+hm;
  t.title=d.toLocaleString();
- node.querySelector('.who').appendChild(t);
- node.onmouseenter=()=>t.style.opacity='1';
- node.onmouseleave=()=>t.style.opacity='0'}
+ node.querySelector('.who').appendChild(t)}
 
 /* ---------------- projects ---------------- */
 let PROJECTS={}, projFilter=null;
@@ -2953,7 +2964,8 @@ function savedAssistant(m){
    i.onclick=()=>window.open(u,'_blank');box.appendChild(i)});a.tools.appendChild(box)}
  a.bub.dataset.raw=m.text;a.bub.innerHTML=md(m.text);decorate(a.bub);
  if(m.thinking)showSavedThinking(a,m.thinking);
- if(!m.text&&!m.thinking)a.bub.innerHTML='<span style="color:var(--mut)">(stopped before it wrote anything)</span>';
+ if(!m.text&&!m.thinking&&!(m.tool_runs||[]).length&&!(m.tools||[]).length)
+  a.bub.innerHTML='<span style="color:var(--mut)">(stopped before it wrote anything)</span>';
  if(m.secs!=null||m.usage)answerStats(a,m.secs,m.usage);
  return a}
 function diffBlock(D,label){
