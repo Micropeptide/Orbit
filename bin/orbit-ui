@@ -170,8 +170,12 @@ def get_state(sid=None, create=True):
             STATES[sid] = st
         return st or S
 
+JOB_RUNS = {}          # sid of a scheduled run in its own new chat -> its cancel Event
+
 def running_sids():
-    return [sid for sid, st in list(STATES.items()) if st.lock.locked()]
+    # scheduled runs in their own chat count too: they were invisible, so
+    # nothing could show them running, stop them, or wait for them
+    return [sid for sid, st in list(STATES.items()) if st.lock.locked()] + list(JOB_RUNS)
 
 def jdump(o): return json.dumps(o, default=str)
 
@@ -975,6 +979,9 @@ class H(http.server.BaseHTTPRequestHandler):
             st.interrupt.set()
             return self._send(200, jdump({"ok": True, "queued": len(st.inbox)}))
         if p == "/api/cancel":
+            if d.get("sid") in JOB_RUNS:           # a scheduled run in its own chat
+                JOB_RUNS[d["sid"]].set()
+                return self._send(200, jdump({"ok": True, "sid": d["sid"]}))
             st = get_state(d.get("sid"), create=False)
             st.cancel.set()
             return self._send(200, jdump({"ok": True, "sid": st.sid}))
@@ -1411,11 +1418,11 @@ JOBS_INFLIGHT = set()
 def _stamp_started(job_id):
     """Claim the job before running it. last_run was only written on completion,
     so a job that was still running when the UI restarted fired all over again."""
-    cfg = q.sched_load()
-    for j in cfg.get("jobs", []):
-        if j.get("id") == job_id:
-            j["last_run"] = time.time()
-    q.sched_save(cfg)
+    def stamp(cfg):
+        for j in cfg.get("jobs", []):
+            if j.get("id") == job_id:
+                j["last_run"] = time.time()
+    q.sched_update(stamp)
 
 def _job_minutes(job):
     """A job with stop_at ("06:00") must be done by then: its answer gets that
@@ -1439,7 +1446,15 @@ def run_job(job):
         # stamped as run, so the scheduler simply tries again next minute.
         return "skipped: that chat is busy"
     started = time.time()
-    _stamp_started(job.get("id"))
+    try:
+        _stamp_started(job.get("id"))
+    except Exception:
+        # never leave the chat locked: a crash here used to hold its lock for
+        # good, so the chat read as "running" forever and nothing could run in it
+        if st is not None:
+            try: st.lock.release()
+            except RuntimeError: pass
+        raise
     result_sid = None
     try:
         label = job.get("name") or job["id"]
@@ -1481,25 +1496,31 @@ def run_job(job):
             specs, _ = q.active_tools(pid)
             tools = q.tools_for(job.get("agent"), specs)
             result_sid = "sched-" + time.strftime("%Y%m%d-%H%M%S")
-            out = q.turn(msgs, _job_prompt(job), tools, approve=lambda *a: False,
-                         sid=result_sid, project=pid, max_minutes=_job_minutes(job))
-            # filed under its project, so a project's scheduled runs sit with its chats
-            q.session_save(result_sid, msgs, f"[scheduled] {label}", {"project": pid} if pid else None)
+            stop = JOB_RUNS[result_sid] = threading.Event()
+            try:
+                out = q.turn(msgs, _job_prompt(job), tools, approve=lambda *a: False, cancel=stop,
+                             sid=result_sid, project=pid, max_minutes=_job_minutes(job),
+                             checkpoint=lambda: q.session_save(result_sid, msgs, f"[scheduled] {label}",
+                                                               {"project": pid} if pid else None))
+            finally:
+                JOB_RUNS.pop(result_sid, None)
+                # filed under its project, so a project's scheduled runs sit with its chats
+                q.session_save(result_sid, msgs, f"[scheduled] {label}", {"project": pid} if pid else None)
         result, ok = (out or "")[:400], True
     except Exception as e:
         import traceback
         _sched_log(f"job {job.get('id')} failed:\n{traceback.format_exc()}")
         result, ok = f"{type(e).__name__}: {e}", False
-    cfg = q.sched_load()
-    for j in cfg.get("jobs", []):
-        if j.get("id") == job.get("id"):
-            j["last_run"] = time.time(); j["last_ok"] = ok
-            j["last_result"] = result; j["last_sid"] = result_sid
-            j["seconds"] = round(time.time() - started, 1)
-            # a one-off has had its run, and a repeat past its end is finished
-            if j.get("every") == "once" or (j.get("until") and time.time() > float(j["until"])):
-                j["enabled"] = False
-    q.sched_save(cfg)
+    def record(cfg):
+        for j in cfg.get("jobs", []):
+            if j.get("id") == job.get("id"):
+                j["last_run"] = time.time(); j["last_ok"] = ok
+                j["last_result"] = result; j["last_sid"] = result_sid
+                j["seconds"] = round(time.time() - started, 1)
+                # a one-off has had its run, and a repeat past its end is finished
+                if j.get("every") == "once" or (j.get("until") and time.time() > float(j["until"])):
+                    j["enabled"] = False
+    q.sched_update(record)
     q._SESS_CACHE["key"] = None
     return result
 

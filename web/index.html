@@ -643,6 +643,9 @@ function addAssistant(who,ts){
  // thinking sits BELOW the answer so it never pushes the reply off screen
  const th=el('<details class=think><summary>thinking</summary><div class=body></div></details>');
  th.style.display='none';m.appendChild(th);
+ // once you open or close it yourself, nothing changes it back -- a live
+ // update used to re-collapse it moments after you clicked
+ th.querySelector('summary').addEventListener('click',()=>{th._user=true});
  // The thinking box scrolls itself, independently of the page. Track
  // whether you are near ITS bottom so a live update only follows along
  // when you have not deliberately scrolled up to read what came before —
@@ -686,10 +689,17 @@ function addAssistant(who,ts){
 // A thinking trace recovered from a reopened chat -- a completed answer, or
 // one you stopped mid-stream. Shown collapsed, same as a live one once the
 // answer began; click to read it.
-function showSavedThinking(a,text){
+function showSavedThinking(a,text,ts){
  a.think.style.display='';a.think.open=false;
- a.think.querySelector('summary').textContent='thinking';
+ if(ts)a.think._at=clockTime(ts);
+ thinkLabel(a,'thinking');
  a.think.querySelector('.body').textContent=text}
+// when a thinking block began, shown on its label
+function clockTime(ts){const d=ts?new Date(ts*1000):new Date();
+ return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}
+function thinkLabel(a,txt){a.think.querySelector('summary').textContent=txt+(a.think._at?' · '+a.think._at:'')}
+// thinking opens by itself while it is written and stays open; only you close it
+function openThink(a){if(!a.think._user)a.think.open=true}
 
 let ctxEl=null;
 function closeCtx(){if(ctxEl){ctxEl.remove();ctxEl=null}}
@@ -926,8 +936,8 @@ function attachLive(theSid, initial){
    notify(theSid,'Needs your approval',lv.approval.name||'')}
   if(lv.thinking){
    const body=a.think.querySelector('.body');
-   if(!thinkStarted){thinkStarted=true;body._stick=true;a.think.style.display='';a.think.open=!lv.content}
-   else if(lv.content&&body._stick)a.think.open=false;   // reading back? leave it open, untouched
+   if(!thinkStarted){thinkStarted=true;body._stick=true;a.think.style.display='';a.think._at=clockTime();
+    thinkLabel(a,'thinking');openThink(a)}
    body.textContent=lv.thinking;
    if(body._stick)body.scrollTop=body.scrollHeight}        // only if you're not reading back
   if(lv.content){a.bub.innerHTML=md(lv.content);a.bub.dataset.raw=lv.content}
@@ -943,7 +953,6 @@ function attachLive(theSid, initial){
     stopLive(); note.remove();
     lrows.forEach(r=>{if(r.classList.contains('live'))finishTool(r,{stopped:true})});
     if(lv.content){a.bub.innerHTML=md(lv.content);decorate(a.bub)}
-    a.think.open=false;
     RUNNING.delete(theSid);renderSessions();loadSessions();
    }
   }catch(e){stopLive()}
@@ -1264,7 +1273,7 @@ async function go(opts){
   if(pendingRender){clearTimeout(pendingRender);pendingRender=null}
   if(thinkPending){clearTimeout(thinkPending);thinkPending=null;a.think.querySelector('.body').textContent=thinking}
   if(answer){a.bub.innerHTML=md(answer);decorate(a.bub)}else a.bub.remove();
-  a.think.classList.remove('live');if(thinking)a.think.querySelector('summary').textContent=thoughtFor();
+  a.think.classList.remove('live');if(thinking)thinkLabel(a,thoughtFor());
   a=addAssistant(modelLabel());thinking='';answer='';return true};
  a.bub.innerHTML='<span class=working>working<span class=dots></span></span>';
  let thinking='',answer='',lastRender=0,pendingRender=null,thinkPending=null;
@@ -1286,9 +1295,9 @@ async function go(opts){
     if(m.k==='thinking_delta'||m.k==='content_delta')nextStep();
     if(m.k==='thinking_delta'){
      if(!thinking){                             // first reasoning token
-      tThink=performance.now();
-      a.think.style.display='';a.think.open=true;a.think.classList.add('live');
-      a.think.querySelector('summary').textContent='thinking…';
+      tThink=performance.now();a.think._at=clockTime();
+      a.think.style.display='';openThink(a);a.think.classList.add('live');
+      thinkLabel(a,'thinking…');
       a.bub.innerHTML='';                       // drop the "working" placeholder
       a.think.querySelector('.body')._stick=true;     // nothing to preserve yet
      }
@@ -1304,10 +1313,7 @@ async function go(opts){
       const tbody=a.think.querySelector('.body');
       tbody.textContent=thinking;
       a.think.classList.remove('live');
-      a.think.querySelector('summary').textContent=thoughtFor();
-      // scrolled up to read back? leave it open and exactly where you left it —
-      // collapsing it out from under you is worse than one extra open panel
-      if(tbody._stick)a.think.open=false;
+      thinkLabel(a,thoughtFor());          // stays open: you close it when you want
      }
      if(!answer){a.bub.innerHTML='';a.m.querySelectorAll('.retrynote').forEach(x=>x.remove())}
      answer+=m.p;a.bub.dataset.raw=answer;
@@ -1411,7 +1417,7 @@ async function go(opts){
       if(answer){a.bub.innerHTML=md(answer);decorate(a.bub)}
       else if(!thinking&&!a.tools.childElementCount)a.m.remove();
       else a.bub.innerHTML='';
-      a.think.classList.remove('live');if(thinking)a.think.querySelector('summary').textContent=thoughtFor();
+      a.think.classList.remove('live');if(thinking)thinkLabel(a,thoughtFor());
       if(pn){pn.done=true;pn.tag.textContent='✓ read';wrap.appendChild(pn.node)}
       else noteBubble(m.p.text,'✓ read — sent from another window');
       a=addAssistant(modelLabel());
@@ -1453,7 +1459,7 @@ async function go(opts){
   if(pendingRender){clearTimeout(pendingRender);pendingRender=null}
  if(thinkPending){clearTimeout(thinkPending);thinkPending=null;
   a.think.querySelector('.body').textContent=thinking}
- if(thinking&&!answer){a.think.classList.remove('live');a.think.querySelector('summary').textContent=thoughtFor()}
+ if(thinking&&!answer){a.think.classList.remove('live');thinkLabel(a,thoughtFor())}
  if(!answer)a.bub.textContent=(stoppedSid===sendSid)?'(stopped before it wrote anything)'
                                             :'(no answer)';
  else {a.bub.innerHTML=md(answer);decorate(a.bub)}
@@ -2963,7 +2969,7 @@ function savedAssistant(m){
   m.plots.forEach(u=>{const i=document.createElement('img');i.src=u;i.style.cursor='zoom-in';
    i.onclick=()=>window.open(u,'_blank');box.appendChild(i)});a.tools.appendChild(box)}
  a.bub.dataset.raw=m.text;a.bub.innerHTML=md(m.text);decorate(a.bub);
- if(m.thinking)showSavedThinking(a,m.thinking);
+ if(m.thinking)showSavedThinking(a,m.thinking,m.t);
  if(!m.text&&!m.thinking&&!(m.tool_runs||[]).length&&!(m.tools||[]).length)
   a.bub.innerHTML='<span style="color:var(--mut)">(stopped before it wrote anything)</span>';
  if(m.secs!=null||m.usage)answerStats(a,m.secs,m.usage);

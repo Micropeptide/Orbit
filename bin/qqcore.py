@@ -2022,11 +2022,18 @@ def redact_server_log(path=SRVLOG):
 
 def _atomic_write(path, data):
     """Write via temp+rename so a crash mid-write can never truncate a chat."""
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f)
-        f.flush(); os.fsync(f.fileno())
-    os.replace(tmp, path)
+    # a temp name of its own: two threads saving the same file shared one
+    # ".tmp", and the second rename found it gone (FileNotFoundError)
+    tmp = f"{path}.{os.getpid()}-{threading.get_ident()}-{os.urandom(3).hex()}.tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+            f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try: os.remove(tmp)
+            except OSError: pass
 
 def session_save(sid, messages, title=None, extra=None):
     payload = {"schema": SCHEMA, "title": title, "messages": messages,
@@ -3343,8 +3350,19 @@ def sched_load():
     try: return json.load(open(SCHED))
     except Exception: return {"jobs": []}
 
+SCHED_LOCK = threading.RLock()   # every read-modify-write of schedule.json
+
 def sched_save(d):
-    snapshot_config(SCHED); _atomic_write(SCHED, d); return d
+    with SCHED_LOCK:
+        snapshot_config(SCHED); _atomic_write(SCHED, d); return d
+
+def sched_update(fn):
+    """Load the schedule, let fn change it, save it -- as one step, so two
+    jobs finishing together can't overwrite each other's changes."""
+    with SCHED_LOCK:
+        cfg = sched_load()
+        fn(cfg)
+        return sched_save(cfg)
 
 def sched_due(job, now=None):
     now = now or time.time()
@@ -3353,6 +3371,10 @@ def sched_due(job, now=None):
     if job.get("start") and now < float(job["start"]): return False
     last = job.get("last_run") or 0
     kind = job.get("every", "daily")
+    if kind in ("daily", "weekly") and not last:
+        # a new daily job waits for its next time: one created at 09:33 for
+        # 07:30 used to count today's 07:30 as missed and run at once
+        last = float(job.get("created") or 0)
     if kind == "once": return not last and now >= float(job.get("at_ts") or 0)
     if kind == "minutes":  return now - last >= 60 * float(job.get("n", 30))
     if kind == "hours":    return now - last >= 3600 * float(job.get("n", 6))
