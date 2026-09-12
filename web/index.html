@@ -984,6 +984,8 @@ function attachLive(theSid, initial){
 
 async function openSession(id){
  stopLive();
+ if(tempMode){tempMode=false;$('#tempbtn').style.borderColor='';$('#tempbtn').style.color='';
+  $('#burnbtn').style.display='none'}          // a saved chat is never temporary
  const d=await (await fetch('/api/session/'+id)).json();
  if(d.error)return sysline('could not open: '+d.error);
  if(sid&&sid!==d.sid){clearTimeout(draftT);saveDraft(sid)}
@@ -1406,6 +1408,8 @@ async function go(opts){
       +`${(INFO.settings&&INFO.settings.idle_min)||20} min idle — first message after that reloads `
       +`~15 GB of weights</div>`;
      bottom()}
+    else if(m.k==='plan_nudge'||m.k==='fail_streak'||m.k==='ultrathink'){
+     sysline(m.p.msg||m.k)}
     else if(m.k==='queued'){               // another chat has the model; this one waits in line
      a.bub.innerHTML='<span class=working>'+esc(m.p.msg||'waiting for another chat to finish')+'<span class=dots></span></span>';bottom()}
     else if(m.k==='dequeued'){
@@ -2613,11 +2617,14 @@ $('#tempbtn').onclick=async()=>{
 $('#burnbtn').onclick=async()=>{
  if(!confirm('Erase this conversation completely? It cannot be recovered.'))return;
  clearDraft(sid);
- const d=await (await fetch('/api/burn',{method:'POST'})).json();
+ const d=await (await fetch('/api/burn',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({sid})})).json();
+ if(!d.ok){toast(d.error||'nothing erased');return}
  stopLive(); sid=d.sid; syncBusy();
  wrap.innerHTML='';sysline('erased');loadSessions()};
 addEventListener('beforeunload',()=>{
- if(tempMode)navigator.sendBeacon('/api/burn')});
+ // names the chat, so the server can refuse if it isn't the temporary one
+ if(tempMode&&sid)navigator.sendBeacon('/api/burn',new Blob([JSON.stringify({sid})],{type:'application/json'}))});
 
 /* ---------------- command palette ---------------- */
 let pal=null,palSel=0,palItems=[];

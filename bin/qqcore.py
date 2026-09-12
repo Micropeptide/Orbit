@@ -749,9 +749,31 @@ def t_run_shell(command):
     if not (S.get("shell_enabled") or full_access()):
         return ("Error: shell is disabled. Enable it, or 'Full computer access', "
                 "in Settings -> Tools if you want this.")
-    r = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=180)
+    bad = _interactive(command)
+    if bad: return bad
+    r = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=180,
+                       env=_batch_env(), stdin=subprocess.DEVNULL)
     return (f"exit={r.returncode}\nstdout:\n{r.stdout[:MAXCH]}"
             + (f"\nstderr:\n{r.stderr[:2000]}" if r.stderr else ""))
+
+def _batch_env():
+    """Environment for commands run with nobody at the keyboard: git, pip,
+    brew and pagers never stop to ask, so an unattended run can't hang on a
+    prompt until it times out."""
+    return {**os.environ, "CI": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_EDITOR": ":",
+            "EDITOR": ":", "PAGER": "cat", "GIT_PAGER": "cat", "PIP_NO_INPUT": "1",
+            "HOMEBREW_NO_AUTO_UPDATE": "1", "DEBIAN_FRONTEND": "noninteractive"}
+
+import re as _re                  # (also imported further down; needed this early)
+_INTERACTIVE = _re.compile(r"^\s*(sudo\s+)?(vim?|nvim|nano|emacs|less|more|man|top|htop|watch)(\s|$)"
+                           r"|^\s*(python3?|ipython|node|irb|sqlite3|psql|mysql)\s*$")
+
+def _interactive(command):
+    if _INTERACTIVE.search(str(command or "")):
+        return ("Error: that starts an interactive program, which would wait forever for "
+                "keyboard input. Use a non-interactive form instead: cat/head/sed for files, "
+                "python -c '...' or the python tool for code, `top -l 1` for a snapshot.")
+    return None
 
 BG_JOBS = {}                                       # id -> job record, this session only
 BG_SEQ = [0]
@@ -776,8 +798,11 @@ def t_run_shell_background(command):
     jid = f"bg{BG_SEQ[0]}"
     out_path = os.path.join(BG_OUT_DIR, jid + ".log")
     outf = open(out_path, "w")
+    bad = _interactive(command)
+    if bad: outf.close(); return bad
     proc = subprocess.Popen(command, shell=True, cwd=WORKSPACE, stdout=outf,
-                            stderr=subprocess.STDOUT, text=True)
+                            stderr=subprocess.STDOUT, text=True, env=_batch_env(),
+                            stdin=subprocess.DEVNULL)
     BG_JOBS[jid] = {"id": jid, "command": command, "started": time.time(),
                      "proc": proc, "out_path": out_path, "outf": outf}
     return f"Started background job {jid}: {command!r}. Poll it with check_background({jid!r})."
@@ -1336,7 +1361,7 @@ class _Either:
 
 # keys Orbit keeps on a stored message for itself -- never sent to a model
 PRIVATE_KEYS = ("partial", "interjection", "compacted", "t", "secs", "ok", "usage", "tool_runs",
-                "reasoning_marks")
+                "reasoning_marks", "nudge")
 
 def para_marks(marks, state, chunk, now=None):
     """Note when each paragraph of thinking began: [offset, time] pairs, kept
@@ -1388,6 +1413,7 @@ def _strip_reasoning(messages):
 
 def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
                 interrupt=None):
+    if think is None: think = getattr(TURN_CTX, "think", None)
     think = S.get("thinking", True) if think is None else think
     messages = _strip_reasoning(messages)
     stop = _Either(cancel or CANCEL, interrupt)
@@ -1559,6 +1585,10 @@ def _run_one_tool(tc, fn, args, messages, emit, approve, seen_calls):
     full = _truncate_output(fn, out)
     emit("tool_result", {"name": fn, "id": tid, "ok": ok, "secs": secs, "output": str(out)[:4000]})
     _tool_log(fn, secs, ok, getattr(TURN_CTX, "sid", None))
+    if fn in ("read_file", "edit_file", "write_file"):
+        # a subfolder's own rules, the first time this chat touches a file there
+        try: full += folder_rules_for(_resolve_path((args or {}).get("path", "")))
+        except Exception: pass
     messages.append({"role":"tool","tool_call_id":tid,"name":fn,"t":time.time(),
                      "ok": ok, "secs": secs, "content": full})
     if fn == "screen_look" and LAST_SCREEN_IMAGE:
@@ -1675,8 +1705,17 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
     elif not remote:
         ensure_model()          # a hosted model needs no local weights at all
     LAST_SOURCES.clear()
-    if isinstance(user_content, str) and not user_content.startswith("Continue"):
+    # a new request starts a new plan; a continuation, a scheduled run of this
+    # chat or a pick-up after a restart carries on with the one it has
+    if isinstance(user_content, str) and not user_content.startswith(
+            ("Continue", "[Scheduled task", "Orbit restarted")):
         CURRENT_PLAN["steps"] = []
+    # "ultrathink" anywhere outside a code block: most reasoning, for this answer only
+    TURN_CTX.think = None
+    if isinstance(user_content, str) and _re.search(
+            r"\bultrathink\b", _re.sub(r"```.*?```", "", user_content, flags=_re.S), _re.I):
+        TURN_CTX.effort, TURN_CTX.think = "high", True
+        emit("ultrathink", {"msg": "ultrathink — thinking as hard as it can for this answer"})
     plain = user_content if isinstance(user_content, str) else " ".join(
         x.get("text", "") for x in user_content if isinstance(x, dict))
     sk = suggest_skill(plain)
@@ -1831,6 +1870,24 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
             if not calls:
                 if inbox:
                     continue            # a note landed just as it finished — answer that too
+                # it stopped with plan steps still open: nudge it on, a few
+                # times at most and only while it is making progress -- a small
+                # model often ends early, and nobody may be watching
+                pend = plan_pending()
+                done_now = sum(1 for x in CURRENT_PLAN.get("steps", []) if x.get("done"))
+                mark = (done_now, tool_runs[0])
+                if (pend and int(S.get("plan_nudges", 3)) > seen_calls.get("__nudges__", 0)
+                        and not cancel.is_set() and seen_calls.get("__nudge_mark__") != mark):
+                    seen_calls["__nudges__"] = seen_calls.get("__nudges__", 0) + 1
+                    seen_calls["__nudge_mark__"] = mark
+                    left = "; ".join(x["text"] for x in pend[:5])
+                    messages.append({"role": "user", "nudge": True, "t": time.time(), "content": (
+                        f"[Orbit: your plan still has {len(pend)} open step(s): {left}. Carry on with "
+                        "the next one now without asking. If something blocks you, call plan(note=...) "
+                        "saying what, and finish with what you have.]")})
+                    emit("plan_nudge", {"left": [x["text"] for x in pend],
+                                        "msg": f"resuming — {len(pend)} plan step(s) left"})
+                    continue
                 answer = (msg.get("content") or "").strip()
                 if LAST_SOURCES:
                     emit("sources", [{"doc": x["doc"], "score": x["score"],
@@ -1840,6 +1897,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                 _finish(messages[-1], rnd)
                 emit("done", None)
                 return answer
+            n_before = len(messages)
             for i, tc in enumerate(calls):
                 if not tc.get("id"): tc["id"] = f"call_{rnd}_{i}"
                 fn, args, bad = repair_call(tc["function"].get("name") or "",
@@ -1881,6 +1939,22 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                         "ok": False, "content": (f"Internal error running {fn}: {type(e).__name__}: {e}. "
                                     "This is a bug in the tool, not your fault. Try a different "
                                     "tool or approach, and carry on with the task.")})
+            # three failures in a row: stop and rethink rather than flail. The
+            # identical-call guard only caught the same call three times
+            streak = seen_calls.get("__fail_streak__", 0)
+            for m_ in messages[n_before:]:
+                if m_.get("role") == "tool":
+                    streak = streak + 1 if m_.get("ok") is False else 0
+            seen_calls["__fail_streak__"] = streak
+            if streak == 0: seen_calls.pop("__fail_warned__", None)
+            elif streak >= 3 and not seen_calls.get("__fail_warned__"):
+                seen_calls["__fail_warned__"] = True
+                emit("fail_streak", {"n": streak, "msg": f"{streak} tool calls failed in a row — rethinking"})
+                messages.append({"role": "user", "nudge": True, "t": time.time(), "content": (
+                    f"[Orbit: the last {streak} tool calls failed. Stop and think before the next one: "
+                    "say what went wrong, undo anything you broke (checkpoints keep earlier versions "
+                    "of edited files), then try a different approach — or finish and explain what "
+                    "blocks you.]")})
             # write progress to disk as it goes: a long answer used to be saved
             # only when it finished, so a crash or restart lost every step of it
             if checkpoint and time.time() - last_ckpt >= CHECKPOINT_EVERY:
@@ -3734,9 +3808,50 @@ def squeeze_tool_results(messages, keep_recent=6, cap=1500):
     idx = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
     if len(idx) <= keep_recent: return messages, 0
     freed, out = 0, list(messages)
+    old = set(idx[:-keep_recent])
+    # which call made each result, so a repeated call's older result can go
+    calls, later = {}, {}
+    for i, m in enumerate(out):
+        for tc in m.get("tool_calls") or []:
+            f = tc.get("function") or {}
+            calls[tc.get("id")] = (f.get("name"), f.get("arguments") or "")
+    for i in reversed(idx):
+        sig = calls.get(out[i].get("tool_call_id"))
+        if sig is None: continue
+        if sig in later and i in old and not str(out[i].get("content") or "").startswith("[same"):
+            body = str(out[i].get("content") or "")
+            out[i] = {**out[i], "content": f"[same call made again later — see step {later[sig]}'s result]"}
+            freed += len(body) - len(out[i]["content"])
+        later.setdefault(sig, i)
+    # a failed result that is no longer recent needs only its first line
+    for i in old:
+        body = str(out[i].get("content") or "")
+        if out[i].get("ok") is False and len(body) > 300:
+            out[i] = {**out[i], "content": body[:300] + " …[rest of an old error elided]"}
+            freed += len(body) - len(out[i]["content"])
+    # file contents written earlier live on in the file; the arguments can go
+    first_old_tool = min(old) if old else 0
+    last_old = max(old) if old else -1
+    for i, m in enumerate(out):
+        if i > last_old or m.get("role") != "assistant" or not m.get("tool_calls"): continue
+        new_calls, changed = [], False
+        for tc in m["tool_calls"]:
+            f = tc.get("function") or {}
+            if f.get("name") in ("write_file", "edit_file") and len(f.get("arguments") or "") > cap:
+                try: a = json.loads(f["arguments"])
+                except ValueError: a = None
+                if isinstance(a, dict):
+                    for k in ("content", "new_string", "old_string"):
+                        if isinstance(a.get(k), str) and len(a[k]) > 200:
+                            a[k] = f"[{len(a[k])} characters — elided; the file itself has them]"
+                    na = json.dumps(a)
+                    freed += len(f["arguments"]) - len(na)
+                    tc = {**tc, "function": {**f, "arguments": na}}; changed = True
+            new_calls.append(tc)
+        if changed: out[i] = {**m, "tool_calls": new_calls}
     for i in idx[:-keep_recent]:
         body = str(out[i].get("content") or "")
-        if len(body) <= cap or body.startswith("[elided"): continue
+        if len(body) <= cap or body.startswith(("[elided", "[same")): continue
         head, tail = body[: cap // 2], body[-cap // 4:]
         out[i] = {**out[i], "content":
                   f"[elided {len(body) - len(head) - len(tail)} characters of an "
@@ -3951,7 +4066,21 @@ def file_diff(path, new_text):
 
 
 # ==================================================================== PLAN / TODO
-CURRENT_PLAN = {"steps": [], "updated": 0}
+PLANS = {}          # plan key (the chat's sid, or a helper's own key) -> {"steps", "updated"}
+
+def _plan_key():
+    return getattr(TURN_CTX, "plan_key", None) or getattr(TURN_CTX, "sid", None) or "_"
+
+class _PlanView(dict):
+    """CURRENT_PLAN, kept as a name for older code: reads and writes the plan of
+    whichever chat is running on this thread. It used to be one dict for the
+    whole process, so three chats overwrote each other's plans."""
+    def _p(self): return PLANS.setdefault(_plan_key(), {"steps": [], "updated": 0})
+    def __getitem__(self, k): return self._p()[k]
+    def __setitem__(self, k, v): self._p()[k] = v
+    def get(self, k, d=None): return self._p().get(k, d)
+
+CURRENT_PLAN = _PlanView()
 
 def t_plan(steps=None, done=None, note=None):
     """Track multi-step work. steps=[...] starts a plan; done=index marks one complete."""
@@ -5019,8 +5148,9 @@ def t_task(prompt, description=None):
         if k == "tool":
             steps[0] += 1
             up("subtask", {"description": label, "tool": (p or {}).get("name"), "step": steps[0]})
-    saved_plan = [dict(s) for s in CURRENT_PLAN.get("steps", [])]
     saved_sources = list(LAST_SOURCES)
+    parent_key = getattr(TURN_CTX, "plan_key", None)
+    TURN_CTX.plan_key = f"task-{os.urandom(3).hex()}"      # the helper's own plan
     TURN_CTX.depth = 1
     try:
         ans = turn(msgs, str(prompt), tools, emit=sub_emit, approve=parent["approve"],
@@ -5032,7 +5162,8 @@ def t_task(prompt, description=None):
         for k, v in parent.items(): setattr(TURN_CTX, k, v)
         TURN_CTX.depth = parent["depth"] or 0
         TURN_CTX.project = project
-        CURRENT_PLAN["steps"] = saved_plan
+        PLANS.pop(TURN_CTX.plan_key, None)
+        TURN_CTX.plan_key = parent_key
         LAST_SOURCES[:] = saved_sources
     return f"Helper report ({steps[0]} tool steps) for “{label}”:\n\n{ans}"
 
@@ -5206,3 +5337,62 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
                                       model=model, interrupt=interrupt)
     finally:
         slot_exit()
+
+
+# ==================================================================== FOLDER RULES, CHAT HISTORY
+INJECTED_RULES = {}     # sid -> set of rule files already shown to that chat
+
+def folder_rules_for(path):
+    """Rule files (ORBIT.md / AGENTS.md / CLAUDE.md) in the folders between a
+    file and its project's root, not yet shown to this chat -- so a subfolder
+    can say "never modify these" and the model hears it when it gets there.
+    The root's own rules are already in the system prompt."""
+    root = project_folder()
+    if not root: return ""
+    p = os.path.abspath(path)
+    if not p.startswith(root.rstrip(os.sep) + os.sep): return ""
+    seen = INJECTED_RULES.setdefault(getattr(TURN_CTX, "sid", None) or "_", set())
+    out, d = [], os.path.dirname(p)
+    while d.startswith(root.rstrip(os.sep) + os.sep):
+        for name in RULE_FILES:
+            fp = os.path.join(d, name)
+            if fp in seen or not os.path.isfile(fp): continue
+            seen.add(fp)
+            try: txt = open(fp, encoding="utf-8", errors="replace").read().strip()[:4000]
+            except OSError: continue
+            if txt: out.append(f"[Rules for {os.path.relpath(d, root)}/ ({name}) — follow them here:]\n{txt}")
+            break
+        d = os.path.dirname(d)
+    return ("\n\n" + "\n\n".join(out)) if out else ""
+
+
+def t_search_chats(query, limit=10):
+    hits = search_chats(str(query or ""), limit=max(1, min(int(limit or 10), 30)))
+    if not hits: return f"No earlier chat mentions {query!r}."
+    return "\n".join(f"- {h['sid']} · {h['title']} · {h['role']}: …{h['snippet']}…" for h in hits)
+
+def t_read_chat(id, last=12):
+    """The last few turns of an earlier chat, read-only."""
+    sid = str(id or "").strip()
+    if not _re.fullmatch(r"[\w\-]+", sid) or not os.path.exists(session_path(sid)):
+        return f"Error: no chat with id {sid!r}. Find one with search_chats."
+    msgs, title = session_load(sid)
+    rows = []
+    for m in msgs:
+        if m.get("role") not in ("user", "assistant") or m.get("nudge"): continue
+        c = m.get("content")
+        if isinstance(c, list): c = " ".join(x.get("text", "") for x in c if isinstance(x, dict))
+        if c: rows.append(f"{m['role']}: {str(c)[:2500]}")
+    n = max(1, min(int(last or 12), 40))
+    return f"Chat “{title}” ({sid}), last {min(n, len(rows))} of {len(rows)} messages:\n\n" + "\n\n".join(rows[-n:])
+
+BUILTIN["search_chats"] = t_search_chats
+BUILTIN["read_chat"] = t_read_chat
+ALL_SPECS += [
+ {"type": "function", "function": {"name": "search_chats",
+  "description": "Search earlier chats for a word or phrase — e.g. what was concluded about a market or a gene last week. Returns chat ids, titles and a snippet.",
+  "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["query"]}}},
+ {"type": "function", "function": {"name": "read_chat",
+  "description": "Read the last messages of an earlier chat by id (from search_chats). Read-only.",
+  "parameters": {"type": "object", "properties": {"id": {"type": "string"}, "last": {"type": "integer"}}, "required": ["id"]}}},
+]
