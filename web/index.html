@@ -1122,7 +1122,9 @@ async function newChat(){
  const typed=q.value;
  switching=(async()=>{
   // a failed request used to do nothing at all -- the old chat just stayed put
-  let d;try{const r=await fetch('/api/new',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+  // in the project the sidebar is showing, or none from "All chats"
+  let d;try{const r=await fetch('/api/new',{method:'POST',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({project:projFilter||null})});
    d=await r.json();if(!r.ok||!d.sid)throw new Error(d.error||('the server answered '+r.status))}
   catch(e){toast('could not start a new chat — '+(e.message||e)+'. Orbit may be restarting; try again in a moment.');return}
   stopLive(); sid=d.sid;if(q.value===typed)loadDraft(d.sid);   // typed while it opened? keep that

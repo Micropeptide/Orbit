@@ -595,7 +595,15 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/new":
             with LOCK: q.reload_settings()
             fresh_state()
-            return self._send(200, jdump({"sid": S.sid}))
+            # the project you are looking at in the sidebar, not whichever chat the
+            # server last had open -- a new chat from "All chats" was landing in
+            # the project of the chat you'd been in, with its rules and folder
+            if "project" in d:
+                with LOCK:
+                    S.project = d.get("project") or None
+                    q.ACTIVE_PROJECT["id"] = S.project
+                    S.msgs[0]["content"] = q.system_prompt_for(S.agent, S.project)
+            return self._send(200, jdump({"sid": S.sid, "project": S.project}))
         if p == "/api/compact":
             with LOCK:
                 before = len(S.msgs)
