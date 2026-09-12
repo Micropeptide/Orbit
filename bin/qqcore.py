@@ -71,6 +71,9 @@ DEFAULTS = {
   # hold off idle sleep while an answer is running, so an evening-long task
   # isn't stopped dead by the Mac dozing off
   "keep_awake": True,
+  # an answer cut off because Orbit itself stopped (crash, update, restart) is
+  # picked up again in the same chat a minute after it starts back up
+  "resume_after_restart": True,
   "shell_enabled": False,
   "code_execution": True,
   "write_any": False,
@@ -1543,7 +1546,7 @@ def _take_notes(messages, inbox, emit, late=False):
     return n
 
 def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
-         inbox=None, interrupt=None, sid=None):
+         inbox=None, interrupt=None, sid=None, checkpoint=None):
     """Answer one message, looping model -> tools -> model until it is done.
 
     approve(fn, args, reason) -> bool; if None, risky actions are refused.
@@ -1592,6 +1595,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
     every = float(S.get("long_run_notice_min") or 0) * 60
     next_notice = t_start + every if every else None
     awake = _stay_awake()
+    last_ckpt = 0.0       # the first step that runs tools is saved at once, then every CHECKPOINT_EVERY s
     try:
         rnd = 0
         while True:
@@ -1692,6 +1696,12 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                         "content": (f"Internal error running {fn}: {type(e).__name__}: {e}. "
                                     "This is a bug in the tool, not your fault. Try a different "
                                     "tool or approach, and carry on with the task.")})
+            # write progress to disk as it goes: a long answer used to be saved
+            # only when it finished, so a crash or restart lost every step of it
+            if checkpoint and time.time() - last_ckpt >= CHECKPOINT_EVERY:
+                last_ckpt = time.time()
+                try: checkpoint()
+                except Exception: pass
     finally:
         _release_awake(awake)
 
@@ -1894,6 +1904,54 @@ def session_delete(sid):
     p = session_path(sid)
     if os.path.exists(p): os.remove(p); return True
     return False
+
+CHECKPOINT_EVERY = 15      # seconds between progress saves during one long answer
+RESUME_WINDOW_H = 12       # cut off longer ago than this: repaired, but not restarted
+
+def recover_interrupted_sessions(now=None):
+    """Chats whose answer was cut off because Orbit itself stopped — a crash,
+    an update, a restart — which the chat file marks with `running_since`.
+
+    Each is put back into a shape a model will accept (a tool call that never
+    got its result makes the next request invalid) and, unless
+    resume_after_restart is off or it was a long time ago, a one-off run is
+    scheduled to pick the work up in that same chat a minute later — it shows
+    in Tasks and can be cancelled like any other. Returns [(sid, resumed)]."""
+    now = now or time.time()
+    out = []
+    try: names = os.listdir(SESSIONS)
+    except OSError: return out
+    for f in names:
+        if not f.endswith(".json"): continue
+        try: raw = json.load(open(os.path.join(SESSIONS, f)))
+        except Exception: continue
+        if not isinstance(raw, dict) or not raw.get("running_since"): continue
+        sid, since = f[:-5], float(raw.get("running_since") or 0)
+        msgs = list(raw.get("messages") or [])
+        answered = {m.get("tool_call_id") for m in msgs if m.get("role") == "tool"}
+        last_calls = next((m for m in reversed(msgs)
+                           if m.get("role") == "assistant" and m.get("tool_calls")), None)
+        for t in (last_calls or {}).get("tool_calls") or []:
+            if t.get("id") not in answered:
+                msgs.append({"role": "tool", "tool_call_id": t.get("id"),
+                             "name": (t.get("function") or {}).get("name"),
+                             "content": "(no result — Orbit stopped before this finished)"})
+        keep = {k: v for k, v in raw.items()
+                if k not in ("schema", "title", "messages", "saved", "running_since")}
+        session_save(sid, msgs, raw.get("title"), keep)
+        resume = bool(S.get("resume_after_restart", True)) and now - since < RESUME_WINDOW_H * 3600
+        if resume:
+            title = raw.get("title") or sid
+            job = {"id": "job" + os.urandom(3).hex(), "every": "once", "at_ts": now + 60,
+                   "sid": sid, "enabled": True, "created": now, "created_by": "orbit",
+                   "name": f"pick up after restart: {title[:40]}",
+                   "prompt": ("Orbit restarted while you were in the middle of this. Carry on "
+                              "from where you stopped — check `plan` and the latest messages "
+                              "above, and don't redo steps that are already done.")}
+            cfg = sched_load(); cfg.setdefault("jobs", []).append(job); sched_save(cfg)
+            notify("Orbit restarted", f"picking up “{title[:60]}” where it left off")
+        out.append((sid, resume))
+    return out
 
 
 # ------------------------------------------------------------------ saved prompts

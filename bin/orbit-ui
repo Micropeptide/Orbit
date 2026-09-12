@@ -75,6 +75,9 @@ class State:
         # interrupt cuts a long generation short so a note isn't left waiting
         self.inbox = collections.deque()
         self.interrupt = threading.Event()
+        # true while an answer runs, written into the chat file, so a restart
+        # can tell which chats it cut off mid-answer
+        self.running = False
         # live buffer: lets you switch away mid-answer and rejoin it later
         self.live = {"thinking": "", "content": "", "tools": [],
                      "status": "", "done": True, "seq": 0}
@@ -91,6 +94,7 @@ class State:
         self.cancel = threading.Event()
         self.inbox = collections.deque()
         self.interrupt = threading.Event()
+        self.running = False
         self.live = {"thinking": "", "content": "", "tools": [],
                      "status": "", "done": True, "seq": 0}
         self.flags = {}
@@ -186,6 +190,7 @@ def save_session(st=None):
     if getattr(st, "model", None): extra["model"] = st.model
     if st.sys_override: extra["sys_override"] = st.sys_override
     if st.project: extra["project"] = st.project
+    if getattr(st, "running", False): extra["running_since"] = st.busy_since or time.time()
     q.session_save(st.sid, st.msgs, st.title, extra)
 
 class H(http.server.BaseHTTPRequestHandler):
@@ -1096,6 +1101,7 @@ class H(http.server.BaseHTTPRequestHandler):
                         st.title = " ".join(str(text).split())[:60] or "(untitled)"
                     # write immediately: a running chat must be visible in the sidebar
                     st.msgs.append({"role": "user", "content": content})
+                    st.running = True
                     save_session(st)
                     st.msgs.pop()
                     def _approve(fn, a, reason):
@@ -1149,7 +1155,8 @@ class H(http.server.BaseHTTPRequestHandler):
                     _t0 = time.time()
                     st.interrupt.clear()
                     q.turn(st.msgs, content, st.tools, emit=_emit, approve=_approve,
-                           cancel=st.cancel, inbox=st.inbox, interrupt=st.interrupt, sid=st.sid)
+                           cancel=st.cancel, inbox=st.inbox, interrupt=st.interrupt, sid=st.sid,
+                           checkpoint=lambda: save_session(st))
                     # a note that landed in the instant between the answer ending
                     # and this chat being released: answer it now, in this same
                     # stream, rather than leave it sitting unread
@@ -1160,7 +1167,8 @@ class H(http.server.BaseHTTPRequestHandler):
                         st.interrupt.clear()
                         q.turn(st.msgs, note.get("text", ""), st.tools, emit=_emit,
                                approve=_approve, cancel=st.cancel, inbox=st.inbox,
-                               interrupt=st.interrupt, sid=st.sid)
+                               interrupt=st.interrupt, sid=st.sid,
+                               checkpoint=lambda: save_session(st))
                     try:
                         stats = q.server_status().get("last") or {}
                         q.ledger_add(st.sid, seconds=round(time.time() - _t0, 1),
@@ -1169,6 +1177,7 @@ class H(http.server.BaseHTTPRequestHandler):
                         tot = (stats.get("prompt_tokens") or 0) + (stats.get("completion_tokens") or 0)
                         if tot: q.SESSION_TOKENS[st.sid] = tot
                     except Exception: pass
+                    st.running = False
                     save_session(st)
                 if first and not st.cancel.is_set():
                     try:
@@ -1183,6 +1192,12 @@ class H(http.server.BaseHTTPRequestHandler):
                 Q.put(("error", f"{type(e).__name__}: {e}")); Q.put(("end", {}))
             finally:
                 st.live["done"] = True
+                if st.running:
+                    # an answer that failed, not one Orbit was stopped during —
+                    # the next start must not treat it as cut off and resume it
+                    st.running = False
+                    try: save_session(st)
+                    except Exception: pass
                 if st.temp:
                     try: q.redact_server_log()
                     except Exception: pass
@@ -1317,6 +1332,7 @@ def run_job(job):
         if st is not None:
             try:
                 st.busy_since = time.time(); st.cancel.clear(); st.interrupt.clear()
+                st.running = True
                 st.live = {"thinking": "", "content": "", "tools": [],
                            "status": "", "done": False, "seq": 0}
                 q.ACTIVE_PROJECT["id"] = st.project
@@ -1327,11 +1343,17 @@ def run_job(job):
                           f"{time.strftime('%H:%M')}]\n{job.get('prompt', '')}")
                 out = q.turn(st.msgs, prompt, st.tools, emit=_live_emitter(st),
                              approve=lambda *a: False, cancel=st.cancel,
-                             inbox=st.inbox, interrupt=st.interrupt, sid=st.sid)
+                             inbox=st.inbox, interrupt=st.interrupt, sid=st.sid,
+                             checkpoint=lambda: save_session(st))
+                st.running = False
                 save_session(st)
                 result_sid = st.sid
             finally:
                 st.live["done"] = True
+                if st.running:
+                    st.running = False
+                    try: save_session(st)
+                    except Exception: pass
                 try: st.lock.release()
                 except RuntimeError: pass
         else:
@@ -1399,6 +1421,13 @@ class Srv(socketserver.ThreadingTCPServer):
 if __name__ == "__main__":
     # This was never started: scheduled tasks only ever ran when you pressed
     # "run now", and the trash was never auto-purged.
+    # before the scheduler starts, so a pick-up run it books is there to find
+    try:
+        for _sid, _resumed in q.recover_interrupted_sessions():
+            print(f"  ! {_sid} was mid-answer when Orbit stopped — "
+                  + ("picking it up again in a minute" if _resumed else "repaired, not restarted"))
+    except Exception as e:
+        print(f"  ! could not check for chats cut off mid-answer: {e}")
     threading.Thread(target=scheduler_loop, daemon=True).start()
     mode = remote_mode()
     addrs = REMOTE.bind_addresses(mode)
