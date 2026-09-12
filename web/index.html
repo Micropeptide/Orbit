@@ -3300,7 +3300,9 @@ async function checkCode(){
    const btn=el('<button>Restart interface</button>');
    btn.onclick=async()=>{
     btn.disabled=true;btn.textContent='restarting…';
-    await fetch('/api/restart_ui',{method:'POST'}).catch(()=>{});
+    const rr=await fetch('/api/restart_ui',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
+      .then(r=>r.json()).catch(()=>({}));
+    if(rr.deferred){btn.textContent=rr.msg||'restarting when answers finish';toast(rr.msg||'waiting for running answers');return}
     // wait for it to actually come back instead of reloading into a dead server
     const t0=Date.now();
     const poll=async()=>{

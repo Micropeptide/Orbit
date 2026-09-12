@@ -1018,7 +1018,14 @@ class H(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send(200, jdump({"msg": f"start failed: {e}"}))
         if p == "/api/restart_ui":
-            # launchd has KeepAlive, so exiting brings us straight back on new code
+            # launchd has KeepAlive, so exiting brings us straight back on new code.
+            # Never mid-answer: a restart used to cut a running answer off, so it
+            # now waits for every running chat to finish (force=true to override)
+            busy = running_sids()
+            if busy and not d.get("force"):
+                _restart_when_idle()
+                return self._send(200, jdump({"ok": True, "deferred": True, "running": len(busy),
+                    "msg": f"will restart as soon as {len(busy)} running answer(s) finish"}))
             threading.Timer(0.4, lambda: os._exit(0)).start()
             return self._send(200, jdump({"ok": True, "msg": "restarting the interface…"}))
         if p == "/api/server/stop":
@@ -1467,6 +1474,8 @@ def run_job(job):
             q.session_save(result_sid, msgs, f"[scheduled] {label}", {"project": pid} if pid else None)
         result, ok = (out or "")[:400], True
     except Exception as e:
+        import traceback
+        _sched_log(f"job {job.get('id')} failed:\n{traceback.format_exc()}")
         result, ok = f"{type(e).__name__}: {e}", False
     cfg = q.sched_load()
     for j in cfg.get("jobs", []):
@@ -1491,7 +1500,15 @@ def scheduler_loop():
             # it here stalled every other chore for as long as it took
             JOBS_INFLIGHT.add(jid)
             def _go(j=job, i=jid):
-                try: run_job(j)
+                # every run leaves a line, and a crash its traceback: a pick-up run
+                # once vanished with nothing to say why
+                _sched_log(f"start {i} ({j.get('name')}) sid={j.get('sid')}")
+                try:
+                    r = run_job(j)
+                    _sched_log(f"end   {i}: {str(r)[:200]}")
+                except BaseException:
+                    import traceback
+                    _sched_log(f"CRASH {i}:\n{traceback.format_exc()}")
                 finally: JOBS_INFLIGHT.discard(i)
             threading.Thread(target=_go, daemon=True).start()
 
@@ -1518,6 +1535,25 @@ def scheduler_loop():
 class Srv(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
+
+_RESTART_WAITING = threading.Event()
+
+def _restart_when_idle():
+    """Restart once no chat is answering (checked every few seconds)."""
+    if _RESTART_WAITING.is_set(): return
+    _RESTART_WAITING.set()
+    def wait():
+        while running_sids() or JOBS_INFLIGHT:
+            time.sleep(3)
+        os._exit(0)
+    threading.Thread(target=wait, daemon=True).start()
+
+def _sched_log(msg):
+    try:
+        with open(os.path.join(q.LOGS, "scheduler.log"), "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+    except OSError:
+        pass
 
 def _already_serving(port):
     """Whether another Orbit is already listening on this port. A second copy
