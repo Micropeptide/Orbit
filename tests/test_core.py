@@ -1061,5 +1061,263 @@ class TestTailscaleServeDoesNotReopenOnEveryStartup(unittest.TestCase):
         self.assertEqual(os.listdir(os.path.join(self.tmp, "config")), [])
 
 
+import threading
+
+
+class TestLongAnswers(unittest.TestCase):
+    """The answer loop with a scripted model standing in for a real one: no cap
+    on steps, notes handed over mid-answer, thinking kept across a stop, and
+    compaction that measures the conversation actually being sent."""
+
+    def setUp(self):
+        import collections
+        self.deque = collections.deque
+        self.tmp = tempfile.mkdtemp(prefix="qqtest-long-")
+        names = ("stream_call", "probe", "ensure_model", "model_is_local", "notify", "S",
+                 "MODEL", "local_model_name", "tool_schema_tokens", "server_status")
+        self._saved = {k: getattr(q, k) for k in names}
+        q.S = dict(q.DEFAULTS); q.S["keep_awake"] = False
+        q.MODEL = "fake-model"
+        q.probe = lambda *a, **k: "fake-model"
+        q.ensure_model = lambda *a, **k: "fake-model"
+        q.model_is_local = lambda *a, **k: True
+        q.local_model_name = lambda *a, **k: "fake-model"
+        q.tool_schema_tokens = lambda *a, **k: 0
+        # a server that reports no count at all -- the case that read as 0% full
+        q.server_status = lambda *a, **k: {"context_used": None, "context_max": 0}
+        q.notify = lambda *a, **k: None
+        self.sent, self.events = [], []
+
+    def tearDown(self):
+        for k, v in self._saved.items(): setattr(q, k, v)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def emit(self, k, p): self.events.append((k, p))
+    def kinds(self): return [k for k, _ in self.events]
+
+    def script(self, *steps):
+        """Each step sees what the model would be sent, and returns its reply."""
+        steps = list(steps)
+        def fake(messages, tools, **kw):
+            if tools is None:                # a compaction summary, not an answer step
+                return {"role": "assistant", "content": "SUMMARY OF EARLIER WORK"}
+            self.sent.append(q._strip_reasoning(messages))
+            return steps.pop(0)(messages)
+        q.stream_call = fake
+
+    def tool_step(self, i, then=None):
+        def step(_messages):
+            if then: then()
+            return {"role": "assistant", "content": "", "tool_calls": [{
+                "id": f"c{i}", "type": "function", "function": {
+                    "name": "list_dir",
+                    "arguments": json.dumps({"path": self.tmp, "pattern": f"*{i}*"})}}]}
+        return step
+
+    def final(self, text, then=None):
+        def step(_messages):
+            if then: then()
+            return {"role": "assistant", "content": text}
+        return step
+
+    def chat(self, *history):
+        return [{"role": "system", "content": "sys"}] + list(history)
+
+    def test_no_step_limit_by_default(self):
+        self.script(*[self.tool_step(i) for i in range(75)], self.final("all done"))
+        self.assertEqual(q.turn(self.chat(), "do 75 things", [], emit=self.emit), "all done")
+        self.assertNotIn("round_limit", self.kinds())
+
+    def test_a_note_sent_mid_answer_reaches_the_model_at_its_next_step(self):
+        inbox = self.deque()
+        self.script(self.tool_step(1, then=lambda: inbox.append({"text": "also check Denver"})),
+                    self.final("checked both"))
+        msgs = self.chat()
+        q.turn(msgs, "check Phoenix", [], emit=self.emit, inbox=inbox)
+        users = [m for m in self.sent[1] if m["role"] == "user"]
+        self.assertTrue(any("also check Denver" in m["content"]
+                            and "while you were working" in m["content"] for m in users))
+        self.assertIn("interjection", self.kinds())
+        self.assertTrue(any(m.get("interjection") for m in msgs), "kept and flagged for reloads")
+
+    def test_a_note_that_lands_as_it_finishes_is_answered_too(self):
+        inbox = self.deque()
+        self.script(self.final("first answer", then=lambda: inbox.append({"text": "one more"})),
+                    self.final("answered the note"))
+        self.assertEqual(q.turn(self.chat(), "hi", [], emit=self.emit, inbox=inbox),
+                         "answered the note")
+        self.assertEqual(len(self.sent), 2)
+
+    def test_a_note_interrupts_generation_and_the_thinking_is_kept(self):
+        inbox, interrupt = self.deque(), threading.Event()
+        def cut(_m):
+            inbox.append({"text": "use the 2pm forecast"}); interrupt.set()
+            return {"role": "assistant", "content": "", "reasoning_content": "about to use the 9am run",
+                    "tool_calls": [{"id": "half", "type": "function",
+                                    "function": {"name": "list_dir", "arguments": "{\"pa"}}]}
+        self.script(cut, self.final("switched to 2pm"))
+        msgs = self.chat()
+        q.turn(msgs, "forecast", [], emit=self.emit, inbox=inbox, interrupt=interrupt)
+        self.assertFalse([m for m in msgs if m["role"] == "tool"], "a half-written tool call ran")
+        second = " ".join(str(m.get("content")) for m in self.sent[1])
+        self.assertIn("about to use the 9am run", second)
+        self.assertIn("use the 2pm forecast", second)
+
+    def test_stop_keeps_the_thinking_for_the_next_message(self):
+        cancel = threading.Event()
+        def stopped(_m):
+            cancel.set()
+            return {"role": "assistant", "content": "half an answer",
+                    "reasoning_content": "plan: A then B"}
+        self.script(stopped)
+        msgs = self.chat()
+        self.assertIn("(stopped)", q.turn(msgs, "go", [], emit=self.emit, cancel=cancel))
+        self.assertTrue(msgs[-1].get("partial"))
+        shown = q._strip_reasoning(msgs)[-1]
+        self.assertIn("plan: A then B", shown["content"])
+        self.assertIn("half an answer", shown["content"])
+        self.assertNotIn("partial", shown)
+
+    def test_a_long_run_tells_you_it_is_still_going(self):
+        q.S["long_run_notice_min"] = 1e-9
+        told = []
+        q.notify = lambda title, text: told.append(text)
+        self.script(self.tool_step(1), self.tool_step(2), self.final("done"))
+        q.turn(self.chat(), "go", [], emit=self.emit)
+        self.assertIn("long_running", self.kinds())
+        self.assertTrue(told)
+
+    def test_autocompact_measures_this_conversation_not_the_server(self):
+        big = self.chat(*[{"role": "user" if i % 2 == 0 else "assistant",
+                           "content": f"turn {i} " + "x" * 3000} for i in range(100)])
+        self.script()
+        new, did, pct = q.maybe_autocompact(big)
+        self.assertTrue(did)
+        self.assertGreater(pct, 80)
+        self.assertLess(sum(len(str(m.get("content"))) for m in new), 60000)
+        self.assertTrue(any("[earlier conversation, compacted]" in str(m.get("content")) for m in new))
+        self.assertEqual(new[-1]["content"], big[-1]["content"], "the recent end survives verbatim")
+
+    def test_compaction_summarises_the_recent_end_not_only_the_start(self):
+        asked = []
+        q.stream_call = lambda messages, tools, **kw: (asked.append(messages[-1]["content"])
+                                                       or {"role": "assistant", "content": "S"})
+        msgs = self.chat({"role": "user", "content": "ORIGINAL-ASK"},
+                         *[{"role": "assistant", "content": "filler " * 250} for _ in range(60)],
+                         {"role": "assistant", "content": "LATEST-PROGRESS"},
+                         *[{"role": "assistant", "content": "tail"} for _ in range(6)])
+        q.compact(msgs, keep_tail=6)
+        self.assertIn("ORIGINAL-ASK", asked[0])
+        self.assertIn("LATEST-PROGRESS", asked[0])
+
+    def test_one_long_answer_compacts_partway_and_keeps_its_request(self):
+        history = [{"role": "user" if i % 2 == 0 else "assistant",
+                    "content": f"turn {i} " + "x" * 3000} for i in range(100)]
+        self.script(self.final("finished"))
+        q.turn(self.chat(*history), "THE REQUEST", [], emit=self.emit)
+        self.assertIn("autocompact", self.kinds())
+        sent = self.sent[0]
+        self.assertTrue(any(m.get("content") == "THE REQUEST" for m in sent))
+        self.assertLess(sum(len(str(m.get("content"))) for m in sent), 60000)
+
+    def test_the_ui_can_steer_a_running_answer(self):
+        src = open(os.path.join(ROOT, "bin", "orbit-ui")).read()
+        self.assertIn('"/api/interject"', src)
+        self.assertIn("inbox=st.inbox", src)
+
+
+class TestScheduling(unittest.TestCase):
+    """The model sets up its own follow-ups: once, repeating, until a time,
+    in the chat it was asked from."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="qqtest-sched-")
+        self.path = os.path.join(self.tmp, "schedule.json")
+        self._saved = (q.sched_load, q.sched_save)
+        q.sched_load = lambda: (json.load(open(self.path)) if os.path.exists(self.path)
+                                else {"jobs": []})
+        q.sched_save = lambda d: (json.dump(d, open(self.path, "w")), d)[1]
+        self._sid = getattr(q.TURN_CTX, "sid", None)
+
+    def tearDown(self):
+        q.sched_load, q.sched_save = self._saved
+        q.TURN_CTX.sid = self._sid
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_times_it_understands(self):
+        now = time.time()
+        self.assertAlmostEqual(q._parse_when("in 2 hours", now), now + 7200, delta=1)
+        self.assertAlmostEqual(q._parse_when("now", now), now, delta=1)
+        t = q._parse_when("21:30", now)
+        self.assertTrue(now - 60 <= t <= now + 86400)
+        self.assertEqual(time.localtime(t).tm_hour, 21)
+        self.assertGreater(q._parse_when("tomorrow 07:00", now), now)
+        self.assertEqual(time.localtime(q._parse_when("9pm", now)).tm_hour, 21)
+        self.assertEqual(time.localtime(q._parse_when("2026-09-12 21:00", now)).tm_hour, 21)
+        with self.assertRaises(ValueError): q._parse_when("sometime soon", now)
+
+    def test_a_repeat_in_this_chat_runs_until_its_end(self):
+        q.TURN_CTX.sid = "chat-abc"
+        out = q.t_schedule_task("check the markets", start="now", repeat_every_minutes=15,
+                                until="in 3 hours")
+        self.assertIn("Scheduled", out)
+        job = q.sched_load()["jobs"][0]
+        self.assertEqual(job["sid"], "chat-abc")
+        self.assertTrue(q.sched_due(job))
+        self.assertFalse(q.sched_due(job, now=job["until"] + 1))
+        job["last_run"] = time.time()
+        self.assertFalse(q.sched_due(job), "it just ran; the next is 15 minutes out")
+        self.assertTrue(q.sched_due(job, now=time.time() + 15 * 60 + 1))
+
+    def test_a_one_off_runs_once_at_its_time(self):
+        q.TURN_CTX.sid = None
+        q.t_schedule_task("start the pipeline", start="in 30 minutes")
+        job = q.sched_load()["jobs"][0]
+        self.assertNotIn("sid", job)
+        self.assertFalse(q.sched_due(job))
+        self.assertTrue(q.sched_due(job, now=time.time() + 31 * 60))
+        job["last_run"] = time.time()
+        self.assertFalse(q.sched_due(job, now=time.time() + 3600))
+
+    def test_bad_input_is_refused_not_scheduled(self):
+        self.assertTrue(q.t_schedule_task("").startswith("Error"))
+        self.assertTrue(q.t_schedule_task("x", repeat_every_minutes=0.5).startswith("Error"))
+        self.assertTrue(q.t_schedule_task("x", start="whenever").startswith("Error"))
+        self.assertEqual(q.sched_load()["jobs"], [])
+
+    def test_list_and_cancel(self):
+        q.t_schedule_task("a", start="in 5 minutes")
+        jid = q.sched_load()["jobs"][0]["id"]
+        self.assertIn(jid, q.t_list_scheduled_tasks())
+        self.assertIn("Cancelled", q.t_cancel_scheduled_task(jid))
+        self.assertEqual(q.sched_load()["jobs"], [])
+
+    def test_setting_one_up_asks_first(self):
+        self.assertEqual(q.risk_check("schedule_task", {"prompt": "x"})[0], "confirm")
+
+
+class TestMemoryReachesTheModel(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="qqtest-mem-")
+        self._saved = q.MEMDIR; q.MEMDIR = self.tmp
+
+    def tearDown(self):
+        q.MEMDIR = self._saved
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_notes_that_do_not_fit_are_named_not_cut(self):
+        for i in range(3):
+            open(os.path.join(self.tmp, f"note{i}.md"), "w").write(f"# note {i}\n" + "y" * 5000)
+            time.sleep(0.02)
+        blob = q.memory_blob(limit=12000)
+        self.assertIn("not shown for space", blob)
+        self.assertIn("note0", blob)
+
+    def test_the_model_is_told_to_write_memory_itself(self):
+        self.assertIn("on your own", q.HARNESS_NOTE)
+        self.assertIn("`remember`", q.HARNESS_NOTE)
+        self.assertIn(q.HARNESS_NOTE, q.system_prompt())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -70,7 +70,7 @@ and (for some) the power to block the action.
 
 ## Memory and instructions
 
-- [x] Durable memory, injected into every chat
+- [x] Durable memory, injected into every chat — written by the model on its own initiative when it learns something a later chat would need, and refreshed into already-open chats every turn
 - [x] General instructions (a CLAUDE.md equivalent)
 - [x] Project-scoped instructions
 - [ ] **Quick-add memory** — a `#` prefix (or a keyboard shortcut) that saves whatever you just typed as a memory without a separate tool call or confirmation
@@ -116,10 +116,13 @@ and (for some) the power to block the action.
 ## Session and history
 
 - [x] Sessions list, search, pin, archive, projects, tags
-- [x] Auto-compact when the context window fills
+- [x] Auto-compact when the context window fills — measured on the conversation actually being sent (it used to read the server's last request, which could be 0% or another chat), checked before every step of one long answer as well as between messages, keeping the most recent work verbatim; the full transcript is archived before anything is folded away
+- [x] **Steer a running answer** — while it works, Send becomes Steer: your note is read at its next step, a long generation is cut short so the note isn't left waiting, and a note that lands as it finishes is answered too
+- [x] Stop keeps the thinking — a stopped or interrupted answer's reasoning is handed back to the model with your next message, so it carries on instead of starting over
+- [x] No cap on steps or minutes per answer (both still settable), with a still-working notice in the chat and a macOS notification every 30 minutes, and the Mac kept awake while it runs
 - [ ] **Fork a conversation** — branch from any point into a new chat, keeping history up to that message (distinct from "edit and resend", which replaces rather than branches)
 - [ ] Resume a specific named session from the CLI (`orbit --resume <name>`) rather than always the most recent
-- [ ] A "continue where a scheduled job left off" pattern — right now scheduled prompts each start fresh
+- [x] A "continue where a scheduled job left off" pattern — the model schedules its own follow-ups with `schedule_task` (once, every N minutes, daily, until a time), and each run can continue the chat it came from, with its history; the local model starts itself for a run
 
 ## Notifications and status
 

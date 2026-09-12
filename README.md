@@ -243,8 +243,10 @@ Everything is editable in Settings; the files are plain JSON if you prefer.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `max_tool_rounds` | 60 | Tool calls one answer may make. Research tasks need 40+. |
-| `max_turn_minutes` | 20 | Backstop so a stuck task cannot run forever. 0 = no limit. |
+| `max_tool_rounds` | 0 | Tool calls one answer may make. 0 = no limit — it keeps going until the work is done or you press Stop. |
+| `max_turn_minutes` | 0 | Minutes one answer may run. 0 = no limit; you're told how it's going instead (next row). |
+| `long_run_notice_min` | 30 | Every N minutes an answer keeps running: a notice in the chat with a Stop button, and a macOS notification. 0 = never. |
+| `keep_awake` | true | Hold off idle sleep while an answer is running, so an evening-long task isn't stopped by the Mac dozing off. |
 | `autocompact_pct` | 80 | Context fullness that triggers trimming. |
 | `squeeze_tool_results` | true | Trim old tool output before compacting conversation. |
 | `idle_min` | 90 | Minutes before the local model server is stopped. |
