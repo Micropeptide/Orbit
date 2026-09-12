@@ -346,6 +346,7 @@ class H(http.server.BaseHTTPRequestHandler):
             if not st:
                 return self._send(200, jdump({"known": False, "running": False}))
             lv = dict(st.live)
+            lv.pop("_mstate", None)
             lv["known"] = True
             lv["running"] = st.lock.locked()
             return self._send(200, jdump(lv))
@@ -1169,7 +1170,10 @@ class H(http.server.BaseHTTPRequestHandler):
 
                     def _emit(k, p):
                         lv = st.live                      # keep a copy so you can rejoin later
-                        if   k == "thinking_delta": lv["thinking"] += p
+                        if   k == "thinking_delta":
+                            q.para_marks(lv.setdefault("thinking_marks", []),
+                                         lv.setdefault("_mstate", [len(lv["thinking"]), lv["thinking"][-2:]]), p)
+                            lv["thinking"] += p
                         elif k == "content_delta":  lv["content"]  += p
                         elif k == "tool":
                             lv["tools"].append({"name": p.get("name"), "args": p.get("args"),
@@ -1300,7 +1304,10 @@ def _live_emitter(st):
     so opening that chat mid-run shows it working, like any other answer."""
     def emit(k, p):
         lv = st.live
-        if   k == "thinking_delta": lv["thinking"] += p
+        if   k == "thinking_delta":
+            q.para_marks(lv.setdefault("thinking_marks", []),
+                         lv.setdefault("_mstate", [len(lv["thinking"]), lv["thinking"][-2:]]), p)
+            lv["thinking"] += p
         elif k == "content_delta":  lv["content"]  += p
         elif k == "tool": lv["tools"].append({"name": p.get("name"), "args": p.get("args"),
                                               "id": p.get("id"), "t": p.get("t")})
@@ -1403,6 +1410,8 @@ def render(msgs):
                         "model": m.get("model") if m["role"] == "assistant" else None,
                         # the thinking trace, kept from a normal answer or a stop mid-stream
                         "thinking": m.get("reasoning_content") if m["role"] == "assistant" else None,
+                        # when each paragraph of the thinking began: [[offset, time], ...]
+                        "thinking_marks": m.get("reasoning_marks") if m["role"] == "assistant" else None,
                         # a note sent while it was working, so a reopened chat can say so
                         "note": bool(m.get("interjection")),
                         # when it was written; None for messages from before this was kept

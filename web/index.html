@@ -332,6 +332,8 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .think.live{border-left-color:var(--acc)}
 .think.live summary{color:var(--acc)}
 .think .body{max-height:220px;overflow-y:auto}
+.think .body .tstamp{display:block;color:var(--dim);font-size:10.5px;margin:8px 0 1px;font-variant-numeric:tabular-nums}
+.think .body .tstamp:first-child{margin-top:0}
 .planbox{margin:8px 0;border:1px solid var(--line);border-radius:9px;background:var(--card);
  padding:9px 12px;font-size:13px}
 .planbox b{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);
@@ -689,11 +691,32 @@ function addAssistant(who,ts){
 // A thinking trace recovered from a reopened chat -- a completed answer, or
 // one you stopped mid-stream. Shown collapsed, same as a live one once the
 // answer began; click to read it.
-function showSavedThinking(a,text,ts){
+function showSavedThinking(a,text,ts,marks){
  a.think.style.display='';a.think.open=false;
- if(ts)a.think._at=clockTime(ts);
+ if(marks&&marks.length)a.think._at=clockTime(marks[0][1]);else if(ts)a.think._at=clockTime(ts);
  thinkLabel(a,'thinking');
- a.think.querySelector('.body').textContent=text}
+ renderThink(a.think.querySelector('.body'),text,marks)}
+// Thinking with the time each paragraph began, where it began after a pause:
+// marks are [[offset, seconds], ...]; a label shows when 10s+ passed since the last.
+function renderThink(body,text,marks){
+ text=text||'';
+ if(!marks||!marks.length){body.textContent=text;return}
+ let html='',from=0,shown=null;
+ const ms=marks.filter(m=>m[0]<=text.length).sort((a,b)=>a[0]-b[0]);
+ ms.forEach((m,i)=>{
+  const at=m[0],t=m[1];
+  if(at>from){html+=esc(text.slice(from,at));from=at}
+  if(shown===null||t-shown>=10){html+=`<span class=tstamp>${clockTime(t)}</span>`;shown=t}});
+ html+=esc(text.slice(from));
+ body.innerHTML=html}
+// the same bookkeeping as the server's para_marks, for a live answer
+function paraMarks(marks,prev,chunk){
+ const now=Date.now()/1000;
+ if(!prev.length&&chunk)marks.push([0,now]);
+ const tail=prev.slice(-2),combo=tail+chunk;let i=combo.indexOf('\n\n');
+ while(i!==-1){const pos=prev.length-tail.length+i+2;
+  if(pos<prev.length+chunk.length&&(!marks.length||pos>marks[marks.length-1][0]))marks.push([pos,now]);
+  i=combo.indexOf('\n\n',i+1)}}
 // when a thinking block began, shown on its label
 function clockTime(ts){const d=ts?new Date(ts*1000):new Date();
  return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'})}
@@ -938,7 +961,7 @@ function attachLive(theSid, initial){
    const body=a.think.querySelector('.body');
    if(!thinkStarted){thinkStarted=true;body._stick=true;a.think.style.display='';a.think._at=clockTime();
     thinkLabel(a,'thinking');openThink(a)}
-   body.textContent=lv.thinking;
+   renderThink(body,lv.thinking,lv.thinking_marks);
    if(body._stick)body.scrollTop=body.scrollHeight}        // only if you're not reading back
   if(lv.content){a.bub.innerHTML=md(lv.content);a.bub.dataset.raw=lv.content}
   bottom()};
@@ -1271,12 +1294,12 @@ async function go(opts){
  const nextStep=()=>{
   if(!a.tools.querySelector('details.tool,div.tool,.autoappr,.blocked,.approve'))return false;
   if(pendingRender){clearTimeout(pendingRender);pendingRender=null}
-  if(thinkPending){clearTimeout(thinkPending);thinkPending=null;a.think.querySelector('.body').textContent=thinking}
+  if(thinkPending){clearTimeout(thinkPending);thinkPending=null;renderThink(a.think.querySelector('.body'),thinking,tmarks)}
   if(answer){a.bub.innerHTML=md(answer);decorate(a.bub)}else a.bub.remove();
   a.think.classList.remove('live');if(thinking)thinkLabel(a,thoughtFor());
-  a=addAssistant(modelLabel());thinking='';answer='';return true};
+  a=addAssistant(modelLabel());thinking='';answer='';tmarks=[];return true};
  a.bub.innerHTML='<span class=working>working<span class=dots></span></span>';
- let thinking='',answer='',lastRender=0,pendingRender=null,thinkPending=null;
+ let thinking='',answer='',lastRender=0,pendingRender=null,thinkPending=null,tmarks=[];
  const t0=performance.now(), trows={};      // trows: live tool rows by call id
  let tThink=0, endP=null, errored=false;
  const thoughtFor=()=>'thought for '+fmtSecs((performance.now()-tThink)/1000);
@@ -1301,17 +1324,17 @@ async function go(opts){
       a.bub.innerHTML='';                       // drop the "working" placeholder
       a.think.querySelector('.body')._stick=true;     // nothing to preserve yet
      }
-     thinking+=m.p;
+     paraMarks(tmarks,thinking,m.p);thinking+=m.p;
      if(!thinkPending){thinkPending=setTimeout(()=>{thinkPending=null;
       const body=a.think.querySelector('.body');
-      body.textContent=thinking;
+      renderThink(body,thinking,tmarks);
       if(body._stick)body.scrollTop=body.scrollHeight;   // only if you're not reading back
       bottom()},90)}}
     else if(m.k==='content_delta'){
      if(!answer&&thinking){                     // answer begins — tuck thinking away
       if(thinkPending){clearTimeout(thinkPending);thinkPending=null}
       const tbody=a.think.querySelector('.body');
-      tbody.textContent=thinking;
+      renderThink(tbody,thinking,tmarks);
       a.think.classList.remove('live');
       thinkLabel(a,thoughtFor());          // stays open: you close it when you want
      }
@@ -1413,7 +1436,7 @@ async function go(opts){
       // the note, and let what it says next start below it
       if(pendingRender){clearTimeout(pendingRender);pendingRender=null}
       if(thinkPending){clearTimeout(thinkPending);thinkPending=null;
-       a.think.querySelector('.body').textContent=thinking}
+       renderThink(a.think.querySelector('.body'),thinking,tmarks)}
       if(answer){a.bub.innerHTML=md(answer);decorate(a.bub)}
       else if(!thinking&&!a.tools.childElementCount)a.m.remove();
       else a.bub.innerHTML='';
@@ -1422,7 +1445,7 @@ async function go(opts){
       else noteBubble(m.p.text,'✓ read — sent from another window');
       a=addAssistant(modelLabel());
       a.bub.innerHTML='<span class=working>reading your note<span class=dots></span></span>';
-      thinking='';answer='';bottom()}}
+      thinking='';answer='';tmarks=[];bottom()}}
     else if(m.k==='long_running'){
      a.m.querySelectorAll('.longrun').forEach(x=>x.remove());
      const b=el('<div class="limitbox longrun"></div>');
@@ -1458,7 +1481,7 @@ async function go(opts){
    }}
   if(pendingRender){clearTimeout(pendingRender);pendingRender=null}
  if(thinkPending){clearTimeout(thinkPending);thinkPending=null;
-  a.think.querySelector('.body').textContent=thinking}
+  renderThink(a.think.querySelector('.body'),thinking,tmarks)}
  if(thinking&&!answer){a.think.classList.remove('live');thinkLabel(a,thoughtFor())}
  if(!answer)a.bub.textContent=(stoppedSid===sendSid)?'(stopped before it wrote anything)'
                                             :'(no answer)';
@@ -2969,7 +2992,7 @@ function savedAssistant(m){
   m.plots.forEach(u=>{const i=document.createElement('img');i.src=u;i.style.cursor='zoom-in';
    i.onclick=()=>window.open(u,'_blank');box.appendChild(i)});a.tools.appendChild(box)}
  a.bub.dataset.raw=m.text;a.bub.innerHTML=md(m.text);decorate(a.bub);
- if(m.thinking)showSavedThinking(a,m.thinking,m.t);
+ if(m.thinking)showSavedThinking(a,m.thinking,m.t,m.thinking_marks);
  if(!m.text&&!m.thinking&&!(m.tool_runs||[]).length&&!(m.tools||[]).length)
   a.bub.innerHTML='<span style="color:var(--mut)">(stopped before it wrote anything)</span>';
  if(m.secs!=null||m.usage)answerStats(a,m.secs,m.usage);
