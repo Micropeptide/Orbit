@@ -4,6 +4,9 @@
   orbit                 interactive      orbit "question"   one-shot
   orbit --resume        continue last    orbit --stop       stop the local model
   orbit --ui            open the web app
+  orbit run [--json] [--project NAME] [--model ID] [--save] "prompt"
+                        headless: answer once and exit (for scripts, cron, CI);
+                        --json prints one JSON event per line and a final result
   /new /compact /tools /memory /settings /history /reset   in-session
 """
 import os, sys
@@ -18,7 +21,64 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import qqcore as q
 C = q.C
 
+def headless(argv):
+    """`orbit run`: one answer, no prompts, for scripts. Risky actions that
+    would ask for approval are refused (there is nobody to ask), exactly as
+    for a scheduled task. Exit status 0 on an answer, 1 on a failure."""
+    import json, time
+    flags, words, i = {}, [], 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--project", "--model"):
+            flags[a[2:]] = argv[i + 1] if i + 1 < len(argv) else ""; i += 2; continue
+        if a.startswith("--"): flags[a[2:]] = True; i += 1; continue
+        words.append(a); i += 1
+    prompt = " ".join(words).strip()
+    if not prompt and not sys.stdin.isatty(): prompt = sys.stdin.read().strip()
+    as_json = bool(flags.get("json"))
+    def out(kind, data):
+        if as_json: print(json.dumps({"type": kind, "data": data}, default=str), flush=True)
+    if not prompt:
+        out("error", "no prompt given"); print("usage: orbit run [--json] \"prompt\"", file=sys.stderr); return 2
+    pid = None
+    if flags.get("project"):
+        want = str(flags["project"]).lower()
+        for k, v in q.projects_load().items():
+            if want in (k.lower(), str(v.get("name", "")).lower()): pid = k
+        if not pid:
+            out("error", f"no project {flags['project']!r}"); print(f"no project {flags['project']!r}", file=sys.stderr); return 2
+    q.ACTIVE_PROJECT["id"] = pid
+    if flags.get("model"): q.ACTIVE_MODEL["id"] = flags["model"]
+    prompt = q.expand_prompt(prompt)
+    tools, _errs = q.active_tools(pid)
+    msgs = [{"role": "system", "content": q.system_prompt_for(None, pid)}]
+    sid = "run-" + time.strftime("%Y%m%d-%H%M%S")
+    def emit(kind, p):
+        if kind == "content_delta":
+            if not as_json: print(p, end="", flush=True)
+        elif kind == "thinking_delta" or kind == "done":
+            pass
+        else:
+            out(kind, p)
+            if not as_json and kind == "tool":
+                print(C(f"\n  ⚙ {p.get('name')}", "2;33"), file=sys.stderr, flush=True)
+    try:
+        text = q.turn(msgs, prompt, tools, emit=emit, approve=lambda *a: False, sid=sid, project=pid)
+    except Exception as e:
+        out("error", f"{type(e).__name__}: {e}")
+        print(f"error: {type(e).__name__}: {e}", file=sys.stderr); return 1
+    if flags.get("save"):
+        q.session_save(sid, msgs, "orbit run: " + prompt[:50], {"project": pid} if pid else None)
+    rec = q.LAST_TURN.get(sid) or {}
+    if as_json:
+        out("result", {"text": text, "sid": sid if flags.get("save") else None, **rec})
+    else:
+        print()
+    return 0
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "run":
+        sys.exit(headless(sys.argv[2:]))
     if "--stop" in sys.argv:
         print(q.stop_server()); return
     if "--ui" in sys.argv:
