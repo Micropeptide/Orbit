@@ -1482,12 +1482,13 @@ def _run_one_tool(tc, fn, args, messages, emit, approve, seen_calls):
                (mode == "full" and fn not in NEVER_AUTO_FNS and reason not in NEVER_AUTO) or \
                (mode == "auto" and _auto_approvable(fn, args, reason))
         if auto:
-            emit("auto_approved", {"name": fn, "args": args, "reason": reason, "id": tid,
+            emit("auto_approved", {"name": fn, "args": args, "reason": reason, "call_id": tid,
                                    "rule": by_rule["note"] or by_rule["pattern"] if by_rule else None})
             LOG_SAFETY(fn, args, "auto-approved (your rule)" if by_rule else "auto-approved", reason)
             out = run()
         else:
-            emit("approval", {"name": fn, "args": args, "reason": reason, "id": tid})
+            # "call_id", not "id": clients answer approvals by approval_request's id
+            emit("approval", {"name": fn, "args": args, "reason": reason, "call_id": tid})
             said = approve(fn, args, reason) if approve else False
             # approve() may answer (allowed, what the user said) as well as a bare yes/no
             ok, note = (bool(said[0]), (said[1] or "").strip()) if isinstance(said, tuple) else (bool(said), "")

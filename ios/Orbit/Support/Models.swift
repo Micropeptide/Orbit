@@ -60,10 +60,12 @@ struct Message: Identifiable, Codable, Hashable {
     /// Reasoning, when the model exposes it — from a live answer, or recovered
     /// from a completed or stopped-mid-stream one the Mac saved.
     var thinking: String?
+    /// A note sent while an answer was running, which it read at its next step.
+    var note: Bool? = nil
 
     var isUser: Bool { role == "user" }
 
-    enum CodingKeys: String, CodingKey { case role, text, images, plots, tools, model, thinking }
+    enum CodingKeys: String, CodingKey { case role, text, images, plots, tools, model, thinking, note }
 }
 
 struct ChatDetail: Codable {

@@ -45,6 +45,10 @@ struct MessageBubble: View {
                         }
                     }
             }
+            if message.note == true {
+                Text("sent while it was working")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
         } else {

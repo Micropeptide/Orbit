@@ -489,6 +489,24 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Send a note while an answer is running — it is read at the next step,
+    /// and the answer carries on with it in mind. If the answer finished in the
+    /// meantime, the note goes as an ordinary message instead of being lost.
+    func steer(_ text: String) async {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let server, !t.isEmpty, let sid = liveSid ?? openChat?.sid else { return }
+        messages.append(Message(role: "user", text: t, note: true))
+        liveStatus = "note queued — it reads this at its next step"
+        let taken = (try? await server.interject(sid: sid, message: t)) ?? false
+        if !taken {
+            if let i = messages.lastIndex(where: { $0.isUser && $0.text == t && $0.note == true }) {
+                messages.remove(at: i)
+            }
+            for _ in 0..<40 where streaming { try? await Task.sleep(nanoseconds: 150_000_000) }
+            if !streaming { await send(t) }
+        }
+    }
+
     func stopGenerating() async {
         guard let server, let sid = liveSid ?? openChat?.sid else { return }
         try? await server.stop(sid)
