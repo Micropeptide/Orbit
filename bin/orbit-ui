@@ -1304,7 +1304,7 @@ if __name__ == "__main__":
         REMOTE.advertise(PORT)
         atexit.register(REMOTE.stop_advertising)
         if mode == "tailscale":
-            served = REMOTE.ensure_serve(PORT)
+            served = REMOTE.ensure_serve(PORT, root=q.ROOT)
             if served:
                 print("  tailscale serve: https on " + ", ".join(f"{h}:{p}" for h, p in served))
     # One listener per address. Loopback is always first, so the desktop app is
