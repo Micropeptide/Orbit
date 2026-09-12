@@ -1220,6 +1220,23 @@ class TestLongAnswers(unittest.TestCase):
         self.assertTrue(any(m.get("content") == "THE REQUEST" for m in sent))
         self.assertLess(sum(len(str(m.get("content"))) for m in sent), 60000)
 
+    def test_progress_is_saved_during_a_long_answer(self):
+        every = q.CHECKPOINT_EVERY
+        q.CHECKPOINT_EVERY = 0
+        try:
+            saves = []
+            self.script(self.tool_step(1), self.tool_step(2), self.final("done"))
+            q.turn(self.chat(), "go", [], emit=self.emit, checkpoint=lambda: saves.append(1))
+            self.assertEqual(len(saves), 2, "one save after each step that ran tools")
+        finally:
+            q.CHECKPOINT_EVERY = every
+
+    def test_the_ui_saves_progress_and_resumes_after_a_restart(self):
+        src = open(os.path.join(ROOT, "bin", "orbit-ui")).read()
+        self.assertIn("checkpoint=lambda: save_session(st)", src)
+        self.assertIn("recover_interrupted_sessions()", src)
+        self.assertIn('extra["running_since"]', src)
+
     def test_the_ui_can_steer_a_running_answer(self):
         src = open(os.path.join(ROOT, "bin", "orbit-ui")).read()
         self.assertIn('"/api/interject"', src)
@@ -1317,6 +1334,56 @@ class TestMemoryReachesTheModel(unittest.TestCase):
         self.assertIn("on your own", q.HARNESS_NOTE)
         self.assertIn("`remember`", q.HARNESS_NOTE)
         self.assertIn(q.HARNESS_NOTE, q.system_prompt())
+
+
+class TestSurvivesARestart(Sandbox):
+    """An answer cut off by Orbit stopping used to just end there."""
+
+    def setUp(self):
+        super().setUp()
+        self.jobs = {"jobs": []}
+        self._saved2 = (q.sched_load, q.sched_save, q.notify, q.S)
+        q.sched_load = lambda: self.jobs
+        q.sched_save = lambda d: d
+        q.notify = lambda *a, **k: None
+        q.S = dict(q.DEFAULTS)
+
+    def tearDown(self):
+        q.sched_load, q.sched_save, q.notify, q.S = self._saved2
+        super().tearDown()
+
+    def cut_off(self, sid, msgs, since):
+        q.session_save(sid, msgs, "Market run", {"running_since": since, "pinned": True})
+
+    def test_a_cut_off_answer_is_repaired_and_picked_up_in_the_same_chat(self):
+        call = {"id": "t9", "type": "function", "function": {"name": "run_shell", "arguments": "{}"}}
+        self.cut_off("c1", [{"role": "system", "content": "s"}, {"role": "user", "content": "go"},
+                            {"role": "assistant", "content": "", "tool_calls": [call]}],
+                     time.time() - 60)
+        self.assertEqual(q.recover_interrupted_sessions(), [("c1", True)])
+        raw = json.load(open(q.session_path("c1")))
+        self.assertNotIn("running_since", raw)
+        self.assertTrue(raw.get("pinned"), "the chat's own flags survive the repair")
+        self.assertEqual((raw["messages"][-1]["role"], raw["messages"][-1]["tool_call_id"]),
+                         ("tool", "t9"))
+        job = self.jobs["jobs"][0]
+        self.assertEqual((job["sid"], job["every"]), ("c1", "once"))
+        self.assertGreater(job["at_ts"], time.time())
+
+    def test_a_long_ago_cut_off_is_repaired_but_not_restarted(self):
+        self.cut_off("c2", [{"role": "system", "content": "s"}], time.time() - 2 * 86400)
+        self.assertEqual(q.recover_interrupted_sessions(), [("c2", False)])
+        self.assertEqual(self.jobs["jobs"], [])
+
+    def test_resuming_can_be_switched_off(self):
+        q.S["resume_after_restart"] = False
+        self.cut_off("c3", [{"role": "system", "content": "s"}], time.time())
+        self.assertEqual(q.recover_interrupted_sessions(), [("c3", False)])
+        self.assertEqual(self.jobs["jobs"], [])
+
+    def test_a_finished_chat_is_left_alone(self):
+        q.session_save("c4", [{"role": "system", "content": "s"}], "done")
+        self.assertEqual(q.recover_interrupted_sessions(), [])
 
 
 if __name__ == "__main__":

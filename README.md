@@ -247,6 +247,7 @@ Everything is editable in Settings; the files are plain JSON if you prefer.
 | `max_turn_minutes` | 0 | Minutes one answer may run. 0 = no limit; you're told how it's going instead (next row). |
 | `long_run_notice_min` | 30 | Every N minutes an answer keeps running: a notice in the chat with a Stop button, and a macOS notification. 0 = never. |
 | `keep_awake` | true | Hold off idle sleep while an answer is running, so an evening-long task isn't stopped by the Mac dozing off. |
+| `resume_after_restart` | true | If Orbit itself stops mid-answer (crash, update, restart), pick the work up again in the same chat a minute after it's back — booked as a one-off task you can cancel. Progress is saved as an answer goes, so little is lost. |
 | `autocompact_pct` | 80 | Context fullness that triggers trimming. |
 | `squeeze_tool_results` | true | Trim old tool output before compacting conversation. |
 | `idle_min` | 90 | Minutes before the local model server is stopped. |
