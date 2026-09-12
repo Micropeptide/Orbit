@@ -1690,6 +1690,44 @@ class TestRound1(TestLongAnswers):
         self.assertEqual(msgs[-1]["reasoning_marks"], [[0, 1.0], [3, 20.0]])
         self.assertNotIn("reasoning_marks", q._strip_reasoning(msgs)[-1])
 
+    def test_a_second_answer_waits_for_the_first(self):
+        """One conversation at a time on the local model: a second answer
+        waits in line, says so, and starts when the first is done."""
+        order, started = [], threading.Event()
+        def slow(messages, tools, **kw):
+            order.append(("start", messages[-1]["content"]))
+            if messages[-1]["content"] == "first": started.set(); time.sleep(0.6)
+            order.append(("end", messages[-1]["content"]))
+            return {"role": "assistant", "content": "ok"}
+        q.stream_call = slow
+        ev2 = []
+        t1 = threading.Thread(target=lambda: q.turn(self.chat(), "first", [], sid="c1"))
+        t1.start(); started.wait(2)
+        q.turn(self.chat(), "second", [], emit=lambda k, p: ev2.append(k), sid="c2")
+        t1.join()
+        self.assertEqual(order, [("start", "first"), ("end", "first"), ("start", "second"), ("end", "second")])
+        self.assertIn("queued", ev2); self.assertIn("dequeued", ev2)
+        self.assertFalse(q.slot_busy())
+
+    def test_stopping_a_queued_answer_keeps_its_message(self):
+        held, done = threading.Event(), threading.Event()
+        def other():                 # another chat holds the model (another thread)
+            q.slot_enter(holder="other"); held.set(); done.wait(5); q.slot_exit()
+        th = threading.Thread(target=other); th.start(); held.wait(2)
+        try:
+            stop = threading.Event(); stop.set()
+            msgs = self.chat()
+            out = q.turn(msgs, "later please", [], cancel=stop, sid="c3")
+            self.assertIn("waiting for another chat", out)
+            self.assertEqual(msgs[-1]["content"], "later please")
+        finally:
+            done.set(); th.join()
+
+    def test_hosted_models_are_not_queued(self):
+        q.model_is_local = lambda *a, **k: False
+        self.assertTrue(q.slot_enter())          # returns at once, holds nothing
+        self.assertFalse(q.slot_busy())
+
     def test_minutes_until_the_next_clock_time(self):
         now = time.mktime((2026, 9, 12, 2, 0, 0, 0, 0, -1))
         self.assertAlmostEqual(q.minutes_until("06:00", now), 240, delta=1)
@@ -2112,6 +2150,13 @@ class TestRound1Server(Sandbox):
         block = src[src.index("def run_job(job):"):][:1400]
         self.assertIn("never leave the chat locked", block)
         self.assertIn("q.sched_update(", src)
+
+    def test_the_scheduler_starts_nothing_while_anything_runs(self):
+        src = open(os.path.join(ROOT, "bin", "orbit-ui")).read()
+        block = src[src.index("    def _due_jobs():"):][:2500]
+        self.assertIn("if running_sids() or JOBS_INFLIGHT or q.slot_busy(): return", block)
+        self.assertIn("schedule_gap_min", block)
+        self.assertIn("one job per minute at most", block)
 
     def test_restarting_waits_for_running_answers(self):
         """A restart used to cut a running answer off mid-step; it now waits

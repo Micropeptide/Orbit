@@ -68,6 +68,11 @@ DEFAULTS = {
   "max_tool_rounds": 0,
   "max_turn_minutes": 0,
   "long_run_notice_min": 30,
+  # the local model handles one conversation well and two badly: answers take
+  # turns, and a second chat's message waits in line instead of running alongside
+  "one_chat_at_a_time": True,
+  # minutes a scheduled job waits after the last answer finished before starting
+  "schedule_gap_min": 3,
   # hold off idle sleep while an answer is running, so an evening-long task
   # isn't stopped dead by the Mac dozing off
   "keep_awake": True,
@@ -5128,3 +5133,76 @@ def usage_stats(days=7, now=None):
 
 def _tool_ok(out):
     return not str(out).lstrip().startswith(("Error", "REFUSED", "DENIED", "Internal error"))
+
+
+# ==================================================================== ONE AT A TIME
+# The local model serves one conversation well and two badly: interleaved
+# requests evict each other's cache, so every step re-reads tens of thousands
+# of tokens and both crawl. So an answer holds the model for its whole length
+# -- every step, not just one request -- and anything else that wants it
+# (another chat, a scheduled job, a title, a memory note) waits its turn.
+GEN_SLOT = threading.RLock()
+GEN_STATE = {"holder": None, "since": 0.0, "ended": 0.0}
+_GEN_DEPTH = threading.local()
+
+def _slot_applies(model=None):
+    return bool(S.get("one_chat_at_a_time", True)) and model_is_local(model)
+
+def _slot_took(holder):
+    d = getattr(_GEN_DEPTH, "n", 0)
+    if d == 0: GEN_STATE.update(holder=holder, since=time.time())
+    _GEN_DEPTH.n = d + 1
+
+def slot_enter(emit=None, cancel=None, holder=None, model=None):
+    """Take the model for one answer, waiting in line if another has it.
+    Returns False if cancelled while waiting. A no-op for hosted models."""
+    if not _slot_applies(model): return True
+    if GEN_SLOT.acquire(blocking=False):
+        _slot_took(holder); return True
+    if emit:
+        emit("queued", {"msg": "waiting for another chat to finish", "behind": GEN_STATE.get("holder")})
+    cancel = cancel or CANCEL
+    while not cancel.is_set():
+        if GEN_SLOT.acquire(timeout=1):
+            _slot_took(holder)
+            if emit: emit("dequeued", {"waited": round(time.time() - GEN_STATE["since"], 1)})
+            return True
+    return False
+
+def slot_exit():
+    d = getattr(_GEN_DEPTH, "n", 0)
+    if d <= 0: return
+    _GEN_DEPTH.n = d - 1
+    if d == 1: GEN_STATE.update(holder=None, ended=time.time())
+    GEN_SLOT.release()
+
+def slot_busy():
+    """Whether some answer (or request) holds the model right now."""
+    return GEN_STATE.get("holder") is not None
+
+_turn_unslotted = turn
+def turn(messages, user_content, tools, emit=None, approve=None, cancel=None, **kw):
+    if not slot_enter(emit, cancel, kw.get("sid") or "an answer"):
+        # stopped while waiting in line: keep the message so it isn't lost
+        messages.append({"role": "user", "content": user_content, "t": time.time()})
+        (emit or (lambda k, p: None))("done", None)
+        return "(stopped while waiting for another chat to finish)"
+    try:
+        return _turn_unslotted(messages, user_content, tools, emit=emit, approve=approve,
+                               cancel=cancel, **kw)
+    finally:
+        slot_exit()
+
+_stream_call_unslotted = stream_call
+def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None, interrupt=None):
+    """Every model request takes the slot too -- a no-op inside an answer that
+    already holds it, a wait for a title or memory note made alongside one."""
+    if not _slot_applies(model):
+        return _stream_call_unslotted(messages, tools, think=think, emit=emit, cancel=cancel,
+                                      model=model, interrupt=interrupt)
+    GEN_SLOT.acquire(); _slot_took(getattr(TURN_CTX, "sid", None) or "a background request")
+    try:
+        return _stream_call_unslotted(messages, tools, think=think, emit=emit, cancel=cancel,
+                                      model=model, interrupt=interrupt)
+    finally:
+        slot_exit()

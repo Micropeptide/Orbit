@@ -1113,6 +1113,7 @@ class H(http.server.BaseHTTPRequestHandler):
         Q = queue.Queue()
 
         def work():
+            slotted = [False]
             try:
                 parts, notes = [], []
                 for a in atts:
@@ -1204,6 +1205,14 @@ class H(http.server.BaseHTTPRequestHandler):
                     q.ACTIVE_MODEL["id"] = st.model
                     prev_effort = q.S.get("reasoning_effort")
                     if effort: q.S["reasoning_effort"] = effort
+                    # one answer at a time on the local model: if another chat has
+                    # it, this one waits in line (and says so) rather than running
+                    # alongside -- two at once made both crawl
+                    if not q.slot_enter(_emit, st.cancel, st.sid, st.model):
+                        st.msgs.append({"role": "user", "content": content, "t": time.time()})
+                        st.running = False; save_session(st)
+                        Q.put(("end", {"sid": st.sid, "title": st.title})); return
+                    slotted[0] = True
                     _refresh_system(st)
                     st.refresh_tools()     # a project's own tools, and any added since
                     st.msgs, did, pct = q.maybe_autocompact(st.msgs, emit=lambda k, p: Q.put((k, p)),
@@ -1263,6 +1272,7 @@ class H(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 Q.put(("error", f"{type(e).__name__}: {e}")); Q.put(("end", {}))
             finally:
+                if slotted[0]: q.slot_exit()
                 st.live["done"] = True
                 if st.running:
                     # an answer that failed, not one Orbit was stopped during —
@@ -1287,13 +1297,15 @@ class H(http.server.BaseHTTPRequestHandler):
 
 # stream events worth showing to a tab that rejoins an answer mid-way
 _STATUS_KINDS = ("server_starting", "stagnation", "autocompact", "squeezed",
-                 "long_running", "interjection", "retry", "subtask")
+                 "long_running", "interjection", "retry", "subtask", "queued", "dequeued")
 
 def _status_text(k, p):
     p = p or {}
     if k == "long_running": return f"still working — {p.get('minutes')} min, {p.get('rounds')} steps"
     if k == "interjection": return "reading your note"
     if k == "squeezed":     return "trimming old tool output to make room"
+    if k == "queued":       return "waiting for another chat to finish"
+    if k == "dequeued":     return "its turn — starting"
     if k == "retry":        return (f"model request failed ({p.get('kind')}) — retrying"
                                     + (f" in {p.get('wait')}s" if p.get("wait") else ""))
     if k == "subtask":      return f"helper: {p.get('description')} — {p.get('tool')}"
@@ -1535,6 +1547,11 @@ def run_job(job):
 
 def scheduler_loop():
     def _due_jobs():
+        # one thing at a time: no job while any answer (or job) is running, and
+        # a gap after the last one finished, so jobs never pile onto a chat
+        if running_sids() or JOBS_INFLIGHT or q.slot_busy(): return
+        if time.time() - q.GEN_STATE.get("ended", 0) < float(q.S.get("schedule_gap_min") or 0) * 60:
+            return
         for job in q.sched_load().get("jobs", []):
             jid = job.get("id")
             if jid in JOBS_INFLIGHT or not q.sched_due(job):
@@ -1554,6 +1571,7 @@ def scheduler_loop():
                     _sched_log(f"CRASH {i}:\n{traceback.format_exc()}")
                 finally: JOBS_INFLIGHT.discard(i)
             threading.Thread(target=_go, daemon=True).start()
+            return                      # one job per minute at most; the next waits its turn
 
     def _watch_h2():
         if not q.S.get("watch_cluster_jobs"): return

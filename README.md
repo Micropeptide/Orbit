@@ -267,6 +267,8 @@ Everything is editable in Settings; the files are plain JSON if you prefer.
 | `max_tool_rounds` | 0 | Tool calls one answer may make. 0 = no limit — it keeps going until the work is done or you press Stop. |
 | `max_turn_minutes` | 0 | Minutes one answer may run. 0 = no limit; you're told how it's going instead (next row). |
 | `long_run_notice_min` | 30 | Every N minutes an answer keeps running: a notice in the chat with a Stop button, and a macOS notification. 0 = never. |
+| `one_chat_at_a_time` | true | With a local model, one answer runs at a time. A message in another chat waits in line and says so, and scheduled jobs wait for a quiet moment. Two conversations at once made both crawl. Hosted models are never queued. |
+| `schedule_gap_min` | 3 | Minutes a scheduled job waits after the last answer finished. |
 | `keep_awake` | true | Hold off idle sleep while an answer is running, so an evening-long task isn't stopped by the Mac dozing off. |
 | `resume_after_restart` | true | If Orbit itself stops mid-answer (crash, update, restart), pick the work up again in the same chat a minute after it's back — booked as a one-off task you can cancel. Progress is saved as an answer goes, so little is lost. |
 | `autocompact_pct` | 80 | Context fullness that triggers trimming. |

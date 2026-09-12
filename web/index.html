@@ -1406,6 +1406,10 @@ async function go(opts){
       +`${(INFO.settings&&INFO.settings.idle_min)||20} min idle — first message after that reloads `
       +`~15 GB of weights</div>`;
      bottom()}
+    else if(m.k==='queued'){               // another chat has the model; this one waits in line
+     a.bub.innerHTML='<span class=working>'+esc(m.p.msg||'waiting for another chat to finish')+'<span class=dots></span></span>';bottom()}
+    else if(m.k==='dequeued'){
+     a.bub.innerHTML='<span class=working>its turn — starting<span class=dots></span></span>'}
     else if(m.k==='server_ready'){
      a.bub.innerHTML=`<span class=working>ready in ${m.p.elapsed}s — thinking<span class=dots></span></span>`;
      bottom()}
