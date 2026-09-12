@@ -347,6 +347,14 @@ actor OrbitServer {
         try await post("/api/cancel", ["sid": sid])
     }
 
+    /// A note for an answer that is still running: the Mac hands it to the
+    /// model at its next step. False when that answer has already finished.
+    func interject(sid: String, message: String) async throws -> Bool {
+        struct R: Codable { var ok: Bool? }
+        let data = try await post("/api/interject", ["sid": sid, "message": message])
+        return (try? JSONDecoder().decode(R.self, from: data).ok) ?? false
+    }
+
     /// Cut the conversation back to before the given user message (ordinal
     /// among user messages, which is how the Mac counts).
     func truncate(_ sid: String, atUserIndex index: Int, check: String? = nil) async throws {
@@ -438,9 +446,18 @@ actor OrbitServer {
         case "autocompact_done", "stagnation": return .status("")
         case "blocked":        return .blocked(reason: str("reason"))
         case "auto_approved":  return .autoApproved(name: str("name"), reason: str("reason"))
-        case "approval":
+        // "approval_request" carries the id /api/approve answers to; the bare
+        // "approval" event before it never did, so a prompt on the phone could
+        // not actually be answered
+        case "approval_request":
             return .approval(name: str("name"), reason: str("reason"),
                              id: (p as? [String: Any])?["id"] as? String)
+        case "approval":       return nil
+        case "interjection":   return .status("reading your note")
+        case "retry":          return .status("model error — retrying")
+        case "subtask":
+            let d = str("description")
+            return .status(d.isEmpty ? "a helper is working" : "helper: \(d)")
         case "error", "stream_error":
             return .error(p as? String ?? str("error"))
         case "end":

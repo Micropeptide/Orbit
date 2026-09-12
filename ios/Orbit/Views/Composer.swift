@@ -74,6 +74,22 @@ struct Composer: View {
                     .background(.background, in: .rect(cornerRadius: 20))
                     .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(.quaternary))
 
+                if state.streaming && canSend {
+                    // a note for the running answer, read at its next step
+                    Button {
+                        let text = draft
+                        draft = ""
+                        Haptics.tap()
+                        Task { await state.steer(text) }
+                    } label: {
+                        Image(systemName: "arrow.turn.down.right")
+                            .font(.body.weight(.bold))
+                            .frame(width: 36, height: 36)
+                            .background(Color.accentColor, in: .circle)
+                            .foregroundStyle(.white)
+                    }
+                    .accessibilityLabel("Steer: send a note to the running answer")
+                }
                 if state.streaming {
                     Button {
                         Task { await state.stopGenerating() }
