@@ -331,7 +331,7 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 @keyframes dt{0%{content:''}25%{content:'.'}50%{content:'..'}75%{content:'...'}}
 .think.live{border-left-color:var(--acc)}
 .think.live summary{color:var(--acc)}
-.think .body{max-height:220px;overflow-y:auto}
+.think.live .body{max-height:260px;overflow-y:auto}   /* only while it streams; finished thinking shows in full */
 .think .body .tstamp{display:block;color:var(--dim);font-size:10.5px;margin:8px 0 1px;font-variant-numeric:tabular-nums}
 .think .body .tstamp:first-child{margin-top:0}
 .planbox{margin:8px 0;border:1px solid var(--line);border-radius:9px;background:var(--card);
@@ -1121,7 +1121,10 @@ async function newChat(){
  if(sid){clearTimeout(draftT);saveDraft(sid)}      // keep what you were typing with its chat
  const typed=q.value;
  switching=(async()=>{
-  const d=await (await fetch('/api/new',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
+  // a failed request used to do nothing at all -- the old chat just stayed put
+  let d;try{const r=await fetch('/api/new',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+   d=await r.json();if(!r.ok||!d.sid)throw new Error(d.error||('the server answered '+r.status))}
+  catch(e){toast('could not start a new chat — '+(e.message||e)+'. Orbit may be restarting; try again in a moment.');return}
   stopLive(); sid=d.sid;if(q.value===typed)loadDraft(d.sid);   // typed while it opened? keep that
   PLAN_MODE=false;drawPlanMode();wrap.innerHTML='';$('#title').textContent='New chat';atts=[];$('#chips').innerHTML='';
   tempMode=false;$('#tempbtn').style.borderColor='';$('#tempbtn').style.color='';
@@ -3399,8 +3402,15 @@ function showOnboarding(){
  $('#ob_done').onclick=()=>{PREF.set('onboarded','1');closeModal()};
 }
 try{if(!PREF.get('onboarded'))setTimeout(showOnboarding,700)}catch(e){}
+const PAGE_LOADED=Date.now()/1000;
 async function checkCode(){
  try{const c=await (await fetch('/api/code')).json();
+  // the page itself changed on disk since this tab loaded it: fixes to the
+  // page only arrive with a reload, and nothing used to say so
+  if(c.page_mtime&&c.page_mtime>PAGE_LOADED+2&&!document.querySelector('.reloadBar')){
+   const b=el('<div class="staleBar reloadBar"><span>Orbit\'s page was updated — reload to get the new version.</span></div>');
+   const btn=el('<button>Reload</button>');btn.onclick=()=>location.reload();b.appendChild(btn);
+   document.body.appendChild(b)}
   const bar=document.querySelector('.staleBar');
   if(c.stale&&!bar){
    const b=el(`<div class=staleBar><span>Code changed on disk (${c.files.join(', ')}) — `

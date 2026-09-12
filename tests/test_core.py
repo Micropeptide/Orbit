@@ -2368,6 +2368,15 @@ class TestRound1Server(Sandbox):
         self.assertIn("a saved chat is never temporary", page)
         self.assertIn("navigator.sendBeacon('/api/burn',new Blob([JSON.stringify({sid})]", page)
 
+    def test_the_right_files_are_watched_for_changes(self):
+        names = [os.path.basename(f) for f in self.ui.CODE_FILES]
+        self.assertEqual(names, ["qqcore.py", "orbit-ui", "index.html"])
+        self.assertIn("page_mtime", self.ui.code_is_stale())
+        page = open(os.path.join(ROOT, "web", "index.html")).read()
+        self.assertIn(".think.live .body{max-height", page)
+        self.assertNotIn(".think .body{max-height:220px", page)
+        self.assertIn("could not start a new chat", page)
+
     def test_restarting_waits_for_running_answers(self):
         """A restart used to cut a running answer off mid-step; it now waits
         until no chat is answering, unless forced."""
