@@ -838,7 +838,7 @@ def _parse_when(s, now=None):
                      "'tomorrow 07:00' or '2026-09-12 21:00'")
 
 def t_schedule_task(prompt, start="now", repeat_every_minutes=None, daily_at=None,
-                    until=None, name=None, in_this_chat=True):
+                    until=None, name=None, in_this_chat=True, stop_at=None):
     """Set up work to run later, or again and again, with nobody watching."""
     prompt = str(prompt or "").strip()
     if not prompt: return "Error: a scheduled task needs a prompt — what to do each time it runs."
@@ -862,6 +862,10 @@ def t_schedule_task(prompt, start="now", repeat_every_minutes=None, daily_at=Non
     if until_ts:
         if until_ts <= start_ts: return "Error: 'until' is before the first run."
         job["until"] = until_ts
+    if stop_at:
+        if not _re.match(r"^\d{1,2}:\d{2}$", str(stop_at).strip()):
+            return "Error: stop_at must look like '06:00'."
+        job["stop_at"] = str(stop_at).strip()
     sid = getattr(TURN_CTX, "sid", None)
     if in_this_chat and sid: job["sid"] = sid
     # a run in a new chat still belongs to the project it was scheduled from,
@@ -1241,6 +1245,7 @@ ALL_SPECS = [
    "daily_at":{"type":"string","description":"Instead of a start/interval: run every day at this time, e.g. '07:30'."},
    "until":{"type":"string","description":"Stop repeating after this time (same formats as start)."},
    "name":{"type":"string"},
+   "stop_at":{"type":"string","description":"Clock time each run must be finished by, e.g. '06:00' for work that should only happen overnight. The run wraps up with a summary when it gets there."},
    "in_this_chat":{"type":"boolean"}},"required":["prompt"]}}},
  {"type":"function","function":{"name":"list_scheduled_tasks","description":"List scheduled tasks: id, next run, last result.",
   "parameters":{"type":"object","properties":{}}}},
@@ -1600,7 +1605,8 @@ def _take_notes(messages, inbox, emit, late=False):
     return n
 
 def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
-         inbox=None, interrupt=None, sid=None, checkpoint=None, project=_NO_PROJECT_ARG):
+         inbox=None, interrupt=None, sid=None, checkpoint=None, project=_NO_PROJECT_ARG,
+         max_minutes=None):
     """Answer one message, looping model -> tools -> model until it is done.
 
     approve(fn, args, reason) -> bool; if None, risky actions are refused.
@@ -1683,7 +1689,9 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
             return txt
         except Exception:
             return ""
-    budget_min = float(S.get("max_turn_minutes") or 0)
+    # max_minutes: this answer's own time limit (a scheduled run that must end
+    # by a set time); otherwise the global setting, where 0 means no limit
+    budget_min = float(max_minutes if max_minutes is not None else (S.get("max_turn_minutes") or 0))
     max_rounds = int(S.get("max_tool_rounds") or 0)
     every = float(S.get("long_run_notice_min") or 0) * 60
     next_notice = t_start + every if every else None
@@ -3360,6 +3368,17 @@ def sched_due(job, now=None):
         target = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, int(hh), int(mm), 0, 0, 0, -1))
         return now >= target and last < target
     return False
+
+def minutes_until(hhmm, now=None):
+    """Minutes from now to the next time the clock reads hh:mm (a run that
+    starts at 02:00 with stop_at 06:00 gets 240). None if it can't be read."""
+    try: h, m = [int(x) for x in str(hhmm).strip().split(":")]
+    except (ValueError, AttributeError): return None
+    now = now or time.time()
+    lt = time.localtime(now)
+    target = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, h, m, 0, 0, 0, -1))
+    if target <= now: target += 86400
+    return (target - now) / 60.0
 
 def sched_next(job):
     """Human-readable next run."""

@@ -1648,6 +1648,20 @@ class TestRound1(TestLongAnswers):
         self.assertEqual(q.S["autocompact_pct"], 80, "limit restored")
 
     # --- wrap-up when a limit is hit
+    def test_minutes_until_the_next_clock_time(self):
+        now = time.mktime((2026, 9, 12, 2, 0, 0, 0, 0, -1))
+        self.assertAlmostEqual(q.minutes_until("06:00", now), 240, delta=1)
+        self.assertAlmostEqual(q.minutes_until("01:00", now), 23 * 60, delta=1)
+        self.assertIsNone(q.minutes_until("soon"))
+
+    def test_an_answers_own_time_limit_ends_it_with_a_summary(self):
+        def fake(messages, tools, **kw):
+            if tools is None: return {"role": "assistant", "content": "WRAP: out of time"}
+            return self.tool_step(len(messages))(messages)
+        q.stream_call = fake
+        out = q.turn(self.chat(), "research", [], emit=self.emit, max_minutes=0.0001)
+        self.assertIn("WRAP: out of time", out)
+
     def test_a_step_limit_ends_with_a_summary_not_mid_thought(self):
         q.S["max_tool_rounds"] = 2
         def fake(messages, tools, **kw):
@@ -1954,6 +1968,25 @@ class TestRound1Server(Sandbox):
                 {"role": "assistant", "content": "second answer"}]
         self.assertEqual(self.ui.render(msgs)[-1]["tool_runs"], [])
 
+    def test_text_and_the_tools_it_called_stay_together(self):
+        msgs = [{"role": "user", "content": "go"},
+                {"role": "assistant", "content": "Fetching prices.", "tool_calls": [{"id": "a", "type": "function",
+                 "function": {"name": "market_detail", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "a", "name": "market_detail", "content": "0.8"},
+                {"role": "assistant", "content": "Now the weekly counts.", "tool_calls": [{"id": "b", "type": "function",
+                 "function": {"name": "python", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "b", "name": "python", "content": "3"},
+                {"role": "assistant", "content": "Done."}]
+        got = [(e["text"], [r["name"] for r in e["tool_runs"]]) for e in self.ui.render(msgs)[1:]]
+        self.assertEqual(got, [("Fetching prices.", ["market_detail"]),
+                               ("Now the weekly counts.", ["python"]), ("Done.", [])])
+
+    def test_a_scheduled_run_with_a_stop_time_gets_that_long(self):
+        self.assertIsNone(self.ui._job_minutes({"prompt": "x"}))
+        m = self.ui._job_minutes({"prompt": "x", "stop_at": time.strftime("%H:%M", time.localtime(time.time() + 3600))})
+        self.assertTrue(58 <= m <= 61, m)
+        self.assertIn("You have until", self.ui._job_prompt({"prompt": "x", "stop_at": "06:00"}))
+
     def test_a_tool_step_with_no_text_keeps_its_tool_rows(self):
         msgs = [{"role": "user", "content": "go"},
                 {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
@@ -1963,9 +1996,10 @@ class TestRound1Server(Sandbox):
                  "function": {"name": "read_file", "arguments": "{}"}}]},
                 {"role": "tool", "tool_call_id": "c2", "name": "read_file", "content": "Error: no such file"},
                 {"role": "assistant", "content": "done"}]
-        rows = self.ui.render(msgs)[-1]["tool_runs"]
-        self.assertEqual([r["name"] for r in rows], ["list_dir", "read_file"])
-        self.assertEqual([r["ok"] for r in rows], [True, False], "older chats: judged by what came back")
+        out = self.ui.render(msgs)
+        self.assertEqual([[r["name"] for r in e["tool_runs"]] for e in out[1:]],
+                         [["list_dir"], ["read_file"], []], "each step keeps the tools it called")
+        self.assertEqual(out[2]["tool_runs"][0]["ok"], False, "older chats: judged by what came back")
 
     def test_render_returns_tool_rows_with_timing(self):
         msgs = [{"role": "user", "content": "go", "t": 1.0},
@@ -1976,8 +2010,9 @@ class TestRound1Server(Sandbox):
                 {"role": "assistant", "content": "done", "secs": 3.2,
                  "usage": {"prompt_tokens": 10, "completion_tokens": 2}}]
         out = self.ui.render(msgs)
-        row = out[-1]["tool_runs"][0]
+        row = out[-2]["tool_runs"][0]           # on the step that called it
         self.assertEqual((row["name"], row["args"], row["ok"], row["secs"]), ("list_dir", {"path": "/tmp"}, True, 0.4))
+        self.assertEqual(out[-1]["tool_runs"], [])
         self.assertEqual(out[-1]["secs"], 3.2)
         self.assertEqual(out[-1]["usage"]["completion_tokens"], 2)
 
