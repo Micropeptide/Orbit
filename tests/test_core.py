@@ -1728,6 +1728,124 @@ class TestRound1(TestLongAnswers):
         self.assertTrue(q.slot_enter())          # returns at once, holds nothing
         self.assertFalse(q.slot_busy())
 
+    def test_each_chat_has_its_own_plan(self):
+        """REVIEW: one plan for the whole process -- chats overwrote each other's."""
+        q.TURN_CTX.sid = "chat-a"; q.t_plan(steps=["a1", "a2"])
+        q.TURN_CTX.sid = "chat-b"; q.t_plan(steps=["b1"])
+        q.TURN_CTX.sid = "chat-a"
+        self.assertEqual([x["text"] for x in q.plan_pending()], ["a1", "a2"])
+        q.PLANS.pop("chat-a", None); q.PLANS.pop("chat-b", None)
+
+    def test_a_scheduled_run_or_pick_up_keeps_the_plan(self):
+        q.TURN_CTX.sid = "chat-p"; q.t_plan(steps=["one", "two"])
+        self.script(self.final("ok"))
+        q.stream_call = lambda m, t, **kw: {"role": "assistant", "content": "ok"}
+        q.S["plan_nudges"] = 0
+        q.turn(self.chat(), "Orbit restarted while you were in the middle of this.", [], sid="chat-p")
+        self.assertEqual(len(q.PLANS["chat-p"]["steps"]), 2)
+        q.turn(self.chat(), "a brand new question", [], sid="chat-p")
+        self.assertEqual(q.PLANS["chat-p"]["steps"], [])
+
+    def test_it_is_nudged_on_while_plan_steps_are_open(self):
+        calls = {"n": 0}
+        def fake(messages, tools, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"role": "assistant", "content": "", "tool_calls": [{"id": "p1", "type": "function",
+                        "function": {"name": "plan", "arguments": json.dumps({"steps": ["fetch", "record"]})}}]}
+            if calls["n"] == 2: return {"role": "assistant", "content": "I fetched it."}   # stops early
+            if calls["n"] == 3:
+                self.assertIn("still has 2 open step", messages[-1]["content"])
+                return {"role": "assistant", "content": "", "tool_calls": [{"id": "p2", "type": "function",
+                        "function": {"name": "plan", "arguments": json.dumps({"done": 0})}}]}
+            return {"role": "assistant", "content": "all done now"}
+        q.stream_call = fake
+        q.S["plan_nudges"] = 3
+        msgs = self.chat()
+        out = q.turn(msgs, "do it", [], emit=self.emit, sid="nudge-chat")
+        self.assertIn("plan_nudge", self.kinds())
+        self.assertTrue(any(m.get("nudge") for m in msgs))
+        self.assertLessEqual(calls["n"], 6, "nudges stop when nothing changes")
+        self.assertNotIn("nudge", q._strip_reasoning(msgs)[-2])
+        q.PLANS.pop("nudge-chat", None)
+
+    def test_three_failures_in_a_row_make_it_stop_and_rethink(self):
+        n = {"i": 0}
+        def fake(messages, tools, **kw):
+            n["i"] += 1
+            if n["i"] <= 3:
+                return {"role": "assistant", "content": "", "tool_calls": [{"id": f"f{n['i']}", "type": "function",
+                        "function": {"name": "read_file", "arguments": json.dumps({"path": f"/nope/{n['i']}.txt"})}}]}
+            return {"role": "assistant", "content": "giving up politely"}
+        q.stream_call = fake
+        msgs = self.chat()
+        q.turn(msgs, "read them", [], emit=self.emit)
+        self.assertIn("fail_streak", self.kinds())
+        self.assertTrue(any("tool calls failed" in str(m.get("content")) for m in msgs if m.get("nudge")))
+
+    def test_shell_commands_cannot_wait_for_a_keyboard(self):
+        q.S["shell_enabled"] = True
+        self.assertIn("exit=0", q.t_run_shell("echo $CI $GIT_TERMINAL_PROMPT"))
+        self.assertIn("1 0", q.t_run_shell("echo $CI $GIT_TERMINAL_PROMPT"))
+        self.assertIn("interactive program", q.t_run_shell("vim notes.txt"))
+        self.assertIn("interactive program", q.t_run_shell("python3"))
+        self.assertIn("exit=0", q.t_run_shell("python3 -c 'print(1)'"))
+
+    def test_squeezing_drops_repeats_old_errors_and_written_contents(self):
+        big = "x" * 5000
+        msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "go"}]
+        def call(i, name, args, result, ok=True):
+            msgs.append({"role": "assistant", "content": "", "tool_calls": [{"id": f"c{i}", "type": "function",
+                         "function": {"name": name, "arguments": json.dumps(args)}}]})
+            msgs.append({"role": "tool", "tool_call_id": f"c{i}", "name": name, "ok": ok, "content": result})
+        call(1, "list_dir", {"path": "/a"}, "listing " + big)
+        call(2, "write_file", {"path": "/w/x.py", "content": big}, "Created")
+        call(3, "read_file", {"path": "/nope"}, "Error: " + "e" * 2000, ok=False)
+        call(4, "list_dir", {"path": "/a"}, "listing again")
+        for i in range(5, 12): call(i, "python", {"code": str(i)}, "ok")
+        out, freed = q.squeeze_tool_results(msgs)
+        self.assertGreater(freed, 9000)
+        self.assertTrue(out[3]["content"].startswith("[same call"))
+        self.assertIn("elided; the file itself has them", out[4]["tool_calls"][0]["function"]["arguments"])
+        self.assertIn("old error elided", out[7]["content"])
+
+    def test_a_subfolders_rules_arrive_with_its_first_file(self):
+        folder = os.path.join(self.tmp, "rp"); raw = os.path.join(folder, "data", "raw")
+        os.makedirs(raw)
+        open(os.path.join(raw, "ORBIT.md"), "w").write("Never modify files in data/raw.")
+        open(os.path.join(raw, "a.csv"), "w").write("x,y\n")
+        pid, _ = q.project_upsert(None, name="RP", folder=folder)
+        q.TURN_CTX.project = pid; q.TURN_CTX.sid = "rules-chat"
+        msgs = []
+        q._run_one_tool({"id": "r1"}, "read_file", {"path": os.path.join(raw, "a.csv")}, msgs, self.emit, None, {})
+        self.assertIn("Never modify files in data/raw", msgs[-1]["content"])
+        q._run_one_tool({"id": "r2"}, "read_file", {"path": os.path.join(raw, "a.csv")}, msgs, self.emit, None, {"x": 0})
+        self.assertNotIn("Never modify", msgs[-1]["content"], "shown once per chat")
+
+    def test_earlier_chats_can_be_searched_and_read(self):
+        saved = q.SESSIONS
+        q.SESSIONS = os.path.join(self.tmp, "sess"); os.makedirs(q.SESSIONS)
+        try:
+            q.session_save("old-1", [{"role": "user", "content": "what about the measles market?"},
+                                     {"role": "assistant", "content": "P(YES)=0.4 given 3,294 cases"}], "Measles")
+            q._SESS_CACHE["key"] = None
+            self.assertIn("old-1", q.t_search_chats("measles"))
+            self.assertIn("3,294", q.t_read_chat("old-1"))
+            self.assertIn("no chat", q.t_read_chat("../etc"))
+        finally:
+            q.SESSIONS = saved; q._SESS_CACHE["key"] = None
+
+    def test_ultrathink_turns_reasoning_up_for_one_answer(self):
+        seen = []
+        def fake(messages, tools, **kw):
+            seen.append((getattr(q.TURN_CTX, "effort", None), getattr(q.TURN_CTX, "think", None)))
+            return {"role": "assistant", "content": "ok"}
+        q.stream_call = fake
+        q.turn(self.chat(), "ultrathink: is this right?", [], emit=self.emit)
+        q.turn(self.chat(), "plain question", [], emit=self.emit)
+        self.assertEqual(seen[0], ("high", True)); self.assertIsNone(seen[1][1])
+        self.assertIn("ultrathink", self.kinds())
+
     def test_minutes_until_the_next_clock_time(self):
         now = time.mktime((2026, 9, 12, 2, 0, 0, 0, 0, -1))
         self.assertAlmostEqual(q.minutes_until("06:00", now), 240, delta=1)
@@ -2157,6 +2275,16 @@ class TestRound1Server(Sandbox):
         self.assertIn("if running_sids() or JOBS_INFLIGHT or q.slot_busy(): return", block)
         self.assertIn("schedule_gap_min", block)
         self.assertIn("one job per minute at most", block)
+
+    def test_burn_never_erases_a_saved_chat(self):
+        """REGRESSION: /api/burn deleted whichever chat was current. A page still
+        in temporary mode erased a real chat -- file and all, no bin -- on reload."""
+        src = open(os.path.join(ROOT, "bin", "orbit-ui")).read()
+        block = src[src.index('if p == "/api/burn":'):][:900]
+        self.assertIn("if not S.temp", block)
+        page = open(os.path.join(ROOT, "web", "index.html")).read()
+        self.assertIn("a saved chat is never temporary", page)
+        self.assertIn("navigator.sendBeacon('/api/burn',new Blob([JSON.stringify({sid})]", page)
 
     def test_restarting_waits_for_running_answers(self):
         """A restart used to cut a running answer off mid-step; it now waits

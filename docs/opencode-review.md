@@ -52,3 +52,27 @@ answer for each feature.
 - **`!shell` injection in commands.** A saved prompt that runs shell commands when you type it would bypass the approval tiers.
 - **Remote MCP with OAuth, the GitHub app, IDE/ACP integration, themes.** Worth doing eventually, but they don't bear on research work with a local model.
 - **Plan mode as a separate agent.** Orbit's `plan` tool and its autonomy modes already cover "look before you act". A read-only agent is easy to set up under Agents if you want one.
+
+## Also taken from oh-my-opencode
+
+[oh-my-opencode](https://github.com/code-yeongyu/oh-my-opencode) is a plugin pack for opencode. The useful ideas, adapted to one local model:
+
+- **A plan per chat, saved with it.** The plan tool's state was one dict for the whole process: chats overwrote each other's plans, and a restart lost them. A scheduled run, or the pick-up after a restart, now carries on with the chat's plan.
+- **Finish the plan.** When the model stops with plan steps still open, Orbit nudges it on. It does this at most `plan_nudges` times (3), and only while the model is making progress. This is the "todo continuation enforcer", scaled down.
+- **Three strikes.** After three failed tool calls in a row, Orbit tells the model to stop, say what went wrong, undo anything it broke and change approach.
+- **Commands that can't hang.** Shell commands run with `CI=1`, `GIT_TERMINAL_PROMPT=0`, `PAGER=cat` and so on, with no stdin. Editors, pagers and bare REPLs are refused, with a hint.
+- **Pruning without a model call.** Before compacting, Orbit elides three things:
+  - an older result of a call that was repeated later,
+  - the content of an old write (the file itself has it),
+  - an old error beyond its first line.
+- **Rules from subfolders.** The first time a chat touches a file in a subfolder of the project, that folder's `ORBIT.md`/`AGENTS.md`/`CLAUDE.md` is shown with the result.
+- **Earlier chats as tools.** `search_chats` and `read_chat` let the model check what an earlier conversation concluded.
+- **`ultrathink`.** The word anywhere in a message turns reasoning to the maximum for that answer.
+
+Not taken:
+- the multi-model agent roster and "always delegate" orchestration (one local model),
+- LSP/AST tools and the comment checker,
+- the all-caps "ultrawork" prompt,
+- keyword auto-modes that trigger on everyday words,
+- tmux panes,
+- third-party search MCP servers switched on by default.

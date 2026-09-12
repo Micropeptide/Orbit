@@ -164,7 +164,9 @@ def get_state(sid=None, create=True):
                 msgs, title = q.session_load(sid)
                 st.msgs, st.title = msgs, title
                 raw = json.load(open(q.session_path(sid)))
-                if isinstance(raw, dict): st.project = raw.get("project")
+                if isinstance(raw, dict):
+                    st.project = raw.get("project")
+                    if raw.get("plan") and sid not in q.PLANS: q.PLANS[sid] = raw["plan"]
             except Exception:
                 pass
             STATES[sid] = st
@@ -197,6 +199,8 @@ def save_session(st=None):
     # from the sidebar updates the loaded state too (see /api/session/assign)
     extra["project"] = st.project
     if getattr(st, "running", False): extra["running_since"] = st.busy_since or time.time()
+    pl = q.PLANS.get(st.sid)
+    if pl and pl.get("steps"): extra["plan"] = pl       # the chat's plan survives a restart
     q.session_save(st.sid, st.msgs, st.title, extra)
 
 class H(http.server.BaseHTTPRequestHandler):
@@ -528,6 +532,8 @@ class H(http.server.BaseHTTPRequestHandler):
                     try:
                         raw = json.load(open(q.session_path(sid)))
                         stt.project = raw.get("project") if isinstance(raw, dict) else None
+                        if isinstance(raw, dict) and raw.get("plan") and sid not in q.PLANS:
+                            q.PLANS[sid] = raw["plan"]
                         stt.model = raw.get("model") if isinstance(raw, dict) else None
                     except Exception: stt.project, stt.model = None, None
                 globals()["S"] = stt               # the chat the browser is looking at
@@ -867,8 +873,14 @@ class H(http.server.BaseHTTPRequestHandler):
             fresh_state(temp=bool(d.get("on", True)))
             return self._send(200, jdump({"temp": S.temp, "sid": S.sid}))
         if p == "/api/burn":
+            # erases only a TEMPORARY chat. It used to delete whichever chat was
+            # current, file and all, bypassing the bin -- so a page that still
+            # thought it was in temporary mode erased a real chat on reload
             with LOCK:
                 was = S.sid
+                if not S.temp or (d.get("sid") and d.get("sid") != was):
+                    return self._send(409, jdump({"ok": False, "error":
+                        "not a temporary chat — nothing erased (use Delete to move a chat to the bin)"}))
                 try:
                     if os.path.exists(q.session_path(was)): os.remove(q.session_path(was))
                 except OSError: pass
@@ -1297,7 +1309,8 @@ class H(http.server.BaseHTTPRequestHandler):
 
 # stream events worth showing to a tab that rejoins an answer mid-way
 _STATUS_KINDS = ("server_starting", "stagnation", "autocompact", "squeezed",
-                 "long_running", "interjection", "retry", "subtask", "queued", "dequeued")
+                 "long_running", "interjection", "retry", "subtask", "queued", "dequeued",
+                 "plan_nudge", "fail_streak", "ultrathink")
 
 def _status_text(k, p):
     p = p or {}
@@ -1407,6 +1420,7 @@ def render(msgs):
             try: call_args[tc.get("id")] = json.loads(tc["function"].get("arguments") or "{}")
             except (ValueError, KeyError, TypeError): pass
         if m.get("role") not in ("user", "assistant"): continue
+        if m.get("nudge"): continue        # Orbit's own "carry on" notes, not the user's words
         c = m.get("content")
         if isinstance(c, list):
             out.append({"role": m["role"],
