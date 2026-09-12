@@ -23,8 +23,14 @@ import json, os, urllib.request, urllib.error
 # ------------------------------------------------------------------ registry
 
 BUILTIN_PROVIDERS = {
+    # base_url empty on purpose: the local server's actual port is only known
+    # by qqcore.py (config/settings.json's server.port, which is user-settable
+    # and not always 8000), and stream_call() already falls back to its own
+    # freshly-computed BASE when a provider's base_url is empty. A hardcoded
+    # value here would go stale — and silently 404 against whatever else is
+    # running on port 8000 — the moment someone changes the port.
     "local": {"label": "Local · MTPLX", "kind": "openai", "managed": True,
-              "base_url": "http://127.0.0.1:8000/v1", "key": "",
+              "base_url": "", "key": "",
               "note": "the model running on this Mac"},
     "anthropic": {"label": "Anthropic · Claude", "kind": "anthropic",
                   "base_url": "", "key": "ANTHROPIC_API_KEY",

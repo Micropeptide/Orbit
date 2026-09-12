@@ -648,6 +648,16 @@ class TestModelProviders(unittest.TestCase):
         # /opt/homebrew/bin and vanished from the picker because of it
         self.assertIn("/opt/homebrew/bin", self.P.EXTRA_BIN_DIRS)
 
+    def test_local_provider_has_no_hardcoded_port(self):
+        # REGRESSION: base_url was a literal "http://127.0.0.1:8000/v1", so
+        # changing server.port away from 8000 in Settings silently kept every
+        # chat completion pointed at the old port -- a 404 if something else
+        # was listening there, a connection error otherwise. qqcore.py's
+        # stream_call() already falls back to its own freshly-computed BASE
+        # when base_url is empty; the fix is for the default to actually be
+        # empty so that fallback is what fires.
+        self.assertEqual(self.P.BUILTIN_PROVIDERS["local"]["base_url"], "")
+
     def test_transcript_keeps_roles_and_drops_nothing_silently(self):
         sysmsg, body = self.P._transcript([
             {"role": "system", "content": "be terse"},
