@@ -205,13 +205,40 @@ def serve_map(port):
     return []
 
 
-def ensure_serve(port, prefer=8443):
+def _serve_cache_path(root):
+    return os.path.join(root, "config", ".tailscale-serve.json") if root else None
+
+def _serve_cache_save(cache_path, port, served):
+    if not cache_path or not served: return
+    try: json.dump({"port": port, "served": served}, open(cache_path, "w"))
+    except OSError: pass
+
+def ensure_serve(port, prefer=8443, root=None):
     """Front the loopback listener with Tailscale Serve, on the first free
     HTTPS port from `prefer` up. Idempotent, persistent (--bg), and quiet when
     Tailscale or HTTPS certificates are not available — the plain tailnet
-    listener still works then."""
+    listener still works then.
+
+    Cached per port in config/.tailscale-serve.json once confirmed working —
+    querying `tailscale serve status` was, by itself, enough to pull the
+    Tailscale app to the front, and this runs on every Orbit startup while
+    remote access is set to Tailscale. A cache hit skips the CLI entirely, so
+    an ordinary restart no longer touches Tailscale at all. The live check
+    still runs, and re-caches, whenever the port changes or the cache is
+    missing — delete config/.tailscale-serve.json to force a fresh one, e.g.
+    after reinstalling Tailscale or if serve was reset outside Orbit."""
+    cache_path = _serve_cache_path(root)
+    if cache_path:
+        try:
+            cached = json.load(open(cache_path))
+            if cached.get("port") == port and cached.get("served"):
+                return [tuple(x) for x in cached["served"]]
+        except Exception:
+            pass
     have = serve_map(port)
-    if have: return have
+    if have:
+        _serve_cache_save(cache_path, port, have)
+        return have
     for b in TAILSCALE_BINS:
         if not os.path.exists(b): continue
         try:
@@ -224,7 +251,9 @@ def ensure_serve(port, prefer=8443):
                                capture_output=True, text=True, timeout=20)
         except Exception:
             return []
-        return serve_map(port) if r.returncode == 0 else []
+        result = serve_map(port) if r.returncode == 0 else []
+        _serve_cache_save(cache_path, port, result)
+        return result
     return []
 
 

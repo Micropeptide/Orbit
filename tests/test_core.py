@@ -13,6 +13,7 @@ import importlib.machinery, json, os, shutil, sys, tempfile, time, unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "bin"))
 import qqcore as q
+import remote as R
 
 
 class Sandbox(unittest.TestCase):
@@ -984,6 +985,70 @@ class TestDoctor(unittest.TestCase):
         # service's restricted PATH even when it's installed via Homebrew
         import inspect
         self.assertIn("_cliclick_path", inspect.getsource(q.health_check))
+
+
+class TestTailscaleServeDoesNotReopenOnEveryStartup(unittest.TestCase):
+    """REGRESSION: ensure_serve() called `tailscale serve status` on every
+    single Orbit startup while remote access was set to Tailscale mode —
+    merely querying it was enough to pull the Tailscale app to the front each
+    time. A cache keyed by port means a normal restart doesn't touch the
+    tailscale CLI at all once it has been set up once."""
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="qqtest-ts-")
+        os.makedirs(os.path.join(self.tmp, "config"), exist_ok=True)
+        self.calls = []
+        self.configured = False
+
+        def fake_run(cmd, **kw):
+            self.calls.append(cmd)
+            class Res:
+                returncode = 0
+                stderr = ""
+                stdout = ""
+            r = Res()
+            if "status" in cmd:
+                r.stdout = json.dumps({"Web": ({"foo.ts.net:443": {"Handlers": {
+                    "/": {"Proxy": "http://127.0.0.1:9999"}}}} if self.configured else {}),
+                    "TCP": {}})
+            if "--bg" in cmd:
+                self.configured = True
+            return r
+
+        import unittest.mock as mock
+        self._patches = [
+            mock.patch("subprocess.run", side_effect=fake_run),
+            mock.patch("os.path.exists", side_effect=lambda p: p == R.TAILSCALE_BINS[0]),
+        ]
+        for p in self._patches: p.start()
+
+    def tearDown(self):
+        for p in self._patches: p.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_second_call_makes_no_subprocess_calls_at_all(self):
+        r1 = R.ensure_serve(9999, root=self.tmp)
+        self.assertTrue(r1)
+        n_after_first = len(self.calls)
+        self.assertGreater(n_after_first, 0, "the first-ever setup must still do a live check")
+
+        r2 = R.ensure_serve(9999, root=self.tmp)
+        self.assertEqual(r2, r1)
+        self.assertEqual(len(self.calls), n_after_first,
+                          "a cache hit must not touch the tailscale CLI at all")
+
+    def test_a_different_port_is_not_served_from_the_stale_cache(self):
+        R.ensure_serve(9999, root=self.tmp)
+        n_after_first = len(self.calls)
+        R.ensure_serve(8888, root=self.tmp)
+        self.assertGreater(len(self.calls), n_after_first,
+                            "a different port must trigger a fresh live check")
+
+    def test_no_root_means_no_caching_but_still_works(self):
+        r = R.ensure_serve(9999, root=None)
+        self.assertTrue(r)
+        # os.path.exists is mocked above, so check the real directory listing
+        # instead of asking the mock whether it wrote a cache file
+        self.assertEqual(os.listdir(os.path.join(self.tmp, "config")), [])
 
 
 if __name__ == "__main__":
