@@ -700,6 +700,7 @@ def _save_checkpoint(p):
     for old in snaps[:-CHECKPOINTS_KEEP]:
         try: os.remove(os.path.join(d, old))
         except OSError: pass
+    return dest                  # which snapshot, so an answer's changes can be undone
 
 def list_checkpoints(path):
     """Saved versions of a workspace file, newest first — [] if it has none or
@@ -735,9 +736,10 @@ def t_write_file(path, content):
                 "'Full computer access' in Settings -> Tools to override.")
     d = file_diff(p, content)
     LAST_DIFF.clear(); LAST_DIFF.update({"path": p, **d})
-    _save_checkpoint(p)
+    snap = _save_checkpoint(p)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     open(p, "w").write(content)
+    _note_change(p, snap, created=not d["existed"])
     try:
         if p.startswith(os.path.abspath(WORKSPACE)):
             record_file(os.path.relpath(p, WORKSPACE), "write_file")
@@ -1361,7 +1363,7 @@ class _Either:
 
 # keys Orbit keeps on a stored message for itself -- never sent to a model
 PRIVATE_KEYS = ("partial", "interjection", "compacted", "t", "secs", "ok", "usage", "tool_runs",
-                "reasoning_marks", "nudge")
+                "reasoning_marks", "nudge", "changes", "changes_undone")
 
 def para_marks(marks, state, chunk, now=None):
     """Note when each paragraph of thinking began: [offset, time] pairs, kept
@@ -1470,7 +1472,14 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
     except urllib.error.HTTPError as e:
         try: detail = e.read().decode("utf-8", "replace")[:800]
         except Exception: detail = ""
-        raise ModelError(f"HTTP {e.code} from the model server: {detail or e.reason}", e.code)
+        ra = None
+        try:
+            h = e.headers or {}
+            if h.get("retry-after-ms"): ra = float(h.get("retry-after-ms")) / 1000
+            elif h.get("retry-after"): ra = float(h.get("retry-after"))
+        except (TypeError, ValueError):
+            ra = None
+        raise ModelError(f"HTTP {e.code} from the model server: {detail or e.reason}", e.code, ra)
     with r:
         for raw in r:
             if stop.is_set(): break
@@ -1531,6 +1540,9 @@ def _run_one_tool(tc, fn, args, messages, emit, approve, seen_calls):
         except Exception as e: return f"Error: {type(e).__name__}: {e}"
 
     args, refusal = plugin_before(fn, args)
+    if not refusal and getattr(TURN_CTX, "read_only", False) and _changes_things(fn):
+        refusal = ("REFUSED: plan mode is on, so nothing may be changed. Read, search and think, then "
+                   "describe exactly what you would do; the user switches plan mode off to let you do it.")
     level, reason = ("block", refusal) if refusal else risk_check(fn, args)
     if refusal:
         out = refusal
@@ -1661,7 +1673,7 @@ def _take_notes(messages, inbox, emit, late=False):
 
 def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
          inbox=None, interrupt=None, sid=None, checkpoint=None, project=_NO_PROJECT_ARG,
-         max_minutes=None):
+         max_minutes=None, read_only=None):
     """Answer one message, looping model -> tools -> model until it is done.
 
     approve(fn, args, reason) -> bool; if None, risky actions are refused.
@@ -1679,6 +1691,9 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
     helper = getattr(TURN_CTX, "depth", 0)
     TURN_CTX.model = getattr(TURN_CTX, "model", None) if helper else ACTIVE_MODEL.get("id")
     TURN_CTX.effort = getattr(TURN_CTX, "effort", None) if helper else S.get("reasoning_effort")
+    if not helper:
+        TURN_CTX.changes = []          # files this answer changes, so it can be undone
+        TURN_CTX.read_only = bool(read_only)   # plan mode: look, think, propose -- change nothing
     # what a helper started by the task tool inherits from this answer
     TURN_CTX.emit, TURN_CTX.approve, TURN_CTX.cancel, TURN_CTX.tools = emit, approve, cancel, tools
     remote = not model_is_local()
@@ -1734,8 +1749,13 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
         stats page, and in LAST_TURN for the stream's closing event."""
         rec = {"secs": round(time.time() - t_start, 1), "usage": dict(usage),
                "tool_runs": tool_runs[0], "rounds": rounds}
+        ch = [dict(c) for c in (getattr(TURN_CTX, "changes", None) or [])]
+        if msg is not None:
+            msg.update({k: rec[k] for k in ("secs", "usage", "tool_runs")})
+            if ch: msg["changes"] = ch
+            rec["t"] = msg.get("t")
+        rec["changes"] = [c["path"] for c in ch]
         if sid: LAST_TURN[sid] = rec
-        if msg is not None: msg.update({k: rec[k] for k in ("secs", "usage", "tool_runs")})
         return rec
     def _wrap_up(why):
         """A limit was hit: one last call, without tools, so the answer ends with
@@ -1830,7 +1850,8 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                            }.get(kind, "Check it is running (sidebar → Start)")
                     return (f"_The model request failed ({fails}×): {err[:400]}_\n\n{why}, "
                             "then press **Continue**.")
-                wait = _backoff(fails)
+                # the provider's own Retry-After beats our guess (capped at 2 minutes)
+                wait = min(float(getattr(e, "retry_after", 0) or 0), 120) or _backoff(fails)
                 emit("retry", {"attempt": fails, "of": give_up, "wait": round(wait, 1), "error": err[:300], "kind": kind})
                 end = time.time() + wait
                 while time.time() < end and not cancel.is_set(): time.sleep(0.2)
@@ -4661,8 +4682,9 @@ def t_edit_file(path, old_string, new_string, replace_all=False):
     if err: return f"Error editing {p}: {err}"
     if crlf: out = out.replace("\n", "\r\n")
     d = file_diff(p, out)
-    _save_checkpoint(p)
+    snap = _save_checkpoint(p)
     with open(p, "w", encoding="utf-8", newline="") as f: f.write(out)
+    _note_change(p, snap)
     LAST_DIFF.clear(); LAST_DIFF.update({"path": p, **d})
     try:
         if p.startswith(os.path.abspath(WORKSPACE)): record_file(os.path.relpath(p, WORKSPACE), "edit_file")
@@ -4814,9 +4836,10 @@ def repair_call(fn, raw, tools=None):
 
 # ------------------------------------------------------------------ errors and retries
 class ModelError(RuntimeError):
-    """A failed model request, carrying its HTTP status when there was one."""
-    def __init__(self, msg, code=None):
-        super().__init__(msg); self.code = code
+    """A failed model request, carrying its HTTP status -- and how long the
+    provider asked us to wait (Retry-After), when it said -- when there was one."""
+    def __init__(self, msg, code=None, retry_after=None):
+        super().__init__(msg); self.code = code; self.retry_after = retry_after
 
 # specific phrases only: "max_tokens" or "token limit" also appear in errors
 # about the output cap and in rate limits, which compacting would not fix
@@ -5396,3 +5419,171 @@ ALL_SPECS += [
   "description": "Read the last messages of an earlier chat by id (from search_chats). Read-only.",
   "parameters": {"type": "object", "properties": {"id": {"type": "string"}, "last": {"type": "integer"}}, "required": ["id"]}}},
 ]
+
+
+# ==================================================================== MORE FROM OPENCODE
+# undo an answer's file changes, plan mode, asking the user a question
+# mid-task, glob, multi_edit, and built-in /init and /review commands
+
+def _note_change(path, snap, created=False):
+    ch = getattr(TURN_CTX, "changes", None)
+    if ch is None: return
+    ch.append({"path": path, "snap": snap, "created": bool(created and not snap)})
+
+def undo_changes(changes):
+    """Put back every file an answer changed, newest first: an edited file from
+    the snapshot taken just before, a created one to the bin. Each restore is
+    itself checkpointed, so undoing can be undone. Returns what it did."""
+    done = []
+    for c in reversed(changes or []):
+        p = c.get("path")
+        if not p: continue
+        try:
+            if c.get("created"):
+                if os.path.exists(p):
+                    trash_put("file", p, {"why": "undo"}); done.append(f"removed {p} (it's in the bin)")
+            elif c.get("snap") and os.path.exists(c["snap"]):
+                _save_checkpoint(p)
+                with open(c["snap"], "rb") as f, open(p, "wb") as out: out.write(f.read())
+                done.append(f"restored {p}")
+            else:
+                done.append(f"couldn't undo {p}: no snapshot (it lives outside the workspace and project folder)")
+        except Exception as e:
+            done.append(f"couldn't undo {p}: {type(e).__name__}: {e}")
+    return done
+
+_WRITE_TOOLS = {"write_file", "edit_file", "multi_edit", "run_shell", "run_shell_background",
+                "stop_background", "schedule_task", "cancel_scheduled_task", "self_patch",
+                "self_rollback", "cluster_run", "cluster_submit", "cluster_qdel", "save_skill",
+                "screen_click", "screen_move", "screen_drag", "screen_type", "screen_key", "screen_scroll"}
+
+def _changes_things(fn):
+    """Whether a tool can change anything -- refused in plan mode. A file tool
+    counts unless it declared itself safe."""
+    if fn in _WRITE_TOOLS: return True
+    ft = file_tool(fn) if fn not in BUILTIN else None
+    return bool(ft and not ft.get("safe"))
+
+PLAN_MODE_NOTE = ("## Plan mode\nThe user has switched on plan mode: read, search, run analyses and "
+                  "think, but change nothing -- no file writes or edits, no shell commands, no scheduled "
+                  "tasks. Finish with a concrete plan: the steps, the files and exact changes, and how "
+                  "to check the result. They switch plan mode off when they want it carried out.")
+
+def t_ask_user(question, options=None, multiple=False):
+    """Ask the user something mid-task and wait for the answer -- a choice
+    between options, or free text. With nobody watching, says so."""
+    ask = getattr(TURN_CTX, "ask", None)
+    opts = [str(o)[:120] for o in (options or []) if str(o).strip()][:8]
+    if not ask:
+        return ("Nobody is watching this run, so there's no one to ask. Make the most reasonable "
+                "choice yourself, say which and why, and carry on.")
+    ans = ask(str(question)[:600], opts, bool(multiple))
+    if ans is None or ans == "":
+        return "No answer came (30 minutes). Make the most reasonable choice, say which and why, and carry on."
+    return f"The user answered: {ans}"
+
+def t_glob(pattern, path=None, limit=200):
+    """Files matching a pattern like '**/*.py' or 'data/*.csv', newest first."""
+    import glob as _g
+    base = os.path.expanduser(path) if path else (project_folder() or WORKSPACE)
+    if not os.path.isdir(base): return f"Error: not a folder: {base}"
+    skip = ("/.git/", "/node_modules/", "/venv/", "/.venv/", "/__pycache__/", "/.checkpoints/")
+    hits = []
+    for p in _g.iglob(os.path.join(base, str(pattern)), recursive=True):
+        if any(x in p + "/" for x in skip) or not os.path.isfile(p): continue
+        hits.append(p)
+        if len(hits) > 5000: break
+    if not hits: return f"No files match {pattern!r} under {base}."
+    hits.sort(key=lambda p: -os.path.getmtime(p))
+    n = max(1, min(int(limit or 200), 1000))
+    body = "\n".join(os.path.relpath(p, base) for p in hits[:n])
+    return f"{base} — {len(hits)} match(es), newest first" + (f", first {n}" if len(hits) > n else "") + ":\n" + body
+
+def t_multi_edit(path, edits):
+    """Several edits to one file, applied in order and written once -- all or
+    nothing: if any one can't be applied, the file is left as it was."""
+    p = _resolve_path(path)
+    if not _write_allowed(p):
+        return f"Error: writes are confined to {WORKSPACE}" + (" and the project folder" if project_folder() else "") + "."
+    if isinstance(edits, str):
+        try: edits = json.loads(edits)
+        except ValueError: return "Error: edits must be a list of {old_string, new_string, replace_all}."
+    if not isinstance(edits, list) or not edits: return "Error: give at least one edit."
+    if not os.path.exists(p): return f"Error: no such file: {p}.{_did_you_mean(p)}"
+    if _is_binary(p): return f"Error: {p} is a binary file."
+    try: text = open(p, "rb").read().decode("utf-8")
+    except UnicodeDecodeError: return f"Error: {p} is not UTF-8 text."
+    crlf = "\r\n" in text and text.count("\r\n") == text.count("\n")
+    if crlf: text = text.replace("\r\n", "\n")
+    cur = text
+    for i, e in enumerate(edits, 1):
+        if not isinstance(e, dict): return f"Error: edit {i} is not an object."
+        out, how, err = apply_edit(cur, str(e.get("old_string") or ""), str(e.get("new_string") or ""),
+                                   bool(e.get("replace_all")))
+        if err: return f"Error in edit {i} of {len(edits)} — nothing was changed: {err}"
+        cur = out
+    if crlf: cur = cur.replace("\n", "\r\n")
+    d = file_diff(p, cur)
+    snap = _save_checkpoint(p)
+    with open(p, "w", encoding="utf-8", newline="") as f: f.write(cur)
+    _note_change(p, snap)
+    LAST_DIFF.clear(); LAST_DIFF.update({"path": p, **d})
+    return f"Applied {len(edits)} edits to {p} (+{d['added']} −{d['removed']} lines)" + _diagnose(p)
+
+BUILTIN.update({"ask_user": t_ask_user, "glob": t_glob, "multi_edit": t_multi_edit})
+ALL_SPECS += [
+ {"type": "function", "function": {"name": "ask_user",
+  "description": "Ask the user a question mid-task and wait for the answer — use when a real decision is theirs (which of two approaches, which dataset, whether to go ahead) rather than guessing. Give options when you can; the first may be marked (Recommended). Don't use it for things you can find out yourself.",
+  "parameters": {"type": "object", "properties": {
+   "question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}},
+   "multiple": {"type": "boolean", "description": "allow choosing several"}}, "required": ["question"]}}},
+ {"type": "function", "function": {"name": "glob",
+  "description": "Find files by name pattern, e.g. '**/*.py' or 'results/*.csv', newest first. Searches the project folder (or workspace) unless path is given.",
+  "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"},
+   "limit": {"type": "integer"}}, "required": ["pattern"]}}},
+ {"type": "function", "function": {"name": "multi_edit",
+  "description": "Make several edits to one file at once, in order, all or nothing. Each edit is {old_string, new_string, replace_all?} like edit_file. Prefer it to several edit_file calls on the same file.",
+  "parameters": {"type": "object", "properties": {"path": {"type": "string"},
+   "edits": {"type": "array", "items": {"type": "object", "properties": {
+     "old_string": {"type": "string"}, "new_string": {"type": "string"}, "replace_all": {"type": "boolean"}},
+     "required": ["old_string", "new_string"]}}}, "required": ["path", "edits"]}}},
+]
+
+_auto_approvable_prev = _auto_approvable
+def _auto_approvable(fn, args, reason):
+    if fn == "multi_edit" and reason not in NEVER_AUTO:
+        return _write_allowed(os.path.abspath(_resolve_path((args or {}).get("path", ""))))
+    return _auto_approvable_prev(fn, args, reason)
+
+BUILTIN_PROMPTS = {
+ "init": {"builtin": True, "text": (
+  "Write (or update) the rules file ORBIT.md at the root of this project's folder, so that future "
+  "chats here start out knowing what they would otherwise get wrong.\n\n"
+  "Focus, if given: $ARGUMENTS\n\n"
+  "Look first at what explains the project fastest: README files, manifests and lockfiles, build/test "
+  "configuration, scripts and task runners, CI, and any existing ORBIT.md / AGENTS.md / CLAUDE.md. "
+  "Open a few central source files only if the structure is still unclear. Trust what the scripts and "
+  "configs actually do over what prose claims.\n\n"
+  "Keep only what a newcomer would likely miss: the exact commands (and how to run one test or one "
+  "step), required order of steps, where data and results live, conventions that differ from the "
+  "usual, things that must never be touched, and known traps. No generic advice, no restating the "
+  "README. Short sections, bullet points, under ~80 lines. If ORBIT.md exists, improve it rather "
+  "than starting over, and keep anything still true.")},
+ "review": {"builtin": True, "text": (
+  "Review these changes and give actionable feedback: $ARGUMENTS\n\n"
+  "With nothing after /review, review uncommitted work in the project folder (git status, git diff, "
+  "git diff --cached, and any new files). A commit id means that commit (git show); a branch name "
+  "means the difference from it (git diff <branch>...HEAD).\n\n"
+  "Read the surrounding code before judging a change. Report real problems first — bugs, wrong "
+  "results, data loss, security issues, broken edge cases — each with the file and line, what goes "
+  "wrong, and a concrete fix. Then smaller issues. Skip style preferences. Say plainly if it looks "
+  "good. Change nothing yourself.")},
+}
+
+def all_prompts():
+    """Saved prompts, with the built-in /init and /review underneath (yours win)."""
+    return {**BUILTIN_PROMPTS, **prompts_load()}
+
+_expand_prompt_base = expand_prompt
+def expand_prompt(text, prompts=None):
+    return _expand_prompt_base(text, all_prompts() if prompts is None else prompts)
