@@ -8,7 +8,7 @@ luck: knowledge files starting with "_" were silently skipped, the session list
 served stale data after pin/tag edits, markdown tables were never parsed, and
 MCP servers were respawned (and leaked) on every call. Each has a test below.
 """
-import importlib.machinery, json, os, shutil, sys, tempfile, time, unittest
+import importlib.machinery, json, os, shutil, sys, tempfile, threading, time, unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "bin"))
@@ -1648,6 +1648,29 @@ class TestRound1(TestLongAnswers):
         self.assertEqual(q.S["autocompact_pct"], 80, "limit restored")
 
     # --- wrap-up when a limit is hit
+    def test_a_new_daily_job_waits_for_its_next_time(self):
+        """REGRESSION: a daily 07:30 job created at 09:33 ran at once."""
+        created = time.mktime((2026, 9, 12, 9, 33, 0, 0, 0, -1))
+        job = {"every": "daily", "at": "07:30", "created": created}
+        self.assertFalse(q.sched_due(job, now=created + 60))
+        self.assertTrue(q.sched_due(job, now=created + 23 * 3600))
+        early = dict(job, created=time.mktime((2026, 9, 12, 6, 0, 0, 0, 0, -1)))
+        self.assertTrue(q.sched_due(early, now=created), "made before today's time: runs today")
+
+    def test_two_threads_saving_one_file_never_collide(self):
+        """REGRESSION: both used '<file>.tmp'; the second rename found it gone,
+        crashing a scheduled pick-up and leaving its chat locked for good."""
+        path = os.path.join(self.tmp, "sched.json"); errors = []
+        def save(i):
+            try:
+                for _ in range(40): q._atomic_write(path, {"i": i})
+            except Exception as e: errors.append(e)
+        ts = [threading.Thread(target=save, args=(i,)) for i in range(6)]
+        for th in ts: th.start()
+        for th in ts: th.join()
+        self.assertEqual(errors, [])
+        self.assertEqual([f for f in os.listdir(self.tmp) if f.endswith(".tmp")], [])
+
     def test_minutes_until_the_next_clock_time(self):
         now = time.mktime((2026, 9, 12, 2, 0, 0, 0, 0, -1))
         self.assertAlmostEqual(q.minutes_until("06:00", now), 240, delta=1)
@@ -2034,6 +2057,22 @@ class TestRound1Server(Sandbox):
             srv.close()
         self.assertFalse(self.ui._already_serving(port))
 
+
+    def test_a_scheduled_run_in_its_own_chat_is_visible_and_stoppable(self):
+        ev = threading.Event()
+        self.ui.JOB_RUNS["sched-x"] = ev
+        try:
+            self.assertIn("sched-x", self.ui.running_sids())
+        finally:
+            self.ui.JOB_RUNS.pop("sched-x", None)
+        src = open(os.path.join(ROOT, "bin", "orbit-ui")).read()
+        self.assertIn('if d.get("sid") in JOB_RUNS:', src)
+
+    def test_a_failed_job_start_never_leaves_the_chat_locked(self):
+        src = open(os.path.join(ROOT, "bin", "orbit-ui")).read()
+        block = src[src.index("def run_job(job):"):][:1400]
+        self.assertIn("never leave the chat locked", block)
+        self.assertIn("q.sched_update(", src)
 
     def test_restarting_waits_for_running_answers(self):
         """A restart used to cut a running answer off mid-step; it now waits
