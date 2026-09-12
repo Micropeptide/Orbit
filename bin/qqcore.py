@@ -74,6 +74,9 @@ DEFAULTS = {
   # an answer cut off because Orbit itself stopped (crash, update, restart) is
   # picked up again in the same chat a minute after it starts back up
   "resume_after_restart": True,
+  # after a substantial answer, extract durable facts and save them as new
+  # memory notes by itself — the model rarely stops mid-task to call remember
+  "auto_memory": True,
   "shell_enabled": False,
   "code_execution": True,
   "write_any": False,
@@ -660,9 +663,14 @@ def _save_checkpoint(p):
     diff. Only workspace files are checkpointed — write_any/full-access writes
     elsewhere on the Mac are not (nowhere safe to keep the snapshot). A no-op
     for a file that doesn't exist yet, since there is nothing to save."""
-    if not p.startswith(os.path.abspath(WORKSPACE) + os.sep): return
     if not os.path.isfile(p): return
-    rel = os.path.relpath(p, WORKSPACE)
+    if p.startswith(os.path.abspath(WORKSPACE) + os.sep):
+        rel = os.path.relpath(p, WORKSPACE)
+    else:
+        # a project folder's files get a snapshot too, kept under the workspace
+        folder = project_folder() if "project_folder" in globals() else None
+        if not folder or not p.startswith(folder.rstrip(os.sep) + os.sep): return
+        rel = os.path.join("_projects", os.path.basename(folder), os.path.relpath(p, folder))
     if rel.split(os.sep)[0] == ".checkpoints": return
     d = _checkpoint_dir(rel)
     os.makedirs(d, exist_ok=True)
@@ -703,9 +711,11 @@ def restore_checkpoint(path, name):
     return f"Restored {os.path.relpath(p, WORKSPACE)} from the {name} checkpoint."
 
 def t_write_file(path, content):
-    p = os.path.abspath(os.path.expanduser(path))
-    if not (S.get("write_any") or full_access()) and not p.startswith(os.path.abspath(WORKSPACE)):
-        return (f"Error: writes confined to {WORKSPACE}. Enable 'write anywhere' or "
+    p = _resolve_path(path)
+    if not _write_allowed(p):
+        return (f"Error: writes confined to {WORKSPACE}"
+                + (" and the project folder" if project_folder() else "") +
+                ". Enable 'write anywhere' or "
                 "'Full computer access' in Settings -> Tools to override.")
     d = file_diff(p, content)
     LAST_DIFF.clear(); LAST_DIFF.update({"path": p, **d})
@@ -843,6 +853,9 @@ def t_schedule_task(prompt, start="now", repeat_every_minutes=None, daily_at=Non
         job["until"] = until_ts
     sid = getattr(TURN_CTX, "sid", None)
     if in_this_chat and sid: job["sid"] = sid
+    # a run in a new chat still belongs to the project it was scheduled from,
+    # with that project's rules, folder and tools
+    if ACTIVE_PROJECT.get("id"): job["project"] = ACTIVE_PROJECT["id"]
     cfg = sched_load(); cfg.setdefault("jobs", []).append(job); sched_save(cfg)
     first = time.strftime("%a %H:%M", time.localtime(start_ts))
     rep = (f"every {job['n']:g} min" if job["every"] == "minutes" else
@@ -1301,7 +1314,7 @@ class _Either:
         return True
 
 # keys Orbit keeps on a stored message for itself -- never sent to a model
-PRIVATE_KEYS = ("partial", "interjection", "compacted")
+PRIVATE_KEYS = ("partial", "interjection", "compacted", "t", "secs", "ok", "usage", "tool_runs")
 
 def _strip_reasoning(messages):
     """Stored history keeps each turn's thinking so a reopened chat can still
@@ -1387,7 +1400,13 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
     req = urllib.request.Request(base + "/chat/completions", data=json.dumps(body).encode(),
                                  headers=headers)
     content, reasoning, tcalls, usage = [], [], {}, None
-    with urllib.request.urlopen(req, timeout=3600) as r:
+    try:
+        r = urllib.request.urlopen(req, timeout=3600)
+    except urllib.error.HTTPError as e:
+        try: detail = e.read().decode("utf-8", "replace")[:800]
+        except Exception: detail = ""
+        raise ModelError(f"HTTP {e.code} from the model server: {detail or e.reason}", e.code)
+    with r:
         for raw in r:
             if stop.is_set(): break
             line = raw.decode("utf-8", "replace")
@@ -1418,25 +1437,39 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
            "model": spec.get("label") or spec["model"]}
     if reasoning: msg["reasoning_content"] = "".join(reasoning)
     if usage and usage.get("prompt_tokens"): msg["_prompt_tokens"] = int(usage["prompt_tokens"])
+    if usage: msg["_usage"] = {k: int(usage.get(k) or 0) for k in ("prompt_tokens", "completion_tokens")}
     if tcalls: msg["tool_calls"] = [tcalls[k] for k in sorted(tcalls)]
     return msg
 
 
 def _run_one_tool(tc, fn, args, messages, emit, approve, seen_calls):
     global LAST_SCREEN_IMAGE
+    t0 = time.time()
+    tid = tc.get("id")
     sig = fn + json.dumps(args, sort_keys=True)[:400]
     seen_calls[sig] = seen_calls.get(sig, 0) + 1
     if seen_calls[sig] >= 3:
         emit("stagnation", {"tool": fn, "times": seen_calls[sig]})
-        messages.append({"role":"tool","tool_call_id":tc["id"],"name":fn,
-            "content": (f"You have now called {fn} with these exact arguments "
-                        f"{seen_calls[sig]} times and got the same result. Stop repeating "
-                        "it. Either try a different approach, or move to the next step of "
-                        "your plan, or tell the user what is blocking you.")})
+        out = (f"You have now called {fn} with these exact arguments "
+               f"{seen_calls[sig]} times and got the same result. Stop repeating "
+               "it. Either try a different approach, or move to the next step of "
+               "your plan, or tell the user what is blocking you.")
+        emit("tool_result", {"name": fn, "id": tid, "ok": False, "secs": 0.0, "output": out})
+        messages.append({"role":"tool","tool_call_id":tid,"name":fn,"t":time.time(),
+                         "ok": False, "secs": 0.0, "content": out})
         return True
 
-    level, reason = risk_check(fn, args)
-    if level == "block":
+    def run():
+        try: return dispatch(fn, args)
+        except Exception as e: return f"Error: {type(e).__name__}: {e}"
+
+    args, refusal = plugin_before(fn, args)
+    level, reason = ("block", refusal) if refusal else risk_check(fn, args)
+    if refusal:
+        out = refusal
+        emit("blocked", {"name": fn, "reason": refusal})
+        LOG_SAFETY(fn, args, "blocked by plugin", refusal)
+    elif level == "block":
         out = (f"REFUSED: {reason}. This action is blocked and cannot be approved — "
                "protected paths are never touched. Tell the user exactly what was "
                "attempted and why it was refused.")
@@ -1449,35 +1482,43 @@ def _run_one_tool(tc, fn, args, messages, emit, approve, seen_calls):
                (mode == "full" and fn not in NEVER_AUTO_FNS and reason not in NEVER_AUTO) or \
                (mode == "auto" and _auto_approvable(fn, args, reason))
         if auto:
-            emit("auto_approved", {"name": fn, "args": args, "reason": reason,
+            emit("auto_approved", {"name": fn, "args": args, "reason": reason, "id": tid,
                                    "rule": by_rule["note"] or by_rule["pattern"] if by_rule else None})
             LOG_SAFETY(fn, args, "auto-approved (your rule)" if by_rule else "auto-approved", reason)
-            try: out = dispatch(fn, args)
-            except Exception as e: out = f"Error: {type(e).__name__}: {e}"
+            out = run()
         else:
-            emit("approval", {"name": fn, "args": args, "reason": reason})
-            ok = bool(approve(fn, args, reason)) if approve else False
-            LOG_SAFETY(fn, args, "approved" if ok else "denied", reason)
-            if not ok:
+            emit("approval", {"name": fn, "args": args, "reason": reason, "id": tid})
+            said = approve(fn, args, reason) if approve else False
+            # approve() may answer (allowed, what the user said) as well as a bare yes/no
+            ok, note = (bool(said[0]), (said[1] or "").strip()) if isinstance(said, tuple) else (bool(said), "")
+            LOG_SAFETY(fn, args, "approved" if ok else "denied", reason + (f" — {note}" if note else ""))
+            if not ok and note:
+                out = (f"DENIED by the user: {reason}. They said: “{note}”. Do not retry the "
+                       "same call; follow what they said instead.")
+            elif not ok:
                 out = (f"DENIED by the user: {reason}. Do not retry this or attempt a "
                        "workaround. Explain what you were going to do and stop.")
             else:
-                try: out = dispatch(fn, args)
-                except Exception as e: out = f"Error: {type(e).__name__}: {e}"
+                out = run()
+                if note: out = f"{out}\n\n(The user approved this, adding: “{note}”)"
     else:
-        try: out = dispatch(fn, args)
-        except Exception as e: out = f"Error: {type(e).__name__}: {e}"
+        out = run()
 
     try:
+        out = plugin_after(fn, args, str(out))
+        ok = _tool_ok(out)             # judged before fencing: a fenced error starts with <<<UNTRUSTED
         out, inj = wrap_untrusted(fn, str(out))
     except Exception as e:
-        out, inj = f"Error post-processing {fn}: {type(e).__name__}: {e}", []
+        out, inj, ok = f"Error post-processing {fn}: {type(e).__name__}: {e}", [], False
     if inj:
         emit("injection", {"name": fn, "markers": inj})
         LOG_SAFETY(fn, args, "injection", "; ".join(inj[:3]))
-    emit("tool_result", {"name": fn, "output": str(out)[:600]})
-    messages.append({"role":"tool","tool_call_id":tc["id"],"name":fn,
-                     "content":str(out)[:MAXCH]})
+    secs = round(time.time() - t0, 2)
+    full = _truncate_output(fn, out)
+    emit("tool_result", {"name": fn, "id": tid, "ok": ok, "secs": secs, "output": str(out)[:4000]})
+    _tool_log(fn, secs, ok, getattr(TURN_CTX, "sid", None))
+    messages.append({"role":"tool","tool_call_id":tid,"name":fn,"t":time.time(),
+                     "ok": ok, "secs": secs, "content": full})
     if fn == "screen_look" and LAST_SCREEN_IMAGE:
         # a tool result can't carry an image on every backend this talks to,
         # so the screenshot rides in as one extra turn instead -- the model
@@ -1489,6 +1530,7 @@ def _run_one_tool(tc, fn, args, messages, emit, approve, seen_calls):
     return True
 
 TURN_CTX = threading.local()   # which chat the running answer belongs to, for tools
+_NO_PROJECT_ARG = object()     # turn() called without saying: use the one on screen
 
 _AWAKE = {"n": 0, "proc": None, "lock": threading.Lock()}
 
@@ -1540,13 +1582,13 @@ def _take_notes(messages, inbox, emit, late=False):
         except (IndexError, AttributeError): break
         text = (note.get("text") if isinstance(note, dict) else str(note)) or ""
         if not text.strip(): continue
-        messages.append({"role": "user", "content": text, "interjection": True})
+        messages.append({"role": "user", "content": text, "interjection": True, "t": time.time()})
         emit("interjection", {"text": text, "late": late})
         n += 1
     return n
 
 def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
-         inbox=None, interrupt=None, sid=None, checkpoint=None):
+         inbox=None, interrupt=None, sid=None, checkpoint=None, project=_NO_PROJECT_ARG):
     """Answer one message, looping model -> tools -> model until it is done.
 
     approve(fn, args, reason) -> bool; if None, risky actions are refused.
@@ -1557,6 +1599,11 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
     emit = emit or (lambda k, p: None)
     cancel = cancel or CANCEL
     TURN_CTX.sid = sid
+    # the project is fixed for the whole answer: its folder, rules and tools
+    # must not change because someone clicked on a chat in another project
+    TURN_CTX.project = ACTIVE_PROJECT.get("id") if project is _NO_PROJECT_ARG else project
+    # what a helper started by the task tool inherits from this answer
+    TURN_CTX.emit, TURN_CTX.approve, TURN_CTX.cancel, TURN_CTX.tools = emit, approve, cancel, tools
     remote = not model_is_local()
     if remote:
         spec = current_model()
@@ -1587,9 +1634,39 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
         x.get("text", "") for x in user_content if isinstance(x, dict))
     sk = suggest_skill(plain)
     if sk: emit("skill_hint", {"name": sk["name"], "title": sk["title"]})
-    messages.append({"role": "user", "content": user_content})
+    # every message carries when it was written ("t"), so a reopened chat shows
+    # real times rather than the moment the page drew it; stripped before sending
+    messages.append({"role": "user", "content": user_content, "t": time.time()})
     req = messages[-1]                      # the request this answer is for
     seen_calls, t_start = {}, time.time()
+    if sid: LAST_TURN.pop(sid, None)     # never report the previous answer's cost for this one
+    usage = {"prompt_tokens": 0, "completion_tokens": 0}
+    TURN_CTX.usage = usage         # a helper's tokens are added to this answer's
+    tool_runs = [0]
+    def _finish(msg=None, rounds=0):
+        """Timing and token use of this answer: on its last message, for the
+        stats page, and in LAST_TURN for the stream's closing event."""
+        rec = {"secs": round(time.time() - t_start, 1), "usage": dict(usage),
+               "tool_runs": tool_runs[0], "rounds": rounds}
+        if sid: LAST_TURN[sid] = rec
+        if msg is not None: msg.update({k: rec[k] for k in ("secs", "usage", "tool_runs")})
+        return rec
+    def _wrap_up(why):
+        """A limit was hit: one last call, without tools, so the answer ends with
+        a summary of where things stand rather than mid-thought."""
+        try:
+            ask = {"role": "user", "content": (
+                f"[Orbit: {why}. Stop calling tools. In a few short paragraphs, say what has been "
+                "done, what the results are so far, and exactly what is left to do next.]")}
+            m = stream_call(messages + [ask], None, emit=emit, cancel=cancel)
+            m.pop("_prompt_tokens", None); m.pop("_usage", None)
+            txt = (m.get("content") or "").strip()
+            if txt:
+                messages.append({"role": "assistant", "content": txt, "model": m.get("model"),
+                                 "t": time.time()})
+            return txt
+        except Exception:
+            return ""
     budget_min = float(S.get("max_turn_minutes") or 0)
     max_rounds = int(S.get("max_tool_rounds") or 0)
     every = float(S.get("long_run_notice_min") or 0) * 60
@@ -1604,17 +1681,22 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
             if max_rounds and rnd >= max_rounds:
                 pending = plan_pending()
                 emit("round_limit", {"rounds": rnd, "pending": [p["text"] for p in pending]})
+                summary = _wrap_up(f"the limit of {rnd} tool rounds for one answer was reached")
+                _finish(messages[-1] if summary else None, rnd)
                 emit("done", None)
-                return (f"_Stopped after {rnd} tool rounds without finishing._" +
+                return ((summary + "\n\n") if summary else "") + (f"_Stopped after {rnd} tool rounds without finishing._" +
                         ("\n\nStill outstanding:\n" + "\n".join("- " + p["text"] for p in pending)
                          if pending else "") +
                         "\n\nPress **Continue** to carry on from here.")
             if budget_min and (time.time() - t_start) / 60 > budget_min:
                 emit("round_limit", {"rounds": rnd, "reason": "time",
                                      "pending": [x["text"] for x in plan_pending()]})
+                summary = _wrap_up(f"the time limit of {budget_min:.0f} minutes for one answer was reached")
+                _finish(messages[-1] if summary else None, rnd)
                 emit("done", None)
-                return (f"_Stopped after {budget_min:.0f} minutes._\n\nPress **Continue** to carry on.")
+                return ((summary + "\n\n") if summary else "") + (f"_Stopped after {budget_min:.0f} minutes._\n\nPress **Continue** to carry on.")
             if cancel.is_set():
+                _finish(None, rnd)
                 _take_notes(messages, inbox, emit, late=True)
                 emit("done", None); return "(stopped by user)"
             if next_notice and time.time() >= next_notice:
@@ -1635,42 +1717,67 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
             try:
                 msg = stream_call(messages, tools, emit=emit, cancel=cancel, interrupt=interrupt)
             except Exception as e:
+                if cancel.is_set():
+                    _finish(None, rnd)
+                    _take_notes(messages, inbox, emit, late=True)
+                    emit("done", None); return "(stopped by user)"
+                kind = classify_error(e)
+                err = f"{type(e).__name__}: {e}"
                 fails = seen_calls.get("__stream_fail__", 0) + 1
                 seen_calls["__stream_fail__"] = fails
-                emit("stream_error", {"error": f"{type(e).__name__}: {e}", "attempt": fails})
-                if fails >= 3:
+                give_up = {"auth": 1, "bad_request": 2, "overflow": 2}.get(kind, 5)
+                emit("stream_error", {"error": err, "attempt": fails, "kind": kind, "of": give_up})
+                if kind == "overflow" and fails <= 2:
+                    # too long for the window: retrying the same request can only
+                    # fail again, so fold the conversation down first
+                    emit("retry", {"attempt": fails, "of": give_up, "wait": 0, "error": err[:300], "kind": kind})
+                    _shrink(messages, sid, emit, pin=req, force=True)
+                    continue
+                if fails >= give_up:
+                    _finish(None, rnd)
                     emit("done", None)
-                    return (f"_The model server failed {fails} times: {type(e).__name__}: {e}_\n\n"
-                            "Check it is running (sidebar → Start), then press **Continue**.")
-                time.sleep(min(2 ** fails, 8))
-                if not probe(3):
+                    why = {"auth": "the model provider refused the key — check it in Settings → Models",
+                           "bad_request": "the model server rejected the request",
+                           "overflow": "the conversation is too long even after compacting — start a new chat or compact it"
+                           }.get(kind, "Check it is running (sidebar → Start)")
+                    return (f"_The model request failed ({fails}×): {err[:400]}_\n\n{why}, "
+                            "then press **Continue**.")
+                wait = _backoff(fails)
+                emit("retry", {"attempt": fails, "of": give_up, "wait": round(wait, 1), "error": err[:300], "kind": kind})
+                end = time.time() + wait
+                while time.time() < end and not cancel.is_set(): time.sleep(0.2)
+                if not remote and not probe(3):
                     try: ensure_model()
                     except Exception: pass
                 continue
+            seen_calls.pop("__stream_fail__", None)
             rnd += 1
             used = msg.pop("_prompt_tokens", None)
             if used and sid: SESSION_TOKENS[sid] = used
+            for k, v in (msg.pop("_usage", None) or {}).items(): usage[k] = usage.get(k, 0) + v
             said = {k: v for k, v in msg.items()
                     if k in ("role", "content", "model", "reasoning_content")}
             if cancel.is_set():
                 # a stop mid-stream keeps whatever was written so far, thinking
                 # included, marked partial so the next message hands that
                 # thinking back to the model instead of having it start over
-                messages.append({**said, "partial": True})
+                messages.append({**said, "partial": True, "t": time.time()})
+                _finish(None, rnd)
                 _take_notes(messages, inbox, emit, late=True)
                 emit("done", None); return (msg.get("content") or "").strip() + "\n\n_(stopped)_"
             if interrupt is not None and interrupt.is_set():
                 # a note arrived mid-generation: keep what it had said and thought
                 # (never a half-written tool call), then read the note and go on
                 if said.get("content") or said.get("reasoning_content"):
-                    messages.append({**said, "partial": True})
+                    messages.append({**said, "partial": True, "t": time.time()})
                 continue
             calls = msg.get("tool_calls") or []
             # keep "model" so a reopened chat can say which one wrote each answer;
             # keep "reasoning_content" so the thinking trace survives a reload too —
             # stream_call() strips it back out before it is ever sent to a model
-            messages.append({k: v for k, v in msg.items()
-                             if k in ("role", "content", "tool_calls", "model", "reasoning_content")})
+            messages.append({**{k: v for k, v in msg.items()
+                                if k in ("role", "content", "tool_calls", "model", "reasoning_content")},
+                             "t": time.time()})
             if not calls:
                 if inbox:
                     continue            # a note landed just as it finished — answer that too
@@ -1680,20 +1787,40 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                                       "snippet": x["text"][:260]} for x in LAST_SOURCES[:6]])
                     weak = annotate_support(answer)
                     if weak: emit("weak_claims", weak[:6])
+                _finish(messages[-1], rnd)
                 emit("done", None)
                 return answer
-            for tc in calls:
-                fn = tc["function"]["name"]
-                try: args = json.loads(tc["function"]["arguments"] or "{}")
-                except ValueError: args = {}
-                emit("tool", {"name": fn, "args": args})
+            for i, tc in enumerate(calls):
+                if not tc.get("id"): tc["id"] = f"call_{rnd}_{i}"
+                fn, args, bad = repair_call(tc["function"].get("name") or "",
+                                            tc["function"].get("arguments"), tools)
+                emit("tool", {"name": fn, "args": args, "id": tc["id"], "t": time.time()})
+                tool_runs[0] += 1
+                if bad:
+                    seen_calls["__bad__"] = seen_calls.get("__bad__", 0) + 1
+                    if seen_calls["__bad__"] > 6:
+                        # a model that can't form a valid call stops here rather
+                        # than looping forever when there is no step limit
+                        _finish(None, rnd); emit("done", None)
+                        return ("_Stopped: the model sent malformed tool calls "
+                                f"{seen_calls['__bad__']} times in a row. Last problem: {bad[:300]}_")
+                    # tell the model what was wrong with the call, so it can send
+                    # a good one, instead of running it with arguments it didn't mean
+                    emit("tool_result", {"name": fn, "id": tc["id"], "ok": False, "secs": 0.0,
+                                         "output": bad})
+                    messages.append({"role": "tool", "tool_call_id": tc["id"], "name": fn,
+                                     "t": time.time(), "ok": False, "secs": 0.0, "content": bad})
+                    continue
+                seen_calls.pop("__bad__", None)
                 try:
                     _run_one_tool(tc, fn, args, messages, emit, approve, seen_calls)
                 except Exception as e:
                     # never let an internal failure end the turn: tell the model and go on
                     emit("tool_error", {"name": fn, "error": f"{type(e).__name__}: {e}"})
-                    messages.append({"role":"tool","tool_call_id":tc.get("id"),"name":fn,
-                        "content": (f"Internal error running {fn}: {type(e).__name__}: {e}. "
+                    emit("tool_result", {"name": fn, "id": tc.get("id"), "ok": False, "secs": None,
+                                         "output": f"Internal error: {type(e).__name__}: {e}"})
+                    messages.append({"role":"tool","tool_call_id":tc.get("id"),"name":fn,"t":time.time(),
+                        "ok": False, "content": (f"Internal error running {fn}: {type(e).__name__}: {e}. "
                                     "This is a bug in the tool, not your fault. Try a different "
                                     "tool or approach, and carry on with the task.")})
             # write progress to disk as it goes: a long answer used to be saved
@@ -1733,6 +1860,13 @@ def compact(messages, keep_tail=6, pin=None):
     while start > lo and messages[start].get("role") == "tool": start -= 1
     middle = [m for m in messages[lo:start] if m is not pin]
     if not middle: return messages, "nothing to compact"
+    # an earlier summary is merged, not re-summarised as one more message --
+    # it used to be cut to 1,500 characters like any other, so each compaction
+    # lost most of what the one before had kept
+    prior = [str(m.get("content") or "").replace("[earlier conversation, compacted]\n", "", 1)
+             for m in middle if m.get("compacted")]
+    middle = [m for m in middle if not m.get("compacted")]
+    if not middle: return messages, "nothing new to compact since the last summary"
     lines = []
     for m in middle:
         c = m.get("content")
@@ -1751,16 +1885,23 @@ def compact(messages, keep_tail=6, pin=None):
         # the start holds the original ask and the end holds where things stand
         # now; the middle is what a summary can best afford to thin out
         text = text[:8000] + "\n\n…[middle of the conversation omitted]…\n\n" + text[-32000:]
-    ask = ("Summarise this part of a conversation so the work can continue without it. Keep: "
+    ask = ("Summarise this part of a conversation so the work can continue without it. Keep "
            "every instruction or decision the user gave (word for word when short), facts and "
            "numbers established, file paths / URLs / commands / job ids that matter, what has "
-           "been done, what failed and why, and what is still open. Be specific; no preamble.\n\n"
-           + text)
+           "been done, what failed and why, and what is still open. Be specific; no preamble. "
+           "Use these headings:\n## Goal\n## User instructions\n## Facts established\n"
+           "## Done so far\n## Failed / ruled out\n## Still open / next step\n"
+           "## Files, commands, ids\n\n"
+           + (("An earlier summary covers what came before this part. Merge it in: keep all of "
+               "it that still holds (always every user instruction), update what has changed, "
+               "and drop only what is now irrelevant.\n\n=== Earlier summary ===\n"
+               + "\n\n".join(prior)[-24000:] + "\n=== End of earlier summary ===\n\n") if prior else "")
+           + "=== Conversation to summarise ===\n" + text)
     summary = (stream_call([sysmsg, {"role": "user", "content": ask}], None,
                            think=False).get("content") or "").strip()
     if not summary:
         return messages, "the summary came back empty, so nothing was folded away"
-    note = {"role": "assistant", "compacted": True,
+    note = {"role": "assistant", "compacted": True, "t": time.time(),
             "content": "[earlier conversation, compacted]\n" + summary}
     kept = [pin] if pin is not None and any(m is pin for m in messages[lo:start]) else []
     return ([sysmsg] if has_sys else []) + kept + [note] + messages[start:], summary
@@ -2469,7 +2610,9 @@ def suggest_memories(messages, max_items=4):
     existing = ", ".join(m["name"] for m in memory_list()) or "(none)"
     ask = ("From this conversation, list durable facts about the USER or their WORK that would "
            "be useful in future unrelated conversations — preferences, ongoing projects, lab "
-           "context, constraints. Skip anything transient or specific to this one task.\n"
+           "context, constraints, where things live and how they are set up, results worth "
+           "keeping. Skip anything transient or specific to this one task. Never include "
+           "passwords, API keys, tokens or other secrets.\n"
            f"Existing memories (do not duplicate): {existing}\n\n"
            "Reply as a JSON array of objects with keys \"name\" (short-kebab-case) and "
            "\"content\" (one or two sentences). Reply with JSON only, or [] if nothing qualifies."
@@ -2485,6 +2628,35 @@ def suggest_memories(messages, max_items=4):
         if isinstance(it, dict) and it.get("name") and it.get("content"):
             clean.append({"name": str(it["name"])[:40], "content": str(it["content"])[:600]})
     return clean
+
+def auto_memory(messages, title=None, limit=3):
+    """Save durable facts from a finished answer without being asked.
+
+    Telling the model to call `remember` on its own turned out not to be
+    enough — a local model deep in a task almost never stops to do it — so
+    after a substantial answer Orbit asks separately and writes what comes
+    back. Never overwrites an existing note, and each new one says which chat
+    and day it came from, so a wrong one is easy to trace and delete.
+    Returns the names written."""
+    if not S.get("auto_memory", True) or not S.get("use_memory", True): return []
+    try: items = suggest_memories(messages, max_items=limit)
+    except Exception: return []
+    have = {m["name"] for m in memory_list()}
+    written = []
+    for it in items:
+        name = _re.sub(r"[^a-z0-9_-]+", "-", str(it["name"]).lower()).strip("-")[:40]
+        if not name or name in have: continue
+        src = f"(saved automatically from “{(title or 'a chat')[:60]}”, {time.strftime('%Y-%m-%d')})"
+        written.append(memory_write(name, f"{str(it['content']).strip()}\n\n{src}\n"))
+        have.add(name)
+    if written:
+        try:
+            with open(os.path.join(LOGS, "memory.log"), "a") as f:
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} auto from "
+                        f"{(title or '?')[:60]!r}: {', '.join(written)}\n")
+        except OSError:
+            pass
+    return written
 
 # ------------------------------------------------------------------ SAFETY
 # Two distinct threats:
@@ -3508,7 +3680,7 @@ def _archive(sid, messages, keep=100):
     except Exception:
         pass
 
-def _shrink(messages, sid=None, emit=None, pin=None):
+def _shrink(messages, sid=None, emit=None, pin=None, force=False):
     """Keep a conversation inside the context window, changing the list in
     place. Cheapest first: trim old tool output (usually what filled it, and
     costs no conversation), then summarise the middle, then — if the recent
@@ -3516,9 +3688,12 @@ def _shrink(messages, sid=None, emit=None, pin=None):
     Returns (did_compact, pct_before)."""
     emit = emit or (lambda k, p: None)
     limit = float(S.get("autocompact_pct") or 0)
+    # force: the server just said it is too long, whatever the estimate says --
+    # compact now (a local override; the shared setting is never touched)
+    if force: limit = limit or 80.0
     if limit <= 0 or len(messages) < 4: return False, 0.0
     first = _fill_pct(messages, sid)
-    if first < limit: return False, first
+    if first < limit and not force: return False, first
     under = lambda: context_state(messages)["pct"] < limit
     if S.get("squeeze_tool_results", True):
         squeezed, freed = squeeze_tool_results(messages)
@@ -3526,7 +3701,7 @@ def _shrink(messages, sid=None, emit=None, pin=None):
             messages[:] = squeezed
             if sid: SESSION_TOKENS.pop(sid, None)
             emit("squeezed", {"chars": freed, "pct": context_state(messages)["pct"]})
-            if under(): return False, first
+            if under() and not force: return False, first
     emit("autocompact", {"pct": first, "limit": limit})
     _archive(sid, messages)
     for tail in (8, 3):
@@ -3957,3 +4132,904 @@ ALL_SPECS += [
  {"type":"function","function":{"name":"self_rollback","description":"Undo the most recent self-repair.",
   "parameters":{"type":"object","properties":{"backup":{"type":"string"}}}}},
 ]
+
+
+# ==================================================================== ROUND 1
+# Ideas taken from reading opencode: tool output that is never silently cut,
+# a paged read_file, a forgiving edit_file, repair of malformed tool calls,
+# checks after an edit, error-aware retries, project folders with their own
+# rules and tools, file-defined tools, plugin hooks, a helper-task tool,
+# prompt templates, and per-turn timing/usage for the stats page.
+import difflib as _difflib, random as _random
+
+TOOL_OUT = os.path.join(WORKSPACE, ".tool_output")
+TOOL_OUT_KEEP = 200
+TOOL_LOG = os.path.join(LOGS, "tools.jsonl")
+LAST_TURN = {}                 # sid -> {"secs", "usage", "tool_runs", "rounds"} of its last answer
+
+def _truncate_output(fn, out, limit=None):
+    """Cut an over-long tool result to fit, but never silently: the whole of
+    it goes to a file and the model is told where, so it can page through the
+    part it needs. Used to be str(out)[:MAXCH], which dropped the end of a
+    long log -- usually the part that mattered -- without a word."""
+    limit = int(limit or MAXCH)
+    s = str(out)
+    if len(s) <= limit: return s
+    path = None
+    try:
+        os.makedirs(TOOL_OUT, exist_ok=True)
+        path = os.path.join(TOOL_OUT, f"{time.strftime('%Y%m%d-%H%M%S')}-{fn}-{os.urandom(2).hex()}.txt")
+        with open(path, "w") as f: f.write(s)
+        old = sorted(os.listdir(TOOL_OUT))
+        for n in old[:-TOOL_OUT_KEEP]:
+            try: os.remove(os.path.join(TOOL_OUT, n))
+            except OSError: pass
+    except OSError:
+        path = None
+    head, tail = s[:int(limit * 0.7)], s[-int(limit * 0.25):]
+    gone = len(s) - len(head) - len(tail)
+    hint = (f"\n\n…[{gone:,} characters cut from the middle of this output "
+            f"({s.count(chr(10)) + 1:,} lines in all). "
+            + (f"The whole output is saved at {path} — read the part you need with "
+               "read_file(path, offset=<line>, limit=<lines>) or search it with grep_files.]"
+               if path else "]") + "\n\n")
+    return head + hint + tail
+
+# ------------------------------------------------------------------ read_file, paged
+RICH_DOCS = (".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".epub", ".odt")
+READ_LINES = 2000
+READ_LINE_CHARS = 2000
+
+def _is_binary(p):
+    try:
+        with open(p, "rb") as f: chunk = f.read(8192)
+    except OSError:
+        return False
+    if not chunk: return False
+    if b"\0" in chunk: return True
+    odd = sum(1 for b in chunk if b < 9 or 13 < b < 32)
+    return odd / len(chunk) > 0.3
+
+def _resolve_path(path):
+    """An absolute, normalised path ('..' folded away), trying the project's
+    folder and then the workspace for a relative one."""
+    p = os.path.expanduser(str(path or "").strip())
+    if os.path.isabs(p): return os.path.abspath(p)
+    cands = [os.path.join(WORKSPACE, p)]
+    folder = project_folder()
+    if folder: cands.insert(0, os.path.join(folder, p))
+    for c in cands:
+        if os.path.exists(c): return os.path.abspath(c)
+    return os.path.abspath(cands[0])
+
+def _did_you_mean(p):
+    d, base = os.path.dirname(p), os.path.basename(p)
+    try: names = os.listdir(d)
+    except OSError: return ""
+    close = _difflib.get_close_matches(base, names, n=3, cutoff=0.5)
+    if not close:
+        close = [n for n in names if base.lower() in n.lower()][:3]
+    return (" Did you mean: " + ", ".join(os.path.join(d, n) for n in close) + "?") if close else ""
+
+def t_read_file(path, offset=None, limit=None):
+    """Read a file. Text comes back with line numbers, a page at a time, so a
+    long file can be read in full rather than being cut at 14,000 characters;
+    documents (pdf, docx, xlsx...) are converted to text first."""
+    p = _resolve_path(path)
+    if not os.path.exists(p):
+        return f"Error: no such file: {p}.{_did_you_mean(p)}"
+    if os.path.isdir(p):
+        return f"Error: {p} is a directory — use list_dir to see what is in it."
+    try: start = max(1, int(offset or 1))
+    except (TypeError, ValueError): start = 1
+    try: n = max(1, min(int(limit or READ_LINES), 10000))
+    except (TypeError, ValueError): n = READ_LINES
+    ext = os.path.splitext(p)[1].lower()
+    numbered = True
+    if ext in RICH_DOCS:
+        from markitdown import MarkItDown
+        bad = check_magic(p)
+        if bad: return f"Error: {bad}"
+        text = MarkItDown().convert(p).text_content or ""
+        numbered = False
+    elif _is_binary(p):
+        if ext in IMG_EXT:
+            return f"{p} is an image ({os.path.getsize(p):,} bytes) — it can't be read as text."
+        return f"{p} looks like a binary file ({os.path.getsize(p):,} bytes), so it isn't shown as text."
+    else:
+        with open(p, encoding="utf-8", errors="replace") as f: text = f.read()
+    if not text.strip(): return "(no readable text)"
+    lines = text.split("\n")
+    if lines and lines[-1] == "": lines.pop()
+    total = len(lines)
+    if start > total:
+        return f"Error: {p} has only {total} lines; offset {start} is past the end."
+    cut = lambda l: l if len(l) <= READ_LINE_CHARS else l[:READ_LINE_CHARS] + " …[line cut]"
+    # a page must fit what a tool result may carry, or its middle is cut and
+    # the footer sends the model past lines it never saw
+    budget, rows = int(MAXCH * 0.85), []
+    for i, l in enumerate(lines[start - 1:start - 1 + n], start):
+        row = f"{i:>6}\t{cut(l)}" if numbered else cut(l)
+        if rows and budget - len(row) - 1 < 0: break
+        rows.append(row); budget -= len(row) + 1
+    end = start - 1 + len(rows)
+    body = "\n".join(rows)
+    foot = (f"\n\n(lines {start}–{end} of {total}. Call read_file with offset={end + 1} to "
+            "read on.)" if end < total else
+            (f"\n\n(lines {start}–{end} of {total}, end of file.)" if start > 1 else ""))
+    return body + foot
+
+# ------------------------------------------------------------------ edit_file
+def _norm_ws(s): return " ".join(s.split())
+
+def _line_spans(text):
+    """(start, end) character offsets of every line, newline excluded."""
+    spans, pos = [], 0
+    for line in text.split("\n"):
+        spans.append((pos, pos + len(line))); pos += len(line) + 1
+    return spans
+
+def _strip_line_numbers(s):
+    """Text copied out of read_file keeps its '   12<TAB>' prefixes."""
+    lines = s.split("\n")
+    if lines and all(_re.match(r"^\s*\d+\t", l) for l in lines if l.strip()):
+        return "\n".join(_re.sub(r"^\s*\d+\t", "", l) for l in lines)
+    return s
+
+def find_edit(text, old):
+    """Where `old` is in `text`: a list of (start, end, how). Exact first, then
+    progressively looser -- trailing/leading whitespace per line, all runs of
+    whitespace, first and last lines anchoring a block whose middle is close,
+    escaped newlines -- because a model copying code back rarely gets every
+    space right, and 'string not found' just made it guess again."""
+    if not old: return []
+    hits, i = [], text.find(old)
+    while i != -1:                     # non-overlapping, as a replace would see them
+        hits.append((i, i + len(old), "exact")); i = text.find(old, i + len(old))
+    if hits: return hits
+    cands = [old]
+    unnum = _strip_line_numbers(old)
+    if unnum != old: cands.append(unnum)
+    if "\\n" in old and "\n" not in old:
+        cands.append(old.replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"'))
+    tl, spans = text.split("\n"), _line_spans(text)
+    for cand in cands:
+        if cand is not old and cand in text:
+            j = text.find(cand)
+            how = "numbered" if cand == unnum else "unescaped"
+            out = []
+            while j != -1: out.append((j, j + len(cand), how)); j = text.find(cand, j + len(cand))
+            return out
+        ol = cand.split("\n")
+        while ol and not ol[-1].strip(): ol.pop()
+        while ol and not ol[0].strip(): ol.pop(0)
+        if not ol: continue
+        k = len(ol)
+        for how, norm in (("trimmed", str.strip), ("whitespace", _norm_ws)):
+            want = [norm(x) for x in ol]
+            out = [(spans[s][0], spans[s + k - 1][1], how) for s in range(len(tl) - k + 1)
+                   if all(norm(tl[s + j]) == want[j] for j in range(k))]
+            if out: return out
+        if k >= 3:
+            first, last = ol[0].strip(), ol[-1].strip()
+            best = []
+            for s in range(len(tl)):
+                if tl[s].strip() != first: continue
+                for e in range(s + 2, min(len(tl), s + k * 2 + 5)):
+                    if tl[e].strip() != last: continue
+                    mid_a = "\n".join(x.strip() for x in tl[s + 1:e])
+                    mid_b = "\n".join(x.strip() for x in ol[1:-1])
+                    r = _difflib.SequenceMatcher(None, mid_a, mid_b).ratio()
+                    if r >= 0.75: best.append((r, spans[s][0], spans[e][1]))
+                    break
+            if best:
+                best.sort(reverse=True)
+                if len(best) == 1 or best[0][0] - best[1][0] > 0.1:
+                    return [(best[0][1], best[0][2], "anchored")]
+                return [(b[1], b[2], "anchored") for b in best]
+    return []
+
+def _reindent(new, matched, old):
+    """Keep the file's indentation when the model's copy of the old text had
+    different leading whitespace from what was actually there."""
+    first = lambda s: next((l for l in s.split("\n") if l.strip()), "")
+    have = first(matched); said = first(_strip_line_numbers(old))
+    ind_have = have[:len(have) - len(have.lstrip())]
+    ind_said = said[:len(said) - len(said.lstrip())]
+    if ind_have == ind_said: return new
+    out = []
+    for l in new.split("\n"):
+        if l.startswith(ind_said): out.append(ind_have + l[len(ind_said):])
+        elif not l.strip(): out.append(l)
+        else: out.append(ind_have + l.lstrip())
+    return "\n".join(out)
+
+def apply_edit(text, old, new, replace_all=False):
+    """(new_text, how, error). how says which matcher found it."""
+    hits = find_edit(text, old)
+    if not hits:
+        near = _difflib.get_close_matches(old.strip().split("\n")[0].strip(),
+                                          [l.strip() for l in text.split("\n") if l.strip()],
+                                          n=2, cutoff=0.6)
+        hint = ("\nThe closest line(s) in the file: " + " | ".join(near[:2])) if near else ""
+        return None, None, ("the text to replace was not found in the file. Read the file "
+                            "again (read_file) and copy the exact lines." + hint)
+    if len(hits) > 1 and not replace_all:
+        return None, None, (f"the text to replace occurs {len(hits)} times. Include more "
+                            "surrounding lines so it is unique, or pass replace_all=true.")
+    # what was loosened in finding old_string is loosened in new_string too:
+    # an escaped newline, or read_file's line-number prefixes
+    if hits[0][2] == "unescaped":
+        new = new.replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"')
+    new_unnum = _strip_line_numbers(new)
+    if new_unnum != new and _strip_line_numbers(old) != old: new = new_unnum
+    out, last = [], 0
+    for s, e, how in (hits if replace_all else hits[:1]):
+        seg = text[s:e]
+        rep = new if how in ("exact", "unescaped", "numbered") else _reindent(new, seg, old)
+        out.append(text[last:s]); out.append(rep); last = e
+    out.append(text[last:])
+    return "".join(out), hits[0][2], None
+
+def _inside(p, root):
+    """Whether p is root or below it, after resolving '..' and symlinks on both --
+    a plain prefix test let '<workspace>/../x' and a symlink out of it through."""
+    rp, rr = os.path.realpath(p), os.path.realpath(root)
+    return rp == rr or rp.startswith(rr.rstrip(os.sep) + os.sep)
+
+def _write_allowed(p):
+    if S.get("write_any") or full_access(): return True
+    if _inside(p, WORKSPACE): return True
+    folder = project_folder()
+    return bool(folder) and _inside(p, folder)
+
+def _diagnose(p):
+    """A quick check after a file is written, so a syntax error surfaces now and
+    not three steps later when something imports it. Silent when all is well."""
+    ext = os.path.splitext(p)[1].lower()
+    try:
+        if ext == ".py":
+            src = open(p, encoding="utf-8", errors="replace").read()
+            try: compile(src, p, "exec")
+            except SyntaxError as e:
+                return f"\n\nCheck: Python syntax error at line {e.lineno}: {e.msg}. Fix it before moving on."
+        elif ext == ".json":
+            try: json.load(open(p))
+            except ValueError as e:
+                return f"\n\nCheck: this is not valid JSON ({e}). Fix it before moving on."
+        elif ext in (".js", ".mjs", ".cjs"):
+            import shutil as _sh
+            node = _sh.which("node")
+            if node:
+                r = subprocess.run([node, "--check", p], capture_output=True, text=True, timeout=20)
+                if r.returncode:
+                    return "\n\nCheck: node --check failed:\n" + (r.stderr or r.stdout)[-800:]
+        elif ext in (".sh", ".bash", ".zsh"):
+            sh = "/bin/zsh" if ext == ".zsh" else "/bin/bash"
+            r = subprocess.run([sh, "-n", p], capture_output=True, text=True, timeout=20)
+            if r.returncode:
+                return "\n\nCheck: shell syntax error:\n" + (r.stderr or "")[-800:]
+    except Exception:
+        return ""
+    return ""
+
+def t_edit_file(path, old_string, new_string, replace_all=False):
+    """Replace one piece of a file with another, leaving the rest untouched --
+    cheaper and safer than rewriting the whole file with write_file."""
+    p = _resolve_path(path)
+    if not _write_allowed(p):
+        return (f"Error: writes are confined to {WORKSPACE}"
+                + (" and the project folder" if project_folder() else "") +
+                ". Enable 'write anywhere' in Settings -> Tools to override.")
+    old, new = str(old_string or ""), str(new_string or "")
+    if not old:
+        if os.path.exists(p) and os.path.getsize(p):
+            return "Error: old_string is empty but the file already has content. Give the text to replace."
+        return t_write_file(p, new) + _diagnose(p)
+    if not os.path.exists(p):
+        return f"Error: no such file: {p}.{_did_you_mean(p)}"
+    if old == new: return "Error: old_string and new_string are the same — nothing to change."
+    if _is_binary(p): return f"Error: {p} is a binary file; edit_file only changes text."
+    raw = open(p, "rb").read()
+    try: text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return f"Error: {p} is not UTF-8 text, so editing it here could corrupt it. Use python instead."
+    crlf = "\r\n" in text                 # keep Windows line endings as they were
+    if crlf: text = text.replace("\r\n", "\n")
+    out, how, err = apply_edit(text, old.replace("\r\n", "\n"), new.replace("\r\n", "\n"), bool(replace_all))
+    if err: return f"Error editing {p}: {err}"
+    if crlf: out = out.replace("\n", "\r\n")
+    d = file_diff(p, out)
+    _save_checkpoint(p)
+    with open(p, "w", encoding="utf-8", newline="") as f: f.write(out)
+    LAST_DIFF.clear(); LAST_DIFF.update({"path": p, **d})
+    try:
+        if p.startswith(os.path.abspath(WORKSPACE)): record_file(os.path.relpath(p, WORKSPACE), "edit_file")
+    except Exception: pass
+    note = "" if how in ("exact", "numbered") else f" (matched loosely: {how} — check the result)"
+    return f"Edited {p} (+{d['added']} −{d['removed']} lines){note}" + _diagnose(p)
+
+def preview_edit(fn, args):
+    """The diff a write_file/edit_file is about to make, for the approval card."""
+    try:
+        p = _resolve_path(args.get("path", ""))
+        if fn == "write_file":
+            return {"path": p, **file_diff(p, args.get("content", ""))}
+        if fn == "edit_file" and os.path.exists(p):
+            text = open(p, encoding="utf-8", errors="replace").read()
+            out, _how, err = apply_edit(text, str(args.get("old_string") or ""),
+                                        str(args.get("new_string") or ""),
+                                        bool(args.get("replace_all")))
+            if out is not None: return {"path": p, **file_diff(p, out)}
+    except Exception:
+        pass
+    return None
+
+def _t_write_file_checked(path, content):
+    p = _resolve_path(path)
+    out = t_write_file(p, content)
+    return out + (_diagnose(p) if not out.startswith("Error") else "")
+
+BUILTIN["read_file"] = t_read_file
+BUILTIN["write_file"] = _t_write_file_checked
+BUILTIN["edit_file"] = t_edit_file
+for _s in ALL_SPECS:
+    if _s["function"]["name"] == "read_file":
+        _s["function"]["description"] = (
+            "Read a local file. Text files come back with line numbers, up to 2000 lines at a "
+            "time — pass offset (first line, 1-based) and limit to read a long file in pages. "
+            "pdf, docx, xlsx and pptx are converted to text.")
+        _s["function"]["parameters"] = {"type": "object", "properties": {
+            "path": {"type": "string"},
+            "offset": {"type": "integer", "description": "line to start from, 1-based"},
+            "limit": {"type": "integer", "description": "how many lines (default 2000)"}},
+            "required": ["path"]}
+    if _s["function"]["name"] == "write_file":
+        _s["function"]["description"] = (
+            "Create a file, or replace one completely. To change part of an existing file "
+            "use edit_file instead. Confined to the workspace (and the project folder) unless "
+            "overridden.")
+ALL_SPECS.append({"type": "function", "function": {
+    "name": "edit_file",
+    "description": "Change part of an existing text file: replace old_string with new_string. "
+                   "Read the file first and copy old_string exactly (without the line-number "
+                   "prefix read_file adds). It must match one place only — add surrounding "
+                   "lines to make it unique, or pass replace_all. An empty old_string creates "
+                   "a new file. Syntax is checked afterwards for .py/.json/.js/.sh files.",
+    "parameters": {"type": "object", "properties": {
+        "path": {"type": "string"}, "old_string": {"type": "string"},
+        "new_string": {"type": "string"}, "replace_all": {"type": "boolean"}},
+        "required": ["path", "old_string", "new_string"]}}})
+
+# ------------------------------------------------------------------ tool-call repair
+def _loose_json(raw):
+    """Parse arguments a model wrote slightly wrong: code fences, a trailing
+    comma, single quotes, Python literals, a missing closing brace."""
+    s = str(raw).strip()
+    s = _re.sub(r"^```(?:json)?\s*|\s*```$", "", s)
+    if "{" in s: s = s[s.index("{"):]
+    tries = [s, _re.sub(r",\s*([}\]])", r"\1", s)]
+    depth = s.count("{") - s.count("}")
+    if depth > 0:
+        base = s + ('"' if s.count('"') % 2 else "")
+        tries.append(base + "}" * depth)
+    for t in tries:
+        try:
+            v = json.loads(t)
+            if isinstance(v, dict): return v
+        except ValueError:
+            pass
+        try:
+            import ast
+            v = ast.literal_eval(t)
+            if isinstance(v, dict): return v
+        except Exception:
+            pass
+    return None
+
+def _coerce(v, typ):
+    try:
+        if typ == "integer" and isinstance(v, str) and _re.fullmatch(r"\s*-?\d+(\.0+)?\s*", v):
+            return int(float(v))
+        if typ == "integer" and isinstance(v, float) and v.is_integer(): return int(v)
+        if typ == "number" and isinstance(v, str) and _re.fullmatch(r"\s*-?\d+(\.\d+)?([eE]-?\d+)?\s*", v):
+            return float(v)
+        if typ == "boolean" and isinstance(v, str) and v.strip().lower() in ("true", "false", "yes", "no", "1", "0"):
+            return v.strip().lower() in ("true", "yes", "1")
+        if typ in ("array", "object") and isinstance(v, str) and v.strip()[:1] in "[{":
+            return json.loads(v)
+        if typ == "array" and isinstance(v, str): return [v]
+        if typ == "string" and isinstance(v, (int, float)) and not isinstance(v, bool): return str(v)
+    except (ValueError, TypeError):
+        pass
+    return v
+
+def repair_call(fn, raw, tools=None):
+    """Make a tool call runnable, or explain to the model what is wrong with it.
+    Returns (fn, args, error). Used to be `except ValueError: args = {}`: a
+    call with broken JSON ran with no arguments at all and failed confusingly."""
+    known = {t["function"]["name"]: (t["function"].get("parameters") or {}) for t in (tools or [])}
+    if known and fn not in known:
+        key = lambda n: _re.sub(r"[\s\-.]+", "_", str(n).lower())
+        alias = {key(n): n for n in known}
+        if key(fn) in alias:
+            fn = alias[key(fn)]
+        else:
+            close = _difflib.get_close_matches(str(fn), list(known), n=3, cutoff=0.55)
+            return fn, {}, (f"There is no tool called {fn!r} here." +
+                            (f" Did you mean {', '.join(close)}?" if close else "") +
+                            " Use one of the tools you were given.")
+    if isinstance(raw, dict): args = dict(raw)
+    elif not str(raw or "").strip(): args = {}
+    else:
+        try:
+            args = json.loads(raw)
+        except ValueError as e:
+            args = _loose_json(raw)
+            if args is None:
+                return fn, {}, (f"The arguments for {fn} were not valid JSON ({e}). "
+                                "Call it again with a JSON object of arguments.")
+        if not isinstance(args, dict):
+            return fn, {}, f"The arguments for {fn} must be a JSON object, not {type(args).__name__}."
+    params = known.get(fn) or {}
+    props = params.get("properties") or {}
+    for k in list(args):
+        if k in props: args[k] = _coerce(args[k], props[k].get("type"))
+    missing = [r for r in (params.get("required") or []) if r not in args]
+    for r in list(missing):
+        # a near-miss name -- file_path for path, cmd for command
+        extra = [k for k in args if k not in props]
+        m = _difflib.get_close_matches(r, extra, n=1, cutoff=0.5) or \
+            [k for k in extra if r in k or k in r][:1]
+        if m:
+            args[r] = _coerce(args.pop(m[0]), props.get(r, {}).get("type")); missing.remove(r)
+    if missing:
+        return fn, args, (f"{fn} needs {', '.join(missing)}, which the call left out. "
+                          f"Its parameters: {json.dumps(props)[:600]}")
+    if "properties" in params and (fn in BUILTIN or file_tool(fn)):
+        # a Python function raises on an argument it doesn't take; drop those
+        args = {k: v for k, v in args.items() if k in props}
+    return fn, args, None
+
+# ------------------------------------------------------------------ errors and retries
+class ModelError(RuntimeError):
+    """A failed model request, carrying its HTTP status when there was one."""
+    def __init__(self, msg, code=None):
+        super().__init__(msg); self.code = code
+
+# specific phrases only: "max_tokens" or "token limit" also appear in errors
+# about the output cap and in rate limits, which compacting would not fix
+OVERFLOW_MARKERS = ("context length", "context_length", "maximum context", "context window",
+                    "prompt is too long", "exceeds the context", "input is too long",
+                    "reduce the length of the messages", "prompt too long")
+
+def classify_error(e):
+    """'overflow' (the conversation is too long -- compact, don't retry as is),
+    'auth' (a key is wrong -- retrying won't help), 'bad_request', or
+    'transient' (rate limit, overload, a dropped connection -- worth a retry)."""
+    code = getattr(e, "code", None) or getattr(e, "status", None) or getattr(e, "status_code", None)
+    low = f"{type(e).__name__}: {e}".lower()
+    if code == 429 and "context" not in low: return "transient"
+    if any(m in low for m in OVERFLOW_MARKERS): return "overflow"
+    if code in (401, 403) or "api key" in low or "unauthorized" in low or "authentication" in low:
+        return "auth"
+    if code == 429 or (isinstance(code, int) and code >= 500) or "overloaded" in low or "rate limit" in low:
+        return "transient"
+    if code in (400, 404, 422): return "bad_request"
+    return "transient"
+
+def _backoff(attempt):
+    return min(2 ** attempt, 30) * (0.5 + _random.random())
+
+# ------------------------------------------------------------------ projects: folders, rules, tools
+RULE_FILES = ("ORBIT.md", "AGENTS.md", "CLAUDE.md")
+
+_NO_PROJECT = object()
+
+def current_project():
+    """The project of the answer running on this thread -- fixed when that
+    answer started -- or, outside an answer, the one on screen. Reading the
+    shared ACTIVE_PROJECT mid-answer meant clicking on another chat moved a
+    running answer into that chat's project folder."""
+    p = getattr(TURN_CTX, "project", _NO_PROJECT)
+    return ACTIVE_PROJECT.get("id") if p is _NO_PROJECT else p
+
+def _folder_ok(f):
+    """Never treat /, the home folder or a top-level folder as a project folder:
+    that would open writes to everything under it."""
+    f = os.path.realpath(f)
+    home = os.path.realpath(os.path.expanduser("~"))
+    return os.path.isdir(f) and f not in ("/", home) and len([x for x in f.split(os.sep) if x]) >= 2
+
+def project_folder(pid=None):
+    pid = pid or current_project()
+    if not pid: return None
+    f = (projects_load().get(pid) or {}).get("folder")
+    if not f: return None
+    f = os.path.abspath(os.path.expanduser(f))
+    return f if _folder_ok(f) else None
+
+def project_rules(folder, limit=12000):
+    """The rules file a project folder keeps for whoever works in it -- the
+    first of ORBIT.md, AGENTS.md, CLAUDE.md found there."""
+    for name in RULE_FILES:
+        fp = os.path.join(folder, name)
+        if os.path.isfile(fp):
+            try: txt = open(fp, encoding="utf-8", errors="replace").read().strip()
+            except OSError: continue
+            if txt:
+                return name, (txt if len(txt) <= limit else txt[:limit] + "\n…[rules cut here]")
+    return None, ""
+
+_project_upsert_base = project_upsert
+def project_upsert(pid, **kw):
+    if kw.get("folder"):
+        kw["folder"] = os.path.abspath(os.path.expanduser(str(kw["folder"]).strip()))
+        if os.path.isdir(kw["folder"]) and not _folder_ok(kw["folder"]):
+            raise ValueError("a project folder can't be /, your home folder or a top-level folder")
+    elif "folder" in kw and kw["folder"] == "":
+        d = projects_load()
+        if pid in d: d[pid].pop("folder", None); projects_save(d)
+        kw.pop("folder")
+    return _project_upsert_base(pid, **kw)
+
+def system_prompt_for(agent=None, project=None):
+    base = system_prompt()
+    parts = [base]
+    if project:
+        pr = projects_load().get(project)
+        if pr:
+            head = f"## Project: {pr.get('name','')}"
+            if pr.get("description"): head += f"\n{pr['description']}"
+            if pr.get("instructions"): head += f"\n\n{pr['instructions']}"
+            folder = project_folder(project)
+            if folder:
+                head += (f"\n\nThis project lives in {folder}. Work there by default: relative "
+                         "paths in read_file/edit_file/write_file resolve against it, and files "
+                         "there may be written.")
+                name, rules = project_rules(folder)
+                if rules: head += f"\n\n### Rules ({name} in the project folder)\n{rules}"
+                file_tool_specs(project)
+                ft = sorted(PROJECT_FILE_TOOLS.get(project) or {})
+                if ft: head += "\n\nProject tools available: " + ", ".join(ft) + "."
+                waiting = project_tools_pending(project)
+                if waiting:
+                    head += (f"\n\nThe folder has {len(waiting)} tool file(s) in .orbit/tools that "
+                             "are not loaded until the user marks this project's tools as trusted.")
+            parts.append(head)
+    if agent:
+        a = agents_load().get(agent)
+        if a and (a.get("instructions") or "").strip():
+            parts.append("## Agent: " + agent + "\n" + a["instructions"].strip())
+    return plugin_system("\n\n".join(parts))
+
+GLOBAL_FILE_TOOLS = {}         # name -> {"run", "safe", "path", "scope"} from ROOT/tools
+PROJECT_FILE_TOOLS = {}        # project id -> {name -> def} from <folder>/.orbit/tools
+_FILE_TOOL_CACHE = {}          # path -> (mtime, [defs])
+GLOBAL_TOOLS_DIR = os.path.join(ROOT, "tools")
+FILE_TOOL_ERRORS = {}
+
+def _load_py(path, prefix):
+    import importlib.util
+    name = f"{prefix}_{hashlib.md5(path.encode()).hexdigest()[:10]}"
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+def _tool_defs(path):
+    """The tools one file defines: TOOLS = [{name, description, parameters,
+    run, safe}], or a single SPEC dict plus run() (and optionally SAFE)."""
+    mt = os.path.getmtime(path)
+    hit = _FILE_TOOL_CACHE.get(path)
+    if hit and hit[0] == mt: return hit[1]
+    mod = _load_py(path, "orbit_tool")
+    defs = []
+    for t in (getattr(mod, "TOOLS", None) or []):
+        if isinstance(t, dict) and t.get("name") and callable(t.get("run")): defs.append(t)
+    if not defs and isinstance(getattr(mod, "SPEC", None), dict) and callable(getattr(mod, "run", None)):
+        defs.append({**mod.SPEC, "run": mod.run, "safe": bool(getattr(mod, "SAFE", False))})
+    _FILE_TOOL_CACHE[path] = (mt, defs)
+    return defs
+
+def _tool_files(d):
+    try: return [os.path.join(d, f) for f in sorted(os.listdir(d))
+                 if f.endswith(".py") and not f.startswith("_")]
+    except OSError: return []
+
+def _load_dir(d, scope, trust, into, seen, errors):
+    specs = []
+    for path in _tool_files(d):
+        try: defs = _tool_defs(path)
+        except Exception as e:
+            errors[path] = f"{type(e).__name__}: {e}"; continue
+        for t in defs:
+            name = str(t["name"])
+            if name in BUILTIN or name in seen: continue
+            seen.add(name)
+            into[name] = {"run": t["run"], "safe": bool(t.get("safe")) and trust,
+                          "path": path, "scope": scope}
+            specs.append({"type": "function", "function": {
+                "name": name, "description": str(t.get("description") or name),
+                "parameters": t.get("parameters") or {"type": "object", "properties": {}}}})
+    return specs
+
+def project_tools_pending(project):
+    """Tool files in a project folder that are waiting to be trusted."""
+    folder = project_folder(project) if project else None
+    if not folder or (projects_load().get(project) or {}).get("trust_tools"): return []
+    return _tool_files(os.path.join(folder, ".orbit", "tools"))
+
+def file_tool_specs(project=None):
+    """Tools defined as Python files: ROOT/tools/*.py for every chat, and
+    <project folder>/.orbit/tools/*.py for chats in that project. A project's
+    tool files are not even imported until the project is marked trusted
+    (trust_tools) -- importing runs them, and a folder may be a cloned repo."""
+    project = project if project is not None else current_project()
+    errors, seen = {}, set()
+    glob_defs = {}
+    specs = _load_dir(GLOBAL_TOOLS_DIR, "global", True, glob_defs, seen, errors)
+    global GLOBAL_FILE_TOOLS, FILE_TOOL_ERRORS
+    GLOBAL_FILE_TOOLS = glob_defs       # rebound whole: a reader never sees it half-built
+    folder = project_folder(project) if project else None
+    if folder and (projects_load().get(project) or {}).get("trust_tools"):
+        proj_defs = {}
+        specs += _load_dir(os.path.join(folder, ".orbit", "tools"), "project", True, proj_defs, seen, errors)
+        PROJECT_FILE_TOOLS[project] = proj_defs
+    elif project:
+        PROJECT_FILE_TOOLS.pop(project, None)
+    FILE_TOOL_ERRORS = errors
+    return specs
+
+def file_tool(fn):
+    """The file-defined tool `fn` as the running answer's project sees it."""
+    return (PROJECT_FILE_TOOLS.get(current_project()) or {}).get(fn) or GLOBAL_FILE_TOOLS.get(fn)
+
+_active_tools_base = active_tools
+def active_tools(project=None):
+    specs, errors = _active_tools_base()
+    en = S.get("tools_enabled") or {}
+    try:
+        extra = [t for t in file_tool_specs(project) if en.get(t["function"]["name"], True)]
+    except Exception as e:
+        extra, errors = [], {**errors, "tools folder": f"{type(e).__name__}: {e}"}
+    names = {t["function"]["name"] for t in specs}
+    specs = specs + [t for t in extra if t["function"]["name"] not in names]
+    for path, err in FILE_TOOL_ERRORS.items():
+        errors = {**errors, os.path.basename(path): err}
+    return specs, errors
+
+_all_known_base = all_known_tools
+def all_known_tools():
+    names = _all_known_base()
+    try: names += [t["function"]["name"] for t in file_tool_specs()
+                   if t["function"]["name"] not in names]
+    except Exception: pass
+    return names
+
+_dispatch_base = dispatch
+def dispatch(fn, args):
+    ft = file_tool(fn) if fn not in BUILTIN else None
+    if ft:
+        out = ft["run"](**(args or {}))
+        return out if isinstance(out, str) else json.dumps(out, indent=1, default=str)
+    return _dispatch_base(fn, args)
+
+_risk_check_base = risk_check
+def risk_check(fn, args):
+    level, reason = _risk_check_base(fn, args)
+    if level: return level, reason
+    ft = file_tool(fn) if fn not in BUILTIN else None
+    if ft and not ft["safe"]:
+        return ("confirm", f"run the custom tool {fn} ({os.path.basename(ft['path'])})")
+    return level, reason
+
+_auto_approvable_base = _auto_approvable
+def _auto_approvable(fn, args, reason):
+    if fn == "edit_file" and reason not in NEVER_AUTO:
+        return _write_allowed(os.path.abspath(_resolve_path((args or {}).get("path", ""))))
+    return _auto_approvable_base(fn, args, reason)
+
+# ------------------------------------------------------------------ plugins
+PLUGINS_DIR = os.path.join(ROOT, "plugins")
+_PLUGIN_CACHE = {}
+
+def plugins():
+    """Python files in ROOT/plugins that hook into Orbit. Each may define
+    tool_before(name, args) -> args (raise to refuse the call),
+    tool_after(name, args, output) -> output, and system_transform(text) -> text.
+    A plugin that fails is skipped and logged; it never breaks an answer."""
+    if not os.path.isdir(PLUGINS_DIR): return []
+    out = []
+    for fn in sorted(os.listdir(PLUGINS_DIR)):
+        if not fn.endswith(".py") or fn.startswith("_"): continue
+        path = os.path.join(PLUGINS_DIR, fn)
+        try:
+            mt = os.path.getmtime(path)
+            hit = _PLUGIN_CACHE.get(path)
+            if not hit or hit[0] != mt:
+                _PLUGIN_CACHE[path] = hit = (mt, _load_py(path, "orbit_plugin"))
+            out.append(hit[1])
+        except Exception as e:
+            _plugin_log(fn, "load", e)
+    return out
+
+def _plugin_log(name, where, e):
+    try:
+        with open(os.path.join(LOGS, "plugins.log"), "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {name} {where}: {type(e).__name__}: {e}\n")
+    except OSError:
+        pass
+
+def plugin_system(text):
+    for p in plugins():
+        f = getattr(p, "system_transform", None)
+        if not callable(f): continue
+        try:
+            r = f(text)
+            if isinstance(r, str) and r.strip(): text = r
+        except Exception as e:
+            _plugin_log(getattr(p, "__name__", "?"), "system_transform", e)
+    return text
+
+def plugin_before(fn, args):
+    """(args, refusal)."""
+    for p in plugins():
+        f = getattr(p, "tool_before", None)
+        if not callable(f): continue
+        try:
+            r = f(fn, dict(args))
+            if isinstance(r, dict): args = r
+        except PermissionError as e:
+            return args, f"REFUSED by a plugin: {e}"
+        except Exception as e:
+            _plugin_log(getattr(p, "__name__", "?"), "tool_before", e)
+    return args, None
+
+def plugin_after(fn, args, out):
+    for p in plugins():
+        f = getattr(p, "tool_after", None)
+        if not callable(f): continue
+        try:
+            r = f(fn, args, out)
+            if isinstance(r, str): out = r
+        except Exception as e:
+            _plugin_log(getattr(p, "__name__", "?"), "tool_after", e)
+    return out
+
+# ------------------------------------------------------------------ helper tasks
+def t_task(prompt, description=None):
+    """Hand one self-contained piece of work to a fresh helper with its own,
+    empty context: it researches or builds, and only its report comes back.
+    Keeps a long investigation from filling this conversation's window."""
+    if getattr(TURN_CTX, "depth", 0) >= 1:
+        return "Error: a helper can't start helpers of its own. Do this part yourself."
+    parent = {k: getattr(TURN_CTX, k, None) for k in ("sid", "emit", "approve", "cancel", "tools", "depth", "usage")}
+    project = current_project()
+    tools = [t for t in (parent["tools"] or active_tools()[0])
+             if t["function"]["name"] not in ("task", "schedule_task", "cancel_scheduled_task")]
+    msgs = [{"role": "system", "content": system_prompt_for(None, project) + (
+        "\n\n## You are a helper\nAnother instance of you handed you one self-contained task. "
+        "Do it with your tools, then reply with a concise report: what you found or did, the "
+        "facts and numbers, file paths, and sources. That reply is all it will see.")}]
+    label = (description or str(prompt))[:80]
+    up = parent["emit"] or (lambda k, p: None)
+    steps = [0]
+    def sub_emit(k, p):
+        if k == "tool":
+            steps[0] += 1
+            up("subtask", {"description": label, "tool": (p or {}).get("name"), "step": steps[0]})
+    saved_plan = [dict(s) for s in CURRENT_PLAN.get("steps", [])]
+    saved_sources = list(LAST_SOURCES)
+    TURN_CTX.depth = 1
+    try:
+        ans = turn(msgs, str(prompt), tools, emit=sub_emit, approve=parent["approve"],
+                   cancel=parent["cancel"], project=project)
+        child = TURN_CTX.usage
+        if parent["usage"] is not None and child is not parent["usage"]:
+            for k, v in (child or {}).items(): parent["usage"][k] = parent["usage"].get(k, 0) + v
+    finally:
+        for k, v in parent.items(): setattr(TURN_CTX, k, v)
+        TURN_CTX.depth = parent["depth"] or 0
+        TURN_CTX.project = project
+        CURRENT_PLAN["steps"] = saved_plan
+        LAST_SOURCES[:] = saved_sources
+    return f"Helper report ({steps[0]} tool steps) for “{label}”:\n\n{ans}"
+
+BUILTIN["task"] = t_task
+ALL_SPECS.append({"type": "function", "function": {
+    "name": "task",
+    "description": "Hand a self-contained sub-task to a helper that starts with an empty "
+                   "context and the same tools, and get back only its report. Use it for a "
+                   "side investigation that would otherwise fill this conversation with "
+                   "search results and file dumps — e.g. 'find three recent papers on X and "
+                   "report their key numbers'. The prompt must say everything the helper needs.",
+    "parameters": {"type": "object", "properties": {
+        "prompt": {"type": "string", "description": "the full task, self-contained"},
+        "description": {"type": "string", "description": "3-6 word label"}},
+        "required": ["prompt"]}}})
+
+# ------------------------------------------------------------------ prompt templates
+def expand_prompt(text, prompts=None):
+    """'/name some words' runs the saved prompt called name. $ARGUMENTS becomes
+    the words; $1, $2... (or ${1}) become each one, quotes grouping words --
+    but only for as many words as were given, so '$5 cap' or '$1,000' in a
+    prompt stays as written. With no placeholder used, the words are appended.
+    Anything that isn't a saved prompt's name is left exactly as typed."""
+    s = str(text or "")
+    m = _re.match(r"^/([\w\-]+)(?:\s+(.*))?$", s.strip(), _re.S)
+    if not m: return s
+    prompts = prompts if prompts is not None else prompts_load()
+    rec = prompts.get(m.group(1))
+    if rec is None:
+        low = {k.lower(): v for k, v in prompts.items()}
+        rec = low.get(m.group(1).lower())
+    if rec is None: return s
+    body = rec.get("text", "") if isinstance(rec, dict) else str(rec)
+    rest = (m.group(2) or "").strip()
+    import shlex
+    try: pos = shlex.split(rest)
+    except ValueError: pos = rest.split()
+    used = [False]
+    if "$ARGUMENTS" in body:
+        body = body.replace("$ARGUMENTS", rest); used[0] = True
+    def sub(mm):
+        n = int(mm.group(1) or mm.group(2))
+        if 0 < n <= len(pos):
+            used[0] = True; return pos[n - 1]
+        return mm.group(0)
+    body = _re.sub(r"\$\{(\d)\}|\$(\d)(?!\d|[.,]\d)", sub, body)
+    if rest and not used[0]: body = body.rstrip() + "\n\n" + rest
+    return body
+
+# ------------------------------------------------------------------ usage stats
+def _tool_log(fn, secs, ok, sid=None):
+    try:
+        with open(TOOL_LOG, "a") as f:
+            f.write(json.dumps({"t": time.time(), "sid": sid, "tool": fn,
+                                "secs": round(secs, 2), "ok": ok}) + "\n")
+    except OSError:
+        pass
+
+def usage_stats(days=7, now=None):
+    """Answers, time, tokens and tool use for the last `days` days: totals, by
+    model, by tool and by day, in the shape the Usage window draws."""
+    now = now or time.time()
+    since = now - float(days) * 86400
+    by_day, models, tools, detail = {}, {}, {}, {}
+    turns = 0
+    def day(t): return time.strftime("%Y-%m-%d", time.localtime(t))
+    def dd(t): return by_day.setdefault(day(t), {"turns": 0, "tokens": 0, "seconds": 0.0, "tool_runs": 0})
+    try:
+        for line in open(LEDGER):
+            try: r = json.loads(line)
+            except ValueError: continue
+            if (r.get("t") or 0) < since: continue
+            turns += 1
+            p, c, sec = r.get("prompt_tokens") or 0, r.get("completion_tokens") or 0, r.get("seconds") or 0
+            d = dd(r["t"]); d["turns"] += 1; d["tokens"] += p + c; d["seconds"] += sec
+            m = models.setdefault(r.get("model") or "(unrecorded)",
+                                  {"turns": 0, "prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0})
+            m["turns"] += 1; m["prompt_tokens"] += p; m["completion_tokens"] += c; m["seconds"] += sec
+    except OSError:
+        pass
+    try:
+        for line in open(TOOL_LOG):
+            try: r = json.loads(line)
+            except ValueError: continue
+            if (r.get("t") or 0) < since: continue
+            name = r.get("tool") or "?"
+            tools[name] = tools.get(name, 0) + 1
+            x = detail.setdefault(name, {"calls": 0, "errors": 0, "secs": 0.0})
+            x["calls"] += 1; x["errors"] += 0 if r.get("ok") else 1; x["secs"] += r.get("secs") or 0
+            dd(r["t"])["tool_runs"] += 1
+    except OSError:
+        pass
+    for d in list(by_day.values()) + list(models.values()) + list(detail.values()):
+        for k in ("seconds", "secs"):
+            if k in d: d[k] = round(d[k], 1)
+    return {"turns": turns, "models": models, "tools": tools, "tool_detail": detail,
+            "by_day": by_day, "since": since, "days": days}
+
+def _tool_ok(out):
+    return not str(out).lstrip().startswith(("Error", "REFUSED", "DENIED", "Internal error"))

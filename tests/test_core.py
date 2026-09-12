@@ -15,6 +15,12 @@ sys.path.insert(0, os.path.join(ROOT, "bin"))
 import qqcore as q
 import remote as R
 
+# nothing a test runs may land in the real usage logs or tool-output folder
+_LOGTMP = tempfile.mkdtemp(prefix="qqtest-logs-")
+q.TOOL_LOG = os.path.join(_LOGTMP, "tools.jsonl")
+q.TOOL_OUT = os.path.join(_LOGTMP, "tool_output")
+q.LEDGER = os.path.join(_LOGTMP, "ledger.jsonl")
+
 
 class Sandbox(unittest.TestCase):
     """Redirect every path at qqcore so tests never touch real data."""
@@ -1074,8 +1080,12 @@ class TestLongAnswers(unittest.TestCase):
         self.deque = collections.deque
         self.tmp = tempfile.mkdtemp(prefix="qqtest-long-")
         names = ("stream_call", "probe", "ensure_model", "model_is_local", "notify", "S",
-                 "MODEL", "local_model_name", "tool_schema_tokens", "server_status")
+                 "MODEL", "local_model_name", "tool_schema_tokens", "server_status",
+                 "TOOL_LOG", "TOOL_OUT", "LEDGER")
         self._saved = {k: getattr(q, k) for k in names}
+        q.TOOL_LOG = os.path.join(self.tmp, "tools.jsonl")
+        q.TOOL_OUT = os.path.join(self.tmp, "tool_output")
+        q.LEDGER = os.path.join(self.tmp, "ledger.jsonl")
         q.S = dict(q.DEFAULTS); q.S["keep_awake"] = False
         q.MODEL = "fake-model"
         q.probe = lambda *a, **k: "fake-model"
@@ -1220,6 +1230,13 @@ class TestLongAnswers(unittest.TestCase):
         self.assertTrue(any(m.get("content") == "THE REQUEST" for m in sent))
         self.assertLess(sum(len(str(m.get("content"))) for m in sent), 60000)
 
+    def test_every_message_keeps_its_time_but_never_sends_it(self):
+        self.script(self.tool_step(1), self.final("done"))
+        msgs = self.chat()
+        q.turn(msgs, "go", [], emit=self.emit)
+        self.assertTrue(all(isinstance(m.get("t"), float) for m in msgs[1:]), msgs)
+        self.assertFalse(any("t" in m for s in self.sent for m in s), "times leaked to the model")
+
     def test_progress_is_saved_during_a_long_answer(self):
         every = q.CHECKPOINT_EVERY
         q.CHECKPOINT_EVERY = 0
@@ -1336,6 +1353,43 @@ class TestMemoryReachesTheModel(unittest.TestCase):
         self.assertIn(q.HARNESS_NOTE, q.system_prompt())
 
 
+class TestAutoMemory(unittest.TestCase):
+    """The model rarely calls remember mid-task, so Orbit extracts facts itself."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="qqtest-automem-")
+        self._saved = (q.MEMDIR, q.suggest_memories, q.S, q.LOGS)
+        q.MEMDIR, q.LOGS = self.tmp, self.tmp
+        q.S = dict(q.DEFAULTS)
+
+    def tearDown(self):
+        q.MEMDIR, q.suggest_memories, q.S, q.LOGS = self._saved
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_new_facts_are_written_and_existing_notes_left_alone(self):
+        open(os.path.join(self.tmp, "platform-ports.md"), "w").write("the original note\n")
+        q.suggest_memories = lambda msgs, max_items=3: [
+            {"name": "platform-ports", "content": "a different claim"},
+            {"name": "Sensor Offset", "content": "offset near 1.3 C fits the lab thermometer"}]
+        self.assertEqual(q.auto_memory([{"role": "system", "content": "s"}], "Market run"),
+                         ["sensor-offset"])
+        self.assertEqual(open(os.path.join(self.tmp, "platform-ports.md")).read(),
+                         "the original note\n")
+        new = open(os.path.join(self.tmp, "sensor-offset.md")).read()
+        self.assertIn("offset near 1.3", new)
+        self.assertIn("saved automatically from “Market run”", new)
+
+    def test_it_can_be_switched_off(self):
+        q.S["auto_memory"] = False
+        q.suggest_memories = lambda *a, **k: self.fail("should not even ask")
+        self.assertEqual(q.auto_memory([], "x"), [])
+
+    def test_the_ui_runs_it_after_substantial_answers_only(self):
+        src = open(os.path.join(ROOT, "bin", "orbit-ui")).read()
+        self.assertIn("def _learn_later(st, n0, min_steps=3)", src)
+        self.assertIn("if st.temp or st.cancel.is_set(): return", src)
+
+
 class TestSurvivesARestart(Sandbox):
     """An answer cut off by Orbit stopping used to just end there."""
 
@@ -1388,3 +1442,518 @@ class TestSurvivesARestart(Sandbox):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestRound1(TestLongAnswers):
+    """Features borrowed from reading opencode, each with the failure it fixes."""
+
+    def setUp(self):
+        super().setUp()
+        for k in ("PROJECTS", "GLOBAL_TOOLS_DIR", "PLUGINS_DIR", "WORKSPACE"):
+            self._saved[k] = getattr(q, k)
+        self._saved_active = dict(q.ACTIVE_PROJECT)
+        q.PROJECTS = os.path.join(self.tmp, "projects.json")
+        q.GLOBAL_TOOLS_DIR = os.path.join(self.tmp, "tools")
+        q.PLUGINS_DIR = os.path.join(self.tmp, "plugins")
+        q.WORKSPACE = os.path.join(self.tmp, "ws"); os.makedirs(q.WORKSPACE)
+        q.ACTIVE_PROJECT["id"] = None
+        q.GLOBAL_FILE_TOOLS = {}; q.PROJECT_FILE_TOOLS.clear()
+        q._FILE_TOOL_CACHE.clear(); q._PLUGIN_CACHE.clear()
+        q.TURN_CTX.__dict__.pop("project", None)
+        q.S["write_any"] = False; q.S["autonomy_mode"] = "ask"
+
+    def tearDown(self):
+        q.ACTIVE_PROJECT.clear(); q.ACTIVE_PROJECT.update(self._saved_active)
+        q.GLOBAL_FILE_TOOLS = {}; q.PROJECT_FILE_TOOLS.clear()
+        q._FILE_TOOL_CACHE.clear(); q._PLUGIN_CACHE.clear()
+        q.TURN_CTX.__dict__.pop("project", None)
+        super().tearDown()
+
+    def write(self, rel, text):
+        p = os.path.join(self.tmp, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        open(p, "w").write(text); return p
+
+    # --- output is never silently cut
+    def test_long_tool_output_is_saved_whole_and_the_model_is_told_where(self):
+        big = "".join(f"line {i}\n" for i in range(5000)) + "THE END"
+        out = q._truncate_output("run_shell", big, limit=2000)
+        self.assertLess(len(out), 2600)
+        self.assertIn("THE END", out, "the end of a log is usually what matters")
+        path = out.split("saved at ")[1].split(" ")[0]
+        self.assertEqual(open(path).read(), big)
+        self.assertEqual(q._truncate_output("x", "short"), "short")
+
+    # --- read_file pages
+    def test_read_file_pages_with_line_numbers(self):
+        p = self.write("big.py", "".join(f"x{i} = {i}\n" for i in range(1, 3001)))
+        first = q.t_read_file(p)
+        self.assertIn("     1\tx1 = 1", first)
+        nxt_at = int(first.rsplit("offset=", 1)[1].split(" ")[0])
+        self.assertIn(f"{nxt_at - 1:>6}\tx{nxt_at - 1} = ", first)
+        nxt = q.t_read_file(p, offset=2001, limit=5)
+        self.assertIn("  2001\tx2001 = 2001", nxt)
+        self.assertNotIn("x2006", nxt)
+
+    def test_read_file_suggests_a_near_name_and_refuses_binary(self):
+        self.write("report_final.txt", "hello")
+        self.assertIn("report_final.txt", q.t_read_file(os.path.join(self.tmp, "report_finl.txt")))
+        b = os.path.join(self.tmp, "blob.bin"); open(b, "wb").write(bytes(range(256)) * 10)
+        self.assertIn("binary", q.t_read_file(b))
+
+    # --- edit_file
+    def test_edit_file_exact_and_ambiguous(self):
+        p = os.path.join(q.WORKSPACE, "a.py"); open(p, "w").write("a = 1\nb = 1\nb = 1\n")
+        self.assertIn("Edited", q.t_edit_file(p, "a = 1", "a = 2"))
+        self.assertIn("2 times", q.t_edit_file(p, "b = 1", "b = 3"))
+        self.assertIn("Edited", q.t_edit_file(p, "b = 1", "b = 3", replace_all=True))
+        self.assertEqual(open(p).read(), "a = 2\nb = 3\nb = 3\n")
+
+    def test_edit_file_forgives_wrong_indentation_and_line_numbers(self):
+        p = os.path.join(q.WORKSPACE, "f.py")
+        open(p, "w").write("def f():\n    if x:\n        return 1\n    return 2\n")
+        r = q.t_edit_file(p, "if x:\n    return 1", "if x:\n    return 10")
+        self.assertIn("Edited", r)
+        self.assertEqual(open(p).read(), "def f():\n    if x:\n        return 10\n    return 2\n")
+        r = q.t_edit_file(p, "     4\t    return 2", "    return 20")
+        self.assertIn("Edited", r)
+        self.assertIn("return 20", open(p).read())
+
+    def test_edit_file_not_found_points_at_the_closest_line(self):
+        p = os.path.join(q.WORKSPACE, "g.txt"); open(p, "w").write("alpha beta\ngamma\n")
+        r = q.t_edit_file(p, "alpha betta", "z")
+        self.assertIn("not found", r); self.assertIn("alpha beta", r)
+
+    def test_a_syntax_error_is_reported_right_after_the_edit(self):
+        p = os.path.join(q.WORKSPACE, "h.py"); open(p, "w").write("x = 1\n")
+        self.assertIn("syntax error", q.t_edit_file(p, "x = 1", "x = (1"))
+        self.assertIn("not valid JSON", q.BUILTIN["write_file"](os.path.join(q.WORKSPACE, "c.json"), "{bad"))
+
+    def test_edits_outside_the_workspace_are_refused_but_the_project_folder_is_fine(self):
+        outside = self.write("proj/notes.txt", "one\n")
+        self.assertIn("confined", q.t_edit_file(outside, "one", "two"))
+        pid, _ = q.project_upsert(None, name="P", folder=os.path.join(self.tmp, "proj"))
+        q.ACTIVE_PROJECT["id"] = pid
+        self.assertIn("Edited", q.t_edit_file("notes.txt", "one", "two"), "relative to the project")
+        self.assertEqual(open(outside).read(), "two\n")
+
+    def test_the_approval_card_gets_a_diff_of_the_edit(self):
+        p = os.path.join(q.WORKSPACE, "d.txt"); open(p, "w").write("keep\nold\n")
+        dv = q.preview_edit("edit_file", {"path": p, "old_string": "old", "new_string": "new"})
+        self.assertIn("+new", dv["diff"]); self.assertEqual(open(p).read(), "keep\nold\n")
+
+    # --- tool-call repair
+    SPECS = [{"type": "function", "function": {"name": "list_dir", "parameters": {
+        "type": "object", "properties": {"path": {"type": "string"}, "pattern": {"type": "string"}}}}},
+        {"type": "function", "function": {"name": "check_background", "parameters": {
+        "type": "object", "properties": {"id": {"type": "string"}, "tail": {"type": "integer"}},
+        "required": ["id"]}}}]
+
+    def test_repair_fixes_loose_json_and_types(self):
+        fn, a, err = q.repair_call("check_background", "```json\n{'id': 'bg1', 'tail': '50',}\n```", self.SPECS)
+        self.assertIsNone(err); self.assertEqual(a, {"id": "bg1", "tail": 50})
+        fn, a, err = q.repair_call("Check-Background", '{"id": "bg1"', self.SPECS)
+        self.assertEqual(fn, "check_background"); self.assertIsNone(err); self.assertEqual(a["id"], "bg1")
+
+    def test_repair_explains_what_it_cannot_fix(self):
+        self.assertIn("Did you mean", q.repair_call("check_backgrond", "{}", self.SPECS)[2])
+        self.assertIn("needs id", q.repair_call("check_background", "{}", self.SPECS)[2])
+        self.assertIn("not valid JSON", q.repair_call("list_dir", "{{{nope", self.SPECS)[2])
+        fn, a, err = q.repair_call("check_background", '{"job_id": "bg2"}', self.SPECS)
+        self.assertIsNone(err); self.assertEqual(a, {"id": "bg2"})
+
+    def test_a_broken_call_is_explained_to_the_model_not_run_with_no_arguments(self):
+        ran = []
+        q.BUILTIN["_probe_tool"] = lambda **a: ran.append(a) or "ran"
+        try:
+            spec = [{"type": "function", "function": {"name": "_probe_tool", "parameters": {
+                "type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]}}}]
+            self.script(lambda m: {"role": "assistant", "content": "", "tool_calls": [{
+                "id": "c1", "type": "function", "function": {"name": "_probe_tool", "arguments": "{oops"}}]},
+                self.final("ok"))
+            msgs = self.chat()
+            q.turn(msgs, "go", spec, emit=self.emit)
+            self.assertEqual(ran, [])
+            tool = [m for m in msgs if m["role"] == "tool"][0]
+            self.assertIn("not valid JSON", tool["content"]); self.assertFalse(tool["ok"])
+        finally:
+            q.BUILTIN.pop("_probe_tool", None)
+
+    # --- tool events and timing
+    def test_tool_events_carry_ids_and_timing_and_the_answer_its_cost(self):
+        def step(m):
+            return {"role": "assistant", "content": "", "_usage": {"prompt_tokens": 100, "completion_tokens": 7},
+                    "tool_calls": [{"id": "c9", "type": "function", "function": {
+                        "name": "list_dir", "arguments": json.dumps({"path": self.tmp})}}]}
+        self.script(step, lambda m: {"role": "assistant", "content": "done",
+                                     "_usage": {"prompt_tokens": 150, "completion_tokens": 3}})
+        msgs = self.chat()
+        q.turn(msgs, "look", [], emit=self.emit, sid="s-r1")
+        tool = [p for k, p in self.events if k == "tool"][0]
+        res = [p for k, p in self.events if k == "tool_result"][0]
+        self.assertEqual((tool["id"], res["id"]), ("c9", "c9"))
+        self.assertTrue(res["ok"]); self.assertIn("secs", res)
+        last = msgs[-1]
+        self.assertEqual(last["usage"], {"prompt_tokens": 250, "completion_tokens": 10})
+        self.assertEqual(last["tool_runs"], 1)
+        self.assertEqual(q.LAST_TURN["s-r1"]["tool_runs"], 1)
+        for k in ("secs", "usage", "tool_runs", "ok"):
+            self.assertNotIn(k, q._strip_reasoning(msgs)[-1], "private keys never reach a model")
+        st = q.usage_stats(1)
+        self.assertEqual(st["tools"], {"list_dir": 1})
+        self.assertEqual(st["tool_detail"]["list_dir"]["errors"], 0)
+
+    # --- denial reasons
+    def test_a_reason_given_with_deny_reaches_the_model(self):
+        self.script(lambda m: {"role": "assistant", "content": "", "tool_calls": [{
+            "id": "c1", "type": "function", "function": {"name": "schedule_task",
+            "arguments": json.dumps({"prompt": "x"})}}]}, self.final("ok"))
+        msgs = self.chat()
+        q.turn(msgs, "go", [], emit=self.emit, approve=lambda *a: (False, "use 9pm instead"))
+        tool = [m for m in msgs if m["role"] == "tool"][0]
+        self.assertIn("use 9pm instead", tool["content"])
+
+    # --- error-aware retries
+    def test_errors_are_classified(self):
+        self.assertEqual(q.classify_error(q.ModelError("HTTP 400: maximum context length is 32768", 400)), "overflow")
+        self.assertEqual(q.classify_error(q.ModelError("HTTP 401: invalid api key", 401)), "auth")
+        self.assertEqual(q.classify_error(q.ModelError("HTTP 429", 429)), "transient")
+        self.assertEqual(q.classify_error(ConnectionResetError("reset")), "transient")
+
+    def test_a_bad_key_stops_at_once_instead_of_retrying(self):
+        calls = []
+        def boom(messages, tools, **kw):
+            calls.append(1); raise q.ModelError("HTTP 401: invalid x-api-key", 401)
+        q.stream_call = boom
+        out = q.turn(self.chat(), "hi", [], emit=self.emit)
+        self.assertEqual(len(calls), 1); self.assertIn("key", out)
+
+    def test_context_overflow_compacts_and_carries_on(self):
+        state = {"n": 0}
+        def fake(messages, tools, **kw):
+            if tools is None: return {"role": "assistant", "content": "SUMMARY"}
+            state["n"] += 1
+            if state["n"] == 1: raise q.ModelError("HTTP 400: prompt is too long for the context window", 400)
+            return {"role": "assistant", "content": "answered"}
+        q.stream_call = fake
+        q.S["autocompact_pct"] = 80
+        hist = []
+        for i in range(12):
+            hist += [{"role": "user", "content": f"q{i} " + "x" * 200},
+                     {"role": "assistant", "content": f"a{i}"}]
+        msgs = self.chat(*hist)
+        self.assertEqual(q.turn(msgs, "and now?", [], emit=self.emit), "answered")
+        self.assertIn("retry", self.kinds())
+        self.assertTrue(any(m.get("compacted") for m in msgs))
+        self.assertEqual(q.S["autocompact_pct"], 80, "limit restored")
+
+    # --- wrap-up when a limit is hit
+    def test_a_step_limit_ends_with_a_summary_not_mid_thought(self):
+        q.S["max_tool_rounds"] = 2
+        def fake(messages, tools, **kw):
+            if tools is None: return {"role": "assistant", "content": "WRAP: did two steps, one left"}
+            return self.tool_step(len(messages))(messages)
+        q.stream_call = fake
+        out = q.turn(self.chat(), "many things", [], emit=self.emit)
+        self.assertIn("WRAP: did two steps", out)
+
+    # --- compaction merges the summary before it
+    def test_compaction_merges_the_previous_summary(self):
+        asks = []
+        def fake(messages, tools, **kw):
+            asks.append(messages[-1]["content"]); return {"role": "assistant", "content": "NEW SUMMARY"}
+        q.stream_call = fake
+        old = "EARLIER-SUMMARY " + "k" * 3000 + " END-OF-EARLIER"
+        msgs = self.chat({"role": "assistant", "compacted": True, "content": "[earlier conversation, compacted]\n" + old},
+                         *[{"role": "user", "content": f"m{i}"} for i in range(10)])
+        new, summary = q.compact(msgs, keep_tail=2)
+        self.assertIn("END-OF-EARLIER", asks[0], "the earlier summary was cut to 1,500 chars")
+        self.assertIn("## Still open", asks[0])
+        self.assertEqual(sum(1 for m in new if m.get("compacted")), 1)
+
+    # --- prompt templates
+    def test_saved_prompts_take_arguments(self):
+        pr = {"cite": {"text": "Find sources for $ARGUMENTS, first on $1."},
+              "plain": {"text": "Summarise this"}}
+        self.assertEqual(q.expand_prompt('/cite "sea ice" arctic', pr),
+                         'Find sources for "sea ice" arctic, first on sea ice.')
+        self.assertEqual(q.expand_prompt("/plain the paper", pr), "Summarise this\n\nthe paper")
+        self.assertEqual(q.expand_prompt("/unknown x", pr), "/unknown x")
+        self.assertEqual(q.expand_prompt("no slash", pr), "no slash")
+
+    # --- file-defined tools and project folders
+    TOOL = ("SPEC = {'name': 'shout', 'description': 'upper-case text', 'parameters': "
+            "{'type': 'object', 'properties': {'text': {'type': 'string'}}, 'required': ['text']}}\n"
+            "SAFE = True\n"
+            "def run(text): return text.upper()\n")
+
+    def test_a_tool_in_the_tools_folder_is_offered_and_runs(self):
+        self.write("tools/shout.py", self.TOOL)
+        names = [t["function"]["name"] for t in q.active_tools()[0]]
+        self.assertIn("shout", names)
+        self.assertEqual(q.dispatch("shout", {"text": "hi"}), "HI")
+        self.assertEqual(q.risk_check("shout", {"text": "hi"}), (None, None))
+
+    def test_a_projects_tool_files_are_not_even_imported_until_trusted(self):
+        """REVIEW: importing a tool file runs it, and a project folder may be a
+        cloned repo -- listing tools must not execute untrusted code."""
+        folder = os.path.join(self.tmp, "proj2")
+        marker = os.path.join(self.tmp, "ran.txt")
+        self.write("proj2/.orbit/tools/shout.py", f"open({marker!r}, 'w').write('x')\n" + self.TOOL)
+        self.write("proj2/AGENTS.md", "Always cite the source of every number.")
+        pid, _ = q.project_upsert(None, name="Proj", folder=folder)
+        q.ACTIVE_PROJECT["id"] = pid
+        self.assertNotIn("shout", [t["function"]["name"] for t in q.active_tools(pid)[0]])
+        sp = q.system_prompt_for(None, pid)
+        self.assertFalse(os.path.exists(marker), "an untrusted tool file ran")
+        self.assertIn("not loaded until", sp)
+        q.project_upsert(pid, trust_tools=True)
+        self.assertIn("shout", [t["function"]["name"] for t in q.active_tools(pid)[0]])
+        self.assertEqual(q.risk_check("shout", {"text": "x"})[0], None)
+        sp = q.system_prompt_for(None, pid)
+        self.assertIn("Always cite the source", sp); self.assertIn(folder, sp); self.assertIn("shout", sp)
+
+    def test_a_running_answer_keeps_its_own_project_when_you_click_another(self):
+        """REVIEW: the folder came from the shared ACTIVE_PROJECT, so opening a
+        chat in project A moved a running answer in project B into A's folder."""
+        a = os.path.join(self.tmp, "A"); b = os.path.join(self.tmp, "B")
+        os.makedirs(a); os.makedirs(b)
+        pa, _ = q.project_upsert(None, name="A", folder=a)
+        pb, _ = q.project_upsert(None, name="B", folder=b)
+        seen = {}
+        def fake(messages, tools, **kw):
+            q.ACTIVE_PROJECT["id"] = pa            # someone opens a chat in A mid-answer
+            seen["folder"] = q.project_folder()
+            seen["write_a"] = q._write_allowed(os.path.join(a, "x.txt"))
+            return {"role": "assistant", "content": "ok"}
+        q.stream_call = fake
+        q.ACTIVE_PROJECT["id"] = pb
+        q.turn(self.chat(), "go", [], emit=self.emit, project=pb)
+        self.assertEqual(seen["folder"], b)
+        self.assertFalse(seen["write_a"])
+
+    def test_two_projects_tools_with_the_same_name_stay_apart(self):
+        """REVIEW: one global map meant project B could run A's trusted tool."""
+        for name, word in (("PA", "from A"), ("PB", "from B")):
+            self.write(f"{name}/.orbit/tools/dup.py",
+                       "SPEC = {'name': 'dup', 'description': 'd', 'parameters': {'type': 'object', 'properties': {}}}\n"
+                       f"SAFE = True\ndef run(): return {word!r}\n")
+        pa, _ = q.project_upsert(None, name="A", folder=os.path.join(self.tmp, "PA"), trust_tools=True)
+        pb, _ = q.project_upsert(None, name="B", folder=os.path.join(self.tmp, "PB"), trust_tools=True)
+        q.file_tool_specs(pa); q.file_tool_specs(pb)
+        q.TURN_CTX.project = pa
+        self.assertEqual(q.dispatch("dup", {}), "from A")
+        q.TURN_CTX.project = pb
+        self.assertEqual(q.dispatch("dup", {}), "from B")
+
+    def test_dotdot_and_symlinks_cannot_escape_the_workspace(self):
+        """REVIEW: '<workspace>/../x' passed a plain prefix test."""
+        out = q.t_write_file(os.path.join(q.WORKSPACE, "..", "escaped.txt"), "x")
+        self.assertIn("confined", out)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "escaped.txt")))
+        os.symlink(self.tmp, os.path.join(q.WORKSPACE, "link"))
+        self.assertIn("confined", q.t_write_file(os.path.join(q.WORKSPACE, "link", "e2.txt"), "x"))
+        self.assertIn("confined", q.t_edit_file(os.path.join(q.WORKSPACE, "..", "nope.txt"), "", "x"))
+
+    def test_home_or_root_is_never_a_project_folder(self):
+        with self.assertRaises(ValueError): q.project_upsert(None, name="H", folder="~")
+        with self.assertRaises(ValueError): q.project_upsert(None, name="R", folder="/")
+
+    def test_forced_compaction_never_touches_the_shared_setting(self):
+        """REVIEW: overflow recovery set S['autocompact_pct']=1 for minutes."""
+        seen = []
+        def fake(messages, tools, **kw):
+            seen.append(q.S.get("autocompact_pct")); return {"role": "assistant", "content": "SUM"}
+        q.stream_call = fake
+        q.S["autocompact_pct"] = 80
+        msgs = self.chat(*[{"role": "user", "content": f"m{i}"} for i in range(12)])
+        did, _ = q._shrink(msgs, None, None, force=True)
+        self.assertTrue(did); self.assertEqual(seen, [80])
+        self.assertTrue(any(m.get("compacted") for m in msgs))
+
+    def test_output_cap_and_rate_limit_errors_are_not_called_overflow(self):
+        self.assertEqual(q.classify_error(q.ModelError("HTTP 400: max_tokens: 64000 > 32000", 400)), "bad_request")
+        self.assertEqual(q.classify_error(q.ModelError("HTTP 429: token limit per minute reached", 429)), "transient")
+
+    def test_edit_file_never_overlaps_and_unescapes_both_sides(self):
+        p = os.path.join(q.WORKSPACE, "o.txt"); open(p, "w").write("aaa\n")
+        self.assertIn("Edited", q.t_edit_file(p, "aa", "b", replace_all=True))
+        self.assertEqual(open(p).read(), "ba\n")
+        p2 = os.path.join(q.WORKSPACE, "u.py"); open(p2, "w").write("def f():\n    return 1\n")
+        self.assertIn("Edited", q.t_edit_file(p2, "def f():\\n    return 1", "def f():\\n    return 2"))
+        self.assertEqual(open(p2).read(), "def f():\n    return 2\n")
+
+    def test_edit_file_keeps_windows_line_endings(self):
+        p = os.path.join(q.WORKSPACE, "w.txt"); open(p, "wb").write(b"one\r\ntwo\r\n")
+        self.assertIn("Edited", q.t_edit_file(p, "one\ntwo", "one\nTWO"))
+        self.assertEqual(open(p, "rb").read(), b"one\r\nTWO\r\n")
+
+    def test_a_read_page_fits_in_one_tool_result(self):
+        """REVIEW: 2000 long lines overflowed the result cap, so its middle was
+        cut and the footer skipped the model past lines it never saw."""
+        p = self.write("wide.txt", "".join(f"{i} " + "x" * 200 + "\n" for i in range(1, 3001)))
+        page = q.t_read_file(p)
+        self.assertLessEqual(len(page), q.MAXCH)
+        nxt = int(page.rsplit("offset=", 1)[1].split(" ")[0])
+        self.assertIn(f"{nxt - 1:>6}\t{nxt - 1} ", page, "the footer points just past the last line shown")
+
+    def test_a_fenced_error_still_counts_as_failed(self):
+        msgs = []
+        q._run_one_tool({"id": "c1"}, "read_file", {"path": os.path.join(self.tmp, "missing.txt")},
+                        msgs, self.emit, None, {})
+        self.assertFalse(msgs[-1]["ok"])
+
+    def test_dollar_amounts_in_a_saved_prompt_are_left_alone(self):
+        pr = {"bank": {"text": "Use a virtual $1,000 bankroll and a $5 cap."},
+              "b2": {"text": "Spend $100 on $1."}}
+        self.assertEqual(q.expand_prompt("/bank", pr), "Use a virtual $1,000 bankroll and a $5 cap.")
+        self.assertEqual(q.expand_prompt("/bank now", pr), "Use a virtual $1,000 bankroll and a $5 cap.\n\nnow")
+        self.assertEqual(q.expand_prompt("/b2 ice", pr), "Spend $100 on ice.")
+
+    def test_a_model_that_keeps_sending_broken_calls_is_stopped(self):
+        q.stream_call = lambda messages, tools, **kw: {"role": "assistant", "content": "", "tool_calls": [{
+            "id": f"c{len(messages)}", "type": "function", "function": {"name": "nope", "arguments": "{"}}]}
+        spec = [{"type": "function", "function": {"name": "list_dir", "parameters": {"type": "object", "properties": {}}}}]
+        out = q.turn(self.chat(), "go", spec, emit=self.emit)
+        self.assertIn("malformed tool calls", out)
+
+    def test_a_broken_tool_file_is_reported_not_fatal(self):
+        self.write("tools/bad.py", "this is not python(")
+        specs, errors = q.active_tools()
+        self.assertTrue(any("bad.py" in k for k in errors))
+
+    # --- plugins
+    def test_plugins_can_rewrite_refuse_and_transform(self):
+        self.write("plugins/p.py",
+                   "def tool_before(name, args):\n"
+                   "    if name == 'run_shell': raise PermissionError('no shell on Sundays')\n"
+                   "    return args\n"
+                   "def tool_after(name, args, out): return out + ' [seen]'\n"
+                   "def system_transform(text): return text + '\\nPLUGIN WAS HERE'\n")
+        self.assertIn("PLUGIN WAS HERE", q.system_prompt_for())
+        msgs = []
+        q._run_one_tool({"id": "c1"}, "run_shell", {"command": "ls"}, msgs, self.emit, None, {})
+        self.assertIn("no shell on Sundays", msgs[-1]["content"])
+        q._run_one_tool({"id": "c2"}, "list_dir", {"path": self.tmp}, msgs, self.emit, None, {})
+        self.assertTrue(msgs[-1]["content"].rstrip().endswith("[seen]") or "[seen]" in msgs[-1]["content"])
+
+    # --- helper tasks
+    def test_a_helper_task_runs_in_its_own_context_and_reports_back(self):
+        seen = []
+        def fake(messages, tools, **kw):
+            seen.append(list(messages))
+            if messages[-1].get("content") == "look into X":           # the helper's own turn
+                return {"role": "assistant", "content": "X is 42"}
+            if any(m.get("role") == "tool" for m in messages):
+                return {"role": "assistant", "content": "the helper says 42"}
+            return {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
+                    "function": {"name": "task", "arguments": json.dumps({"prompt": "look into X"})}}]}
+        q.stream_call = fake
+        msgs = self.chat()
+        out = q.turn(msgs, "what is X?", [], emit=self.emit, sid="parent")
+        self.assertEqual(out, "the helper says 42")
+        helper = [m for m in seen if m[-1].get("content") == "look into X"][0]
+        self.assertFalse(any("what is X?" == m.get("content") for m in helper), "fresh context")
+        self.assertIn("X is 42", [m for m in msgs if m["role"] == "tool"][0]["content"])
+        self.assertEqual(q.TURN_CTX.sid, "parent")
+
+
+class TestRound1Server(Sandbox):
+    """Server-side pieces of round 1, checked on the module itself."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_loader(
+            "qqui_r1", importlib.machinery.SourceFileLoader(
+                "qqui_r1", os.path.join(ROOT, "bin", "orbit-ui")))
+        cls.ui = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.ui)
+
+    def test_a_chats_project_follows_its_state_both_ways(self):
+        """A chat loaded from disk keeps its project on the next save, and taking
+        it out of the project sticks too (it used to be copied back from disk)."""
+        q.session_save("s1", [{"role": "user", "content": "hi"}], "T", {"project": "p1"})
+        st = self.ui.get_state("s1")
+        self.assertEqual(st.project, "p1")
+        self.ui.save_session(st)
+        self.assertEqual(json.load(open(q.session_path("s1")))["project"], "p1")
+        st.project = None
+        self.ui.save_session(st)
+        self.assertIsNone(json.load(open(q.session_path("s1")))["project"])
+        src = open(os.path.join(ROOT, "bin", "orbit-ui")).read()
+        self.assertIn("other.project = d.get(\"project\")", src, "assign updates a loaded chat")
+
+    def test_a_tool_step_with_no_text_keeps_its_tool_rows(self):
+        msgs = [{"role": "user", "content": "go"},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
+                 "function": {"name": "list_dir", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "name": "list_dir", "content": "a"},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "c2", "type": "function",
+                 "function": {"name": "read_file", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "c2", "name": "read_file", "content": "Error: no such file"},
+                {"role": "assistant", "content": "done"}]
+        rows = self.ui.render(msgs)[-1]["tool_runs"]
+        self.assertEqual([r["name"] for r in rows], ["list_dir", "read_file"])
+        self.assertEqual([r["ok"] for r in rows], [True, False], "older chats: judged by what came back")
+
+    def test_render_returns_tool_rows_with_timing(self):
+        msgs = [{"role": "user", "content": "go", "t": 1.0},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
+                 "function": {"name": "list_dir", "arguments": "{\"path\": \"/tmp\"}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "name": "list_dir", "ok": True, "secs": 0.4,
+                 "content": "a\nb"},
+                {"role": "assistant", "content": "done", "secs": 3.2,
+                 "usage": {"prompt_tokens": 10, "completion_tokens": 2}}]
+        out = self.ui.render(msgs)
+        row = out[-1]["tool_runs"][0]
+        self.assertEqual((row["name"], row["args"], row["ok"], row["secs"]), ("list_dir", {"path": "/tmp"}, True, 0.4))
+        self.assertEqual(out[-1]["secs"], 3.2)
+        self.assertEqual(out[-1]["usage"]["completion_tokens"], 2)
+
+
+    def test_a_second_copy_exits_before_it_touches_any_chat(self):
+        """REGRESSION: with launchd respawning a second copy while another was
+        already serving, each respawn ran the restart recovery first -- booking
+        a "pick up where it left off" run for every chat the live copy was
+        still answering -- and only then failed to bind the port."""
+        import socket
+        src = open(os.path.join(ROOT, "bin", "orbit-ui")).read()
+        main = src[src.index('if __name__ == "__main__":'):]
+        self.assertLess(main.index("_already_serving(PORT)"), main.index("recover_interrupted_sessions()"))
+        srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+        port = srv.getsockname()[1]
+        try:
+            self.assertTrue(self.ui._already_serving(port))
+        finally:
+            srv.close()
+        self.assertFalse(self.ui._already_serving(port))
+
+
+class TestHeadlessRun(unittest.TestCase):
+    """`orbit run --json` answers once and prints machine-readable events."""
+
+    def test_json_run_prints_events_and_a_result(self):
+        import importlib.util, io, contextlib
+        spec = importlib.util.spec_from_loader(
+            "orbit_cli", importlib.machinery.SourceFileLoader("orbit_cli", os.path.join(ROOT, "bin", "orbit")))
+        cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+        saved = cli.q.turn
+        def fake(msgs, prompt, tools, emit=None, approve=None, sid=None, **kw):
+            self.assertFalse(approve("run_shell", {}, "x"), "nobody to ask: risky calls refused")
+            emit("tool", {"name": "list_dir", "args": {}, "id": "c1"})
+            cli.q.LAST_TURN[sid] = {"secs": 1.5, "usage": {"prompt_tokens": 3, "completion_tokens": 4}, "tool_runs": 1}
+            return "the answer to " + prompt
+        cli.q.turn = fake
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                code = cli.headless(["--json", "what", "is", "up"])
+        finally:
+            cli.q.turn = saved
+        lines = [json.loads(l) for l in buf.getvalue().splitlines() if l.strip()]
+        self.assertEqual(code, 0)
+        self.assertEqual(lines[0]["type"], "tool")
+        self.assertEqual(lines[-1]["type"], "result")
+        self.assertEqual(lines[-1]["data"]["text"], "the answer to what is up")
+        self.assertEqual(lines[-1]["data"]["tool_runs"], 1)

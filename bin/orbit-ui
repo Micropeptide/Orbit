@@ -100,7 +100,7 @@ class State:
         self.flags = {}
         self.model = None
     def refresh_tools(self):
-        specs, self.tool_errors = q.active_tools()
+        specs, self.tool_errors = q.active_tools(self.project)
         self.tools = q.tools_for(self.agent, specs)
 
 S = State()                        # the chat the browser is currently looking at
@@ -189,7 +189,9 @@ def save_session(st=None):
     extra.update(getattr(st, "flags", None) or {})   # pins set before the first save
     if getattr(st, "model", None): extra["model"] = st.model
     if st.sys_override: extra["sys_override"] = st.sys_override
-    if st.project: extra["project"] = st.project
+    # always written, so taking a chat out of a project sticks; moving one in
+    # from the sidebar updates the loaded state too (see /api/session/assign)
+    extra["project"] = st.project
     if getattr(st, "running", False): extra["running_since"] = st.busy_since or time.time()
     q.session_save(st.sid, st.msgs, st.title, extra)
 
@@ -383,6 +385,11 @@ class H(http.server.BaseHTTPRequestHandler):
                 "providers": q.MODELS.load(q.ROOT)["providers"],
                 "keys": q.secrets_masked()}))
         if p == "/api/projects":  return self._send(200, jdump(q.projects_load()))
+        if p == "/api/stats":
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            try: days = max(1, min(int((qs.get("days") or ["7"])[0]), 36500))
+            except ValueError: days = 7
+            return self._send(200, jdump(q.usage_stats(days)))
         if p == "/api/about":
             return self._send(200, jdump({"version": q.VERSION, "github": q.GITHUB,
                 "root": q.ROOT, "model": q.probe() or "stopped",
@@ -710,6 +717,7 @@ class H(http.server.BaseHTTPRequestHandler):
             rec["always"] = bool(d.get("always"))
             rec["pattern"] = (d.get("pattern") or "").strip()
             rec["note"] = (d.get("note") or "").strip()
+            rec["message"] = (d.get("message") or "").strip()[:2000]
             rec["event"].set()
             return self._send(200, jdump({"ok": True}))
         if p == "/api/checkpoints/restore":
@@ -729,15 +737,24 @@ class H(http.server.BaseHTTPRequestHandler):
             q.know_set_project(d.get("name",""), d.get("project") or None)
             return self._send(200, jdump({"ok": True}))
         if p == "/api/projects/save":
-            pid, pr = q.project_upsert(d.get("id"), name=d.get("name"),
+            try:
+              pid, pr = q.project_upsert(d.get("id"), name=d.get("name"),
                 description=d.get("description"), instructions=d.get("instructions"),
-                color=d.get("color"), order=d.get("order"))
+                color=d.get("color"), order=d.get("order"), folder=d.get("folder"),
+                trust_tools=(bool(d["trust_tools"]) if "trust_tools" in d else None))
+            except ValueError as e:
+                return self._send(400, jdump({"error": str(e)}))
+            if pr.get("folder") and not os.path.isdir(pr["folder"]):
+                pr = dict(pr, folder_missing=True)
             return self._send(200, jdump({"id": pid, "project": pr}))
         if p == "/api/projects/delete":
             return self._send(200, jdump({"ok": q.project_delete(d.get("id"))}))
         if p == "/api/session/assign":
             q.session_meta(d.get("id"), project=d.get("project"))
             with LOCK:
+                other = STATES.get(d.get("id"))
+                if other is not None and other is not S:
+                    other.project = d.get("project")
                 if S.sid == d.get("id"):
                     S.project = d.get("project")
                     q.ACTIVE_PROJECT["id"] = S.project
@@ -1069,6 +1086,8 @@ class H(http.server.BaseHTTPRequestHandler):
         st.live = {"thinking": "", "content": "", "tools": [],
                    "status": "", "done": False, "seq": 0}
         text = d.get("message", "")
+        try: text = q.expand_prompt(text)       # '/name words' runs a saved prompt
+        except Exception: pass
         atts = d.get("attachments") or []
         effort = d.get("effort")
         self.send_response(200)
@@ -1109,23 +1128,42 @@ class H(http.server.BaseHTTPRequestHandler):
                         rid = f"ap{_APPROVE_SEQ[0]}"
                         ev = threading.Event()
                         PENDING[rid] = {"event": ev, "allow": False, "fn": fn, "args": a}
-                        Q.put(("approval_request", {"id": rid, "name": fn, "args": a,
-                                                    "reason": reason,
-                                                    "suggested_pattern": q._rule_pattern_suggestion(fn, a)}))
-                        ok = ev.wait(timeout=300)
+                        req = {"id": rid, "name": fn, "args": a, "reason": reason,
+                               "suggested_pattern": q._rule_pattern_suggestion(fn, a)}
+                        if fn in ("write_file", "edit_file"):
+                            # what the change will be, so it can be judged before it's made
+                            dv = q.preview_edit(fn, a)
+                            if dv: req["diff"] = dv
+                        Q.put(("approval_request", req))
+                        # also in the live buffer, so any window that opens this chat
+                        # can see the prompt and answer it — it used to exist only in
+                        # the tab that sent the message, and time out unseen
+                        st.live["approval"] = req
+                        q.notify("Orbit needs your approval", f"{fn}: {reason}")
+                        ok = ev.wait(timeout=900)
+                        st.live.pop("approval", None)
                         rec = PENDING.pop(rid, {})
                         if ok and rec.get("allow") and rec.get("always"):
                             q.add_permission_rule("allow", fn,
                                 rec.get("pattern") or q._rule_pattern_suggestion(fn, a),
                                 rec.get("note") or "")
-                        return bool(rec.get("allow")) if ok else False
+                        allow = bool(rec.get("allow")) if ok else False
+                        # a reason typed with Deny (or a note with Allow) goes back to
+                        # the model, so it can change course rather than just stop
+                        note = (rec.get("message") or "").strip() if ok else ""
+                        return (allow, note) if note else allow
 
                     def _emit(k, p):
                         lv = st.live                      # keep a copy so you can rejoin later
                         if   k == "thinking_delta": lv["thinking"] += p
                         elif k == "content_delta":  lv["content"]  += p
                         elif k == "tool":
-                            lv["tools"].append({"name": p.get("name"), "args": p.get("args")})
+                            lv["tools"].append({"name": p.get("name"), "args": p.get("args"),
+                                                "id": p.get("id"), "t": p.get("t")})
+                        elif k == "tool_result":
+                            for x in reversed(lv["tools"]):
+                                if x.get("id") and x.get("id") == (p or {}).get("id"):
+                                    x.update(ok=p.get("ok"), secs=p.get("secs")); break
                         elif k == "auto_approved":
                             # so a tab that rejoins mid-answer still sees what ran
                             # unattended, not just what is still waiting on it
@@ -1140,7 +1178,7 @@ class H(http.server.BaseHTTPRequestHandler):
                             p = dict(p or {})
                             p["images"] = [os.path.relpath(i, q.WORKSPACE) for i in q.LAST_IMAGES]
                             q.LAST_IMAGES = []
-                        if k == "tool_result" and (p or {}).get("name") == "write_file" and q.LAST_DIFF:
+                        if k == "tool_result" and (p or {}).get("name") in ("write_file", "edit_file") and q.LAST_DIFF:
                             p = dict(p or {}); p["diff"] = dict(q.LAST_DIFF); q.LAST_DIFF.clear()
                         Q.put((k, p))
                     q.CURRENT_SID.update(sid=st.sid, title=st.title)
@@ -1149,14 +1187,17 @@ class H(http.server.BaseHTTPRequestHandler):
                     prev_effort = q.S.get("reasoning_effort")
                     if effort: q.S["reasoning_effort"] = effort
                     _refresh_system(st)
+                    st.refresh_tools()     # a project's own tools, and any added since
                     st.msgs, did, pct = q.maybe_autocompact(st.msgs, emit=lambda k, p: Q.put((k, p)),
                                                             sid=st.sid)
                     if did: save_session(st)
                     _t0 = time.time()
+                    n0 = len(st.msgs)
                     st.interrupt.clear()
                     q.turn(st.msgs, content, st.tools, emit=_emit, approve=_approve,
                            cancel=st.cancel, inbox=st.inbox, interrupt=st.interrupt, sid=st.sid,
-                           checkpoint=lambda: save_session(st))
+                           checkpoint=lambda: save_session(st), project=st.project)
+                    spent = dict(q.LAST_TURN.get(st.sid) or {})
                     # a note that landed in the instant between the answer ending
                     # and this chat being released: answer it now, in this same
                     # stream, rather than leave it sitting unread
@@ -1168,17 +1209,28 @@ class H(http.server.BaseHTTPRequestHandler):
                         q.turn(st.msgs, note.get("text", ""), st.tools, emit=_emit,
                                approve=_approve, cancel=st.cancel, inbox=st.inbox,
                                interrupt=st.interrupt, sid=st.sid,
-                               checkpoint=lambda: save_session(st))
+                               checkpoint=lambda: save_session(st), project=st.project)
+                        # one stream, one bill: add the follow-up's time and tokens
+                        more = q.LAST_TURN.get(st.sid) or {}
+                        spent["secs"] = round((spent.get("secs") or 0) + (more.get("secs") or 0), 1)
+                        spent["tool_runs"] = (spent.get("tool_runs") or 0) + (more.get("tool_runs") or 0)
+                        spent["usage"] = {k: (spent.get("usage") or {}).get(k, 0) + (more.get("usage") or {}).get(k, 0)
+                                          for k in ("prompt_tokens", "completion_tokens")}
+                    q.LAST_TURN[st.sid] = spent
                     try:
-                        stats = q.server_status().get("last") or {}
+                        u = (q.LAST_TURN.get(st.sid) or {}).get("usage") or {}
+                        stats = u if any(u.values()) else (q.server_status().get("last") or {})
+                        spec = q.current_model(st.model) or {}
                         q.ledger_add(st.sid, seconds=round(time.time() - _t0, 1),
                                      prompt_tokens=stats.get("prompt_tokens"),
-                                     completion_tokens=stats.get("completion_tokens"))
+                                     completion_tokens=stats.get("completion_tokens"),
+                                     model=spec.get("label") or spec.get("model"))
                         tot = (stats.get("prompt_tokens") or 0) + (stats.get("completion_tokens") or 0)
                         if tot: q.SESSION_TOKENS[st.sid] = tot
                     except Exception: pass
                     st.running = False
                     save_session(st)
+                    _learn_later(st, n0)
                 if first and not st.cancel.is_set():
                     try:
                         auto = autotitle(st.msgs)
@@ -1187,7 +1239,9 @@ class H(http.server.BaseHTTPRequestHandler):
                             save_session(st)
                     except Exception:
                         pass
-                Q.put(("end", {"sid": st.sid, "title": st.title}))
+                Q.put(("end", {"sid": st.sid, "title": st.title,
+                               **{k: v for k, v in (q.LAST_TURN.get(st.sid) or {}).items()
+                                  if k in ("secs", "usage", "tool_runs", "rounds")}}))
             except Exception as e:
                 Q.put(("error", f"{type(e).__name__}: {e}")); Q.put(("end", {}))
             finally:
@@ -1215,13 +1269,16 @@ class H(http.server.BaseHTTPRequestHandler):
 
 # stream events worth showing to a tab that rejoins an answer mid-way
 _STATUS_KINDS = ("server_starting", "stagnation", "autocompact", "squeezed",
-                 "long_running", "interjection")
+                 "long_running", "interjection", "retry", "subtask")
 
 def _status_text(k, p):
     p = p or {}
     if k == "long_running": return f"still working — {p.get('minutes')} min, {p.get('rounds')} steps"
     if k == "interjection": return "reading your note"
     if k == "squeezed":     return "trimming old tool output to make room"
+    if k == "retry":        return (f"model request failed ({p.get('kind')}) — retrying"
+                                    + (f" in {p.get('wait')}s" if p.get("wait") else ""))
+    if k == "subtask":      return f"helper: {p.get('description')} — {p.get('tool')}"
     return p.get("msg") or k.replace("_", " ")
 
 def _live_emitter(st):
@@ -1231,10 +1288,26 @@ def _live_emitter(st):
         lv = st.live
         if   k == "thinking_delta": lv["thinking"] += p
         elif k == "content_delta":  lv["content"]  += p
-        elif k == "tool": lv["tools"].append({"name": p.get("name"), "args": p.get("args")})
+        elif k == "tool": lv["tools"].append({"name": p.get("name"), "args": p.get("args"),
+                                              "id": p.get("id"), "t": p.get("t")})
+        elif k == "tool_result":
+            for x in reversed(lv["tools"]):
+                if x.get("id") and x.get("id") == (p or {}).get("id"):
+                    x.update(ok=p.get("ok"), secs=p.get("secs")); break
         elif k in _STATUS_KINDS: lv["status"] = _status_text(k, p)
         lv["seq"] += 1
     return emit
+
+def _learn_later(st, n0, min_steps=3):
+    """After a substantial answer (min_steps tool calls or more), pull out
+    durable facts and save them as memory — in the background, after the
+    chat is free, so it never holds up your next message. Never for a
+    temporary chat, which must leave no trace, nor for one you stopped."""
+    if st.temp or st.cancel.is_set(): return
+    steps = sum(1 for m in st.msgs[n0:] if m.get("role") == "tool")
+    if steps < min_steps: return
+    msgs, title = list(st.msgs), st.title
+    threading.Thread(target=lambda: q.auto_memory(msgs, title), daemon=True).start()
 
 def _refresh_system(st):
     """Rebuild a chat's system prompt before each answer. It used to be fixed
@@ -1273,22 +1346,33 @@ def _msg_text(m):
     return str(c or "")
 
 def render(msgs):
-    out, pending_imgs, pending_tools = [], [], []
+    out, pending_imgs, pending_tools, pending_detail = [], [], [], []
+    call_args = {}                     # tool call id -> its arguments, for the tool rows
     for m in msgs:
         if m.get("role") == "tool":
             # recover plots and tool names so a reloaded chat looks like the live one
             body = str(m.get("content") or "")
             mm = _re.search(r"\[created images: ([^\]]+)\]", body)
             if mm: pending_imgs += [x.strip() for x in mm.group(1).split(",") if x.strip()]
-            if m.get("name"): pending_tools.append(m["name"])
+            if m.get("name"):
+                pending_tools.append(m["name"])
+                pending_detail.append({"name": m["name"], "id": m.get("tool_call_id"),
+                                       "args": call_args.get(m.get("tool_call_id")),
+                                       # a chat saved before "ok" was kept: judge it by what came back
+                                       "ok": m["ok"] if "ok" in m else q._tool_ok(body),
+                                       "secs": m.get("secs"),
+                                       "output": body[:1500]})
             continue
+        for tc in m.get("tool_calls") or []:
+            try: call_args[tc.get("id")] = json.loads(tc["function"].get("arguments") or "{}")
+            except (ValueError, KeyError, TypeError): pass
         if m.get("role") not in ("user", "assistant"): continue
         c = m.get("content")
         if isinstance(c, list):
             out.append({"role": m["role"],
                         "text": " ".join(x.get("text","") for x in c if x.get("type")=="text"),
                         "images": [x["image_url"]["url"] for x in c if x.get("type")=="image_url"],
-                        "plots": [], "tools": []})
+                        "plots": [], "tools": [], "t": m.get("t")})
         # a stopped turn can have thinking with no answer text yet -- still show it
         elif c or (m.get("role") == "assistant" and m.get("reasoning_content")):
             out.append({"role": m["role"], "text": c or "", "images": [],
@@ -1299,9 +1383,16 @@ def render(msgs):
                         # the thinking trace, kept from a normal answer or a stop mid-stream
                         "thinking": m.get("reasoning_content") if m["role"] == "assistant" else None,
                         # a note sent while it was working, so a reopened chat can say so
-                        "note": bool(m.get("interjection"))})
-        if m.get("role") == "assistant":
-            pending_imgs, pending_tools = [], []
+                        "note": bool(m.get("interjection")),
+                        # when it was written; None for messages from before this was kept
+                        "t": m.get("t"),
+                        # how long the answer took, what it cost, and each tool it ran
+                        "secs": m.get("secs"), "usage": m.get("usage"),
+                        "tool_runs": pending_detail if m["role"] == "assistant" else []})
+            if m.get("role") == "assistant":
+                # reset only once they are attached to an entry: a tool-call step
+                # with no text and no thinking used to throw its tool rows away
+                pending_imgs, pending_tools, pending_detail = [], [], []
     return out
 
 JOBS_INFLIGHT = set()
@@ -1339,14 +1430,17 @@ def run_job(job):
                 q.ACTIVE_MODEL["id"] = st.model
                 _refresh_system(st)
                 st.msgs, _did, _pct = q.maybe_autocompact(st.msgs, sid=st.sid)
+                n0 = len(st.msgs)
                 prompt = (f"[Scheduled task “{label}”, running unattended at "
                           f"{time.strftime('%H:%M')}]\n{job.get('prompt', '')}")
+                st.refresh_tools()
                 out = q.turn(st.msgs, prompt, st.tools, emit=_live_emitter(st),
                              approve=lambda *a: False, cancel=st.cancel,
                              inbox=st.inbox, interrupt=st.interrupt, sid=st.sid,
-                             checkpoint=lambda: save_session(st))
+                             checkpoint=lambda: save_session(st), project=st.project)
                 st.running = False
                 save_session(st)
+                _learn_later(st, n0)
                 result_sid = st.sid
             finally:
                 st.live["done"] = True
@@ -1357,13 +1451,16 @@ def run_job(job):
                 try: st.lock.release()
                 except RuntimeError: pass
         else:
-            msgs = [{"role": "system", "content": q.system_prompt_for(job.get("agent"))}]
-            specs, _ = q.active_tools()
+            pid = job.get("project") or None
+            q.ACTIVE_PROJECT["id"] = pid
+            msgs = [{"role": "system", "content": q.system_prompt_for(job.get("agent"), pid)}]
+            specs, _ = q.active_tools(pid)
             tools = q.tools_for(job.get("agent"), specs)
             result_sid = "sched-" + time.strftime("%Y%m%d-%H%M%S")
             out = q.turn(msgs, job.get("prompt", ""), tools, approve=lambda *a: False,
-                         sid=result_sid)
-            q.session_save(result_sid, msgs, f"[scheduled] {label}")
+                         sid=result_sid, project=pid)
+            # filed under its project, so a project's scheduled runs sit with its chats
+            q.session_save(result_sid, msgs, f"[scheduled] {label}", {"project": pid} if pid else None)
         result, ok = (out or "")[:400], True
     except Exception as e:
         result, ok = f"{type(e).__name__}: {e}", False
@@ -1418,7 +1515,25 @@ class Srv(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
+def _already_serving(port):
+    """Whether another Orbit is already listening on this port. A second copy
+    (launchd's KeepAlive respawning one while another was started by hand)
+    used to run the restart recovery before failing to bind -- treating every
+    chat the live copy was answering as cut off, and booking a "pick up where
+    it left off" run for it each time it was respawned."""
+    import socket
+    try:
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=1.5):
+            return True
+    except OSError:
+        return False
+
 if __name__ == "__main__":
+    if _already_serving(PORT):
+        print(f"Orbit is already running on port {PORT}; this copy is exiting "
+              "without touching any chat.")
+        time.sleep(30)          # don't let a KeepAlive respawn spin every second
+        sys.exit(0)
     # This was never started: scheduled tasks only ever ran when you pressed
     # "run now", and the trash was never auto-purged.
     # before the scheduler starts, so a pick-up run it books is there to find

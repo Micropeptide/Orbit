@@ -27,7 +27,9 @@ under each answer names the model that wrote it.*
 - **It can use the screen, off by default.** Turn on Screen control and it can take a screenshot, click, type and press keys on your Mac — in any app. A screenshot is only actually *seen* by a vision-capable model; a click or keystroke still asks for your approval unless Full computer access is also on. Needs Screen Recording and Accessibility granted to it by hand — Orbit can't grant those for you.
 - **A roadmap, not just a changelog.** [docs/agent-roadmap.md](docs/agent-roadmap.md) goes through what Claude Code does — hooks, subagents, plan mode, background shells, finer-grained per-command permissions — and works out what's worth building here.
 - **Guardrails that hold.** A three-way autonomy setting — ask every time, auto-approve safe workspace-scoped actions, or full computer access — decides what runs without asking; a small hard floor (disk destruction, a fork bomb, a reverse shell, protected paths, …) is refused outright in every mode, full access included. Writes stay in the workspace unless told otherwise; the Python tool cannot be used as a shell; fetched web content is fenced and scanned for prompt injection.
-- **Built for long work.** Projects with shared instructions, skills loaded on demand, durable memory, scheduled prompts, and three conversations generating at once.
+- **Built for long work.** Projects with shared instructions, skills loaded on demand, durable memory, scheduled prompts, and three conversations generating at once. Steer an answer while it runs, stop it and redirect without losing its thinking, and let it hand side-investigations to a helper with its own empty context.
+- **Projects that point at a folder.** Give a project a folder and its chats work there: relative paths resolve against it, the folder's `ORBIT.md` / `AGENTS.md` / `CLAUDE.md` becomes the project's rules, and, once you trust the project, Python files in `<folder>/.orbit/tools/` become tools only that project's chats see.
+- **Extend it with one file.** A Python file in `tools/` is a new tool; one in `plugins/` can rewrite or refuse tool calls and adjust the system prompt. See [docs/extending.md](docs/extending.md).
 - **Plain files in one folder.** Chats, notes and settings are JSON and Markdown you can open in Finder. Delete the folder and Orbit is gone.
 - **Backed up without thinking about it.** Once a day the Mac archives chats, memory, skills, knowledge and settings into iCloud Drive (API keys left out); restoring only ever adds what is missing.
 
@@ -56,8 +58,16 @@ tools.
 **It keeps its shape over long work.** Chats live in projects with shared
 instructions. Skills are procedures loaded on demand. When the context window
 fills, it trims old tool output first and only compacts the conversation if that
-is not enough. Answers keep streaming when you switch chats, and up to three
+is not enough — and a later compaction merges the earlier summary instead of
+re-summarising it. Answers keep streaming when you switch chats, and up to three
 conversations can run at once.
+
+**It recovers instead of giving up.** A malformed tool call (broken JSON, a
+misspelt tool, a missing argument) is repaired or explained back to the model
+rather than run with nothing. A context overflow compacts and carries on; a rate
+limit backs off and retries; a bad API key stops at once with a clear message.
+Tool output too long for the window is never silently cut: the whole of it is
+saved to a file and the model is told where to page through it.
 
 **It stays out of the way.** Everything is a folder of plain files. Delete the
 folder and Orbit is gone.
@@ -169,16 +179,27 @@ speculative decoding depth, fan behaviour).
 | **Tasks** | Scheduled prompts that run on their own, and a live view of cluster jobs if you use one. |
 | **Trash** | Deleted chats and files, restorable, auto-purged after a retention you set. |
 
-Also: `/` for commands, `⌘P` to search everything, `?` for shortcuts, drag-and-drop
-or paste to attach, a temporary chat that is never written to disk, and one-click
-export to Markdown or self-contained HTML.
+Also: `/` for commands (saved prompts take arguments — `$ARGUMENTS`, `$1`, `$2`),
+`⌘P` to search everything, `⌘G` to jump to any message, `?` for shortcuts,
+drag-and-drop or paste to attach (a long paste collapses into a chip), ↑/↓ for
+your earlier messages, a draft kept per chat, fork a chat from any message, a
+temporary chat that is never written to disk, and one-click export to Markdown or
+self-contained HTML. Each tool call shows as a row with a live timer and ✓/✗;
+each answer shows how long it took and how many tokens it used, and Usage by
+model… adds it all up by day, model and tool. When a chat you are not looking at
+finishes or needs your approval, you get a notification — and an approval can be
+answered from any window, with a diff of the edit it is asking about and a
+reason if you deny it.
 
 ---
 
 ## Tools it can use
 
 Web search · fetch a URL (with a stealth-browser fallback for bot walls) · read
-local files (pdf, docx, xlsx, pptx, csv) · write files · run Python · run shell ·
+local files a page at a time with line numbers (pdf, docx, xlsx, pptx, csv
+converted) · write files · edit part of a file (forgiving about whitespace and
+indentation, syntax-checked afterwards) · hand a sub-task to a helper · run
+Python · run shell ·
 list and grep directories · fetch paper PDFs by DOI · PubMed · NCBI · UniProt ·
 AlphaFold · sequence utilities · check citations against Crossref · search your
 knowledge base · remember a fact · save a skill · plan and track multi-step work ·
@@ -311,7 +332,7 @@ using it, are in [docs/service.md](docs/service.md).
 ## Tests
 
 ```bash
-venv/bin/python tests/test_core.py        # 73 unit tests: safety, sessions, models, context
+venv/bin/python tests/test_core.py        # unit tests: safety, sessions, models, context, tools
 venv/bin/python tests/test_endpoints.py   # every read-only endpoint answers cleanly
 venv/bin/python tests/test_api.py         # create/rename/tag/bin/restore round-trips
 ```
