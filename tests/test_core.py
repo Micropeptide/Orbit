@@ -715,7 +715,7 @@ class TestModelProviders(unittest.TestCase):
 
     def test_a_hosted_model_does_not_wake_the_local_server(self):
         src = open(os.path.join(ROOT, "bin", "qqcore.py")).read()
-        block = src.split("def turn(")[1][:1500]
+        block = src.split("def turn(")[1][:3000]
         self.assertIn("remote = not model_is_local()", block)
         self.assertIn("if not remote and not probe(2):", block)
 
@@ -1810,12 +1810,73 @@ class TestRound1(TestLongAnswers):
         self.assertEqual(q.expand_prompt("/bank now", pr), "Use a virtual $1,000 bankroll and a $5 cap.\n\nnow")
         self.assertEqual(q.expand_prompt("/b2 ice", pr), "Spend $100 on ice.")
 
+    def test_an_exact_edit_of_a_tsv_row_keeps_its_first_column(self):
+        """REVIEW: a row starting '2<TAB>' looked like a read_file line number,
+        and the first column was stripped from the replacement."""
+        p = os.path.join(q.WORKSPACE, "t.tsv"); open(p, "w").write("1\t100\tA\n2\t200\tB\n")
+        self.assertIn("Edited", q.t_edit_file(p, "2\t200\tB", "2\t250\tB"))
+        self.assertEqual(open(p).read(), "1\t100\tA\n2\t250\tB\n")
+
+    def test_mixed_line_endings_are_left_as_they_were(self):
+        p = os.path.join(q.WORKSPACE, "m.txt"); open(p, "wb").write(b"a\r\nb\nc\n")
+        q.t_edit_file(p, "b", "B")
+        self.assertEqual(open(p, "rb").read(), b"a\r\nB\nc\n")
+
+    def test_system_and_scratch_roots_are_not_project_folders(self):
+        for f in ("/tmp", "/private/var", "/usr/local", "/Library/Caches"):
+            if os.path.isdir(f):
+                self.assertFalse(q._folder_ok(f), f)
+        self.assertTrue(q._folder_ok(self.tmp))
+
+    def test_project_folder_files_have_restorable_checkpoints(self):
+        folder = os.path.join(self.tmp, "cp"); os.makedirs(folder)
+        pid, _ = q.project_upsert(None, name="CP", folder=folder)
+        q.TURN_CTX.project = pid
+        f = os.path.join(folder, "n.txt"); open(f, "w").write("v1\n")
+        q.t_edit_file(f, "v1", "v2")
+        snaps = q.list_checkpoints(f)
+        self.assertEqual(len(snaps), 1)
+        self.assertIn("Restored", q.restore_checkpoint(f, snaps[0]))
+        self.assertEqual(open(f).read(), "v1\n")
+
+    def test_a_scheduled_task_is_filed_under_the_answers_project(self):
+        saved = (q.sched_load, q.sched_save); box = {"jobs": []}
+        q.sched_load = lambda: box; q.sched_save = lambda d: d
+        try:
+            q.TURN_CTX.project = "p-running"; q.ACTIVE_PROJECT["id"] = "p-on-screen"
+            q.t_schedule_task("check it", in_this_chat=False)
+            self.assertEqual(box["jobs"][-1]["project"], "p-running")
+        finally:
+            q.sched_load, q.sched_save = saved
+
+    def test_a_running_answer_keeps_its_model_when_another_chat_switches(self):
+        seen = []
+        def fake(messages, tools, **kw):
+            q.ACTIVE_MODEL["id"] = "other-chats-model"
+            seen.append(getattr(q.TURN_CTX, "model", None))
+            if len(seen) == 1:
+                return {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
+                        "function": {"name": "list_dir", "arguments": json.dumps({"path": self.tmp})}}]}
+            return {"role": "assistant", "content": "ok"}
+        q.stream_call = fake
+        was = q.ACTIVE_MODEL.get("id")
+        try:
+            q.ACTIVE_MODEL["id"] = "my-model"
+            q.turn(self.chat(), "go", [], emit=self.emit)
+        finally:
+            q.ACTIVE_MODEL["id"] = was
+        self.assertEqual(seen, ["my-model", "my-model"])
+
     def test_a_model_that_keeps_sending_broken_calls_is_stopped(self):
         q.stream_call = lambda messages, tools, **kw: {"role": "assistant", "content": "", "tool_calls": [{
             "id": f"c{len(messages)}", "type": "function", "function": {"name": "nope", "arguments": "{"}}]}
         spec = [{"type": "function", "function": {"name": "list_dir", "parameters": {"type": "object", "properties": {}}}}]
-        out = q.turn(self.chat(), "go", spec, emit=self.emit)
+        msgs = self.chat()
+        out = q.turn(msgs, "go", spec, emit=self.emit)
         self.assertIn("malformed tool calls", out)
+        asked = {c["id"] for m in msgs if m.get("tool_calls") for c in m["tool_calls"]}
+        answered = {m.get("tool_call_id") for m in msgs if m["role"] == "tool"}
+        self.assertEqual(asked - answered, set(), "a dangling call breaks the next request")
 
     def test_a_broken_tool_file_is_reported_not_fatal(self):
         self.write("tools/bad.py", "this is not python(")
@@ -1883,6 +1944,15 @@ class TestRound1Server(Sandbox):
         self.assertIsNone(json.load(open(q.session_path("s1")))["project"])
         src = open(os.path.join(ROOT, "bin", "orbit-ui")).read()
         self.assertIn("other.project = d.get(\"project\")", src, "assign updates a loaded chat")
+
+    def test_a_stopped_answers_tool_rows_stay_with_it(self):
+        msgs = [{"role": "user", "content": "first"},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
+                 "function": {"name": "web_search", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "name": "web_search", "content": "r"},
+                {"role": "user", "content": "second"},
+                {"role": "assistant", "content": "second answer"}]
+        self.assertEqual(self.ui.render(msgs)[-1]["tool_runs"], [])
 
     def test_a_tool_step_with_no_text_keeps_its_tool_rows(self):
         msgs = [{"role": "user", "content": "go"},

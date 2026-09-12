@@ -380,7 +380,8 @@ def model_catalogue():
 
 def current_model(mid=None):
     """Resolved model for this turn. None when nothing is configured at all."""
-    want = mid or ACTIVE_MODEL.get("id")
+    # a running answer keeps the model it started with, whatever another chat selects
+    want = mid or getattr(TURN_CTX, "model", None) or ACTIVE_MODEL.get("id")
     if want and want.startswith("local-dir:"):
         want = None                     # not serving yet: fall back to what is
     return MODELS.resolve(ROOT, want, local_model_name(), secrets_load())
@@ -657,6 +658,20 @@ CHECKPOINTS_KEEP = 20
 def _checkpoint_dir(rel):
     return os.path.join(CHECKPOINTS, rel)
 
+def _ckpt_rel(p):
+    """Where a file's snapshots live under .checkpoints: its workspace-relative
+    path, or .projects/<project id>/<path in the project folder> for a file in
+    the running project's folder. None for anything else."""
+    p = os.path.abspath(p)
+    if p.startswith(os.path.abspath(WORKSPACE) + os.sep):
+        rel = os.path.relpath(p, WORKSPACE)
+        return None if rel.split(os.sep)[0] == ".checkpoints" else rel
+    if "project_folder" not in globals(): return None
+    pid, folder = current_project(), project_folder()
+    if pid and folder and p.startswith(folder.rstrip(os.sep) + os.sep):
+        return os.path.join(".projects", pid, os.path.relpath(p, folder))
+    return None
+
 def _save_checkpoint(p):
     """Snapshot a workspace file's current contents before write_file overwrites
     it, so a bad edit can be undone with the actual previous file, not just a
@@ -664,14 +679,8 @@ def _save_checkpoint(p):
     elsewhere on the Mac are not (nowhere safe to keep the snapshot). A no-op
     for a file that doesn't exist yet, since there is nothing to save."""
     if not os.path.isfile(p): return
-    if p.startswith(os.path.abspath(WORKSPACE) + os.sep):
-        rel = os.path.relpath(p, WORKSPACE)
-    else:
-        # a project folder's files get a snapshot too, kept under the workspace
-        folder = project_folder() if "project_folder" in globals() else None
-        if not folder or not p.startswith(folder.rstrip(os.sep) + os.sep): return
-        rel = os.path.join("_projects", os.path.basename(folder), os.path.relpath(p, folder))
-    if rel.split(os.sep)[0] == ".checkpoints": return
+    rel = _ckpt_rel(p)                 # a project folder's files get snapshots too
+    if not rel: return
     d = _checkpoint_dir(rel)
     os.makedirs(d, exist_ok=True)
     ts = time.strftime("%Y%m%d-%H%M%S")
@@ -691,8 +700,9 @@ def list_checkpoints(path):
     """Saved versions of a workspace file, newest first — [] if it has none or
     lives outside the workspace."""
     p = os.path.abspath(os.path.expanduser(path))
-    if not p.startswith(os.path.abspath(WORKSPACE) + os.sep): return []
-    d = _checkpoint_dir(os.path.relpath(p, WORKSPACE))
+    rel = _ckpt_rel(p)
+    if not rel: return []
+    d = _checkpoint_dir(rel)
     if not os.path.isdir(d): return []
     return sorted(os.listdir(d), reverse=True)
 
@@ -700,15 +710,16 @@ def restore_checkpoint(path, name):
     """Put a saved version of a workspace file back. Snapshots what's there
     first, so restoring is itself undoable — never a one-way trip."""
     p = os.path.abspath(os.path.expanduser(path))
-    if not p.startswith(os.path.abspath(WORKSPACE) + os.sep):
-        return "Error: checkpoints only exist for files inside the workspace."
-    d = os.path.abspath(_checkpoint_dir(os.path.relpath(p, WORKSPACE)))
+    rel = _ckpt_rel(p)
+    if not rel:
+        return "Error: checkpoints only exist for files in the workspace or the project folder."
+    d = os.path.abspath(_checkpoint_dir(rel))
     src = os.path.abspath(os.path.join(d, name or ""))
     if os.path.dirname(src) != d or not os.path.isfile(src):
         return "Error: no such checkpoint."
     _save_checkpoint(p)
     with open(src, "rb") as f, open(p, "wb") as out: out.write(f.read())
-    return f"Restored {os.path.relpath(p, WORKSPACE)} from the {name} checkpoint."
+    return f"Restored {os.path.basename(p)} from the {name} checkpoint."
 
 def t_write_file(path, content):
     p = _resolve_path(path)
@@ -855,7 +866,7 @@ def t_schedule_task(prompt, start="now", repeat_every_minutes=None, daily_at=Non
     if in_this_chat and sid: job["sid"] = sid
     # a run in a new chat still belongs to the project it was scheduled from,
     # with that project's rules, folder and tools
-    if ACTIVE_PROJECT.get("id"): job["project"] = ACTIVE_PROJECT["id"]
+    if current_project(): job["project"] = current_project()
     cfg = sched_load(); cfg.setdefault("jobs", []).append(job); sched_save(cfg)
     first = time.strftime("%a %H:%M", time.localtime(start_ts))
     rep = (f"every {job['n']:g} min" if job["every"] == "minutes" else
@@ -1372,7 +1383,7 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
         out = MODELS.anthropic_stream(
             spec["model"], messages, tools, prov["api_key"],
             think=think and spec.get("thinking", True),
-            effort=S.get("reasoning_effort", "medium"),
+            effort=getattr(TURN_CTX, "effort", None) or S.get("reasoning_effort", "medium"),
             emit=emit, cancel=stop,
             max_tokens=int(S.get("max_output_tokens") or 32000),
             base_url=prov.get("base_url") or "")
@@ -1385,7 +1396,7 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
     if tools: body["tools"] = tools
     smp = S.get("sampling") or {}
     if think:
-        body["reasoning_effort"] = S.get("reasoning_effort", "medium")
+        body["reasoning_effort"] = getattr(TURN_CTX, "effort", None) or S.get("reasoning_effort", "medium")
     else:
         body.update(temperature=0.7, top_p=0.8, top_k=20, presence_penalty=1.5)
     for k in ("temperature","top_p","top_k","presence_penalty"):
@@ -1603,6 +1614,10 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
     # the project is fixed for the whole answer: its folder, rules and tools
     # must not change because someone clicked on a chat in another project
     TURN_CTX.project = ACTIVE_PROJECT.get("id") if project is _NO_PROJECT_ARG else project
+    # model and effort are held for the whole answer too; a helper keeps its parent's
+    helper = getattr(TURN_CTX, "depth", 0)
+    TURN_CTX.model = getattr(TURN_CTX, "model", None) if helper else ACTIVE_MODEL.get("id")
+    TURN_CTX.effort = getattr(TURN_CTX, "effort", None) if helper else S.get("reasoning_effort")
     # what a helper started by the task tool inherits from this answer
     TURN_CTX.emit, TURN_CTX.approve, TURN_CTX.cancel, TURN_CTX.tools = emit, approve, cancel, tools
     remote = not model_is_local()
@@ -1801,7 +1816,15 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                     seen_calls["__bad__"] = seen_calls.get("__bad__", 0) + 1
                     if seen_calls["__bad__"] > 6:
                         # a model that can't form a valid call stops here rather
-                        # than looping forever when there is no step limit
+                        # than looping forever when there is no step limit --
+                        # every call in its message still gets a result, or the
+                        # next request would be rejected for a dangling call
+                        for j, rest in enumerate(calls[i:]):
+                            rest.setdefault("id", f"call_{rnd}_{i + j}")
+                            messages.append({"role": "tool", "tool_call_id": rest["id"],
+                                             "name": rest["function"].get("name") or "",
+                                             "t": time.time(), "ok": False,
+                                             "content": bad if j == 0 else "(not run)"})
                         _finish(None, rnd); emit("done", None)
                         return ("_Stopped: the model sent malformed tool calls "
                                 f"{seen_calls['__bad__']} times in a row. Last problem: {bad[:300]}_")
@@ -2216,7 +2239,7 @@ LAST_SOURCES = []
 
 def t_search_knowledge(query, k=5):
     """Search the user's own document library (papers, notes, protocols)."""
-    hits = know_search(query, int(k), project=ACTIVE_PROJECT.get("id"))
+    hits = know_search(query, int(k), project=current_project())
     for h in hits:
         LAST_SOURCES.append({"doc": h["doc"], "score": h["score"], "text": h["text"]})
     if not hits: return "No matches in the knowledge base."
@@ -4362,8 +4385,7 @@ def apply_edit(text, old, new, replace_all=False):
     # an escaped newline, or read_file's line-number prefixes
     if hits[0][2] == "unescaped":
         new = new.replace("\\n", "\n").replace("\\t", "\t").replace('\\"', '"')
-    new_unnum = _strip_line_numbers(new)
-    if new_unnum != new and _strip_line_numbers(old) != old: new = new_unnum
+    if hits[0][2] == "numbered": new = _strip_line_numbers(new)   # never on an exact match: a TSV row starts "2\t"
     out, last = [], 0
     for s, e, how in (hits if replace_all else hits[:1]):
         seg = text[s:e]
@@ -4435,7 +4457,9 @@ def t_edit_file(path, old_string, new_string, replace_all=False):
     try: text = raw.decode("utf-8")
     except UnicodeDecodeError:
         return f"Error: {p} is not UTF-8 text, so editing it here could corrupt it. Use python instead."
-    crlf = "\r\n" in text                 # keep Windows line endings as they were
+    # keep Windows line endings as they were -- but only a file that is CRLF
+    # throughout; a mixed one is left exactly as it is
+    crlf = "\r\n" in text and text.count("\r\n") == text.count("\n")
     if crlf: text = text.replace("\r\n", "\n")
     out, how, err = apply_edit(text, old.replace("\r\n", "\n"), new.replace("\r\n", "\n"), bool(replace_all))
     if err: return f"Error editing {p}: {err}"
@@ -4640,7 +4664,15 @@ def _folder_ok(f):
     that would open writes to everything under it."""
     f = os.path.realpath(f)
     home = os.path.realpath(os.path.expanduser("~"))
-    return os.path.isdir(f) and f not in ("/", home) and len([x for x in f.split(os.sep) if x]) >= 2
+    if not os.path.isdir(f) or f in ("/", home) or len([x for x in f.split(os.sep) if x]) < 2:
+        return False
+    # system trees, and shared scratch roots themselves (a folder inside is fine)
+    if f in ("/private/tmp", "/private/var", "/private/var/folders", "/Users/Shared") or \
+       os.path.dirname(f) == "/Volumes":
+        return False
+    return not any(f == r or f.startswith(r + os.sep) for r in
+                   ("/System", "/Library", "/Applications", "/usr", "/bin", "/sbin",
+                    "/private/etc", "/opt", "/cores", "/dev"))
 
 def project_folder(pid=None):
     pid = pid or current_project()

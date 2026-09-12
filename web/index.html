@@ -1079,9 +1079,10 @@ async function runCmd(cmd,rest){
 let switching=null;                        // a chat switch still in flight
 async function newChat(){
  if(sid){clearTimeout(draftT);saveDraft(sid)}      // keep what you were typing with its chat
+ const typed=q.value;
  switching=(async()=>{
   const d=await (await fetch('/api/new',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
-  stopLive(); sid=d.sid;loadDraft(d.sid);wrap.innerHTML='';$('#title').textContent='New chat';atts=[];$('#chips').innerHTML='';
+  stopLive(); sid=d.sid;if(q.value===typed)loadDraft(d.sid);   // typed while it opened? keep thatwrap.innerHTML='';$('#title').textContent='New chat';atts=[];$('#chips').innerHTML='';
   tempMode=false;$('#tempbtn').style.borderColor='';$('#tempbtn').style.color='';
   $('#burnbtn').style.display='none';
   syncBusy();
@@ -1177,9 +1178,11 @@ function approvalBox(p){
   row.appendChild(inp);row.appendChild(ok);row.appendChild(cancel);
   box.appendChild(row);why.remove();inp.focus()};
  const send=async(allow,extra)=>{
-  box.querySelectorAll('button').forEach(b=>b.disabled=true);   // one answer, not a double-click's two
-  const r=await fetch('/api/approve',{method:'POST',headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({id:p.id,allow,...extra})});
+  const bs=[...box.querySelectorAll('button')];bs.forEach(b=>b.disabled=true);   // one answer, not a double-click's two
+  let r;
+  try{r=await fetch('/api/approve',{method:'POST',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({id:p.id,allow,...extra})})}
+  catch(e){bs.forEach(b=>b.disabled=false);toast('could not reach Orbit — try again');return}
   box.innerHTML='';
   box.appendChild(el(r.ok?`<b>${allow?'allowed':'denied'}</b>`
                         :'<b>already answered — in another window, or it timed out</b>'))};
