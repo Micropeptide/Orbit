@@ -1383,6 +1383,11 @@ def para_marks(marks, state, chunk, now=None):
         i = combo.find("\n\n", i + 1)
     state[0], state[1] = n + len(chunk), combo[-2:]
 
+def sent_at(t):
+    """'Sat 12 Sep 2026, 11:29 PDT' -- local time, with the weekday spelled out."""
+    lt = time.localtime(float(t))
+    return time.strftime("%a %d %b %Y, %H:%M ", lt) + (time.strftime("%Z", lt) or "")
+
 def _strip_reasoning(messages):
     """Stored history keeps each turn's thinking so a reopened chat can still
     show it, but a model should never be handed its own — or another
@@ -1412,6 +1417,14 @@ def _strip_reasoning(messages):
                     "into account now, and keep going unless it tells you to stop:]\n")
             c = m.get("content")
             n["content"] = head + c if isinstance(c, str) else [{"type": "text", "text": head}] + list(c or [])
+        if m.get("role") == "user" and m.get("t") and not m.get("nudge"):
+            # when it was sent, so the model knows today's date and the time
+            # instead of guessing (it called a Saturday "Friday"). On each
+            # message rather than in the system prompt: a clock there would
+            # change the start of every request and defeat the prompt cache
+            stamp = f"[{sent_at(m['t'])}] "
+            c = n.get("content")
+            n["content"] = stamp + c if isinstance(c, str) else [{"type": "text", "text": stamp}] + list(c or [])
         out[i] = n
     return out
 
@@ -3113,6 +3126,8 @@ def wrap_untrusted(fn, output):
 
 HARNESS_NOTE = (
  "\n\n## How you work here\n"
+ "- Each message from the user starts with when it was sent, e.g. [Sat 12 Sep 2026, 11:29 PDT]. "
+ "That is the current date and time — use it, never guess the day or date.\n"
  "- No time or step limit on an answer. Plan with `plan`, work through every step and keep "
  "going until it's done; the user hears if you've been running a long time and can stop you.\n"
  "- The user can send you notes while you work. They arrive marked as sent mid-task: treat "

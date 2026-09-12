@@ -1227,7 +1227,7 @@ class TestLongAnswers(unittest.TestCase):
         q.turn(self.chat(*history), "THE REQUEST", [], emit=self.emit)
         self.assertIn("autocompact", self.kinds())
         sent = self.sent[0]
-        self.assertTrue(any(m.get("content") == "THE REQUEST" for m in sent))
+        self.assertTrue(any(str(m.get("content")).endswith("] THE REQUEST") for m in sent))
         self.assertLess(sum(len(str(m.get("content"))) for m in sent), 60000)
 
     def test_every_message_keeps_its_time_but_never_sends_it(self):
@@ -1236,6 +1236,17 @@ class TestLongAnswers(unittest.TestCase):
         q.turn(msgs, "go", [], emit=self.emit)
         self.assertTrue(all(isinstance(m.get("t"), float) for m in msgs[1:]), msgs)
         self.assertFalse(any("t" in m for s in self.sent for m in s), "times leaked to the model")
+
+    def test_the_model_is_told_when_each_message_was_sent(self):
+        """REGRESSION: with no date anywhere, it called a Saturday "Friday"."""
+        self.script(self.final("ok"))
+        msgs = self.chat()
+        q.turn(msgs, "what day is it?", [], emit=self.emit)
+        sent_user = [m for m in self.sent[0] if m["role"] == "user"][-1]["content"]
+        self.assertTrue(sent_user.startswith("[" + time.strftime("%a %d %b %Y", time.localtime(msgs[-2]["t"]))), sent_user)
+        self.assertTrue(sent_user.endswith("] what day is it?"))
+        self.assertNotIn(time.strftime("%H:%M"), self.sent[0][0]["content"].split("## How you work")[0],
+                         "no clock in the system prompt: it would defeat the prompt cache")
 
     def test_progress_is_saved_during_a_long_answer(self):
         every = q.CHECKPOINT_EVERY
@@ -2376,6 +2387,13 @@ class TestRound1Server(Sandbox):
         self.assertIn(".think.live .body{max-height", page)
         self.assertNotIn(".think .body{max-height:220px", page)
         self.assertIn("could not start a new chat", page)
+
+    def test_a_new_chat_follows_the_sidebars_project(self):
+        src = open(os.path.join(ROOT, "bin", "orbit-ui")).read()
+        block = src[src.index('if p == "/api/new":'):][:900]
+        self.assertIn('if "project" in d:', block)
+        page = open(os.path.join(ROOT, "web", "index.html")).read()
+        self.assertIn("body:JSON.stringify({project:projFilter||null})", page)
 
     def test_restarting_waits_for_running_answers(self):
         """A restart used to cut a running answer off mid-step; it now waits
