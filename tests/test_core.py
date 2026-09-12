@@ -2000,6 +2000,16 @@ class TestRound1Server(Sandbox):
         self.assertFalse(self.ui._already_serving(port))
 
 
+    def test_restarting_waits_for_running_answers(self):
+        """A restart used to cut a running answer off mid-step; it now waits
+        until no chat is answering, unless forced."""
+        src = open(os.path.join(ROOT, "bin", "orbit-ui")).read()
+        block = src[src.index('if p == "/api/restart_ui":'):][:900]
+        self.assertIn("running_sids()", block)
+        self.assertIn("_restart_when_idle()", block)
+        self.assertIn('d.get("force")', block)
+
+
 class TestHeadlessRun(unittest.TestCase):
     """`orbit run --json` answers once and prints machine-readable events."""
 
