@@ -97,7 +97,9 @@ DEFAULTS = {
   "server": {
     "port": 8000, "context_window": 64512, "kv_quant": "q8", "fan_mode": "smart",
     "thermal_poll": True, "depth": 3, "prefill_chunk_tokens": 2048,
-    "reasoning": "off", "scheduler_mode": "cooperative", "batching_preset": "agent",
+    # "auto": other apps sharing the server (WorkBuddy, scripts) get thinking by
+    # default; Orbit turns it on or off itself in every request it sends
+    "reasoning": "auto", "scheduler_mode": "cooperative", "batching_preset": "agent",
     "max_active_requests": 3,
     "ssd_session_cache": "on",
   },
