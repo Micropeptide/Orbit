@@ -2094,12 +2094,14 @@ setInterval(refreshRunning,2000);
 // A chat can change under you -- a message sent from the phone, or another
 // window. Ask the Mac for a cheap stamp of the open chat every few seconds and
 // re-read it when the count moves; join an answer someone else started.
-let WATCH_N=null, WATCH_SID=null;
+let WATCH_N=null, WATCH_SID=null, WATCH_GONE=null;
 async function watchOpenChat(){
- if(!sid||busy||SENDING.has(sid)||livePoll||switching||document.hidden)return;
+ // a temporary chat has no file to stamp, and a chat that 404s once (deleted,
+ // or never saved) is not polled again -- both used to 404 every 3 seconds
+ if(!sid||tempMode||sid===WATCH_GONE||busy||SENDING.has(sid)||livePoll||switching||document.hidden)return;
  try{
   const st=await (await fetch('/api/stamp/'+sid)).json();
-  if(st.error)return;
+  if(st.error){WATCH_GONE=sid;return}
   if(WATCH_SID!==sid||WATCH_N===null){WATCH_SID=sid;WATCH_N=st.n;return}   // no baseline yet
   if(st.n!==WATCH_N||st.running){
    WATCH_N=st.n;
