@@ -13,6 +13,7 @@ import qqcore as q
 
 PORT = int(os.environ.get("ORBIT_UI_PORT") or os.environ.get("QQ_UI_PORT") or 8899)
 import remote as REMOTE
+import collections
 
 def remote_mode():
     return (q.S.get("remote_access") or {}).get("mode", "off")
@@ -70,6 +71,10 @@ class State:
         self.lock = threading.Lock()   # one turn at a time *per chat*
         self.busy_since = 0
         self.cancel = threading.Event()
+        # notes you send while it is answering, read at its next step; the
+        # interrupt cuts a long generation short so a note isn't left waiting
+        self.inbox = collections.deque()
+        self.interrupt = threading.Event()
         # live buffer: lets you switch away mid-answer and rejoin it later
         self.live = {"thinking": "", "content": "", "tools": [],
                      "status": "", "done": True, "seq": 0}
@@ -84,6 +89,8 @@ class State:
         # keep self.lock: replacing it while a turn holds it would break exclusion
         self.busy_since = 0
         self.cancel = threading.Event()
+        self.inbox = collections.deque()
+        self.interrupt = threading.Event()
         self.live = {"thinking": "", "content": "", "tools": [],
                      "status": "", "done": True, "seq": 0}
         self.flags = {}
@@ -932,6 +939,19 @@ class H(http.server.BaseHTTPRequestHandler):
                 try: os.replace(old, new)
                 except OSError: ok = False
             return self._send(200, jdump({"ok": ok}))
+        if p == "/api/interject":
+            # A note for an answer that is still running: queued, and handed to
+            # the model at its next step. The interrupt cuts a long generation
+            # short so the note is read now, not after it finishes writing — a
+            # tool that is mid-run is never killed for it.
+            st = STATES.get(d.get("sid") or S.sid)
+            text = (d.get("message") or "").strip()
+            if not text: return self._send(400, jdump({"error": "empty note"}))
+            if st is None or not st.lock.locked():
+                return self._send(200, jdump({"ok": False, "running": False}))
+            st.inbox.append({"text": text, "t": time.time()})
+            st.interrupt.set()
+            return self._send(200, jdump({"ok": True, "queued": len(st.inbox)}))
         if p == "/api/cancel":
             st = get_state(d.get("sid"), create=False)
             st.cancel.set()
@@ -1105,10 +1125,10 @@ class H(http.server.BaseHTTPRequestHandler):
                             # unattended, not just what is still waiting on it
                             lv["tools"].append({"name": "✓ auto-approved: " + p.get("name", ""),
                                                 "args": p.get("args")})
-                        elif k in ("server_starting", "stagnation", "autocompact"):
+                        elif k in _STATUS_KINDS:
                             # a tab that rejoins mid-answer needs to see this too,
                             # otherwise a cold start looks like a hung chat
-                            lv["status"] = (p or {}).get("msg") or k.replace("_", " ")
+                            lv["status"] = _status_text(k, p)
                         lv["seq"] += 1
                         if k == "tool_result" and q.LAST_IMAGES:
                             p = dict(p or {})
@@ -1122,11 +1142,25 @@ class H(http.server.BaseHTTPRequestHandler):
                     q.ACTIVE_MODEL["id"] = st.model
                     prev_effort = q.S.get("reasoning_effort")
                     if effort: q.S["reasoning_effort"] = effort
-                    st.msgs, did, pct = q.maybe_autocompact(st.msgs, emit=lambda k, p: Q.put((k, p)))
+                    _refresh_system(st)
+                    st.msgs, did, pct = q.maybe_autocompact(st.msgs, emit=lambda k, p: Q.put((k, p)),
+                                                            sid=st.sid)
                     if did: save_session(st)
                     _t0 = time.time()
+                    st.interrupt.clear()
                     q.turn(st.msgs, content, st.tools, emit=_emit, approve=_approve,
-                           cancel=st.cancel)
+                           cancel=st.cancel, inbox=st.inbox, interrupt=st.interrupt, sid=st.sid)
+                    # a note that landed in the instant between the answer ending
+                    # and this chat being released: answer it now, in this same
+                    # stream, rather than leave it sitting unread
+                    while st.inbox and not st.cancel.is_set():
+                        note = st.inbox.popleft()
+                        _emit("interjection", {"text": note.get("text", "")})
+                        save_session(st)
+                        st.interrupt.clear()
+                        q.turn(st.msgs, note.get("text", ""), st.tools, emit=_emit,
+                               approve=_approve, cancel=st.cancel, inbox=st.inbox,
+                               interrupt=st.interrupt, sid=st.sid)
                     try:
                         stats = q.server_status().get("last") or {}
                         q.ledger_add(st.sid, seconds=round(time.time() - _t0, 1),
@@ -1163,6 +1197,40 @@ class H(http.server.BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 return
             if kind == "end": return
+
+# stream events worth showing to a tab that rejoins an answer mid-way
+_STATUS_KINDS = ("server_starting", "stagnation", "autocompact", "squeezed",
+                 "long_running", "interjection")
+
+def _status_text(k, p):
+    p = p or {}
+    if k == "long_running": return f"still working — {p.get('minutes')} min, {p.get('rounds')} steps"
+    if k == "interjection": return "reading your note"
+    if k == "squeezed":     return "trimming old tool output to make room"
+    return p.get("msg") or k.replace("_", " ")
+
+def _live_emitter(st):
+    """What a chat's own stream would record, for a run nobody is streaming —
+    so opening that chat mid-run shows it working, like any other answer."""
+    def emit(k, p):
+        lv = st.live
+        if   k == "thinking_delta": lv["thinking"] += p
+        elif k == "content_delta":  lv["content"]  += p
+        elif k == "tool": lv["tools"].append({"name": p.get("name"), "args": p.get("args")})
+        elif k in _STATUS_KINDS: lv["status"] = _status_text(k, p)
+        lv["seq"] += 1
+    return emit
+
+def _refresh_system(st):
+    """Rebuild a chat's system prompt before each answer. It used to be fixed
+    when the chat was opened, so memory written since — by you, or by the
+    model itself mid-task — never reached a chat that was already open. A
+    per-chat prompt added with /sysprompt is kept."""
+    if not st.msgs or st.msgs[0].get("role") != "system": return
+    cur = st.msgs[0].get("content") or ""
+    mark = "\n\n## This chat\n"
+    st.msgs[0]["content"] = (q.system_prompt_for(st.agent, st.project)
+                             + (cur[cur.index(mark):] if mark in cur else ""))
 
 def autotitle(msgs):
     """Ask the model for a short title once the first exchange exists."""
@@ -1214,7 +1282,9 @@ def render(msgs):
                         # which model wrote this, so a reopened chat is honest about it
                         "model": m.get("model") if m["role"] == "assistant" else None,
                         # the thinking trace, kept from a normal answer or a stop mid-stream
-                        "thinking": m.get("reasoning_content") if m["role"] == "assistant" else None})
+                        "thinking": m.get("reasoning_content") if m["role"] == "assistant" else None,
+                        # a note sent while it was working, so a reopened chat can say so
+                        "note": bool(m.get("interjection"))})
         if m.get("role") == "assistant":
             pending_imgs, pending_tools = [], []
     return out
@@ -1231,26 +1301,59 @@ def _stamp_started(job_id):
     q.sched_save(cfg)
 
 def run_job(job):
-    """Execute one scheduled prompt in its own throwaway session."""
+    """Execute one scheduled prompt — in the chat it was scheduled from, with
+    that chat's history and context, or else in its own throwaway session."""
+    sid = job.get("sid")
+    st = get_state(sid) if sid and os.path.exists(q.session_path(sid)) else None
+    if st is not None and not st.lock.acquire(blocking=False):
+        # that chat is answering — you, or the previous run still going. Not
+        # stamped as run, so the scheduler simply tries again next minute.
+        return "skipped: that chat is busy"
     started = time.time()
     _stamp_started(job.get("id"))
+    result_sid = None
     try:
-        msgs = [{"role": "system", "content": q.system_prompt_for(job.get("agent"))}]
-        specs, _ = q.active_tools()
-        tools = q.tools_for(job.get("agent"), specs)
-        out = q.turn(msgs, job.get("prompt", ""), tools, approve=lambda *a: False)
-        sid = "sched-" + time.strftime("%Y%m%d-%H%M%S")
-        q.session_save(sid, msgs, f"[scheduled] {job.get('name') or job['id']}")
-        result = (out or "")[:400]
-        ok = True
+        label = job.get("name") or job["id"]
+        if st is not None:
+            try:
+                st.busy_since = time.time(); st.cancel.clear(); st.interrupt.clear()
+                st.live = {"thinking": "", "content": "", "tools": [],
+                           "status": "", "done": False, "seq": 0}
+                q.ACTIVE_PROJECT["id"] = st.project
+                q.ACTIVE_MODEL["id"] = st.model
+                _refresh_system(st)
+                st.msgs, _did, _pct = q.maybe_autocompact(st.msgs, sid=st.sid)
+                prompt = (f"[Scheduled task “{label}”, running unattended at "
+                          f"{time.strftime('%H:%M')}]\n{job.get('prompt', '')}")
+                out = q.turn(st.msgs, prompt, st.tools, emit=_live_emitter(st),
+                             approve=lambda *a: False, cancel=st.cancel,
+                             inbox=st.inbox, interrupt=st.interrupt, sid=st.sid)
+                save_session(st)
+                result_sid = st.sid
+            finally:
+                st.live["done"] = True
+                try: st.lock.release()
+                except RuntimeError: pass
+        else:
+            msgs = [{"role": "system", "content": q.system_prompt_for(job.get("agent"))}]
+            specs, _ = q.active_tools()
+            tools = q.tools_for(job.get("agent"), specs)
+            result_sid = "sched-" + time.strftime("%Y%m%d-%H%M%S")
+            out = q.turn(msgs, job.get("prompt", ""), tools, approve=lambda *a: False,
+                         sid=result_sid)
+            q.session_save(result_sid, msgs, f"[scheduled] {label}")
+        result, ok = (out or "")[:400], True
     except Exception as e:
-        result, ok, sid = f"{type(e).__name__}: {e}", False, None
+        result, ok = f"{type(e).__name__}: {e}", False
     cfg = q.sched_load()
     for j in cfg.get("jobs", []):
         if j.get("id") == job.get("id"):
             j["last_run"] = time.time(); j["last_ok"] = ok
-            j["last_result"] = result; j["last_sid"] = sid
+            j["last_result"] = result; j["last_sid"] = result_sid
             j["seconds"] = round(time.time() - started, 1)
+            # a one-off has had its run, and a repeat past its end is finished
+            if j.get("every") == "once" or (j.get("until") and time.time() > float(j["until"])):
+                j["enabled"] = False
     q.sched_save(cfg)
     q._SESS_CACHE["key"] = None
     return result
