@@ -454,6 +454,8 @@ actor OrbitServer {
                              id: (p as? [String: Any])?["id"] as? String)
         case "approval":       return nil
         case "interjection":   return .status("reading your note")
+        case "queued":         return .status("waiting for another chat to finish")
+        case "dequeued":       return .status("its turn — starting")
         case "retry":          return .status("model error — retrying")
         case "subtask":
             let d = str("description")
