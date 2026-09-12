@@ -109,8 +109,10 @@ S = State()                        # the chat the browser is currently looking a
 # Code is imported once at start, so edits to qqcore.py/qq-ui do not take effect
 # until this process restarts. Record what we loaded so the UI can say so.
 LOADED_AT = time.time()
+# the server's own file is orbit-ui now; watching the old name "qq-ui" meant a
+# change to the server was never flagged as needing a restart
 CODE_FILES = [os.path.join(q.ROOT, "bin", "qqcore.py"),
-              os.path.join(q.ROOT, "bin", "qq-ui"),
+              os.path.join(q.ROOT, "bin", "orbit-ui"),
               os.path.join(q.ROOT, "web", "index.html")]
 
 def code_is_stale():
@@ -122,7 +124,9 @@ def code_is_stale():
     # index.html is re-read per request, so only the python files force a restart
     stale = [os.path.basename(f) for f in CODE_FILES[:2]
              if os.path.exists(f) and os.path.getmtime(f) > LOADED_AT]
-    return {"stale": bool(stale), "files": stale,
+    try: page = os.path.getmtime(CODE_FILES[2])
+    except OSError: page = 0
+    return {"stale": bool(stale), "files": stale, "page_mtime": page,
             "loaded_at": LOADED_AT, "newest": newest, "newest_file": who}
 
 def fresh_state(temp=False):
