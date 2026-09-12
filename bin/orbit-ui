@@ -83,6 +83,7 @@ class State:
                      "status": "", "done": True, "seq": 0}
         self.flags = {}            # pin/archive/tags set before the first save
         self.model = None          # None = whatever the default model is
+        self.plan_mode = False     # read-only: look and propose, change nothing
     def reset(self):
         self.sid   = new_sid()
         self.msgs  = [{"role": "system", "content": q.system_prompt_for(self.agent, self.project)}]
@@ -167,6 +168,7 @@ def get_state(sid=None, create=True):
                 if isinstance(raw, dict):
                     st.project = raw.get("project")
                     if raw.get("plan") and sid not in q.PLANS: q.PLANS[sid] = raw["plan"]
+                    st.plan_mode = bool(raw.get("plan_mode"))
             except Exception:
                 pass
             STATES[sid] = st
@@ -201,6 +203,7 @@ def save_session(st=None):
     if getattr(st, "running", False): extra["running_since"] = st.busy_since or time.time()
     pl = q.PLANS.get(st.sid)
     if pl and pl.get("steps"): extra["plan"] = pl       # the chat's plan survives a restart
+    if getattr(st, "plan_mode", False): extra["plan_mode"] = True
     q.session_save(st.sid, st.msgs, st.title, extra)
 
 class H(http.server.BaseHTTPRequestHandler):
@@ -376,7 +379,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/instructions":
             return self._send(200, jdump({"text": q.read_instructions()}))
         if p == "/api/mcp":      return self._send(200, jdump(q.mcp_config()))
-        if p == "/api/prompts":  return self._send(200, jdump(q.prompts_load()))
+        if p == "/api/prompts":  return self._send(200, jdump(q.all_prompts()))
         if p == "/api/knowledge": return self._send(200, jdump(q.know_docs()))
         if p == "/api/skills":   return self._send(200, jdump(q.skills_list()))
         if p == "/api/remote":
@@ -534,12 +537,14 @@ class H(http.server.BaseHTTPRequestHandler):
                         stt.project = raw.get("project") if isinstance(raw, dict) else None
                         if isinstance(raw, dict) and raw.get("plan") and sid not in q.PLANS:
                             q.PLANS[sid] = raw["plan"]
+                        stt.plan_mode = bool(isinstance(raw, dict) and raw.get("plan_mode"))
                         stt.model = raw.get("model") if isinstance(raw, dict) else None
                     except Exception: stt.project, stt.model = None, None
                 globals()["S"] = stt               # the chat the browser is looking at
                 q.ACTIVE_PROJECT["id"] = stt.project
                 msgs, title = list(stt.msgs), stt.title
                 return self._send(200, jdump({"ok": True, "sid": sid, "title": title,
+                                              "plan_mode": bool(getattr(stt, "plan_mode", False)),
                                               "messages": render(msgs), "n": len(msgs),
                                               "context": q.context_state(msgs, sid),
                                               "running": bool(stt and stt.lock.locked()),
@@ -721,6 +726,31 @@ class H(http.server.BaseHTTPRequestHandler):
                 return self._send(200, jdump({"ok": True}))
             except Exception as e:
                 return self._send(404, jdump({"error": str(e)}))
+        if p == "/api/answer":                   # the reply to an ask_user question
+            rec = PENDING.get(d.get("id"))
+            if not rec or "answer" not in rec: return self._send(404, jdump({"error": "no such question"}))
+            ans = d.get("answer")
+            rec["answer"] = ", ".join(map(str, ans)) if isinstance(ans, list) else str(ans or "").strip()[:2000]
+            rec["event"].set()
+            return self._send(200, jdump({"ok": True}))
+        if p == "/api/plan_mode":
+            st = get_state(d.get("sid")) if d.get("sid") else S
+            st.plan_mode = bool(d.get("on"))
+            _refresh_system(st)
+            save_session(st)
+            return self._send(200, jdump({"ok": True, "plan_mode": st.plan_mode}))
+        if p == "/api/undo_changes":             # put back the files one answer changed
+            st = get_state(d.get("sid")) if d.get("sid") else S
+            if st.lock.locked(): return self._send(409, jdump({"error": "that chat is still answering"}))
+            want = d.get("t")
+            m = next((x for x in reversed(st.msgs) if x.get("role") == "assistant" and x.get("changes")
+                      and (want is None or abs(float(x.get("t") or 0) - float(want)) < 0.01)), None)
+            if m is None: return self._send(404, jdump({"error": "no file changes to undo there"}))
+            if m.get("changes_undone"): return self._send(409, jdump({"error": "already undone"}))
+            done = q.undo_changes(m["changes"])
+            m["changes_undone"] = True
+            save_session(st)
+            return self._send(200, jdump({"ok": True, "done": done}))
         if p == "/api/approve":
             rec = PENDING.get(d.get("id"))
             if not rec: return self._send(404, jdump({"error": "no such request"}))
@@ -1181,6 +1211,20 @@ class H(http.server.BaseHTTPRequestHandler):
                         note = (rec.get("message") or "").strip() if ok else ""
                         return (allow, note) if note else allow
 
+                    def _ask(question, options, multiple):
+                        _APPROVE_SEQ[0] += 1
+                        rid = f"qa{_APPROVE_SEQ[0]}"
+                        ev = threading.Event()
+                        PENDING[rid] = {"event": ev, "answer": None}
+                        req = {"id": rid, "question": question, "options": options, "multiple": multiple}
+                        Q.put(("question", req))
+                        st.live["question"] = req          # any window can answer it
+                        q.notify("Orbit has a question", question)
+                        ok = ev.wait(timeout=1800)
+                        st.live.pop("question", None)
+                        rec = PENDING.pop(rid, {})
+                        return rec.get("answer") if ok else None
+
                     def _emit(k, p):
                         lv = st.live                      # keep a copy so you can rejoin later
                         if   k == "thinking_delta":
@@ -1233,9 +1277,11 @@ class H(http.server.BaseHTTPRequestHandler):
                     _t0 = time.time()
                     n0 = len(st.msgs)
                     st.interrupt.clear()
+                    q.TURN_CTX.ask = _ask
                     q.turn(st.msgs, content, st.tools, emit=_emit, approve=_approve,
                            cancel=st.cancel, inbox=st.inbox, interrupt=st.interrupt, sid=st.sid,
-                           checkpoint=lambda: save_session(st), project=st.project)
+                           checkpoint=lambda: save_session(st), project=st.project,
+                           read_only=st.plan_mode)
                     spent = dict(q.LAST_TURN.get(st.sid) or {})
                     # a note that landed in the instant between the answer ending
                     # and this chat being released: answer it now, in this same
@@ -1248,7 +1294,8 @@ class H(http.server.BaseHTTPRequestHandler):
                         q.turn(st.msgs, note.get("text", ""), st.tools, emit=_emit,
                                approve=_approve, cancel=st.cancel, inbox=st.inbox,
                                interrupt=st.interrupt, sid=st.sid,
-                               checkpoint=lambda: save_session(st), project=st.project)
+                               checkpoint=lambda: save_session(st), project=st.project,
+                               read_only=st.plan_mode)
                         # one stream, one bill: add the follow-up's time and tokens
                         more = q.LAST_TURN.get(st.sid) or {}
                         spent["secs"] = round((spent.get("secs") or 0) + (more.get("secs") or 0), 1)
@@ -1280,7 +1327,7 @@ class H(http.server.BaseHTTPRequestHandler):
                         pass
                 Q.put(("end", {"sid": st.sid, "title": st.title,
                                **{k: v for k, v in (q.LAST_TURN.get(st.sid) or {}).items()
-                                  if k in ("secs", "usage", "tool_runs", "rounds")}}))
+                                  if k in ("secs", "usage", "tool_runs", "rounds", "changes", "t")}}))
             except Exception as e:
                 Q.put(("error", f"{type(e).__name__}: {e}")); Q.put(("end", {}))
             finally:
@@ -1364,6 +1411,7 @@ def _refresh_system(st):
     cur = st.msgs[0].get("content") or ""
     mark = "\n\n## This chat\n"
     st.msgs[0]["content"] = (q.system_prompt_for(st.agent, st.project)
+                             + ("\n\n" + q.PLAN_MODE_NOTE if getattr(st, "plan_mode", False) else "")
                              + (cur[cur.index(mark):] if mark in cur else ""))
 
 def autotitle(msgs):
@@ -1444,6 +1492,9 @@ def render(msgs):
                         "t": m.get("t"),
                         # how long the answer took, what it cost, and each tool it ran
                         "secs": m.get("secs"), "usage": m.get("usage"),
+                        # files this answer changed, so the page can offer to undo them
+                        "changes": [c.get("path") for c in m.get("changes") or []],
+                        "changes_undone": bool(m.get("changes_undone")),
                         "tool_runs": []})
             for tc in calls: owner[tc.get("id")] = out[-1]
     return out
@@ -1511,7 +1562,7 @@ def run_job(job):
                              approve=lambda *a: False, cancel=st.cancel,
                              inbox=st.inbox, interrupt=st.interrupt, sid=st.sid,
                              checkpoint=lambda: save_session(st), project=st.project,
-                             max_minutes=_job_minutes(job))
+                             max_minutes=_job_minutes(job), read_only=st.plan_mode)
                 st.running = False
                 save_session(st)
                 _learn_later(st, n0)

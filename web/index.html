@@ -498,6 +498,8 @@ const CMDS=[
  {c:'/export',d:'download this chat as markdown'},
  {c:'/jump',d:'jump to one of your messages in this chat (⌘G)'},
  {c:'/stats',d:'usage: turns, tokens and time per model'},
+ {c:'/plan',d:'plan mode: it may read and think but change nothing'},
+ {c:'/build',d:'leave plan mode: it may make changes again'},
  {c:'/sound',d:'toggle a short beep when an answer finishes while you are away'},
  {c:'/hidetools',d:'hide or show finished tool rows'},
  {c:'/clear',d:'clear the screen only'},
@@ -953,6 +955,7 @@ function attachLive(theSid, initial){
    lrows.push(c);a.tools.appendChild(c)});
   shownTools=tl.length;
   tl.forEach((t,i)=>{const r=lrows[i];if(r&&r.classList.contains('live')&&t.ok!=null)finishTool(r,t)});
+  if(lv.question&&lv.question.id!==a._q){a._q=lv.question.id;a.tools.appendChild(questionBox(lv.question))}
   // an approval waiting in this chat, raised by a stream some other tab owns
   if(lv.approval&&lv.approval.id!==shownApproval){
    shownApproval=lv.approval.id;a.tools.appendChild(approvalBox(lv.approval));
@@ -990,6 +993,7 @@ async function openSession(id){
  if(d.error)return sysline('could not open: '+d.error);
  if(sid&&sid!==d.sid){clearTimeout(draftT);saveDraft(sid)}
  sid=d.sid;$('#title').textContent=d.title||'(untitled)';wrap.innerHTML='';
+ PLAN_MODE=!!d.plan_mode;drawPlanMode();
  WATCH_SID=d.sid;WATCH_N=(typeof d.n==='number')?d.n:null;   // what this page now shows
  if(UNSEEN[d.sid]){delete UNSEEN[d.sid];syncUnseen()}
  loadDraft(d.sid);
@@ -1075,6 +1079,7 @@ async function runCmd(cmd,rest){
  q.value='';closeMenu();saveDraft(sid);
  if(cmd==='/help'){sysline(CMDS.map(c=>c.c).join('  '));return true}
  if(cmd==='/stats'){showStats(7);return true}
+ if(cmd==='/plan'||cmd==='/build'){setPlanMode(cmd==='/plan');return true}
  if(cmd==='/jump'){openJump();return true}
  if(cmd==='/sound'){const on=PREF.get('beep','0')!=='1';PREF.set('beep',on?'1':'0');
   if(on)beep();toast(on?'beep on — when an answer finishes while you are away':'beep off');return true}
@@ -1117,7 +1122,8 @@ async function newChat(){
  const typed=q.value;
  switching=(async()=>{
   const d=await (await fetch('/api/new',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
-  stopLive(); sid=d.sid;if(q.value===typed)loadDraft(d.sid);   // typed while it opened? keep thatwrap.innerHTML='';$('#title').textContent='New chat';atts=[];$('#chips').innerHTML='';
+  stopLive(); sid=d.sid;if(q.value===typed)loadDraft(d.sid);   // typed while it opened? keep that
+  PLAN_MODE=false;drawPlanMode();wrap.innerHTML='';$('#title').textContent='New chat';atts=[];$('#chips').innerHTML='';
   tempMode=false;$('#tempbtn').style.borderColor='';$('#tempbtn').style.color='';
   $('#burnbtn').style.display='none';
   syncBusy();
@@ -1235,6 +1241,50 @@ function approvalBox(p){
  btns.appendChild(yes);btns.appendChild(always);btns.appendChild(no);btns.appendChild(why);box.appendChild(btns);
  return box}
 
+// A question the model asks mid-task (ask_user): pick an option or type an answer.
+function questionBox(p){
+ const box=el('<div class=approve></div>');
+ const h=el('<b></b>');h.textContent='Orbit asks — '+p.question;box.appendChild(h);
+ const send=async ans=>{
+  box.querySelectorAll('button,input').forEach(b=>b.disabled=true);
+  let r;try{r=await fetch('/api/answer',{method:'POST',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({id:p.id,answer:ans})})}catch(e){box.querySelectorAll('button,input').forEach(b=>b.disabled=false);
+   toast('could not reach Orbit — try again');return}
+  box.innerHTML='';const d=el('<b></b>');
+  d.textContent=r.ok?'answered: '+(Array.isArray(ans)?ans.join(', '):ans):'already answered — in another window, or it timed out';
+  box.appendChild(d)};
+ const btns=el('<div class=btns></div>');
+ const opts=p.options||[];
+ if(p.multiple&&opts.length){
+  const picks=opts.map(o=>{const l=el('<label style="display:flex;gap:6px;align-items:center"><input type=checkbox><span></span></label>');
+   l.querySelector('span').textContent=o;box.appendChild(l);return[l.querySelector('input'),o]});
+  const ok=el('<button class=yes>Send</button>');ok.onclick=()=>send(picks.filter(x=>x[0].checked).map(x=>x[1]));btns.appendChild(ok)}
+ else opts.forEach((o,i)=>{const b=el(`<button class="${i?'always':'yes'}"></button>`);b.textContent=o;b.onclick=()=>send(o);btns.appendChild(b)});
+ box.appendChild(btns);
+ const row=el('<div class=alwaysrow></div>');const inp=document.createElement('input');inp.type='text';
+ inp.placeholder=opts.length?'or type your own answer':'type your answer';
+ const go_=el('<button>Send</button>');go_.onclick=()=>{if(inp.value.trim())send(inp.value.trim())};
+ inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();go_.click()}};
+ row.appendChild(inp);row.appendChild(go_);box.appendChild(row);
+ return box}
+// Plan mode: it may read and think but change nothing, until switched off.
+let PLAN_MODE=false;
+function drawPlanMode(){let b=$('#planmode');
+ if(!b){b=el('<span id=planmode title="plan mode: it may read and think but change nothing — /build to leave" style="margin-left:8px;font-size:11px;padding:1px 7px;border-radius:9px;background:var(--acc);color:#fff;cursor:pointer">plan mode</span>');
+  b.onclick=()=>setPlanMode(false);$('#title').after(b)}
+ b.style.display=PLAN_MODE?'':'none'}
+async function setPlanMode(on){
+ const d=await apiPost('/api/plan_mode',{sid,on},'plan mode');if(!d)return;
+ PLAN_MODE=!!d.plan_mode;drawPlanMode();
+ toast(PLAN_MODE?'plan mode: it will read and propose, and change nothing':'plan mode off: it may make changes')}
+// Undo the files one answer changed (each restore is itself checkpointed).
+function undoButton(a,t,n){
+ const acts=a.m.querySelector('.acts');if(!acts||acts.querySelector('.undo'))return;
+ const b=el(`<button class=undo>undo ${n} file change${n>1?'s':''}</button>`);
+ b.onclick=async()=>{if(!confirm('Put back the files this answer changed? (Files it created go to the bin.)'))return;
+  const d=await apiPost('/api/undo_changes',{sid,t},'undo');if(!d)return;
+  b.remove();sysline('undone: '+(d.done||[]).join('; '))};
+ acts.appendChild(b)}
 // Notes sent while an answer is running. The server hands each one to the
 // model at its next step, and says when in the stream ('interjection').
 let PENDING_NOTES=[];
@@ -1408,6 +1458,8 @@ async function go(opts){
       +`${(INFO.settings&&INFO.settings.idle_min)||20} min idle — first message after that reloads `
       +`~15 GB of weights</div>`;
      bottom()}
+    else if(m.k==='question'){a.tools.appendChild(questionBox(m.p));bottom();
+     notify(sendSid,'Orbit has a question',m.p.question||'')}
     else if(m.k==='plan_nudge'||m.k==='fail_streak'||m.k==='ultrathink'){
      sysline(m.p.msg||m.k)}
     else if(m.k==='queued'){               // another chat has the model; this one waits in line
@@ -1495,6 +1547,7 @@ async function go(opts){
                                             :'(no answer)';
  else {a.bub.innerHTML=md(answer);decorate(a.bub)}
  answerStats(a,endP&&endP.secs!=null?endP.secs:(performance.now()-t0)/1000,endP&&endP.usage);
+ if(endP&&(endP.changes||[]).length&&endP.t)undoButton(a,endP.t,endP.changes.length);
  if(stoppedSid!==sendSid&&!errored)
   notify(sendSid,'Answer ready',answer.replace(/\s+/g,' ').trim().slice(0,160)||'(no answer)');
  }catch(e){a.bub.innerHTML='';const x=el('<div class=err></div>');x.textContent='Error: '+e;a.m.appendChild(x);
@@ -3007,6 +3060,7 @@ function savedAssistant(m){
  if(!m.text&&!m.thinking&&!(m.tool_runs||[]).length&&!(m.tools||[]).length)
   a.bub.innerHTML='<span style="color:var(--mut)">(stopped before it wrote anything)</span>';
  if(m.secs!=null||m.usage)answerStats(a,m.secs,m.usage);
+ if((m.changes||[]).length&&!m.changes_undone&&m.t)undoButton(a,m.t,m.changes.length);
  return a}
 function diffBlock(D,label){
  const box=el('<div class=diff></div>');

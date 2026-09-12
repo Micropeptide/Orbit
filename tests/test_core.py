@@ -1846,6 +1846,88 @@ class TestRound1(TestLongAnswers):
         self.assertEqual(seen[0], ("high", True)); self.assertIsNone(seen[1][1])
         self.assertIn("ultrathink", self.kinds())
 
+    def test_an_answers_file_changes_can_be_undone(self):
+        p = os.path.join(q.WORKSPACE, "u.txt"); open(p, "w").write("original\n")
+        def fake(messages, tools, **kw):
+            if not any(m.get("role") == "tool" for m in messages):
+                return {"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "e1", "type": "function", "function": {"name": "edit_file", "arguments":
+                        json.dumps({"path": p, "old_string": "original", "new_string": "changed"})}},
+                    {"id": "w1", "type": "function", "function": {"name": "write_file", "arguments":
+                        json.dumps({"path": os.path.join(q.WORKSPACE, "new.txt"), "content": "hi"})}}]}
+            return {"role": "assistant", "content": "done"}
+        q.stream_call = fake
+        q.S["autonomy_mode"] = "auto"
+        saved = (q.TRASH_FILE, q.TRASH)
+        q.TRASH = os.path.join(self.tmp, "trash"); q.TRASH_FILE = os.path.join(q.TRASH, "files")
+        os.makedirs(q.TRASH_FILE)
+        try:
+            msgs = self.chat()
+            q.turn(msgs, "change it", [], emit=self.emit, sid="undo-chat")
+            self.assertEqual(open(p).read(), "changed\n")
+            ch = msgs[-1]["changes"]
+            self.assertEqual([os.path.basename(c["path"]) for c in ch], ["u.txt", "new.txt"])
+            self.assertEqual(q.LAST_TURN["undo-chat"]["changes"], [c["path"] for c in ch])
+            done = q.undo_changes(ch)
+            self.assertEqual(open(p).read(), "original\n")
+            self.assertFalse(os.path.exists(os.path.join(q.WORKSPACE, "new.txt")), "created file goes to the bin")
+            self.assertEqual(len(done), 2)
+        finally:
+            q.TRASH_FILE, q.TRASH = saved
+
+    def test_plan_mode_refuses_changes_but_allows_reading(self):
+        q.TURN_CTX.read_only = True
+        try:
+            msgs = []
+            q._run_one_tool({"id": "a"}, "write_file", {"path": os.path.join(q.WORKSPACE, "x.txt"), "content": "x"},
+                            msgs, self.emit, None, {})
+            self.assertIn("plan mode is on", msgs[-1]["content"])
+            self.assertFalse(os.path.exists(os.path.join(q.WORKSPACE, "x.txt")))
+            q._run_one_tool({"id": "b"}, "list_dir", {"path": self.tmp}, msgs, self.emit, None, {})
+            self.assertNotIn("plan mode", msgs[-1]["content"])
+        finally:
+            q.TURN_CTX.read_only = False
+
+    def test_asking_the_user_with_and_without_someone_there(self):
+        q.TURN_CTX.ask = None
+        self.assertIn("Nobody is watching", q.t_ask_user("which one?", ["a", "b"]))
+        q.TURN_CTX.ask = lambda question, options, multiple: options[1]
+        try:
+            self.assertEqual(q.t_ask_user("which one?", ["a", "b"]), "The user answered: b")
+        finally:
+            q.TURN_CTX.ask = None
+
+    def test_glob_and_multi_edit(self):
+        os.makedirs(os.path.join(q.WORKSPACE, "d", "e"))
+        for f in ("d/a.py", "d/e/b.py", "d/c.txt"): open(os.path.join(q.WORKSPACE, f), "w").write("x = 1\ny = 2\n")
+        out = q.t_glob("**/*.py", q.WORKSPACE)
+        self.assertIn("2 match", out); self.assertIn("d/e/b.py", out)
+        p = os.path.join(q.WORKSPACE, "d/a.py")
+        self.assertIn("Applied 2 edits", q.t_multi_edit(p, [{"old_string": "x = 1", "new_string": "x = 10"},
+                                                            {"old_string": "y = 2", "new_string": "y = 20"}]))
+        self.assertEqual(open(p).read(), "x = 10\ny = 20\n")
+        r = q.t_multi_edit(p, [{"old_string": "x = 10", "new_string": "x = 3"}, {"old_string": "nope", "new_string": "z"}])
+        self.assertIn("nothing was changed", r); self.assertEqual(open(p).read(), "x = 10\ny = 20\n")
+
+    def test_the_providers_retry_after_is_respected(self):
+        waits, n = [], {"i": 0}
+        def fake(messages, tools, **kw):
+            n["i"] += 1
+            if n["i"] == 1: raise q.ModelError("HTTP 429: slow down", 429, retry_after=0.3)
+            return {"role": "assistant", "content": "ok"}
+        q.stream_call = fake
+        t0 = time.time()
+        out = q.turn(self.chat(), "hi", [], emit=lambda k, p: waits.append(p.get("wait")) if k == "retry" else None)
+        self.assertEqual(out, "ok"); self.assertEqual(waits, [0.3])
+        self.assertLess(time.time() - t0, 3)
+
+    def test_built_in_init_and_review_commands(self):
+        self.assertIn("ORBIT.md", q.expand_prompt("/init focus on the data pipeline", {**q.BUILTIN_PROMPTS}))
+        self.assertIn("focus on the data pipeline", q.expand_prompt("/init focus on the data pipeline", {**q.BUILTIN_PROMPTS}))
+        self.assertIn("git diff", q.expand_prompt("/review", {**q.BUILTIN_PROMPTS}))
+        mine = {**q.BUILTIN_PROMPTS, "init": {"text": "my own init"}}
+        self.assertEqual(q.expand_prompt("/init", mine), "my own init")
+
     def test_minutes_until_the_next_clock_time(self):
         now = time.mktime((2026, 9, 12, 2, 0, 0, 0, 0, -1))
         self.assertAlmostEqual(q.minutes_until("06:00", now), 240, delta=1)

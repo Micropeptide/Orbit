@@ -44,6 +44,17 @@ answer for each feature.
 | Forking a session | Fork a chat from any of your messages. |
 | Prompt history, drafts, a jump list | ↑/↓ through what you sent, one draft per chat, and `⌘G` / `/jump` to go to any message. |
 
+### Second pass through opencode's source
+
+| opencode | In Orbit |
+|---|---|
+| Revert a message's file changes (snapshots) | Each answer records the files it wrote or edited, with the snapshot taken just before. An **undo N file changes** button puts them back: edited files from the snapshot, new files to the bin. Undoing can itself be undone. |
+| Plan agent (read-only) | `/plan` switches a chat to plan mode: reading, searching and analysis are allowed, but writes, edits, shell and scheduling are refused. The chat ends with a concrete plan. `/build` switches it back. |
+| `question` tool | `ask_user` asks you mid-task, with options or free text, and waits for the answer. It is answerable from any window. In a run nobody is watching, it tells the model to decide for itself and say so. |
+| Retry-After from providers | A rate-limited request waits as long as the provider asks, capped at 2 minutes. |
+| `/init`, `/review` commands | Built in, and overridable by a saved prompt of the same name. `/init` writes the project folder's `ORBIT.md`; `/review` reviews uncommitted changes, a commit or a branch. |
+| `glob` tool, multi-edit | `glob("**/*.py")`, newest first. `multi_edit` makes several edits to one file, all or nothing. |
+
 ## Not adopted, and why
 
 - **Share links.** They upload a conversation to a public server, and Orbit's premise is that nothing leaves the Mac unless you send it.
