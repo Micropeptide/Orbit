@@ -1671,6 +1671,25 @@ class TestRound1(TestLongAnswers):
         self.assertEqual(errors, [])
         self.assertEqual([f for f in os.listdir(self.tmp) if f.endswith(".tmp")], [])
 
+    def test_each_paragraph_of_thinking_is_timed(self):
+        marks, st = [], [0, ""]
+        for chunk, t in (("Look at", 100), (" the data.\n", 101), ("\nNow the ", 130), ("count.\n\nDone", 131)):
+            q.para_marks(marks, st, chunk, now=t)
+        text = "Look at the data.\n\nNow the count.\n\nDone"
+        self.assertEqual(st[0], len(text))
+        self.assertEqual([m[0] for m in marks], [0, text.index("Now"), text.index("Done")])
+        self.assertEqual([m[1] for m in marks], [100, 130, 131])
+
+    def test_a_model_step_keeps_when_its_thinking_happened(self):
+        def fake(messages, tools, **kw):
+            return {"role": "assistant", "content": "ok", "reasoning_content": "a\n\nb",
+                    "reasoning_marks": [[0, 1.0], [3, 20.0]]}
+        q.stream_call = fake
+        msgs = self.chat()
+        q.turn(msgs, "go", [], emit=self.emit)
+        self.assertEqual(msgs[-1]["reasoning_marks"], [[0, 1.0], [3, 20.0]])
+        self.assertNotIn("reasoning_marks", q._strip_reasoning(msgs)[-1])
+
     def test_minutes_until_the_next_clock_time(self):
         now = time.mktime((2026, 9, 12, 2, 0, 0, 0, 0, -1))
         self.assertAlmostEqual(q.minutes_until("06:00", now), 240, delta=1)
@@ -1990,6 +2009,26 @@ class TestRound1Server(Sandbox):
                 {"role": "user", "content": "second"},
                 {"role": "assistant", "content": "second answer"}]
         self.assertEqual(self.ui.render(msgs)[-1]["tool_runs"], [])
+
+    def test_saved_thinking_carries_its_paragraph_times(self):
+        out = self.ui.render([{"role": "user", "content": "q"},
+                              {"role": "assistant", "content": "a", "reasoning_content": "x\n\ny",
+                               "reasoning_marks": [[0, 5.0], [3, 40.0]]}])
+        self.assertEqual(out[-1]["thinking_marks"], [[0, 5.0], [3, 40.0]])
+
+    def test_the_page_marks_paragraphs_the_same_way_as_the_server(self):
+        import shutil, subprocess
+        node = shutil.which("node")
+        if not node: self.skipTest("no node")
+        src = open(os.path.join(ROOT, "web", "index.html")).read()
+        fn = src[src.index("function paraMarks"):src.index("// when a thinking block began")]
+        chunks = ["Look at", " the data.\n", "\nNow the ", "count.\n\nDone"]
+        js = fn + ("let m=[],t='';for(const c of " + json.dumps(chunks) +
+                   "){paraMarks(m,t,c);t+=c}console.log(JSON.stringify(m.map(x=>x[0])))")
+        got = json.loads(subprocess.run([node, "-e", js], capture_output=True, text=True).stdout)
+        marks, st = [], [0, ""]
+        for c in chunks: q.para_marks(marks, st, c)
+        self.assertEqual(got, [m[0] for m in marks])
 
     def test_text_and_the_tools_it_called_stay_together(self):
         msgs = [{"role": "user", "content": "go"},

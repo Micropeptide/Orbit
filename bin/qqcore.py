@@ -1330,7 +1330,24 @@ class _Either:
         return True
 
 # keys Orbit keeps on a stored message for itself -- never sent to a model
-PRIVATE_KEYS = ("partial", "interjection", "compacted", "t", "secs", "ok", "usage", "tool_runs")
+PRIVATE_KEYS = ("partial", "interjection", "compacted", "t", "secs", "ok", "usage", "tool_runs",
+                "reasoning_marks")
+
+def para_marks(marks, state, chunk, now=None):
+    """Note when each paragraph of thinking began: [offset, time] pairs, kept
+    with the message so a reopened chat can show when each part was thought.
+    state = [chars so far, last two chars]; updated in place."""
+    now = now or time.time()
+    n, tail = state
+    if n == 0 and chunk: marks.append([0, round(now, 1)])
+    combo = tail + chunk
+    i = combo.find("\n\n")
+    while i != -1:
+        pos = n - len(tail) + i + 2
+        if pos < n + len(chunk) and (not marks or pos > marks[-1][0]) and len(marks) < 500:
+            marks.append([pos, round(now, 1)])
+        i = combo.find("\n\n", i + 1)
+    state[0], state[1] = n + len(chunk), combo[-2:]
 
 def _strip_reasoning(messages):
     """Stored history keeps each turn's thinking so a reopened chat can still
@@ -1416,6 +1433,7 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
     req = urllib.request.Request(base + "/chat/completions", data=json.dumps(body).encode(),
                                  headers=headers)
     content, reasoning, tcalls, usage = [], [], {}, None
+    marks, mstate = [], [0, ""]
     try:
         r = urllib.request.urlopen(req, timeout=3600)
     except urllib.error.HTTPError as e:
@@ -1436,6 +1454,7 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
             if isinstance(d.get("usage"), dict): usage = d["usage"]
             dl = ((d.get("choices") or [{}])[0]).get("delta") or {}
             if dl.get("reasoning_content"):
+                para_marks(marks, mstate, dl["reasoning_content"])
                 reasoning.append(dl["reasoning_content"])
                 if emit: emit("thinking_delta", dl["reasoning_content"])
             if dl.get("content"):
@@ -1452,6 +1471,7 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
     msg = {"role": "assistant", "content": "".join(content),
            "model": spec.get("label") or spec["model"]}
     if reasoning: msg["reasoning_content"] = "".join(reasoning)
+    if marks: msg["reasoning_marks"] = marks
     if usage and usage.get("prompt_tokens"): msg["_prompt_tokens"] = int(usage["prompt_tokens"])
     if usage: msg["_usage"] = {k: int(usage.get(k) or 0) for k in ("prompt_tokens", "completion_tokens")}
     if tcalls: msg["tool_calls"] = [tcalls[k] for k in sorted(tcalls)]
@@ -1780,7 +1800,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
             if used and sid: SESSION_TOKENS[sid] = used
             for k, v in (msg.pop("_usage", None) or {}).items(): usage[k] = usage.get(k, 0) + v
             said = {k: v for k, v in msg.items()
-                    if k in ("role", "content", "model", "reasoning_content")}
+                    if k in ("role", "content", "model", "reasoning_content", "reasoning_marks")}
             if cancel.is_set():
                 # a stop mid-stream keeps whatever was written so far, thinking
                 # included, marked partial so the next message hands that
@@ -1800,7 +1820,8 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
             # keep "reasoning_content" so the thinking trace survives a reload too —
             # stream_call() strips it back out before it is ever sent to a model
             messages.append({**{k: v for k, v in msg.items()
-                                if k in ("role", "content", "tool_calls", "model", "reasoning_content")},
+                                if k in ("role", "content", "tool_calls", "model", "reasoning_content",
+                                         "reasoning_marks")},
                              "t": time.time()})
             if not calls:
                 if inbox:
