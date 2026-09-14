@@ -404,6 +404,38 @@ class TestUIState(unittest.TestCase):
         self.assertIn("lock.locked()", handler,
                       "the handler no longer checks whether that chat is mid-answer")
 
+    def test_live_buffer_holds_only_the_step_being_written(self):
+        # it held every step of the answer, so a window rejoining mid-answer
+        # showed the finished steps twice: saved, and again as live text
+        st = self.ui.State()
+        rec = lambda k, p=None: self.ui._live_record(st, k, p)
+        st.msgs.append({"role": "user", "content": "go"})
+        rec("thinking_delta", "first idea"); rec("content_delta", "step one")
+        rec("tool", {"name": "read_file", "id": "c1", "args": {}})
+        st.msgs += [{"role": "assistant", "content": "step one"}, {"role": "tool", "content": "x"}]
+        rec("tool_result", {"id": "c1", "ok": True, "secs": 0.1})
+        self.assertEqual(st.live["tools"][0]["ok"], True)
+        self.assertEqual(st.live["from"], 2)
+        rec("content_delta", "step two")
+        lv = self.ui._live_view(st)
+        self.assertEqual((lv["content"], lv["tools"], lv["thinking"]), ("step two", [], ""))
+        self.assertEqual((lv["from"], lv["step"]), (4, 1))
+        self.assertFalse([k for k in lv if k.startswith("_")])
+        # what it says after reading a note is a block of its own too
+        rec("interjection", {"text": "also do X"})
+        st.msgs.append({"role": "user", "content": "also do X"})
+        rec("content_delta", "doing X")
+        self.assertEqual((st.live["content"], st.live["step"], st.live["from"]), ("doing X", 2, 5))
+
+    def test_page_stops_drawing_an_answer_once_you_leave_its_chat(self):
+        page = open(os.path.join(ROOT, "web", "index.html")).read()
+        go = page.split("async function go(")[1].split("\n$('#stopgen')")[0]
+        self.assertIn("if(away){", go)
+        self.assertIn("a.m.isConnected", go)
+        self.assertIn("lv.step!==step", page)       # a rejoined answer splits into steps
+        self.assertNotIn("Keep going</button>", page)
+
+
 
 
 class TestPrivacyAndSwitching(unittest.TestCase):
@@ -1193,9 +1225,35 @@ class TestLongAnswers(unittest.TestCase):
         told = []
         q.notify = lambda title, text: told.append(text)
         self.script(self.tool_step(1), self.tool_step(2), self.final("done"))
-        q.turn(self.chat(), "go", [], emit=self.emit)
+        self.assertEqual(q.turn(self.chat(), "go", [], emit=self.emit), "done")
         self.assertIn("long_running", self.kinds())
-        self.assertTrue(told)
+        # a note in the chat only: a system notification read as a prompt
+        self.assertFalse(told)
+
+    def test_asking_whether_to_go_on_is_answered_yes(self):
+        self.script(self.tool_step(1), self.final("Half done. Shall I continue?"),
+                    self.tool_step(2), self.final("all done"))
+        msgs = self.chat()
+        self.assertEqual(q.turn(msgs, "go", [], emit=self.emit), "all done")
+        self.assertTrue(any(m.get("nudge") and "keep going" in m["content"] for m in msgs))
+
+    def test_asks_to_continue_spots_only_that_question(self):
+        for s in ("Shall I continue?", "Would you like me to proceed with the rest?",
+                  "Step 3 of 7 done.\n\nKeep going?", "Do you want me to carry on"):
+            self.assertTrue(q.asks_to_continue(s), s)
+        for s in ("Done. The file is at out/report.md.", "Would you like a chart of this too?",
+                  "I will continue with step 4 now."):
+            self.assertFalse(q.asks_to_continue(s), s)
+
+    def test_ask_user_never_waits_to_be_told_to_go_on(self):
+        asked = []
+        q.TURN_CTX.ask = lambda *a: asked.append(a) or "no"
+        try:
+            self.assertIn("keep going", q.t_ask_user("Should I keep going?"))
+            self.assertFalse(asked)
+            self.assertIn("no", q.t_ask_user("Which dataset, A or B?", ["A", "B"]))
+        finally:
+            q.TURN_CTX.ask = None
 
     def test_autocompact_measures_this_conversation_not_the_server(self):
         big = self.chat(*[{"role": "user" if i % 2 == 0 else "assistant",
