@@ -934,13 +934,21 @@ function stopLive(){if(livePoll){clearInterval(livePoll);livePoll=null}}
 function attachLive(theSid, initial){
  stopLive();
  const note=sysline('still generating — reconnected to it');
- const a=addAssistant(modelLabel());
+ let a=addAssistant(modelLabel());
  a.bub.innerHTML='<span class=working>rejoining this answer<span class=dots></span></span>';
  // shownTools counts lv.tools already drawn -- not a.tools' children, which
  // also hold approval boxes, so one approval used to swallow the next tool
- let thinkStarted=false, shownApproval=null, shownTools=0;
- const lrows=[];
+ let thinkStarted=false, shownApproval=null, shownTools=0, step=null;
+ let lrows=[];
  const paint=lv=>{
+  // the server keeps only the step being written; when it moves on to the
+  // next one, close this block and start another, as a live answer does
+  if(step!==null&&lv.step!=null&&lv.step!==step){
+   lrows.forEach(r=>{if(r.classList.contains('live'))finishTool(r,{})});
+   if(thinkStarted)thinkLabel(a,'thought');
+   if(a.bub.dataset.raw)decorate(a.bub);else a.bub.remove();
+   a=addAssistant(modelLabel());thinkStarted=false;shownTools=0;lrows=[]}
+  if(lv.step!=null)step=lv.step;
   if(!lv.content&&!lv.thinking&&lv.status)
    a.bub.innerHTML='<span class=working>'+esc(lv.status)+'<span class=dots></span></span>';
   const tl=lv.tools||[];
@@ -1364,12 +1372,26 @@ async function go(opts){
   const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
    body:JSON.stringify({message:t,attachments:sending,effort:opts.effort,sid:sendSid})});
   const mine=()=>sid===sendSid;   // user may have switched away
+  // Once you open another chat this answer is off screen for good: every
+  // drawing call below appends to the page's one message list, so its steps
+  // used to land in whichever chat you were reading. It keeps running on the
+  // server; opening its chat again rejoins it from the live buffer instead.
+  let away=false;
   const rd=r.body.getReader(),dec=new TextDecoder();let buf='';
   while(true){const {value,done}=await rd.read();if(done)break;
    buf+=dec.decode(value,{stream:true});
    const parts=buf.split('\n\n');buf=parts.pop();
    for(const ln of parts){ if(!ln.startsWith('data: '))continue;
     let m;try{m=JSON.parse(ln.slice(6))}catch(_){continue}
+    if(!away&&(!mine()||!a.m.isConnected))away=true;
+    if(away){
+     if(m.k==='end')endP=m.p||{};
+     else if(m.k==='error')errored=true;
+     else if(m.k==='tool')answer='';                 // the answer is the text after the last tools
+     else if(m.k==='content_delta')answer+=m.p;
+     else if(m.k==='approval_request')notify(sendSid,'Needs your approval',m.p.name||'');
+     else if(m.k==='question')notify(sendSid,'Orbit has a question',m.p.question||'');
+     continue}
     // a finished call closes its row; the plan/diff/images branches below still run
     if(m.k==='tool_result'&&m.p&&m.p.id&&trows[m.p.id])finishTool(trows[m.p.id],m.p);
     if(m.k==='thinking_delta'||m.k==='content_delta')nextStep();
@@ -1512,15 +1534,13 @@ async function go(opts){
       a.bub.innerHTML='<span class=working>reading your note<span class=dots></span></span>';
       thinking='';answer='';tmarks=[];bottom()}}
     else if(m.k==='long_running'){
-     a.m.querySelectorAll('.longrun').forEach(x=>x.remove());
-     const b=el('<div class="limitbox longrun"></div>');
-     b.appendChild(el(`<b>Still working — ${m.p.minutes} min, ${m.p.rounds} steps so far</b>`));
-     if((m.p.pending||[]).length){const d=document.createElement('div');d.style.color='var(--mut)';
-      d.textContent='next: '+m.p.pending.slice(0,3).join(' · ');b.appendChild(d)}
-     const row=el('<div style="display:flex;gap:8px;margin-top:6px"></div>');
-     const st=el('<button>Stop</button>');st.onclick=()=>{$('#stopgen').click();b.remove()};
-     const k=el('<button class=ghost>Keep going</button>');k.onclick=()=>b.remove();
-     row.appendChild(st);row.appendChild(k);b.appendChild(row);
+     // just a progress line: it carries on by itself, with no time limit.
+     // This used to be a box with Stop / Keep going buttons, which read as
+     // though it were waiting for an answer. Stop is always in the composer.
+     document.querySelectorAll('.longrun').forEach(x=>x.remove());
+     const b=el('<div class="sysline longrun"></div>');
+     b.textContent=`still working — ${m.p.minutes} min, ${m.p.rounds} steps so far`+
+      ((m.p.pending||[]).length?' · next: '+m.p.pending.slice(0,2).join(' · '):'')+' · no action needed';
      a.tools.appendChild(b);bottom()}
     else if(m.k==='retry'){
      a.m.querySelectorAll('.retrynote').forEach(x=>x.remove());   // one per answer, the latest
@@ -1975,7 +1995,7 @@ async function openSettings(tab){
   }
   if(name==='memory'){
    body.innerHTML=`<div class=sec>General instructions <small>— always prepended, like a CLAUDE.md</small></div>
-    <textarea class=ta id=m_ins placeholder="e.g. I'm a plant epigenetics PhD student at UCLA. Prefer concise answers with citations. Always give exact AGI gene IDs."></textarea>
+    <textarea class=ta id=m_ins placeholder="e.g. I'm a biology grad student. Prefer concise answers with citations. Always give exact gene IDs."></textarea>
     <div class=sec>Memories <small>— durable facts, injected into every chat</small></div>
     <div id=memlist></div>
     <div class=grid style="margin-top:10px"><label>New memory name</label>

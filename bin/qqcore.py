@@ -1825,9 +1825,9 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
             if next_notice and time.time() >= next_notice:
                 mins = int((time.time() - t_start) / 60)
                 pend = [x["text"] for x in plan_pending()]
+                # a progress note in the chat only: no system notification, which
+                # read as if the run had stopped to wait for an answer
                 emit("long_running", {"minutes": mins, "rounds": rnd, "pending": pend})
-                notify("Orbit is still working",
-                       f"{mins} min, {rnd} steps so far" + (f" — next: {pend[0]}" if pend else ""))
                 next_notice += every
             # cleared before the notes are taken, so one that lands in between
             # still cuts the coming generation short rather than waiting a step
@@ -1923,6 +1923,17 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                         "saying what, and finish with what you have.]")})
                     emit("plan_nudge", {"left": [x["text"] for x in pend],
                                         "msg": f"resuming — {len(pend)} plan step(s) left"})
+                    continue
+                # it stopped only to ask whether to go on: there's no time limit
+                # and nobody need be watching, so the answer is yes -- a few
+                # times at most, so a model that keeps asking still ends
+                if (asks_to_continue(msg.get("content") or "") and not cancel.is_set()
+                        and seen_calls.get("__go_on__", 0) < int(S.get("plan_nudges", 3))):
+                    seen_calls["__go_on__"] = seen_calls.get("__go_on__", 0) + 1
+                    messages.append({"role": "user", "nudge": True, "t": time.time(), "content": (
+                        "[Orbit: yes, keep going. There is no time limit and no need to check in; "
+                        "carry on until the whole task is done, then report what you did.]")})
+                    emit("plan_nudge", {"msg": "it asked whether to go on — told it to keep going"})
                     continue
                 answer = (msg.get("content") or "").strip()
                 if LAST_SOURCES:
@@ -3128,8 +3139,10 @@ HARNESS_NOTE = (
  "\n\n## How you work here\n"
  "- Each message from the user starts with when it was sent, e.g. [Sat 12 Sep 2026, 11:29 PDT]. "
  "That is the current date and time — use it, never guess the day or date.\n"
- "- No time or step limit on an answer. Plan with `plan`, work through every step and keep "
- "going until it's done; the user hears if you've been running a long time and can stop you.\n"
+ "- No time or step limit on an answer, and no need to check in. Plan with `plan`, work "
+ "through every step and keep going until it's done — for hours if it takes that. Never stop "
+ "to ask whether to continue, keep going or proceed: the answer is always yes, and the user "
+ "can stop you whenever they like. Use `ask_user` only for a real choice that blocks you.\n"
  "- The user can send you notes while you work. They arrive marked as sent mid-task: treat "
  "them as steering for what you're doing now — adjust and carry on, unless they say stop. If "
  "you were interrupted mid-thought, your earlier reasoning is shown to you: continue from it "
@@ -5486,11 +5499,26 @@ PLAN_MODE_NOTE = ("## Plan mode\nThe user has switched on plan mode: read, searc
                   "tasks. Finish with a concrete plan: the steps, the files and exact changes, and how "
                   "to check the result. They switch plan mode off when they want it carried out.")
 
+_CONTINUE_Q = _re.compile(
+    r"\b(?:shall|should|can|may|do you want|would you like|want)\s+(?:me\s+to|i|us\s+to|we)\s+"
+    r"(?:continue|keep going|proceed|carry on|go on|move on|resume)\b"
+    r"|\b(?:continue|keep going|proceed|carry on|go on)\s*(?:\([^)]*\))?\s*\?\s*$"
+    r"|\bshould i stop\b|\bstop here\s*\?", _re.I)
+
+def asks_to_continue(text):
+    """True if text (or its last few lines) asks whether to keep going."""
+    tail = (text or "").strip()[-400:]
+    return bool(_CONTINUE_Q.search(tail))
+
 def t_ask_user(question, options=None, multiple=False):
     """Ask the user something mid-task and wait for the answer -- a choice
     between options, or free text. With nobody watching, says so."""
     ask = getattr(TURN_CTX, "ask", None)
     opts = [str(o)[:120] for o in (options or []) if str(o).strip()][:8]
+    if asks_to_continue(str(question)):
+        # asking leaves the run waiting on someone who may be away for hours
+        return ("Yes: keep going. The user wants long tasks to run to the end without "
+                "check-ins, so don't ask this again; carry on until everything is done.")
     if not ask:
         return ("Nobody is watching this run, so there's no one to ask. Make the most reasonable "
                 "choice yourself, say which and why, and carry on.")

@@ -356,8 +356,7 @@ class H(http.server.BaseHTTPRequestHandler):
             st = STATES.get(sid)
             if not st:
                 return self._send(200, jdump({"known": False, "running": False}))
-            lv = dict(st.live)
-            lv.pop("_mstate", None)
+            lv = _live_view(st)
             lv["known"] = True
             lv["running"] = st.lock.locked()
             return self._send(200, jdump(lv))
@@ -547,13 +546,18 @@ class H(http.server.BaseHTTPRequestHandler):
                 globals()["S"] = stt               # the chat the browser is looking at
                 q.ACTIVE_PROJECT["id"] = stt.project
                 msgs, title = list(stt.msgs), stt.title
+                running = bool(stt and stt.lock.locked())
+                live = _live_view(stt) if running else None
+                # mid-answer, the step being written is drawn from the live
+                # buffer, so the saved copy of it is left out here
+                shown = msgs
+                if live and isinstance(live.get("from"), int) and 0 < live["from"] <= len(msgs):
+                    shown = msgs[:live["from"]]
                 return self._send(200, jdump({"ok": True, "sid": sid, "title": title,
                                               "plan_mode": bool(getattr(stt, "plan_mode", False)),
-                                              "messages": render(msgs), "n": len(msgs),
+                                              "messages": render(shown), "n": len(msgs),
                                               "context": q.context_state(msgs, sid),
-                                              "running": bool(stt and stt.lock.locked()),
-                                              "live": (dict(stt.live) if stt and stt.lock.locked()
-                                                       else None)}))
+                                              "running": running, "live": live}))
             except Exception as e:
                 return self._send(404, jdump({"error": str(e)}))
         if p.startswith("/api/ws/"):
@@ -1238,29 +1242,7 @@ class H(http.server.BaseHTTPRequestHandler):
                         return rec.get("answer") if ok else None
 
                     def _emit(k, p):
-                        lv = st.live                      # keep a copy so you can rejoin later
-                        if   k == "thinking_delta":
-                            q.para_marks(lv.setdefault("thinking_marks", []),
-                                         lv.setdefault("_mstate", [len(lv["thinking"]), lv["thinking"][-2:]]), p)
-                            lv["thinking"] += p
-                        elif k == "content_delta":  lv["content"]  += p
-                        elif k == "tool":
-                            lv["tools"].append({"name": p.get("name"), "args": p.get("args"),
-                                                "id": p.get("id"), "t": p.get("t")})
-                        elif k == "tool_result":
-                            for x in reversed(lv["tools"]):
-                                if x.get("id") and x.get("id") == (p or {}).get("id"):
-                                    x.update(ok=p.get("ok"), secs=p.get("secs")); break
-                        elif k == "auto_approved":
-                            # so a tab that rejoins mid-answer still sees what ran
-                            # unattended, not just what is still waiting on it
-                            lv["tools"].append({"name": "✓ auto-approved: " + p.get("name", ""),
-                                                "args": p.get("args")})
-                        elif k in _STATUS_KINDS:
-                            # a tab that rejoins mid-answer needs to see this too,
-                            # otherwise a cold start looks like a hung chat
-                            lv["status"] = _status_text(k, p)
-                        lv["seq"] += 1
+                        _live_record(st, k, p)            # keep a copy so you can rejoin later
                         if k == "tool_result" and q.LAST_IMAGES:
                             p = dict(p or {})
                             p["images"] = [os.path.relpath(i, q.WORKSPACE) for i in q.LAST_IMAGES]
@@ -1383,25 +1365,59 @@ def _status_text(k, p):
     if k == "subtask":      return f"helper: {p.get('description')} — {p.get('tool')}"
     return p.get("msg") or k.replace("_", " ")
 
-def _live_emitter(st):
-    """What a chat's own stream would record, for a run nobody is streaming —
-    so opening that chat mid-run shows it working, like any other answer."""
-    def emit(k, p):
-        lv = st.live
-        if   k == "thinking_delta":
+def _live_record(st, k, p):
+    """Keep what a running answer is doing in st.live, so a window that opens
+    the chat mid-answer can show it.
+
+    Only the step in progress is kept. When the model starts writing again
+    after running tools (or after reading a note), the step before is already
+    in st.msgs, so the buffer starts over; "from" says where the saved part
+    ends and "step" counts the restarts. The buffer used to hold every step of
+    the answer, so a rejoining window showed the finished steps twice: once
+    from the saved chat and again as one block of live text."""
+    lv = st.live
+    p = p if p is not None else {}
+    if k in ("thinking_delta", "content_delta"):
+        if lv.get("from") is None or lv["tools"] or lv.get("_newstep"):
+            if lv.get("from") is not None:
+                lv["step"] = lv.get("step", 0) + 1
+            lv.update(thinking="", content="", tools=[], thinking_marks=[], _newstep=False,
+                      **{"from": len(st.msgs)})
+            lv.pop("_mstate", None)
+        if k == "thinking_delta":
             q.para_marks(lv.setdefault("thinking_marks", []),
                          lv.setdefault("_mstate", [len(lv["thinking"]), lv["thinking"][-2:]]), p)
             lv["thinking"] += p
-        elif k == "content_delta":  lv["content"]  += p
-        elif k == "tool": lv["tools"].append({"name": p.get("name"), "args": p.get("args"),
-                                              "id": p.get("id"), "t": p.get("t")})
-        elif k == "tool_result":
-            for x in reversed(lv["tools"]):
-                if x.get("id") and x.get("id") == (p or {}).get("id"):
-                    x.update(ok=p.get("ok"), secs=p.get("secs")); break
-        elif k in _STATUS_KINDS: lv["status"] = _status_text(k, p)
-        lv["seq"] += 1
-    return emit
+        else:
+            lv["content"] += p
+    elif k == "tool":
+        lv["tools"].append({"name": p.get("name"), "args": p.get("args"),
+                            "id": p.get("id"), "t": p.get("t")})
+    elif k == "tool_result":
+        for x in reversed(lv["tools"]):
+            if x.get("id") and x.get("id") == p.get("id"):
+                x.update(ok=p.get("ok"), secs=p.get("secs")); break
+    elif k == "auto_approved":
+        # so a tab that rejoins mid-answer still sees what ran
+        # unattended, not just what is still waiting on it
+        lv["tools"].append({"name": "✓ auto-approved: " + p.get("name", ""),
+                            "args": p.get("args")})
+    if k == "interjection" and not p.get("late"):
+        lv["_newstep"] = True               # what it says after the note is a new block
+    if k in _STATUS_KINDS:
+        # a tab that rejoins mid-answer needs to see this too,
+        # otherwise a cold start looks like a hung chat
+        lv["status"] = _status_text(k, p)
+    lv["seq"] = lv.get("seq", 0) + 1
+
+def _live_view(st):
+    """st.live as sent to a browser: without the private bookkeeping."""
+    return {k: v for k, v in st.live.items() if not k.startswith("_")}
+
+def _live_emitter(st):
+    """What a chat's own stream would record, for a run nobody is streaming —
+    so opening that chat mid-run shows it working, like any other answer."""
+    return lambda k, p: _live_record(st, k, p)
 
 def _learn_later(st, n0, min_steps=3):
     """After a substantial answer (min_steps tool calls or more), pull out
