@@ -427,6 +427,14 @@ class TestUIState(unittest.TestCase):
         rec("content_delta", "doing X")
         self.assertEqual((st.live["content"], st.live["step"], st.live["from"]), ("doing X", 2, 5))
 
+    def test_reading_a_running_chat_leaves_out_the_step_being_written(self):
+        # both ways of reading a chat mid-answer, or a rejoining phone or page
+        # shows the step being written twice: saved, and from the live buffer
+        src = open(os.path.join(ROOT, "bin", "orbit-ui")).read()
+        for route in ('if p.startswith("/api/peek/")', 'if p.startswith("/api/session/")'):
+            handler = src.split(route)[1].split("if p.startswith")[0]
+            self.assertIn('"from"', handler, route)
+
     def test_page_stops_drawing_an_answer_once_you_leave_its_chat(self):
         page = open(os.path.join(ROOT, "web", "index.html")).read()
         go = page.split("async function go(")[1].split("\n$('#stopgen')")[0]

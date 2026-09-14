@@ -516,6 +516,9 @@ class H(http.server.BaseHTTPRequestHandler):
             st = STATES.get(sid)
             if st is not None:
                 msgs, title, running = list(st.msgs), st.title, st.lock.locked()
+                # as /api/session: the step being written comes from the live buffer
+                frm = st.live.get("from") if running else None
+                if isinstance(frm, int) and 0 < frm <= len(msgs): msgs = msgs[:frm]
             else:
                 try: msgs, title = q.session_load(sid)
                 except Exception: return self._send(404, jdump({"error": "no such chat"}))
