@@ -112,6 +112,7 @@ LOADED_AT = time.time()
 # the server's own file is orbit-ui now; watching the old name "qq-ui" meant a
 # change to the server was never flagged as needing a restart
 CODE_FILES = [os.path.join(q.ROOT, "bin", "qqcore.py"),
+              os.path.join(q.ROOT, "bin", "claude_engine.py"),
               os.path.join(q.ROOT, "bin", "orbit-ui"),
               os.path.join(q.ROOT, "web", "index.html")]
 
@@ -349,6 +350,26 @@ class H(http.server.BaseHTTPRequestHandler):
             return
         if p == "/api/running":
             return self._send(200, jdump({"running": running_sids(), "max": MAX_PARALLEL}))
+        if p.startswith("/api/claude/info"):
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            sid = (qs.get("sid") or [""])[0]
+            st = STATES.get(sid)
+            msgs = list(st.msgs) if st else (q.session_load(sid)[0] if os.path.exists(q.session_path(sid)) else [])
+            mk = q.CE.marker_of(msgs) or {}
+            spec = q.current_model((st.model if st else None) or None) or {}
+            return self._send(200, jdump({
+                "engine": q.CE.is_engine(spec), "session": mk.get("session"), "cwd": mk.get("cwd"),
+                "skills": mk.get("skills") or [], "resume": q.CE.resume_command(msgs),
+                "transcript": q.CE.jsonl_path(mk.get("session"), mk.get("cwd")) if mk else None,
+                "installed": bool(q.CE.which_claude()), "settings": q.CE.cfg(),
+                "defaults": q.CE.DEFAULTS, "modes": q.CE.PERMISSION_MODES,
+                "prefs": q.CE.chat_prefs(sid), "running": sid in q.CE.RUNS,
+                "mode": (q.CE.RUNS.get(sid) or {}).get("mode"),
+                "commands": [{"name": c.get("name"), "description": c.get("description"),
+                              "argumentHint": c.get("argumentHint")} for c in (q.CE.INIT.get("commands") or [])],
+                "tools": q.CE.INIT.get("tools") or [], "mcp": q.CE.INIT.get("mcp_servers") or [],
+                "version": q.CE.INIT.get("claude_code_version"),
+                "mcp_known": sorted(q.CE.user_mcp_servers())}))
         if p == "/api/code":
             return self._send(200, jdump(code_is_stale()))
         if p.startswith("/api/live/"):
@@ -513,6 +534,7 @@ class H(http.server.BaseHTTPRequestHandler):
             sid = p.rsplit("/", 1)[-1]
             if not sid:
                 return self._send(400, jdump({"error": "which chat?"}))
+            _claude_sync(sid)
             st = STATES.get(sid)
             if st is not None:
                 msgs, title, running = list(st.msgs), st.title, st.lock.locked()
@@ -529,6 +551,7 @@ class H(http.server.BaseHTTPRequestHandler):
             sid = p.rsplit("/", 1)[-1]
             if not sid:
                 return self._send(400, jdump({"error": "which chat?"}))
+            _claude_sync(sid)
             try:
                 # Look the chat up by its own id. Mutating the global S here used to
                 # hijack whichever chat was mid-answer, so its reply was appended to
@@ -618,7 +641,34 @@ class H(http.server.BaseHTTPRequestHandler):
                 save_session()
             return self._send(200, jdump({"before": before, "after": len(S.msgs), "summary": summary}))
         if p == "/api/delete":
-            return self._send(200, jdump({"ok": q.session_delete(d.get("id",""))}))
+            did = d.get("id", "")
+            q.CE.hide_history(did)          # a deleted Claude-Qwen chat stays out of the sidebar
+            return self._send(200, jdump({"ok": q.session_delete(did) or did.startswith("cq-")}))
+        if p == "/api/claude/mode":
+            # a chat's Claude Code permission mode: live if it is answering, and from now on
+            return self._send(200, jdump(q.CE.set_permission_mode(d.get("sid", ""), d.get("mode", ""))))
+        if p == "/api/claude/control":
+            sub = d.get("subtype", "")
+            params = {k: v for k, v in d.items() if k not in ("sid", "subtype")}
+            r = q.CE.control(d.get("sid", ""), sub, **params)
+            return self._send(200, jdump(r if r is not None else {"error": "not running"}))
+        if p == "/api/claude/settings":
+            with LOCK:
+                cur = q.load_settings()
+                cq = dict(cur.get("claude_qwen") or {})
+                for k, v in (d.get("settings") or {}).items():
+                    if k in q.CE.DEFAULTS: cq[k] = v
+                cur["claude_qwen"] = cq
+                q.save_settings(cur); q.reload_settings()
+            return self._send(200, jdump({"ok": True, "settings": q.CE.cfg()}))
+        if p == "/api/mcp_bridge":
+            # Orbit's own tools for a Claude Code run (bin/orbit-mcp); loopback only
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                return self._send(403, jdump({"error": "local only"}))
+            if d.get("op") == "list":
+                return self._send(200, jdump(q.CE.bridge_list(d.get("token", ""))))
+            return self._send(200, jdump(q.CE.bridge_call(d.get("token", ""), d.get("name", ""),
+                                                           d.get("arguments") or {})))
         if p == "/api/settings":
             with LOCK:
                 merged = q._deep_merge(q.load_settings(), d.get("settings") or {})
@@ -755,6 +805,11 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/plan_mode":
             st = get_state(d.get("sid")) if d.get("sid") else S
             st.plan_mode = bool(d.get("on"))
+            if st.lock.locked() and st.sid in q.CE.RUNS:
+                # a Claude Code answer under way switches mode now, not next message
+                q.CE.control(st.sid, "set_permission_mode",
+                             mode="plan" if st.plan_mode else (q.CE.chat_prefs(st.sid).get("permission_mode")
+                                                               or q.CE.cfg().get("permission_mode") or "default"))
             _refresh_system(st)
             save_session(st)
             return self._send(200, jdump({"ok": True, "plan_mode": st.plan_mode}))
@@ -1200,13 +1255,18 @@ class H(http.server.BaseHTTPRequestHandler):
                     st.running = True
                     save_session(st)
                     st.msgs.pop()
-                    def _approve(fn, a, reason):
+                    def _approve(fn, a, reason, info=None):
+                        # info: a prompt raised by Claude Code (claude_engine) -- its
+                        # "always allow" becomes a Claude permission rule, not Orbit's
                         _APPROVE_SEQ[0] += 1
                         rid = f"ap{_APPROVE_SEQ[0]}"
                         ev = threading.Event()
                         PENDING[rid] = {"event": ev, "allow": False, "fn": fn, "args": a}
-                        req = {"id": rid, "name": fn, "args": a, "reason": reason,
+                        req = {"id": rid, "name": (info or {}).get("tool") or fn, "args": a, "reason": reason,
                                "suggested_pattern": q._rule_pattern_suggestion(fn, a)}
+                        if info:
+                            req.update(claude=True, suggested_pattern=info.get("suggested_pattern") or req["name"],
+                                       suggestions=info.get("suggestions") or [])
                         if fn in ("write_file", "edit_file"):
                             # what the change will be, so it can be judged before it's made
                             dv = q.preview_edit(fn, a)
@@ -1220,6 +1280,11 @@ class H(http.server.BaseHTTPRequestHandler):
                         ok = ev.wait(timeout=900)
                         st.live.pop("approval", None)
                         rec = PENDING.pop(rid, {})
+                        if info:
+                            return {"allow": bool(rec.get("allow")) if ok else False,
+                                    "always": bool(ok and rec.get("always")),
+                                    "pattern": rec.get("pattern") or "",
+                                    "note": (rec.get("message") or rec.get("note") or "").strip() if ok else ""}
                         if ok and rec.get("allow") and rec.get("always"):
                             q.add_permission_rule("allow", fn,
                                 rec.get("pattern") or q._rule_pattern_suggestion(fn, a),
@@ -1352,7 +1417,7 @@ class H(http.server.BaseHTTPRequestHandler):
             if kind == "end": return
 
 # stream events worth showing to a tab that rejoins an answer mid-way
-_STATUS_KINDS = ("server_starting", "stagnation", "autocompact", "squeezed",
+_STATUS_KINDS = ("server_starting", "stagnation", "autocompact", "squeezed", "notice",
                  "long_running", "interjection", "retry", "subtask", "queued", "dequeued",
                  "plan_nudge", "fail_streak", "ultrathink")
 
@@ -1412,6 +1477,20 @@ def _live_record(st, k, p):
         # otherwise a cold start looks like a hung chat
         lv["status"] = _status_text(k, p)
     lv["seq"] = lv.get("seq", 0) + 1
+
+def _claude_sync(sid):
+    """Opening a chat: a Claude-Qwen session from a terminal is brought in (or,
+    if it was continued there since, its new part is), unless it is running."""
+    st = STATES.get(sid)
+    if st is not None and st.lock.locked(): return
+    try:
+        if q.CE.sync_session(sid) and st is not None:
+            msgs, title = q.session_load(sid)
+            st.msgs, st.title = msgs, title
+            try: st.model = (json.load(open(q.session_path(sid))) or {}).get("model") or st.model
+            except Exception: pass
+    except Exception as e:
+        print(f"  ! claude sync {sid}: {type(e).__name__}: {e}")
 
 def _live_view(st):
     """st.live as sent to a browser: without the private bookkeeping."""
@@ -1646,6 +1725,7 @@ def scheduler_loop():
         # one thing at a time: no job while any answer (or job) is running, and
         # a gap after the last one finished, so jobs never pile onto a chat
         if running_sids() or JOBS_INFLIGHT or q.slot_busy(): return
+        if q.quiet_left(): return        # quiet mode: scheduled work waits until it ends
         if time.time() - q.GEN_STATE.get("ended", 0) < float(q.S.get("schedule_gap_min") or 0) * 60:
             return
         for job in q.sched_load().get("jobs", []):
@@ -1692,6 +1772,15 @@ def scheduler_loop():
 class Srv(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        # Browsers, health probes, and curl routinely close keep-alive sockets
+        # after receiving their response. BaseServer prints a full traceback for
+        # that harmless disconnect, burying real scheduler/model failures in the
+        # UI log. Preserve normal tracebacks and silence only disconnect noise.
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
 
 _RESTART_WAITING = threading.Event()
 
@@ -1741,6 +1830,8 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"  ! could not check for chats cut off mid-answer: {e}")
     threading.Thread(target=scheduler_loop, daemon=True).start()
+    q.UI_PORT = PORT
+    threading.Thread(target=q.CE.history_items_cached, daemon=True).start()   # warm the sidebar
     mode = remote_mode()
     addrs = REMOTE.bind_addresses(mode)
     if mode != "off":

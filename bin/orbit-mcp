@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""Orbit's own tools as an MCP server, for a Claude Code run started by Orbit.
+
+Claude Code starts this over stdio. It holds no tools itself: each list and
+call is forwarded to the Orbit server that started the run (ORBIT_MCP_URL,
+ORBIT_MCP_TOKEN), which runs the tool inside that chat -- with Orbit's safety
+checks, approvals and project -- and answers. Off unless Settings turns
+"Orbit's tools" on for Claude Code chats. Standard library only.
+"""
+import json, os, sys, urllib.request
+
+URL = os.environ.get("ORBIT_MCP_URL", "")
+TOKEN = os.environ.get("ORBIT_MCP_TOKEN", "")
+
+
+def orbit(payload, timeout=3700):
+    req = urllib.request.Request(URL, data=json.dumps({**payload, "token": TOKEN}).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def reply(mid, result=None, error=None):
+    msg = {"jsonrpc": "2.0", "id": mid}
+    if error is not None: msg["error"] = error
+    else: msg["result"] = result
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line: continue
+        try: req = json.loads(line)
+        except ValueError: continue
+        mid, method, params = req.get("id"), req.get("method"), req.get("params") or {}
+        if mid is None: continue                      # a notification
+        try:
+            if method == "initialize":
+                reply(mid, {"protocolVersion": params.get("protocolVersion") or "2025-06-18",
+                            "capabilities": {"tools": {}},
+                            "serverInfo": {"name": "orbit", "version": "1.0.0"}})
+            elif method == "ping":
+                reply(mid, {})
+            elif method == "tools/list":
+                d = orbit({"op": "list"}, timeout=30)
+                reply(mid, {"tools": d.get("tools") or []})
+            elif method == "tools/call":
+                d = orbit({"op": "call", "name": params.get("name"),
+                           "arguments": params.get("arguments") or {}})
+                if d.get("error"):
+                    reply(mid, {"content": [{"type": "text", "text": "Error: " + d["error"]}], "isError": True})
+                else:
+                    reply(mid, {"content": [{"type": "text", "text": d.get("text") or ""}],
+                                "isError": not d.get("ok", True)})
+            else:
+                reply(mid, error={"code": -32601, "message": f"no method {method}"})
+        except Exception as e:
+            reply(mid, error={"code": -32000, "message": f"{type(e).__name__}: {e}"})
+
+
+if __name__ == "__main__":
+    main()

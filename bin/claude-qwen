@@ -1,0 +1,19 @@
+#!/bin/sh
+# Claude Code on this Mac's local Qwen model (served by MTPLX), set up the way
+# Orbit runs it: the full harness (Write, WebFetch, subagents, skills, your MCP
+# servers), not --bare's three tools. Settings: Orbit → Settings → Claude Code.
+#   CLAUDE_QWEN_PROFILE=lean|focused|full   pick a profile for this run
+#   CLAUDE_QWEN_BARE=1                      the old minimal --bare mode
+#   CLAUDE_QWEN_DRY_RUN=1                   print the command instead of running it
+set -eu
+SCRIPT_PATH=$0
+while [ -L "$SCRIPT_PATH" ]; do
+  SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
+  LINK_TARGET=$(readlink "$SCRIPT_PATH")
+  case "$LINK_TARGET" in
+    /*) SCRIPT_PATH=$LINK_TARGET ;;
+    *)  SCRIPT_PATH=$SCRIPT_DIR/$LINK_TARGET ;;
+  esac
+done
+ORBIT_ROOT=$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")/.." && pwd)
+exec "$ORBIT_ROOT/venv/bin/python" "$ORBIT_ROOT/bin/claude_engine.py" launch "$@"

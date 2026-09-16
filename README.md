@@ -101,6 +101,7 @@ that wrote it.
 | Kind | What it is | Needs |
 |---|---|---|
 | **Local** | An MLX model served by [MTPLX](https://github.com/Youssofal/MTPLX) on Apple Silicon. Starts on demand, sleeps when idle. | 48 GB comfortably runs a 27B at a 64k window |
+| **Claude Code · local Qwen** | The real Claude Code harness — its tools, skills, subagents, todo list and permissions — running on the local model, one resumed session per chat | Claude Code installed. Nothing leaves the Mac. See [docs/claude-code-engine.md](docs/claude-code-engine.md) |
 | **CLI agents** | `claude`, `codex`, `opencode`, `qwen` — spawned as subprocesses and read as JSON event streams | The CLI installed and signed in. **No API key.** |
 | **Hosted APIs** | Anthropic (native Messages API), OpenAI, OpenRouter, Ollama, LM Studio, or any OpenAI-compatible endpoint | A key, pasted into Settings |
 
@@ -116,6 +117,13 @@ always shows which one is answering.
 A CLI model is a whole agent, not a raw model: it brings its own tools and Orbit's
 are not offered to it. Good for asking; use a local or API model when you want
 Orbit's own toolchain.
+
+**Claude Code · local Qwen** goes further than the other CLI agents: every step is
+visible (thinking, each tool call and result, diffs), Claude's permission prompts
+and questions come to Orbit's approval and question boxes, each chat keeps one
+Claude session, and sessions you ran with `claude-qwen` in a terminal appear in
+the sidebar. Settings → Claude Code has the options; quiet mode (Settings →
+General) keeps the local model off for a few hours.
 
 ---
 

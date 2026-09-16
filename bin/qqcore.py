@@ -68,6 +68,9 @@ DEFAULTS = {
   "max_tool_rounds": 0,
   "max_turn_minutes": 0,
   "long_run_notice_min": 30,
+  # How many times Orbit may remind a model that stops while plan steps remain.
+  # Budgeted scheduled runs get additional reminders in turn().
+  "plan_nudges": 3,
   # the local model handles one conversation well and two badly: answers take
   # turns, and a second chat's message waits in line instead of running alongside
   "one_chat_at_a_time": True,
@@ -398,9 +401,19 @@ def model_is_local(mid=None):
     return bool(m and m["provider"] == "local")
 
 MODEL = None
+def quiet_left():
+    """Minutes of quiet mode left (0 = off). While it lasts the local model is
+    never started, so the fans stay down -- e.g. for a few hours at work."""
+    try: return max(0.0, (float(S.get("quiet_until") or 0) - time.time()) / 60)
+    except (TypeError, ValueError): return 0.0
+
 def ensure_model(on_status=None):
     global MODEL
     if MODEL and probe(2): return MODEL
+    if quiet_left() and not probe(2):
+        until = time.strftime("%H:%M", time.localtime(float(S.get("quiet_until"))))
+        raise RuntimeError(f"Quiet mode is on until {until}: the local model is not started, "
+                           "to keep the fans down. Turn it off in Settings → General to use it now.")
     MODEL = probe() or autostart(on_status)
     if not MODEL:
         raise RuntimeError(f"No model server on port {PORT}; autostart failed. See {SRVLOG}")
@@ -1365,7 +1378,7 @@ class _Either:
 
 # keys Orbit keeps on a stored message for itself -- never sent to a model
 PRIVATE_KEYS = ("partial", "interjection", "compacted", "t", "secs", "ok", "usage", "tool_runs",
-                "reasoning_marks", "nudge", "changes", "changes_undone")
+                "reasoning_marks", "nudge", "changes", "changes_undone", "claude", "claude_uuid")
 
 def para_marks(marks, state, chunk, now=None):
     """Note when each paragraph of thinking began: [offset, time] pairs, kept
@@ -1875,10 +1888,75 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                     except Exception: pass
                 continue
             seen_calls.pop("__stream_fail__", None)
-            rnd += 1
             used = msg.pop("_prompt_tokens", None)
             if used and sid: SESSION_TOKENS[sid] = used
             for k, v in (msg.pop("_usage", None) or {}).items(): usage[k] = usage.get(k, 0) + v
+            calls = msg.get("tool_calls") or []
+            # A successful HTTP stream with no text, thinking, or tool call is not
+            # a completed answer. MTPLX produced exactly this failure in two recent
+            # overnight jobs. Retry the same model step directly, then restart the
+            # local server and compact if it persists. Previously these empty
+            # streams consumed the plan-nudge allowance and ended the whole task.
+            silent = (not calls and not (msg.get("content") or "").strip()
+                      and not (msg.get("reasoning_content") or "").strip())
+            if silent:
+                n = seen_calls.get("__silent__", 0) + 1
+                seen_calls["__silent__"] = n
+                retry_limit = 8 if budget_min else 4
+                emit("model_silent", {"rounds": rnd, "silences": n,
+                                      "retrying": n < retry_limit})
+                # The user may have pressed Stop while the empty stream was
+                # finishing. Do not turn that into a slow model restart.
+                if cancel.is_set():
+                    _finish(None, rnd)
+                    _take_notes(messages, inbox, emit, late=True)
+                    emit("done", None)
+                    return "(stopped by user)"
+                # A restart clears a wedged local generation/KV state. Do it only
+                # after a direct retry failed, and once more for a long scheduled
+                # run, so a transient blank stream stays cheap.
+                restart_ok = True
+                if not remote and n in (2, 5):
+                    emit("model_recovering", {"attempt": n, "action": "restart"})
+                    try:
+                        restart_server()
+                    except Exception as e:
+                        restart_ok = False
+                        emit("stream_error", {"error": f"restart failed: {e}",
+                                              "attempt": n, "kind": "transient",
+                                              "of": retry_limit})
+                # Long contexts are the other observed cause. After the server is
+                # responsive again, force a fold before asking for the step anew.
+                if n in (2, 5) and restart_ok:
+                    try: _shrink(messages, sid, emit, pin=req, force=True)
+                    except Exception as e:
+                        emit("stream_error", {"error": f"recovery compaction failed: {e}",
+                                              "attempt": n, "kind": "transient",
+                                              "of": retry_limit})
+                if n < retry_limit and not cancel.is_set():
+                    continue
+                answer = ("_The model server returned an empty response "
+                          f"{n} times. Orbit restarted it and retried, but it did not "
+                          "recover. Your task and plan are saved; press **Continue** "
+                          "to resume from the same point._")
+                # The web UI consumes streamed deltas and ignores turn()'s return
+                # value. Store and emit this terminal recovery result just like a
+                # normal assistant answer, or the chat still appears to stop blank.
+                final = {"role": "assistant", "content": answer,
+                         "model": msg.get("model"), "t": time.time()}
+                messages.append(final)
+                emit("content_delta", answer)
+                _finish(final, rnd)
+                if checkpoint:
+                    try: checkpoint()
+                    except Exception: pass
+                emit("done", None)
+                return answer
+            seen_calls.pop("__silent__", None)
+            # Only a real answer/tool request is a model round. Empty provider
+            # streams are transport recovery attempts and must not exhaust a
+            # user's max_tool_rounds before the retry can produce useful work.
+            rnd += 1
             said = {k: v for k, v in msg.items()
                     if k in ("role", "content", "model", "reasoning_content", "reasoning_marks")}
             if cancel.is_set():
@@ -1895,7 +1973,6 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                 if said.get("content") or said.get("reasoning_content"):
                     messages.append({**said, "partial": True, "t": time.time()})
                 continue
-            calls = msg.get("tool_calls") or []
             # keep "model" so a reopened chat can say which one wrote each answer;
             # keep "reasoning_content" so the thinking trace survives a reload too —
             # stream_call() strips it back out before it is ever sent to a model
@@ -1912,7 +1989,14 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                 pend = plan_pending()
                 done_now = sum(1 for x in CURRENT_PLAN.get("steps", []) if x.get("done"))
                 mark = (done_now, tool_runs[0])
-                if (pend and int(S.get("plan_nudges", 3)) > seen_calls.get("__nudges__", 0)
+                # a budgeted run (a scheduled job with stop_at) deserves more than
+                # the interactive default before we give up nudging it -- and if it
+                # has gone silent a few times in a row the model server is the
+                # problem, not the model, so stop nudging and report instead of
+                # looping on a dead channel (the overnight job did exactly that on
+                # 2026-09-15 and 2026-09-16).
+                nudge_cap = int(S.get("plan_nudges") or 3) + (12 if budget_min else 0)
+                if (pend and nudge_cap > seen_calls.get("__nudges__", 0)
                         and not cancel.is_set() and seen_calls.get("__nudge_mark__") != mark):
                     seen_calls["__nudges__"] = seen_calls.get("__nudges__", 0) + 1
                     seen_calls["__nudge_mark__"] = mark
@@ -1928,12 +2012,30 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                 # and nobody need be watching, so the answer is yes -- a few
                 # times at most, so a model that keeps asking still ends
                 if (asks_to_continue(msg.get("content") or "") and not cancel.is_set()
-                        and seen_calls.get("__go_on__", 0) < int(S.get("plan_nudges", 3))):
+                        and seen_calls.get("__go_on__", 0) < int(S.get("plan_nudges") or 3)):
                     seen_calls["__go_on__"] = seen_calls.get("__go_on__", 0) + 1
                     messages.append({"role": "user", "nudge": True, "t": time.time(), "content": (
                         "[Orbit: yes, keep going. There is no time limit and no need to check in; "
                         "carry on until the whole task is done, then report what you did.]")})
                     emit("plan_nudge", {"msg": "it asked whether to go on — told it to keep going"})
+                    continue
+                # a budgeted run (a scheduled job with stop_at) whose steps are still open
+                # and that stopped with no tool call: the model just finished a thought,
+                # it did not finish the job. The time check above lets _wrap_up() handle
+                # the near-deadline case; this covers a quiet finish mid-budget, which
+                # used to return the whole remaining run unused. Re-nudge a few times,
+                # then report with what there is rather than looping all night.
+                if (budget_min and pend and not cancel.is_set()
+                        and (time.time() - t_start) / 60 < budget_min - 5
+                        and seen_calls.get("__self_cont__", 0) < nudge_cap):
+                    seen_calls["__self_cont__"] = seen_calls.get("__self_cont__", 0) + 1
+                    left = "; ".join(x["text"] for x in pend[:5])
+                    messages.append({"role": "user", "nudge": True, "t": time.time(), "content": (
+                        f"[Orbit: your plan still has {len(pend)} open step(s): {left}. "
+                        "You are not finished. Carry on with the next one now — keep working "
+                        "and calling tools until every step is done or genuinely blocked, "
+                        "then report what you produced.]")})
+                    emit("plan_nudge", {"msg": f"quiet finish mid-run — continuing ({seen_calls['__self_cont__']})"})
                     continue
                 answer = (msg.get("content") or "").strip()
                 if LAST_SOURCES:
@@ -5632,3 +5734,73 @@ def all_prompts():
 _expand_prompt_base = expand_prompt
 def expand_prompt(text, prompts=None):
     return _expand_prompt_base(text, all_prompts() if prompts is None else prompts)
+
+
+# ==================================================================== CLAUDE CODE ENGINE
+# A chat on "Claude Code · local Qwen" runs the real Claude Code harness, one
+# resumed session per chat (bin/claude_engine.py). Everything else about the
+# chat -- the slot, the stream, saving, the sidebar -- stays Orbit's.
+import claude_engine as CE
+CE.Q = sys.modules[__name__]
+UI_PORT = None                 # set by orbit-ui, for the optional Orbit-tools bridge
+
+def uses_claude_engine(mid=None):
+    try:
+        return CE.is_engine(current_model(mid))
+    except Exception:
+        return False
+
+_turn_before_engine = turn
+def turn(messages, user_content, tools, emit=None, approve=None, cancel=None, **kw):
+    if getattr(TURN_CTX, "depth", 0) or not uses_claude_engine():
+        return _turn_before_engine(messages, user_content, tools, emit=emit, approve=approve,
+                                   cancel=cancel, **kw)
+    if not slot_enter(emit, cancel, kw.get("sid") or "an answer"):
+        messages.append({"role": "user", "content": user_content, "t": time.time()})
+        (emit or (lambda k, p: None))("done", None)
+        return "(stopped while waiting for another chat to finish)"
+    try:
+        TURN_CTX.model = ACTIVE_MODEL.get("id")
+        TURN_CTX.effort = S.get("reasoning_effort")
+        proj = kw.pop("project", _NO_PROJECT_ARG)
+        proj = ACTIVE_PROJECT.get("id") if proj is _NO_PROJECT_ARG else proj
+        return CE.run_turn(messages, user_content, tools, emit=emit, approve=approve,
+                           cancel=cancel or CANCEL, project=proj, **kw)
+    finally:
+        slot_exit()
+
+_stream_call_before_engine = stream_call
+def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None, interrupt=None):
+    """Titles, memory notes, summaries: a quick call straight to the local model
+    the engine runs on, rather than a whole Claude Code session for one line."""
+    try:
+        if CE.is_engine(current_model(model)):
+            local = local_model_name()
+            if local: model = MODELS.model_id("local", local)
+    except Exception:
+        pass
+    return _stream_call_before_engine(messages, tools, think=think, emit=emit, cancel=cancel,
+                                      model=model, interrupt=interrupt)
+
+_session_list_before_engine = session_list
+def session_list():
+    """Orbit's chats, and Claude-Qwen sessions from a terminal not yet opened here."""
+    rows = _session_list_before_engine()
+    try:
+        linked = set(CE.linked_sessions().values())
+        for r in rows:
+            if r["id"] in linked or r["id"].startswith("cq-"):
+                r["source"] = "claude-qwen"
+        extra = CE.history_items_cached()
+    except Exception:
+        return rows
+    if not extra: return rows
+    have = {r["id"] for r in rows}
+    extra = [x for x in extra if x["id"] not in have]
+    pinned = [r for r in rows if r.get("pinned")]
+    rest = [r for r in rows if not r.get("pinned")]
+    if rest and all(r.get("order") is not None for r in rest):
+        return pinned + rest + extra              # your own order stays; new ones go last
+    merged = sorted(rest + extra, key=lambda r: -(r.get("mtime") or 0))
+    return pinned + merged
+
