@@ -122,8 +122,9 @@ Orbit's own toolchain.
 visible (thinking, each tool call and result, diffs), Claude's permission prompts
 and questions come to Orbit's approval and question boxes, each chat keeps one
 Claude session, and sessions you ran with `claude-qwen` in a terminal appear in
-the sidebar. Settings → Claude Code has the options; quiet mode (Settings →
-General) keeps the local model off for a few hours.
+the sidebar. It is `claude-qwen` in a window: your Claude setup as it is, with
+skills, plugins, MCP servers and permissions managed in Settings → Claude Code
+and changed in Claude itself; each new chat can pick its working folder.
 
 ---
 

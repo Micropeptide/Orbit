@@ -7,6 +7,28 @@ partly there (◐); the rest are noted with why they wait (·).
 
 Tally: **145 done, 3 partial, 52 not yet.**
 
+## Update: Claude Code mode is claude-qwen in a window
+
+After the first round, the direction changed: Orbit should be a desktop window onto
+`claude-qwen`, conveying everything and adding nothing of its own. So:
+
+- Orbit's additions are off by default and grouped as "Orbit extras": skill
+  routing (61–68), skill hints (68), Orbit's skills (69), project tools (87),
+  Orbit's safety rules (33), time stamps on messages (17).
+- One command line for the terminal and Orbit; Orbit adds only the stream
+  transport, the session and a chat's permission mode. Claude's own default mode
+  applies unless a chat picks one.
+- Skills, plugins, MCP servers and permission settings are read from Claude and
+  changed in Claude (`~/.claude`, `claude plugin`, `claude mcp`). "Save as skill"
+  in a Claude Code chat writes a Claude skill.
+- A new chat's working folder can be chosen, with extra folders (`--add-dir`).
+- Hooks, background tasks, model fallback, denied permissions and Claude's own
+  command output (`/context`, `/cost`, `/compact`) all show in the chat.
+- The `/` menu lists every Claude command and skill before a chat's first answer.
+- Scheduled runs honour a job's own model (they used whichever model was last active).
+- Fans: MTPLX's fan mode ("default" lets macOS manage them); quiet mode now uses it
+  for a few hours instead of keeping the model off.
+
 ## A. The engine
 
 1. ✅ Run the real harness per chat over Claude Code's stream-json protocol, not a one-shot `claude -p` with the chat pasted in.
@@ -34,7 +56,7 @@ Tally: **145 done, 3 partial, 52 not yet.**
 23. ✅ Long runs get the periodic progress line, with open todo items.
 24. ✅ A model server that is not answering is explained, with what to do.
 25. ✅ The harness never inherits another Claude session's variables or a real Anthropic key.
-26. ✅ A sleeping model server is started, with progress, unless quiet mode is on.
+26. ✅ A sleeping model server is started, with progress.
 27. ✅ Titles, memory notes and summaries go straight to the local model, not through a whole Claude session.
 28. ✅ Progress is saved during long runs.
 29. · Keep one Claude process warm between messages. Saves about a second a turn; makes stopping and permissions harder.
@@ -158,7 +180,7 @@ Tally: **145 done, 3 partial, 52 not yet.**
 129. ✅ `CLAUDE_QWEN_BARE=1` brings back the old minimal mode.
 130. ✅ `CLAUDE_QWEN_DRY_RUN=1` prints the command.
 131. ✅ `ORBIT_MODEL_URL` / `ORBIT_MODEL_PORT` point it at another server.
-132. ✅ It starts the local model when needed, unless quiet mode is on.
+132. ✅ It starts the local model when needed.
 133. ✅ Dynamic system-prompt sections are left out, so the prompt stays cacheable across sessions.
 134. ✅ The old launcher is kept as a backup.
 135. · `claude-qwen --orbit` to open the session in Orbit.
@@ -175,7 +197,7 @@ Tally: **145 done, 3 partial, 52 not yet.**
 143. ✅ Claude hooks are off unless you turn them on.
 144. ✅ Subagents and the "small fast model" run on the local model too.
 145. ✅ Telemetry, error reporting, auto-update and non-essential traffic are off.
-146. ✅ Quiet mode: for a few hours the model is never started and scheduled work waits, so the fans stay down.
+146. ✅ Quiet mode: for a few hours the model server runs with MTPLX's "default" fan mode (macOS manages the fans).
 147. ✅ Quiet mode in Settings (3 h, or off).
 148. · A low-power profile (smaller context) for quiet hours.
 149. · Run the model server at background priority.

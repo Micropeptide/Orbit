@@ -60,7 +60,10 @@ aside.hide{display:none}
 .sitem.external .t{font-style:italic;opacity:.85}
 #cqbar{display:inline-flex;gap:6px;align-items:center;margin-left:8px;font-size:11.5px}
 #cqbar select{font-size:11.5px;padding:1px 4px;border-radius:7px}
-#cqbar .cqi{cursor:pointer;padding:1px 7px;border-radius:9px;border:1px solid var(--line);color:var(--mut)}
+#cqbar .cqi,#cqbar .cqdir{cursor:pointer;padding:1px 7px;border-radius:9px;border:1px solid var(--line);color:var(--mut);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cqskills{max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:4px 8px}
+.cqskills .r{display:flex;gap:8px;align-items:flex-start;padding:4px 0;border-bottom:1px solid var(--line);font-size:12.5px}
+.cqskills .r:last-child{border-bottom:0}.cqskills .r small{color:var(--mut);display:block}
 .cqpanel pre{white-space:pre-wrap;word-break:break-all;font-size:12px;background:var(--card);padding:8px;border-radius:8px}
 .cqpanel .kv{display:grid;grid-template-columns:130px 1fr;gap:4px 10px;font-size:12.5px;margin:6px 0}
 .sitem .n{color:var(--dim);font-size:11px}
@@ -1154,7 +1157,7 @@ async function newChat(){
   tempMode=false;$('#tempbtn').style.borderColor='';$('#tempbtn').style.color='';
   $('#burnbtn').style.display='none';
   syncBusy();
-  $('#ctxbox').style.display='none';loadSessions()})();
+  $('#ctxbox').style.display='none';loadSessions();drawClaudeBar()})();
  try{await switching}finally{switching=null}}
 async function doCompact(){
  sysline('compacting...');
@@ -1315,18 +1318,51 @@ async function drawClaudeBar(){
  let b=$('#cqbar');
  if(!isClaudeChat()||!sid){if(b)b.style.display='none';return}
  if(!b){b=el(`<span id=cqbar><select title="Claude Code permission mode for this chat — changes a running answer too">${
-   Object.entries(CQ_MODES).map(([k,v])=>`<option value=${k}>${v}</option>`).join('')}</select><span class=cqi title="Claude Code session">Claude Code</span></span>`);
+   Object.entries(CQ_MODES).map(([k,v])=>`<option value=${k}>${v}</option>`).join('')}</select><span class=cqdir title="the folder this chat's Claude session works in"></span><span class=cqi title="Claude Code session">Claude Code</span></span>`);
   (($('#planmode'))||$('#title')).after(b);
   b.querySelector('select').onchange=async e=>{
    if(e.target.value==='bypassPermissions'&&!confirm('Bypass: Claude Code runs every tool — shell commands, edits, deletions — without asking. Use it only in a folder you can afford to lose. Switch?')){
     e.target.value=(CQ_INFO&&CQ_INFO.prefs||{}).permission_mode||'default';return}
    const d=await apiPost('/api/claude/mode',{sid,mode:e.target.value},'permission mode');
    if(d)toast('permission mode: '+CQ_MODES[d.mode]+(d.live?' — applied to the running answer':''))};
-  b.querySelector('.cqi').onclick=()=>claudePanel()}
+  b.querySelector('.cqi').onclick=()=>claudePanel();
+  b.querySelector('.cqdir').onclick=()=>folderDialog()}
  b.style.display='';
  try{CQ_INFO=await (await fetch('/api/claude/info?sid='+encodeURIComponent(sid))).json()}catch(e){return}
- b.querySelector('select').value=(CQ_INFO.prefs||{}).permission_mode||(CQ_INFO.settings||{}).permission_mode||'default';
- CQ_CMDS=(CQ_INFO.commands||[]).map(c=>({c:'/'+c.name,d:(c.description||'Claude Code').slice(0,120),cc:1}))}
+ b.querySelector('select').value=(CQ_INFO.prefs||{}).permission_mode||(CQ_INFO.settings||{}).permission_mode||CQ_INFO.claude_default_mode||'default';
+ const dir=CQ_INFO.cwd||CQ_INFO.cwd_pref;const chip=b.querySelector('.cqdir');
+ chip.textContent='📁 '+(dir?dir.replace(/^\/Users\/[^/]+/,'~'):'workspace');
+ chip.title=(dir||'Orbit workspace (default)')+(CQ_INFO.session?' — this chat\'s Claude session works here':' — click to choose where this chat starts');
+ CQ_CMDS=(CQ_INFO.commands||[]).map(c=>({c:'/'+c.name,d:(c.description||'Claude Code').slice(0,120),cc:1}));
+ if(!CQ_CMDS.length)fetch('/api/claude/commands').then(r=>r.json()).then(d=>{     // before its first answer too
+  CQ_CMDS=(d.commands||[]).map(c=>({c:'/'+c.name,d:(c.description||'Claude Code').slice(0,120),cc:1}))}).catch(()=>{})}
+// Where a chat's Claude session works: chosen before its first message, like
+// starting claude-qwen in a folder. A chat that has begun stays in its folder.
+async function folderDialog(){
+ const info=await (await fetch('/api/claude/info?sid='+encodeURIComponent(sid))).json();
+ const fl=(await (await fetch('/api/claude/folders')).json()).folders||[];
+ const started=!!info.session;
+ const host=$('#modalhost');
+ host.innerHTML=`<div class=modal><div class="sheet cqpanel"><header><b>Working folder</b>
+   <button class=ghost style="margin-left:auto" id=fdx>close</button></header><div class=body>
+   ${started?`<div class=note>This chat's Claude session works in <code>${esc(info.cwd||'')}</code>. To work somewhere else, start a new chat there.</div>`:
+    '<div class=note>Claude Code starts this chat in the folder you choose, as if you had run claude-qwen there.</div>'}
+   <div class=grid style="margin-top:8px"><label>Folder</label><input type=text id=fd_cwd spellcheck=false>
+   <label>Also allow</label><textarea class=ta id=fd_add style="min-height:50px" placeholder="more folders, one per line (--add-dir)"></textarea></div>
+   <div class=sec>Recent</div><div id=fd_list></div>
+   <div style="margin-top:10px"><button class=primary id=fd_ok>${started?'New chat in this folder':'Use this folder'}</button>
+   <span class=note id=fd_note></span></div></div></div></div>`;
+ $('#fd_cwd').value=info.cwd||info.cwd_pref||'';$('#fd_add').value=(info.add_dirs||[]).join('\n');
+ const list=$('#fd_list');
+ fl.forEach(f=>{const r=el('<div class=memrow style="cursor:pointer"><b></b><span></span></div>');
+  r.querySelector('b').textContent=f.path.replace(/^\/Users\/[^/]+/,'~');r.querySelector('span').textContent=f.why;
+  r.onclick=()=>{$('#fd_cwd').value=f.path};list.appendChild(r)});
+ $('#fdx').onclick=closeModal;
+ $('#fd_ok').onclick=async()=>{
+  const cwd=$('#fd_cwd').value.trim(),add=$('#fd_add').value.split('\n').map(x=>x.trim()).filter(Boolean);
+  if(started){await newChat();}
+  const d=await apiPost('/api/claude/cwd',{sid,cwd,add_dirs:add},'working folder');
+  if(d){closeModal();toast('this chat works in '+(cwd||'the workspace'));drawClaudeBar()}}}
 async function claudePanel(){
  const d=await (await fetch('/api/claude/info?sid='+encodeURIComponent(sid))).json();
  const host=$('#modalhost');
@@ -1626,6 +1662,8 @@ async function go(opts){
      // shown by the retry note; an older server sends no retry event, so say it here
      if(m.p.of==null)sysline(`the model server errored (${m.p.error}) — retrying, attempt ${m.p.attempt}`)}
     else if(m.k==='notice'){sysline(m.p.msg||'')}
+    else if(m.k==='status'){const w=a.bub.querySelector('.working');
+     if(w&&!answer)a.bub.innerHTML='<span class=working>'+esc(m.p.msg||'working')+'<span class=dots></span></span>'}
     else if(m.k==='squeezed'){
      sysline(`trimmed ${Math.round(m.p.chars/1000)}k of old tool output — context now ${m.p.pct}%`)}
     else if(m.k==='autocompact'){
@@ -1711,7 +1749,7 @@ async function openSettings(tab){
     <div class=hint2>When the window fills past this, older turns are summarised automatically before your next message.</div>
     <label>Quiet mode</label><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <span class=note id=g_quiet></span><button class=ghost id=g_quiet3>quiet for 3 h</button><button class=ghost id=g_quietoff>off</button></div>
-    <div class=hint2>While quiet, the local model is never started and scheduled runs wait — the fans stay down.</div>
+    <div class=hint2>While quiet, the model server runs with fan mode "default": macOS manages the fans, with no boost while it generates. Takes effect the next time the server starts (Settings → Local server → restart). The permanent choice is "Fan mode" under Local server.</div>
     <label>Recycle bin keeps</label><div style="display:flex;gap:8px;align-items:center">
       <input type=number id=g_td min=1 max=365 style="max-width:110px"><span class=note>days</span></div>
     </div>
@@ -2225,56 +2263,139 @@ async function openSettings(tab){
    $('#mcperr').textContent=Object.entries(info.tool_errors||{}).map(([k,v])=>k+': '+v).join(' | ');
   }
   if(name==='claude'){
-   const d=await (await fetch('/api/claude/info?sid='+encodeURIComponent(sid||''))).json();
-   const c=d.settings||{};
+   const [d,cc]=await Promise.all([(await fetch('/api/claude/info?sid='+encodeURIComponent(sid||''))).json(),
+                                  (await fetch('/api/claude/config')).json()]);
+   const c=d.settings||{}, us=cc.user||{}, perm=us.permissions||{};
    const known=d.mcp_known||[];
-   body.innerHTML=`<div class=sec>Claude Code · local Qwen <small>— the real Claude Code harness on the local model</small></div>
-    <div class=grid>
-    <label>Profile</label><select id=cq_profile><option value=focused>focused — your Claude settings, the skills each chat needs</option>
-      <option value=full>full — every skill, plugin, hook and MCP server you have</option>
-      <option value=lean>lean — Claude's built-in tools and skills only</option></select>
-    <label>Permission mode</label><select id=cq_mode>${Object.entries(CQ_MODES).map(([k,v])=>`<option value=${k}>${v}</option>`).join('')}</select>
-    <div class=hint2>Claude Code's own permissions decide what needs asking — its mode and the allow/deny rules in your Claude settings. Orbit shows what Claude asks. Each chat can switch its mode from the bar next to the title, even mid-answer.</div>
-    <label>Unattended runs</label><select id=cq_unatt><option value=default>refuse what needs asking</option>
-      <option value=acceptEdits>accept file edits</option><option value=dontAsk>don't ask (Claude's rules only)</option>
-      <option value=bypassPermissions>bypass — allow everything</option></select>
-    <div class=hint2>For scheduled runs, where nobody can answer a prompt.</div>
-    <label>"Don't ask again" saves to</label><select id=cq_dest><option value=suggested>where Claude suggests</option>
-      <option value=localSettings>this folder's .claude/settings.local.json</option><option value=projectSettings>this folder's .claude/settings.json</option>
-      <option value=userSettings>~/.claude/settings.json (everywhere)</option><option value=session>this session only</option></select>
-    <label>Orbit's safety rules too</label><div class=sw><input type=checkbox id=cq_orules><span class=note>also apply Orbit's rules, autonomy mode and folder limit (off: Claude alone decides)</span></div>
-    <label>MCP servers</label><div id=cq_mcp>${known.length?known.map(n=>`<label style="display:inline-flex;gap:4px;margin-right:10px"><input type=checkbox value="${esc(n)}"> ${esc(n)}</label>`).join(''):'<span class=note>none configured for Claude</span>'}
-      <label style="display:inline-flex;gap:4px"><input type=checkbox value="*"> all</label></div>
-    <label>Orbit's tools</label><div class=sw><input type=checkbox id=cq_otools><span class=note>also offer Orbit's own tools (memory, chat search, scheduling, web search) — off: Claude's tools only</span></div>
-    <label>Pick skills per chat</label><div class=sw><input type=checkbox id=cq_route><span class=note>offer the skills that fit each chat, with full descriptions (focused profile)</span></div>
-    <label>Always-offered skills</label><input type=text id=cq_core>
-    <label>Most skills per chat</label><input type=number id=cq_max min=4 max=200>
-    <label>Orbit's skills</label><div class=sw><input type=checkbox id=cq_oskills><span class=note>make Orbit's saved skills loadable in Claude Code</span></div>
-    <label>Claude hooks</label><div class=sw><input type=checkbox id=cq_hooks><span class=note>run the hooks in your Claude settings</span></div>
-    <label>Terminal history</label><div class=sw><input type=checkbox id=cq_hist><span class=note>list claude-qwen sessions from a terminal in the sidebar</span></div>
-    <label>…from any model</label><div class=sw><input type=checkbox id=cq_histall><span class=note>also Claude sessions that ran on other models</span></div>
+   const lines=a=>(a||[]).join('\n'), unlines=v=>v.split('\n').map(x=>x.trim()).filter(Boolean);
+   body.innerHTML=`<div class=note style="margin-bottom:10px">Claude Code · local Qwen is <b>claude-qwen</b> in a window: the same command, your Claude setup as it is.
+     Changes to skills, plugins, MCP servers and permissions below are made to Claude itself (<code>${esc(cc.paths&&cc.paths.user||'')}</code>), so the terminal sees them too.</div>
+    <div class=sec>Permissions <small>— Claude's settings</small></div><div class=grid>
+    <label>Default mode</label><select id=cc_mode><option value="">default (ask)</option>${Object.entries(CQ_MODES).filter(([k])=>k!=='default').map(([k,v])=>`<option value=${k}>${v}</option>`).join('')}</select>
+    <label>Allow</label><textarea class=ta id=cc_allow style="min-height:60px" placeholder="one rule per line, e.g. Bash(git diff:*)"></textarea>
+    <label>Ask</label><textarea class=ta id=cc_ask style="min-height:40px"></textarea>
+    <label>Deny</label><textarea class=ta id=cc_deny style="min-height:40px"></textarea>
+    <label>Extra folders</label><textarea class=ta id=cc_dirs style="min-height:40px" placeholder="additionalDirectories, one per line"></textarea>
+    <label>Hooks</label><div class=sw><input type=checkbox id=cc_hooks><span class=note>run the hooks in your Claude settings (disableAllHooks off)</span></div>
+    </div><button class=primary id=cc_save>Save to Claude's settings</button> <span class=note id=cc_note></span>
+
+    <div class=sec>Skills <small>— ~/.claude/skills</small></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px"><input type=text id=sk_find placeholder="filter" style="max-width:200px">
+     <input type=text id=sk_src placeholder="install from git URL, owner/repo or folder" style="flex:1;min-width:220px"><button class=ghost id=sk_inst>Install</button></div>
+    <div class=note id=sk_note></div><div class=cqskills id=sk_list></div>
+
+    <div class=sec>Plugins</div><div id=pl_list class=note>loading…</div>
+    <div style="display:flex;gap:8px;margin-top:6px"><input type=text id=pl_name placeholder="plugin@marketplace" style="flex:1"><button class=ghost id=pl_inst>Install</button>
+     <input type=text id=mk_src placeholder="add marketplace (URL / owner/repo)" style="flex:1"><button class=ghost id=mk_add>Add</button></div>
+    <div class=note id=pl_note></div>
+
+    <div class=sec>MCP servers <small>— claude mcp</small></div><div id=mcp_list class=note>checking…</div>
+
+    <div class=sec>claude-qwen launcher <small>— for the terminal command and Orbit alike</small></div><div class=grid>
+    <label>Profile</label><select id=cq_profile><option value=standard>standard — Claude as you have it set up</option>
+      <option value=lean>lean — built-in tools and skills only</option></select>
+    <label>MCP servers loaded</label><div id=cq_mcp>${known.map(n=>`<label style="display:inline-flex;gap:4px;margin-right:10px"><input type=checkbox value="${esc(n)}"> ${esc(n)}</label>`).join('')}
+      <label style="display:inline-flex;gap:4px"><input type=checkbox value="*"> all of them</label></div>
     <label>Tools turned off</label><input type=text id=cq_dis>
     <div class=hint2>WebSearch needs Anthropic's servers and cannot work on a local model.</div>
-    <label>Extra instructions</label><textarea class=ta id=cq_append style="min-height:70px"></textarea>
-    </div><button class=primary id=cq_save>Save Claude Code settings</button> <span class=note id=cq_note></span>`;
-   $('#cq_profile').value=c.profile||'focused';$('#cq_mode').value=c.permission_mode||'default';
-   $('#cq_dest').value=c.rule_destination||'suggested';$('#cq_unatt').value=c.unattended_mode||'default';$('#cq_orules').checked=!!c.orbit_rules;
-   $('#cq_otools').checked=!!c.orbit_tools;$('#cq_route').checked=c.skill_routing!==false;
-   $('#cq_core').value=(c.core_skills||[]).join(', ');$('#cq_max').value=c.max_skills||14;
-   $('#cq_oskills').checked=c.orbit_skills!==false;$('#cq_hooks').checked=!!c.hooks;
+    </div>
+
+    <div class=sec>In Orbit</div><div class=grid>
+    <label>Mode for new chats</label><select id=cq_mode><option value="">Claude's default mode</option>${Object.entries(CQ_MODES).map(([k,v])=>`<option value=${k}>${v}</option>`).join('')}</select>
+    <label>Unattended runs</label><select id=cq_unatt><option value="">same as the chat</option>
+      <option value=acceptEdits>accept file edits</option><option value=dontAsk>don't ask (Claude's rules only)</option>
+      <option value=bypassPermissions>bypass — allow everything</option></select>
+    <label>"Don't ask again" saves to</label><select id=cq_dest><option value=suggested>where Claude suggests</option>
+      <option value=localSettings>the folder's .claude/settings.local.json</option><option value=projectSettings>the folder's .claude/settings.json</option>
+      <option value=userSettings>~/.claude/settings.json</option><option value=session>this session only</option></select>
+    <label>Terminal sessions</label><div class=sw><input type=checkbox id=cq_hist><span class=note>list claude-qwen sessions in the sidebar</span></div>
+    <label>…on any model</label><div class=sw><input type=checkbox id=cq_histall><span class=note>also Claude sessions on other models</span></div>
+    </div>
+    <details style="margin-top:8px"><summary class=note>Orbit extras — each adds something Claude itself would not do (all off)</summary><div class=grid style="margin-top:6px">
+    <label>Orbit's safety rules</label><div class=sw><input type=checkbox id=cq_orules><span class=note>Orbit's rules, autonomy mode and folder limit on top of Claude's</span></div>
+    <label>Orbit's tools</label><div class=sw><input type=checkbox id=cq_otools><span class=note>memory, chat search, scheduling, web search</span></div>
+    <label>Project tools</label><div class=sw><input type=checkbox id=cq_ptools><span class=note>a trusted project's own .orbit/tools</span></div>
+    <label>Skill routing</label><div class=sw><input type=checkbox id=cq_route><span class=note>offer only the skills that match each chat</span></div>
+    <label>Always-offered skills</label><input type=text id=cq_core>
+    <label>Skill hints</label><div class=sw><input type=checkbox id=cq_hint><span class=note>name matching skills in the message</span></div>
+    <label>Orbit's skills</label><div class=sw><input type=checkbox id=cq_oskills><span class=note>Orbit's saved skills as a plugin</span></div>
+    <label>Orbit's context</label><div class=sw><input type=checkbox id=cq_octx><span class=note>Orbit's project rules and instructions in the prompt</span></div>
+    <label>Message times</label><div class=sw><input type=checkbox id=cq_time><span class=note>prefix each message with when it was sent</span></div>
+    <label>Extra instructions</label><textarea class=ta id=cq_append style="min-height:50px"></textarea>
+    </div></details>
+    <button class=primary id=cq_save style="margin-top:8px">Save launcher and Orbit options</button> <span class=note id=cq_note></span>`;
+   // permissions
+   $('#cc_mode').value=perm.defaultMode&&perm.defaultMode!=='default'?perm.defaultMode:'';
+   $('#cc_allow').value=lines(perm.allow);$('#cc_ask').value=lines(perm.ask);$('#cc_deny').value=lines(perm.deny);
+   $('#cc_dirs').value=lines(perm.additionalDirectories);$('#cc_hooks').checked=!us.disableAllHooks;
+   $('#cc_save').onclick=async()=>{
+    const r=await apiPost('/api/claude/claude_settings',{patch:{permissions:{defaultMode:$('#cc_mode').value||null,
+      allow:unlines($('#cc_allow').value),ask:unlines($('#cc_ask').value),deny:unlines($('#cc_deny').value),
+      additionalDirectories:unlines($('#cc_dirs').value)},disableAllHooks:$('#cc_hooks').checked?null:true}},'Claude settings');
+    if(r)$('#cc_note').textContent='saved to Claude — applies to its next session'};
+   // skills
+   let SK=cc.skills||[];
+   const drawSkills=()=>{const f=$('#sk_find').value.toLowerCase(),box=$('#sk_list');box.innerHTML='';
+    const shown=SK.filter(x=>!f||x.name.toLowerCase().includes(f)||(x.description||'').toLowerCase().includes(f));
+    $('#sk_note').textContent=`${SK.length} skills · ${SK.filter(x=>!x.enabled).length} turned off`+(shown.length<SK.length?` · ${shown.length} shown`:'');
+    shown.slice(0,300).forEach(x=>{const r=el('<div class=r><input type=checkbox><div style="flex:1"><b></b><small></small></div><button class=ghost style="font-size:11px">remove</button></div>');
+     const cb=r.querySelector('input');cb.checked=x.enabled;r.querySelector('b').textContent=x.name;
+     r.querySelector('small').textContent=(x.description||'').slice(0,220);
+     cb.onchange=async()=>{const d=await apiPost('/api/claude/skills',{op:'toggle',name:x.name,on:cb.checked},'skill');if(d){x.enabled=cb.checked;drawSkills()}};
+     r.querySelector('button').onclick=async()=>{if(!confirm('Move the skill '+x.name+' to the Trash?'))return;
+      const d=await apiPost('/api/claude/skills',{op:'remove',name:x.name},'remove skill');if(d){SK=SK.filter(y=>y!==x);drawSkills()}};
+     box.appendChild(r)});
+    if(shown.length>300)box.appendChild(el(`<div class=note>… ${shown.length-300} more — filter to find them</div>`))};
+   $('#sk_find').oninput=drawSkills;drawSkills();
+   $('#sk_inst').onclick=async()=>{const src=$('#sk_src').value.trim();if(!src)return;$('#sk_note').textContent='installing…';
+    const d=await apiPost('/api/claude/skills',{op:'install',source:src},'install skill');
+    if(d){$('#sk_note').textContent='installed: '+(d.installed||[]).join(', ')+((d.skipped||[]).length?' · already there: '+d.skipped.join(', '):'');
+     SK=(await (await fetch('/api/claude/config')).json()).skills||SK;drawSkills()}};
+   // plugins
+   const drawPlugins=async()=>{const pd=await (await fetch('/api/claude/plugins')).json(),box=$('#pl_list');box.innerHTML='';
+    (pd.plugins||[]).forEach(p=>{const r=el('<div class=memrow><input type=checkbox><b></b><span></span><button class=ghost>update</button><button class=ghost>uninstall</button></div>');
+     const [up,un]=r.querySelectorAll('button');
+     r.querySelector('input').checked=!!p.enabled;r.querySelector('b').textContent=p.id;r.querySelector('span').textContent=(p.version||'')+' · '+(p.scope||'');
+     const act=async op=>{$('#pl_note').textContent=op+'…';const d=await apiPost('/api/claude/plugins',{op,name:p.id},op);
+      $('#pl_note').textContent=d?(d.output||op+' done'):'';drawPlugins()};
+     r.querySelector('input').onchange=e=>act(e.target.checked?'enable':'disable');up.onclick=()=>act('update');
+     un.onclick=()=>{if(confirm('Uninstall '+p.id+'?'))act('uninstall')};box.appendChild(r)});
+    if(!(pd.plugins||[]).length)box.textContent=pd.error||'no plugins installed'};
+   drawPlugins();
+   $('#pl_inst').onclick=async()=>{const n=$('#pl_name').value.trim();if(!n)return;$('#pl_note').textContent='installing…';
+    const d=await apiPost('/api/claude/plugins',{op:'install',name:n},'install plugin');$('#pl_note').textContent=d?d.output:'';drawPlugins()};
+   $('#mk_add').onclick=async()=>{const n=$('#mk_src').value.trim();if(!n)return;$('#pl_note').textContent='adding…';
+    const d=await apiPost('/api/claude/plugins',{op:'marketplace_add',name:n},'add marketplace');$('#pl_note').textContent=d?d.output:''};
+   // MCP
+   (async()=>{const md=await (await fetch('/api/claude/mcp')).json(),box=$('#mcp_list');box.innerHTML='';
+    (md.servers||[]).forEach(m=>{const r=el('<div class=memrow><b></b><span></span><button class=ghost>remove</button></div>');
+     r.querySelector('b').textContent=m.name;r.querySelector('span').textContent=m.status+' · '+m.target;
+     r.querySelector('button').onclick=async()=>{if(!confirm('Remove the MCP server '+m.name+' from Claude?'))return;
+      const d=await apiPost('/api/claude/mcp',{op:'remove',name:m.name},'remove MCP server');if(d)r.remove()};
+     box.appendChild(r)});
+    if(!(md.servers||[]).length)box.textContent=md.error||'none';
+    box.appendChild(el('<div class=hint2>Add servers with <code>claude mcp add</code> in a terminal, or ask Claude to.</div>'))})();
+   // launcher + Orbit options
+   $('#cq_profile').value=c.profile==='lean'?'lean':'standard';$('#cq_mode').value=c.permission_mode||'';
+   $('#cq_unatt').value=c.unattended_mode||'';$('#cq_dest').value=c.rule_destination||'suggested';
    $('#cq_hist').checked=c.history!==false;$('#cq_histall').checked=!!c.history_all_models;
-   $('#cq_dis').value=(c.disallowed_tools||[]).join(', ');$('#cq_append').value=c.append_system||'';
+   $('#cq_dis').value=(c.disallowed_tools||[]).join(', ');
+   $('#cq_orules').checked=!!c.orbit_rules;$('#cq_otools').checked=!!c.orbit_tools;$('#cq_ptools').checked=!!c.project_tools;
+   $('#cq_route').checked=!!c.skill_routing;$('#cq_core').value=(c.core_skills||[]).join(', ');$('#cq_hint').checked=!!c.skill_hint;
+   $('#cq_oskills').checked=!!c.orbit_skills;$('#cq_octx').checked=!!c.orbit_context;$('#cq_time').checked=!!c.message_time;
+   $('#cq_append').value=c.append_system||'';
    body.querySelectorAll('#cq_mcp input').forEach(x=>x.checked=(c.mcp_servers||[]).includes(x.value));
    const list=v=>v.split(',').map(x=>x.trim()).filter(Boolean);
    $('#cq_save').onclick=async()=>{
     const r=await apiPost('/api/claude/settings',{settings:{profile:$('#cq_profile').value,permission_mode:$('#cq_mode').value,
-     rule_destination:$('#cq_dest').value,unattended_mode:$('#cq_unatt').value,orbit_rules:$('#cq_orules').checked,orbit_tools:$('#cq_otools').checked,
-     skill_routing:$('#cq_route').checked,core_skills:list($('#cq_core').value),max_skills:+$('#cq_max').value||14,
-     orbit_skills:$('#cq_oskills').checked,hooks:$('#cq_hooks').checked,history:$('#cq_hist').checked,
+     unattended_mode:$('#cq_unatt').value,rule_destination:$('#cq_dest').value,history:$('#cq_hist').checked,
      history_all_models:$('#cq_histall').checked,disallowed_tools:list($('#cq_dis').value),
-     append_system:$('#cq_append').value,
-     mcp_servers:[...body.querySelectorAll('#cq_mcp input')].filter(x=>x.checked).map(x=>x.value)}},'Claude Code settings');
-    if(r){$('#cq_note').textContent='saved — applies from the next message';drawClaudeBar()}};
+     mcp_servers:[...body.querySelectorAll('#cq_mcp input')].filter(x=>x.checked).map(x=>x.value),
+     orbit_rules:$('#cq_orules').checked,orbit_tools:$('#cq_otools').checked,project_tools:$('#cq_ptools').checked,
+     skill_routing:$('#cq_route').checked,core_skills:list($('#cq_core').value),skill_hint:$('#cq_hint').checked,
+     orbit_skills:$('#cq_oskills').checked,orbit_context:$('#cq_octx').checked,message_time:$('#cq_time').checked,
+     append_system:$('#cq_append').value}},'Claude Code options');
+    if(r){$('#cq_note').textContent='saved — applies from the next message (and the next claude-qwen)';drawClaudeBar()}};
    return}
   if(name==='status'){
    const s=info.status||{};
