@@ -20,6 +20,10 @@ _LOGTMP = tempfile.mkdtemp(prefix="qqtest-logs-")
 q.TOOL_LOG = os.path.join(_LOGTMP, "tools.jsonl")
 q.TOOL_OUT = os.path.join(_LOGTMP, "tool_output")
 q.LEDGER = os.path.join(_LOGTMP, "ledger.jsonl")
+# these tests script Orbit's own model loop: keep them off the Claude Code
+# engine (tests/test_claude_engine.py covers that) and away from ~/.claude history
+q.uses_claude_engine = lambda mid=None: False
+q.CE.history_items_cached = lambda max_age=20: []
 
 
 class Sandbox(unittest.TestCase):
@@ -2447,7 +2451,7 @@ class TestRound1Server(Sandbox):
 
     def test_the_right_files_are_watched_for_changes(self):
         names = [os.path.basename(f) for f in self.ui.CODE_FILES]
-        self.assertEqual(names, ["qqcore.py", "orbit-ui", "index.html"])
+        self.assertEqual(names, ["qqcore.py", "claude_engine.py", "orbit-ui", "index.html"])
         self.assertIn("page_mtime", self.ui.code_is_stale())
         page = open(os.path.join(ROOT, "web", "index.html")).read()
         self.assertIn(".think.live .body{max-height", page)

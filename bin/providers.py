@@ -78,6 +78,15 @@ ADAPTIVE = ("claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-
 # own tools are not offered to them. Good for asking; not for driving the toolchain.
 
 CLI_BACKENDS = {
+    "claude-qwen-cli": {
+        "label": "Claude Code · local Qwen", "bin": "claude-qwen",
+        "argv": ["--print", "--output-format", "stream-json", "--verbose",
+                 "--include-partial-messages"],
+        # The launcher itself maps Claude's Sonnet route to the local Qwen ID.
+        "model_flag": None, "system_flag": "--append-system-prompt",
+        "models": [("", "Claude Code · local Qwen")],
+        "note": "Claude Code harness with the Qwen model served locally by MTPLX",
+    },
     "claude-cli": {
         "label": "Claude Code CLI", "bin": "claude",
         "argv": ["--print", "--output-format", "stream-json", "--verbose",
@@ -137,7 +146,7 @@ def cli_models():
         if not cli_available(bid): continue
         for route, label in b["models"]:
             out.append({"provider": bid, "model": route or "default",
-                        "label": f"{label} · CLI", "context": None,
+                        "label": label if bid == "claude-qwen-cli" else f"{label} · CLI", "context": None,
                         "thinking": False, "kind": "cli",
                         "provider_label": b["label"], "ready": True,
                         "note": b.get("note", "")})
