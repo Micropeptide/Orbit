@@ -34,6 +34,9 @@ class TestClaudeEngine(unittest.TestCase):
         cls.saved_endpoint, cls.saved_wake = CE.model_endpoint, CE._wake_model
         cls.saved_settings = dict(q.S)
         CE._wake_model = lambda emit: None
+        cls.saved_workdir = CE._work_dir
+        wd = os.path.join(cls.tmp, "engine-files"); os.makedirs(wd)
+        CE._work_dir = lambda: wd                               # nor into Orbit's config
         q.S["claude_qwen"] = {"profile": "focused", "orbit_skills": False, "mcp_servers": []}
         q.S["autonomy_mode"] = "ask"
 
@@ -41,6 +44,7 @@ class TestClaudeEngine(unittest.TestCase):
     def tearDownClass(cls):
         for k, v in cls.saved.items(): setattr(q, k, v)
         CE.model_endpoint, CE._wake_model = cls.saved_endpoint, cls.saved_wake
+        CE._work_dir = cls.saved_workdir
         q.S.clear(); q.S.update(cls.saved_settings)
         os.environ.pop("ORBIT_CLAUDE_CONFIG_DIR", None)
         shutil.rmtree(cls.tmp, ignore_errors=True)
