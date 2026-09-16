@@ -31,51 +31,58 @@ BACKEND = "claude-qwen-cli"
 Q = None                       # qqcore, bound by qqcore itself (no import cycle)
 
 DEFAULTS = {
-    # lean: Claude's built-in tools and bundled skills only (--safe-mode)
-    # focused: your user settings, the skills that fit this chat, chosen MCP servers
-    # full: everything in your Claude setup -- every skill, plugin, hook and server
-    "profile": "focused",
-    # Claude Code's permission mode for new runs: default (ask), acceptEdits, plan,
-    # auto, dontAsk or bypassPermissions. Claude's own allow/deny rules apply as
-    # always; Orbit only shows the prompts Claude raises and answers them.
-    "permission_mode": "default",
-    # also apply Orbit's own safety rules, autonomy mode and folder limit on top
-    "orbit_rules": False,
-    # where "Always allow" saves the rule: "suggested" (Claude's choice, usually the
-    # project's .claude/settings.local.json), "userSettings", "projectSettings",
-    # "localSettings" or "session"
-    "rule_destination": "suggested",
-    # permission mode for runs nobody is watching (scheduled jobs): what Claude
-    # would ask about is refused there, unless this lets it through
-    "unattended_mode": "default",
-    "hooks": False,                  # run your Claude hooks (focused/full)
-    "mcp_servers": ["paper-fetch"],  # from ~/.claude.json, by name ("*" = all)
-    "orbit_tools": False,            # also offer Orbit's own tools (MCP bridge)
-    # a project's own tools (<folder>/.orbit/tools, once trusted) in its chats --
-    # they are the project's function (the market project's record_forecast...)
-    "project_tools": True,
-    "orbit_tool_names": ["search_chats", "read_chat", "remember", "search_agent_memory",
-                         "search_knowledge", "schedule_task", "list_scheduled_tasks",
-                         "cancel_scheduled_task", "web_search", "check_citations"],
-    "skill_routing": True,           # pick skills per chat (focused)
-    "core_skills": ["deep-research", "literature-review", "paper-lookup",
-                    "scientific-writing", "statistical-analysis", "dataviz"],
-    "max_skills": 14,
-    "skill_hint": True,              # name the best-matching skills in the message
-    "orbit_skills": True,            # Orbit's own skills as a plugin
+    # Orbit's Claude Code mode is the claude-qwen CLI in a window: the same
+    # command, your Claude setup (~/.claude) as is. The options below marked
+    # "launcher" apply to the terminal command and to Orbit alike; the ones
+    # marked "Orbit extra" add something Claude itself does not do, and are off.
+
+    # launcher: "standard" = Claude as you have it set up (all setting sources,
+    # skills, plugins, hooks); "lean" = built-in tools and skills only (--safe-mode)
+    "profile": "standard",
+    # launcher: MCP servers loaded, by name from your Claude config; "*" = all of them
+    "mcp_servers": ["paper-fetch"],
+    # launcher: tools that cannot work on a local model (WebSearch needs Anthropic's
+    # servers) or that a local chat has no use for
     "disallowed_tools": ["WebSearch", "Workflow", "ScheduleWakeup", "CronCreate", "CronDelete",
                          "CronList", "EnterWorktree", "ExitWorktree", "ReportFindings",
                          "SendMessage", "RemoteTrigger", "ListMcpResourcesTool",
                          "ReadMcpResourceTool", "ReadMcpResourceDirTool"],
+    # launcher: "claude" = run the hooks your Claude settings define; "off" = none
+    "hooks": "claude",
+    "extra_args": [],
+    "append_system": "",
+    "effort_passthrough": True,
+
+    # permission mode for a chat that has not picked one: "" = Claude's own
+    # (permissions.defaultMode in your Claude settings)
+    "permission_mode": "",
+    # permission mode for runs nobody is watching (scheduled jobs)
+    "unattended_mode": "",
+    # where "Don't ask again" saves: "suggested" (Claude's choice), "userSettings",
+    # "projectSettings", "localSettings" or "session"
+    "rule_destination": "suggested",
+    "history": True,                 # list claude-qwen terminal sessions in the sidebar
+    "history_all_models": False,     # ...including Claude sessions on other models
+
+    # Orbit extras, all off: Claude alone decides and sees only what it would see
+    "orbit_rules": False,            # Orbit's safety rules, autonomy mode and folder limit on top
+    "orbit_tools": False,            # Orbit's own tools through an MCP bridge
+    "project_tools": False,          # a trusted project's .orbit/tools through the bridge
+    "orbit_tool_names": ["search_chats", "read_chat", "remember", "search_agent_memory",
+                         "search_knowledge", "schedule_task", "list_scheduled_tasks",
+                         "cancel_scheduled_task", "web_search", "check_citations"],
+    "skill_routing": False,          # offer only the skills matching each chat
+    "core_skills": ["deep-research", "literature-review", "paper-lookup",
+                    "scientific-writing", "statistical-analysis", "dataviz"],
+    "max_skills": 14,
+    "skill_hint": False,             # name the best-matching skills in the message
+    "orbit_skills": False,           # Orbit's saved skills as a Claude plugin
+    "orbit_context": False,          # Orbit's project rules and instructions in the system prompt
+    "message_time": False,           # prefix each message with when it was sent
     # with orbit_rules on: tools Orbit lets through without asking
     "auto_allow": ["Read", "Glob", "Grep", "LS", "Skill", "TodoWrite", "TaskCreate", "TaskGet",
                    "TaskList", "TaskUpdate", "TaskOutput", "Agent", "Task", "ToolSearch",
                    "WebFetch", "NotebookRead", "EnterPlanMode", "mcp__paper-fetch__*"],
-    "history": True,                 # list claude-qwen sessions in the sidebar
-    "history_all_models": False,     # ...including ones run on other models
-    "extra_args": [],
-    "append_system": "",
-    "effort_passthrough": True,
 }
 
 LOCAL_MODEL_PREFIXES = ("mtplx", "local", "qwen")
@@ -314,55 +321,79 @@ def route_skills(text, limit=6):
     return [it for s, it in scored[:limit] if s >= top * 0.45]
 
 
-def skill_settings(enabled, c):
-    """--settings for this run: every user skill off except the chosen ones."""
-    s = {"disableAllHooks": not c.get("hooks")}
-    if c["profile"] == "focused":
-        keep = set(enabled)
-        s["skillOverrides"] = {it["name"]: "off" for it in skill_index() if it["name"] not in keep}
-        s["skillListingBudgetFraction"] = 0.05
-    return s
-
-
 # ------------------------------------------------------------------ arguments
 
-def build_argv(c, *, session_id=None, resume=False, cwd=None, read_only=False, effort=None,
-               name=None, settings_path=None, mcp_path=None, append=None, sdk=True):
+def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None, mode=None,
+               settings_path=None, mcp_path=None, append=None, sdk=True, add_dirs=None, **_):
+    """The claude command line. The same for the terminal (sdk=False) and for
+    Orbit, which only adds the stream transport, the session and a chat's mode."""
     exe = which_claude() or "claude"
     argv = [exe]
     if sdk:
         argv += ["--print", "--output-format", "stream-json", "--verbose",
                  "--input-format", "stream-json", "--include-partial-messages",
-                 "--permission-prompt-tool", "stdio"]
+                 "--include-hook-events", "--permission-prompt-tool", "stdio"]
     argv += ["--model", "sonnet"]
-    prof = c.get("profile") or "focused"
+    prof = c.get("profile") or "standard"
     if prof == "lean":
         argv.append("--safe-mode")
-    elif prof == "focused":
+    elif prof == "focused":                     # older setting: user settings only
         argv += ["--setting-sources", "user"]
     if session_id:
         argv += (["--resume", session_id] if resume else ["--session-id", session_id])
-    mode = "plan" if read_only else (c.get("permission_mode") or "default")
-    if mode not in PERMISSION_MODES: mode = "default"
-    if mode != "default": argv += ["--permission-mode", mode]
+    mode = "plan" if read_only else (mode or "")
+    if mode in PERMISSION_MODES: argv += ["--permission-mode", mode]
     dis = [t for t in c.get("disallowed_tools") or [] if t]
     if dis: argv += ["--disallowedTools", *dis]
     if settings_path: argv += ["--settings", settings_path]
     if mcp_path:
         argv += ["--mcp-config", mcp_path]
-        if prof != "full" and "*" not in (c.get("mcp_servers") or []):
+        if "*" not in (c.get("mcp_servers") or []) and prof != "full":
             argv.append("--strict-mcp-config")
     if prof != "lean" and c.get("orbit_skills"):
         pd = orbit_skills_plugin()
         if pd: argv += ["--plugin-dir", pd]
+    for d in add_dirs or []:
+        argv += ["--add-dir", d]
     if append: argv += ["--append-system-prompt", append]
-    if effort and c.get("effort_passthrough") and effort in ("low", "medium", "high", "xhigh", "max"):
+    # only an explicit step up ("retry deeper"): the terminal command passes no effort
+    if effort and c.get("effort_passthrough") and effort in ("high", "xhigh", "max"):
         argv += ["--effort", effort]
-    if name and not resume: argv += ["--name", name[:80]]
     # identical system text across sessions and days: the local prompt cache keeps it
     argv.append("--exclude-dynamic-system-prompt-sections")
     argv += [str(x) for x in (c.get("extra_args") or [])]
     return argv
+
+
+def launcher_files(c, tag, skills=None, extra_servers=None):
+    """--settings and --mcp-config files for one run (None where not needed)."""
+    settings = {}
+    if c.get("hooks") in (False, "off"):
+        settings["disableAllHooks"] = True
+    if skills is not None and c.get("skill_routing") and (c.get("profile") or "standard") != "lean":
+        keep = set(skills)
+        settings["skillOverrides"] = {it["name"]: "off" for it in skill_index() if it["name"] not in keep}
+        settings["skillListingBudgetFraction"] = 0.05
+    settings_path = _write_json(f"settings-{tag}.json", settings) if settings else None
+    names = c.get("mcp_servers") or []
+    servers = {}
+    if "*" not in names:
+        known = user_mcp_servers()
+        servers = {k: v for k, v in known.items() if k in names}
+    servers.update(extra_servers or {})
+    mcp_path = _write_json(f"mcp-{tag}.json", {"mcpServers": servers}) \
+        if (servers or "*" not in names) else None
+    return settings_path, mcp_path
+
+
+def launcher_append(c, extra=None):
+    parts = [TERMINAL_NOTE] + list(extra or [])
+    if c.get("append_system"): parts.append(str(c["append_system"]))
+    return "\n\n".join(p for p in parts if p)
+
+
+TERMINAL_NOTE = ("# Local model\n- WebSearch is unavailable with this local model; use WebFetch on "
+                 "known URLs.")
 
 
 def _write_json(name, data):
@@ -640,6 +671,53 @@ def control(sid, subtype, timeout=15, **params):
     return w.get("response") if ev.is_set() else {"error": "no reply from Claude Code"}
 
 
+_CATALOG = {"at": 0.0, "lock": threading.Lock()}
+
+
+def command_catalog(max_age=600):
+    """Claude's slash commands, skills, agents and models, as the initialize
+    handshake reports them -- asked of a short-lived claude process that never
+    calls the model, so the / menu is complete before a chat's first answer."""
+    with _CATALOG["lock"]:
+        if INIT.get("commands") and time.time() - _CATALOG["at"] < max_age:
+            return INIT
+        exe = which_claude()
+        if not exe: return INIT
+        url, model, ctx = model_endpoint()
+        c = cfg()
+        settings_path, mcp_path = launcher_files(c, "catalog")
+        argv = build_argv(c, settings_path=settings_path, mcp_path=mcp_path, append=launcher_append(c))
+        try:
+            proc = subprocess.Popen(argv + ["--no-session-persistence"], cwd=HOME,
+                                    env=harness_env(url, model, ctx), stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError:
+            return INIT
+        try:
+            proc.stdin.write((json.dumps({"type": "control_request", "request_id": "orbit-init",
+                                          "request": {"subtype": "initialize"}}) + "\n").encode())
+            proc.stdin.flush()
+            deadline = time.time() + 30
+            while time.time() < deadline:
+                line = proc.stdout.readline()
+                if not line: break
+                try: ev = json.loads(line)
+                except ValueError: continue
+                if ev.get("type") == "control_response":
+                    resp = (ev.get("response") or {}).get("response") or {}
+                    for k in ("commands", "agents", "models", "output_style", "available_output_styles"):
+                        if resp.get(k) is not None: INIT[k] = resp[k]
+                    _CATALOG["at"] = time.time()
+                    break
+        finally:
+            _kill(proc)
+            for f in (settings_path, mcp_path):
+                try:
+                    if f: os.remove(f)
+                except OSError: pass
+        return INIT
+
+
 def set_permission_mode(sid, mode):
     """Change a chat's permission mode: now, if it is answering, and for its next runs."""
     if mode not in PERMISSION_MODES: return {"error": f"unknown mode {mode}"}
@@ -815,18 +893,17 @@ def _system_parts(project):
     return parts
 
 
-def _append_system(project, c, orbit_tools):
-    parts = _system_parts(project)
-    parts.append(
-        "# Running inside Orbit\n"
-        "- The user is chatting through Orbit, a local web app, not a terminal. Messages start with "
-        "when they were sent, e.g. [Wed 16 Sep 2026, 14:30 PDT]; that is the current date and time.\n"
-        "- There is no time limit and no need to check in. Never stop to ask whether to continue; "
-        "keep working until the whole task is done. Ask (AskUserQuestion) only for a real choice.\n"
-        "- WebSearch is unavailable with this local model. Use WebFetch on known URLs"
-        + (", or mcp__orbit__web_search" if orbit_tools else "") + ".")
-    if c.get("append_system"): parts.append(str(c["append_system"]))
-    return "\n\n".join(parts)
+def _orbit_append(project, c, orbit_tools):
+    """What Orbit adds to Claude's system prompt: the launcher's note, and
+    Orbit's own context only when that extra is turned on."""
+    extra = []
+    if c.get("orbit_context"):
+        extra += _system_parts(project)
+        extra.append("# Running inside Orbit\n- The user is chatting through Orbit, a local desktop "
+                     "window onto this session.")
+    if orbit_tools:
+        extra.append("- Orbit's tools are available as mcp__orbit__*.")
+    return launcher_append(c, extra)
 
 
 def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None, inbox=None,
@@ -848,7 +925,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         return msg
 
     spec = q.current_model() or {}
-    label = "Claude Code · " + (spec.get("label") or "local Qwen").replace(" · CLI", "")
+    label = (spec.get("label") or "Claude Code · local Qwen").replace(" · CLI", "")
+    if not label.startswith("Claude Code"): label = "Claude Code · " + label
     emit("model", {"id": spec.get("id"), "label": label, "provider": "Claude Code"})
     _wake_model(emit)
 
@@ -865,11 +943,14 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                      if m.get("role") == "assistant" and m.get("claude_uuid")), None)
         if mine and mine != last_assistant_uuid(jp):
             resume_at = mine
+    prefs = chat_prefs(sid) if sid else {}
     if not resume:
+        # a new session starts in the folder chosen for this chat, else the
+        # chat's project folder, else Orbit's workspace
         folder = None
         try: folder = q.project_folder(project) if project else None
         except Exception: folder = None
-        cwd = folder or q.WORKSPACE
+        cwd = prefs.get("cwd") or folder or q.WORKSPACE
         prior = _prior_transcript([m for m in messages if m.get("role") != "system"])
         mk = {"session": str(uuid.uuid4()), "cwd": cwd, "skills": [], "owner": sid}
     else:
@@ -885,7 +966,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     # skills: this chat's set, grown by what this message needs
     chosen = list(dict.fromkeys(mk.get("skills") or []))
     hint = []
-    if c["profile"] == "focused" and c.get("skill_routing"):
+    if c.get("skill_routing") and c.get("profile") != "lean":
         routed = route_skills(plain, limit=6)
         hint = routed[:3]
         want = [s["name"] for s in routed]
@@ -903,13 +984,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     umsg = messages[-1]
     if sid: q.LAST_TURN.pop(sid, None)
 
-    settings_path = _write_json(f"settings-{mk['session']}.json", skill_settings(chosen, c))
-    servers = {}
-    known = user_mcp_servers()
-    names = c.get("mcp_servers") or []
-    for n in (known if "*" in names else names):
-        if n in known: servers[n] = known[n]
     token = None
+    servers = {}
     specs = []
     if bridge_url():
         if c.get("orbit_tools"):
@@ -932,22 +1008,22 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         servers["orbit"] = {"type": "stdio", "command": sys.executable,
                             "args": [os.path.join(os.path.dirname(os.path.abspath(__file__)), "orbit-mcp")],
                             "env": {"ORBIT_MCP_URL": bridge_url(), "ORBIT_MCP_TOKEN": token}}
-    mcp_path = _write_json(f"mcp-{mk['session']}.json", {"mcpServers": servers})
+    settings_path, mcp_path = launcher_files(c, mk["session"], skills=chosen, extra_servers=servers)
 
-    prefs = chat_prefs(sid) if sid else {}
-    if prefs.get("permission_mode"): c["permission_mode"] = prefs["permission_mode"]
-    if not approve and (c.get("unattended_mode") or "default") != "default":
-        c["permission_mode"] = c["unattended_mode"]
+    # a chat's own mode, else Orbit's default for new chats, else Claude's own
+    mode = prefs.get("permission_mode") or c.get("permission_mode") or None
+    if not approve and c.get("unattended_mode"):
+        mode = c["unattended_mode"]
     url, model_name, ctxw = model_endpoint()
-    argv = build_argv(c, session_id=mk["session"], resume=resume, cwd=cwd, read_only=bool(read_only),
+    argv = build_argv(c, session_id=mk["session"], resume=resume, read_only=bool(read_only), mode=mode,
                       effort=getattr(T, "effort", None) or q.S.get("reasoning_effort"),
-                      name=None, settings_path=settings_path, mcp_path=mcp_path,
-                      append=_append_system(project, c, orbit_tools))
+                      settings_path=settings_path, mcp_path=mcp_path, add_dirs=prefs.get("add_dirs"),
+                      append=_orbit_append(project, c, orbit_tools))
     if fork: argv.append("--fork-session")
     if resume_at: argv += ["--resume-session-at", resume_at]
     env = harness_env(url, model_name, ctxw)
 
-    stamp = f"[{q.sent_at(now)}] "
+    stamp = f"[{q.sent_at(now)}] " if c.get("message_time") else ""
     blocks = _content_blocks(user_content, stamp)
     if prior:
         blocks.insert(0, {"type": "text", "text": "[Earlier in this chat, before it moved to Claude Code:]\n"
@@ -1020,6 +1096,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     next_notice = t_start + every if every else None
     last_ckpt = 0.0
     subagents = {}
+    streamed = set()                   # message ids whose text arrived as a stream
+    step_prompt = [0]                  # prompt size reported at the start of the current message
 
     def respond(req_id, response):
         send({"type": "control_response", "response": {"subtype": "success", "request_id": req_id,
@@ -1096,12 +1174,14 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                 et = e.get("type")
                 if et == "message_start":
                     mid = (e.get("message") or {}).get("id")
+                    streamed.add(mid)
                     if mid != cur_id: new_step(mid)
                     u = (e.get("message") or {}).get("usage") or {}
                     ptok = (u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0) \
                         + (u.get("cache_creation_input_tokens") or 0)
                     if ptok and sid: q.SESSION_TOKENS[sid] = ptok
                     usage["prompt_tokens"] += ptok
+                    step_prompt[0] = ptok
                 elif et == "content_block_delta":
                     d = e.get("delta") or {}
                     if cur is None: new_step(None)
@@ -1114,6 +1194,12 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                 elif et == "message_delta":
                     u = e.get("usage") or {}
                     usage["completion_tokens"] += u.get("output_tokens") or 0
+                    # some servers report the prompt size only at the end of a message
+                    ptok = (u.get("input_tokens") or 0) + (u.get("cache_read_input_tokens") or 0) \
+                        + (u.get("cache_creation_input_tokens") or 0)
+                    if ptok and not step_prompt[0]:
+                        usage["prompt_tokens"] += ptok
+                        if sid: q.SESSION_TOKENS[sid] = ptok
                 continue
 
             if t == "assistant":
@@ -1128,10 +1214,14 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                     continue
                 if msg.get("id") != cur_id or cur is None: new_step(msg.get("id"))
                 if ev.get("uuid"): cur["claude_uuid"] = ev["uuid"]
+                if msg.get("model") == "<synthetic>": cur["model"] = "Claude Code"
                 for b in msg.get("content") or []:
                     bt = b.get("type")
                     if bt == "text":
                         cur["content"] = (cur.get("content") or "") + (b.get("text") or "")
+                        if msg.get("id") not in streamed:
+                            # local commands (/context, /cost, /compact…) answer at once, unstreamed
+                            emit("content_delta", b.get("text") or "")
                     elif bt == "thinking":
                         cur["reasoning_content"] = (cur.get("reasoning_content") or "") + (b.get("thinking") or "")
                         if marks: cur["reasoning_marks"] = list(marks)
@@ -1225,8 +1315,16 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                     emit("retry", {"attempt": ev.get("attempt"), "of": ev.get("max_retries"),
                                    "wait": round((ev.get("retry_delay_ms") or 0) / 1000, 1),
                                    "error": str(ev.get("error") or "")[:300], "kind": "transient"})
-                elif st == "status" and ev.get("status") == "compacting":
-                    emit("notice", {"msg": "compacting the conversation…"})
+                elif st == "status":
+                    if ev.get("status") == "compacting":
+                        emit("notice", {"msg": "compacting the conversation…"})
+                    elif ev.get("compact_result") == "failed":
+                        emit("notice", {"msg": "compacting failed: " + str(ev.get("compact_error") or "")})
+                    elif ev.get("status") == "requesting":
+                        emit("status", {"msg": "waiting for the model"})
+                else:
+                    msg = _system_notice(st, ev)
+                    if msg: emit("notice", {"msg": msg, "kind": st})
                 continue
 
             if t == "result":
@@ -1252,7 +1350,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
             pass
         if token: BRIDGE.pop(token, None)
         for f in (settings_path, mcp_path):      # per-run files; the MCP one holds the run's token
-            try: os.remove(f)
+            try:
+                if f: os.remove(f)
             except OSError: pass
         if sid and RUNS.get(sid) is run: RUNS.pop(sid, None)
         for w in run["waiters"].values(): w["event"].set()
@@ -1293,13 +1392,48 @@ def _run_log(sid, mk, resume, fork, resume_at, c, cwd, argv):
     try:
         line = {"t": time.strftime("%Y-%m-%d %H:%M:%S"), "chat": sid, "session": mk.get("session"),
                 "resume": resume, "fork": fork, "resume_at": resume_at, "cwd": cwd,
-                "profile": c.get("profile"), "mode": c.get("permission_mode"),
+                "profile": c.get("profile"), "mode": next((argv[i + 1] for i, a in enumerate(argv) if a == "--permission-mode"), "claude's"),
                 "skills": len(mk.get("skills") or []),
                 "args": [a for a in argv[1:] if a.startswith("--")]}
         with open(os.path.join(Q.LOGS, "claude.log"), "a") as fh:
             fh.write(json.dumps(line) + "\n")
     except Exception:
         pass
+
+
+def _system_notice(st, ev):
+    """A line for the chat from one of Claude Code's other system events."""
+    def g(*keys):
+        for k in keys:
+            v = ev.get(k)
+            if v: return str(v)
+        return ""
+    if st in ("hook_started",):
+        return ""                                   # the finished line says it all
+    if st in ("hook_response",):
+        out = g("output", "stdout", "message", "stderr").strip()
+        # a hook's context for the model (additionalContext JSON) is not for reading
+        first = next((l for l in out.splitlines() if l.strip() and not l.lstrip().startswith("{")), "")
+        code = ev.get("exit_code")
+        return f"hook {g('hook_name', 'hook_event', 'name')} ran" + \
+            (f" (exit {code})" if code not in (None, 0) else "") + (f" — {first[:160]}" if first else "")
+    if st == "task_started":
+        return f"background task started: {g('description', 'task_id')}"
+    if st == "task_notification":
+        return f"background task {g('status')}: {g('summary', 'description', 'task_id')}"[:400]
+    if st == "permission_denied":
+        return f"permission denied: {g('tool_name')} {g('message', 'reason')}".strip()
+    if st in ("model_fallback", "model_refusal_fallback", "model_consent_fallback"):
+        return f"model fallback: {g('message', 'reason', 'fallback_model', 'model')}"
+    if st == "api_error":
+        return f"model request failed: {g('error', 'message')[:300]}"
+    if st in ("notification", "informational"):
+        return g("message", "text", "content")[:400]
+    if st == "local_command":
+        return g("content", "message", "output")[:2000]
+    if st == "stop_hook_summary":
+        return g("summary", "message")[:400]
+    return ""
 
 
 def _kill(proc):
@@ -1455,10 +1589,10 @@ def convert(path):
             ts = _ts(d.get("timestamp")) or time.time()
             msg = d.get("message") or {}
             if tp == "assistant":
-                if msg.get("model") == "<synthetic>": continue
+                synthetic = msg.get("model") == "<synthetic>"
                 if msg.get("id") != cur_id or cur is None:
-                    cur = {"role": "assistant", "content": "", "model": "Claude Code · " + str(msg.get("model") or ""),
-                           "t": ts}
+                    cur = {"role": "assistant", "content": "", "t": ts,
+                           "model": "Claude Code" if synthetic else "Claude Code · " + str(msg.get("model") or "")}
                     cur_id = msg.get("id")
                     msgs.append(cur)
                 if d.get("uuid"): cur["claude_uuid"] = d["uuid"]
@@ -1692,13 +1826,246 @@ def resume_command(orbit_msgs):
     return f"cd {json.dumps(cwd)} && claude-qwen --resume {mk['session']}"
 
 
+# ------------------------------------------------------------------ your Claude setup
+#
+# Orbit does not keep a copy of Claude's configuration. Skills, plugins, MCP
+# servers and permission settings are read from where Claude keeps them, and
+# changes are made there -- through Claude's own CLI where it has one -- so the
+# terminal and Orbit always see the same setup.
+
+def claude_settings_path(scope="user", cwd=None):
+    if scope == "user":
+        return os.path.join(claude_dir(), "settings.json")
+    base = os.path.join(cwd or os.getcwd(), ".claude")
+    return os.path.join(base, "settings.local.json" if scope == "local" else "settings.json")
+
+
+def read_claude_settings(scope="user", cwd=None):
+    try:
+        with open(claude_settings_path(scope, cwd)) as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_claude_settings(patch, scope="user", cwd=None):
+    """Merge a change into Claude's settings file (a key set to None is removed).
+    The previous file is kept in Orbit's config/claude/backups first."""
+    path = claude_settings_path(scope, cwd)
+    cur = read_claude_settings(scope, cwd)
+    if os.path.exists(path):
+        bk = os.path.join(_work_dir(), "backups")
+        os.makedirs(bk, exist_ok=True)
+        shutil.copy2(path, os.path.join(bk, f"{scope}-settings-{time.strftime('%Y%m%d-%H%M%S')}.json"))
+    def merge(a, b):
+        for k, v in b.items():
+            if v is None: a.pop(k, None)
+            elif isinstance(v, dict) and isinstance(a.get(k), dict): merge(a[k], v)
+            else: a[k] = v
+        return a
+    new = merge(cur, patch or {})
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + f".{os.getpid()}.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(new, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+    return new
+
+
+def claude_cli(args, timeout=120):
+    """Run a claude management command (plugin, mcp...) as your normal Claude,
+    not the local-model harness. Returns (exit code, stdout, stderr)."""
+    exe = which_claude()
+    if not exe: return 127, "", "claude is not installed"
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_CODE_", "CLAUDECODE"))}
+    if os.environ.get("ORBIT_CLAUDE_CONFIG_DIR"):
+        env["CLAUDE_CONFIG_DIR"] = os.environ["ORBIT_CLAUDE_CONFIG_DIR"]
+    try:
+        r = subprocess.run([exe, *args], capture_output=True, text=True, timeout=timeout, env=env,
+                           stdin=subprocess.DEVNULL)
+        return r.returncode, r.stdout, r.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", f"claude {' '.join(args[:2])} took longer than {timeout}s"
+
+
+def skills_list():
+    """Your skills (~/.claude/skills) and whether Claude has each turned off."""
+    over = read_claude_settings().get("skillOverrides") or {}
+    out = []
+    for it in skill_index():
+        out.append({**it, "enabled": over.get(it["name"]) != "off",
+                    "path": os.path.join(claude_dir(), "skills", it["dir"])})
+    return out
+
+
+def skill_set_enabled(name, on):
+    write_claude_settings({"skillOverrides": {name: None if on else "off"}})
+    return {"ok": True, "name": name, "enabled": bool(on)}
+
+
+def write_claude_skill(name, body):
+    """Save a procedure as a Claude skill: ~/.claude/skills/<name>/SKILL.md."""
+    name = re.sub(r"[^a-z0-9-]+", "-", (name or "skill").lower()).strip("-") or "skill"
+    title = next((l.lstrip("# ").strip() for l in body.splitlines() if l.strip()), name)
+    d = os.path.join(claude_dir(), "skills", name)
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "SKILL.md"), "w") as fh:
+        fh.write(f"---\nname: {name}\ndescription: {json.dumps(title[:300])}\n---\n\n{body.strip()}\n")
+    _SKILL_INDEX["key"] = None
+    return name
+
+
+def _skill_dirs(root, depth=4):
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in ("node_modules",)]
+        if dirpath[len(root):].count(os.sep) >= depth:
+            dirnames[:] = []
+        if "SKILL.md" in filenames:
+            found.append(dirpath)
+            dirnames[:] = []                        # a skill's own subfolders are its files
+    return found
+
+
+def skill_install(source, overwrite=False):
+    """Install skills into ~/.claude/skills from a git repository (URL or
+    owner/repo) or a local folder: every folder with a SKILL.md is one skill."""
+    import tempfile
+    source = (source or "").strip()
+    if not source: return {"error": "nothing to install from"}
+    tmp = None
+    if os.path.isdir(os.path.expanduser(source)):
+        root = os.path.abspath(os.path.expanduser(source))
+    else:
+        url = source
+        if re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", source):
+            url = f"https://github.com/{source}.git"
+        if not re.match(r"^(https?://|git@)", url):
+            return {"error": "give a folder, a git URL, or owner/repo"}
+        tmp = tempfile.mkdtemp(prefix="orbit-skill-")
+        r = subprocess.run(["git", "clone", "--depth", "1", url, os.path.join(tmp, "repo")],
+                           capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            shutil.rmtree(tmp, ignore_errors=True)
+            return {"error": "git clone failed: " + (r.stderr.strip().splitlines() or ["?"])[-1][:300]}
+        root = os.path.join(tmp, "repo")
+    try:
+        dirs = _skill_dirs(root)
+        if not dirs: return {"error": "no SKILL.md found there"}
+        dest_base = os.path.join(claude_dir(), "skills")
+        os.makedirs(dest_base, exist_ok=True)
+        installed, skipped = [], []
+        for d in dirs:
+            try:
+                meta, _ = _frontmatter(open(os.path.join(d, "SKILL.md"), encoding="utf-8", errors="replace").read(4000))
+            except OSError:
+                meta = {}
+            name = re.sub(r"[^A-Za-z0-9_.-]+", "-", meta.get("name") or os.path.basename(d.rstrip(os.sep))).strip("-")
+            if d == root and tmp and not meta.get("name"):
+                name = re.sub(r"\.git$", "", source.rstrip("/").split("/")[-1])
+            dest = os.path.join(dest_base, name)
+            if os.path.exists(dest) and not overwrite:
+                skipped.append(name); continue
+            if os.path.exists(dest):
+                _to_trash(dest)
+            shutil.copytree(d, dest, ignore=shutil.ignore_patterns(".git"))
+            installed.append(name)
+        _SKILL_INDEX["key"] = None
+        return {"ok": True, "installed": installed, "skipped": skipped}
+    finally:
+        if tmp: shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _to_trash(path):
+    """Into the macOS Trash (recoverable), not deleted."""
+    trash = os.path.join(HOME, ".Trash")
+    os.makedirs(trash, exist_ok=True)
+    dest = os.path.join(trash, os.path.basename(path.rstrip(os.sep)) + time.strftime("-%Y%m%d-%H%M%S"))
+    shutil.move(path, dest)
+    return dest
+
+
+def skill_remove(name):
+    it = next((x for x in skill_index() if x["name"] == name or x["dir"] == name), None)
+    if not it: return {"error": f"no skill {name}"}
+    dest = _to_trash(os.path.join(claude_dir(), "skills", it["dir"]))
+    _SKILL_INDEX["key"] = None
+    return {"ok": True, "trashed": dest}
+
+
+def plugins_list():
+    rc, out, err = claude_cli(["plugin", "list", "--json"], timeout=60)
+    try: return {"plugins": json.loads(out)}
+    except ValueError: return {"plugins": [], "error": (err or out).strip()[:400]}
+
+
+def plugin_action(op, name):
+    if op not in ("enable", "disable", "install", "uninstall", "update"):
+        return {"error": f"unknown plugin action {op}"}
+    rc, out, err = claude_cli(["plugin", op, name], timeout=300)
+    return {"ok": rc == 0, "output": (out + err).strip()[-1500:]}
+
+
+def marketplaces_list():
+    rc, out, err = claude_cli(["plugin", "marketplace", "list", "--json"], timeout=60)
+    try: return {"marketplaces": json.loads(out)}
+    except ValueError: return {"marketplaces": [], "output": (out + err).strip()[-800:]}
+
+
+def mcp_list():
+    """`claude mcp list`, with each server's health."""
+    rc, out, err = claude_cli(["mcp", "list"], timeout=90)
+    rows = []
+    for line in out.splitlines():
+        m = re.match(r"^([^:\s][^:]*):\s+(.*?)\s+-\s+(.*)$", line.strip())
+        if m:
+            rows.append({"name": m.group(1).strip(), "target": m.group(2).strip(),
+                         "status": re.sub(r"^[^A-Za-z]+", "", m.group(3)).strip()})
+    return {"servers": rows, "error": None if rc == 0 else (err or out).strip()[-400:]}
+
+
+def mcp_action(op, name, config=None, scope="user"):
+    if op == "remove":
+        rc, out, err = claude_cli(["mcp", "remove", name, "--scope", scope], timeout=60)
+    elif op == "add":
+        rc, out, err = claude_cli(["mcp", "add-json", name, json.dumps(config or {}), "--scope", scope], timeout=60)
+    else:
+        return {"error": f"unknown MCP action {op}"}
+    return {"ok": rc == 0, "output": (out + err).strip()[-1500:]}
+
+
+def recent_folders(limit=30):
+    """Folders to start a chat in: where Claude sessions ran, Orbit's projects
+    and workspace."""
+    seen, out = set(), []
+    def add(p, why):
+        if not p: return
+        p = os.path.abspath(os.path.expanduser(p))
+        if p in seen or not os.path.isdir(p): return
+        seen.add(p); out.append({"path": p, "why": why})
+    try: add(Q.WORKSPACE, "Orbit workspace")
+    except Exception: pass
+    try:
+        for pid, pr in (Q.projects_load() or {}).items():
+            add((pr or {}).get("folder"), "project: " + str((pr or {}).get("name") or pid))
+    except Exception:
+        pass
+    for h in sorted(_SCAN.values(), key=lambda x: -((x[1] or {}).get("mtime") or 0)):
+        if h[1]: add(h[1].get("cwd"), "recent Claude session")
+        if len(out) >= limit: break
+    return out
+
+
 # ------------------------------------------------------------------ terminal launcher
 
 def launch(args):
-    """`claude-qwen`: the interactive harness, set up the way Orbit runs it.
+    """`claude-qwen`: the interactive harness on the local model, with the same
+    command Orbit's Claude Code mode uses.
 
-    CLAUDE_QWEN_PROFILE=lean|focused|full picks the profile (default: Orbit's
-    setting); CLAUDE_QWEN_BARE=1 brings back the old --bare mode (three tools)."""
+    CLAUDE_QWEN_PROFILE=standard|lean picks a profile for one run;
+    CLAUDE_QWEN_BARE=1 brings back the old --bare mode (three tools)."""
     global Q
     here = os.path.dirname(os.path.abspath(__file__))
     sys.path.insert(0, here)
@@ -1721,23 +2088,14 @@ def launch(args):
     if os.environ.get("CLAUDE_QWEN_BARE") == "1":
         env["ANTHROPIC_API_KEY"] = "local-qwen"
         os.execvpe(exe, [exe, "--bare", "--model", "sonnet", *args], env)
-    names = c.get("mcp_servers") or []
-    servers = {k: v for k, v in user_mcp_servers().items() if "*" in names or k in names}
-    mcp_path = _write_json("mcp-terminal.json", {"mcpServers": servers})
-    # no per-message skill routing in a terminal, so every skill stays listed
-    settings_path = _write_json("settings-terminal.json", {"disableAllHooks": not c.get("hooks")})
-    append = "\n\n".join(_system_parts(None) + [TERMINAL_NOTE] +
-                         ([str(c["append_system"])] if c.get("append_system") else []))
-    argv = build_argv(c, settings_path=settings_path, mcp_path=mcp_path, sdk=False, append=append)
+    settings_path, mcp_path = launcher_files(c, "terminal")
+    argv = build_argv(c, settings_path=settings_path, mcp_path=mcp_path, sdk=False,
+                      mode=c.get("permission_mode") or None, append=launcher_append(c))
     if os.environ.get("CLAUDE_QWEN_DRY_RUN") == "1":
         print(json.dumps({"argv": argv + list(args), "cwd": os.getcwd(),
                           "env": {k: v for k, v in env.items() if k.startswith(("ANTHROPIC", "CLAUDE"))}}, indent=1))
         return 0
     os.execvpe(exe, argv + list(args), env)
-
-
-TERMINAL_NOTE = ("# Local model\n- WebSearch is unavailable with this local model; use WebFetch on "
-                 "known URLs.")
 
 
 if __name__ == "__main__":

@@ -350,6 +350,29 @@ class H(http.server.BaseHTTPRequestHandler):
             return
         if p == "/api/running":
             return self._send(200, jdump({"running": running_sids(), "max": MAX_PARALLEL}))
+        if p.startswith("/api/claude/config"):
+            # your Claude setup, as Claude keeps it: settings, skills
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            cwd = (qs.get("cwd") or [None])[0]
+            return self._send(200, jdump({
+                "user": q.CE.read_claude_settings("user"),
+                "project": q.CE.read_claude_settings("project", cwd) if cwd else {},
+                "local": q.CE.read_claude_settings("local", cwd) if cwd else {},
+                "paths": {"user": q.CE.claude_settings_path("user"),
+                          "skills": os.path.join(q.CE.claude_dir(), "skills")},
+                "skills": q.CE.skills_list()}))
+        if p == "/api/claude/plugins":
+            return self._send(200, jdump({**q.CE.plugins_list(), **q.CE.marketplaces_list()}))
+        if p == "/api/claude/mcp":
+            return self._send(200, jdump(q.CE.mcp_list()))
+        if p == "/api/claude/commands":
+            cat = q.CE.command_catalog()
+            return self._send(200, jdump({"commands": [{"name": c.get("name"), "description": c.get("description"),
+                                                        "argumentHint": c.get("argumentHint")}
+                                                       for c in cat.get("commands") or []],
+                                          "agents": cat.get("agents") or []}))
+        if p == "/api/claude/folders":
+            return self._send(200, jdump({"folders": q.CE.recent_folders()}))
         if p.startswith("/api/claude/info"):
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
             sid = (qs.get("sid") or [""])[0]
@@ -369,7 +392,9 @@ class H(http.server.BaseHTTPRequestHandler):
                               "argumentHint": c.get("argumentHint")} for c in (q.CE.INIT.get("commands") or [])],
                 "tools": q.CE.INIT.get("tools") or [], "mcp": q.CE.INIT.get("mcp_servers") or [],
                 "version": q.CE.INIT.get("claude_code_version"),
-                "mcp_known": sorted(q.CE.user_mcp_servers())}))
+                "mcp_known": sorted(q.CE.user_mcp_servers()),
+                "cwd_pref": q.CE.chat_prefs(sid).get("cwd"), "add_dirs": q.CE.chat_prefs(sid).get("add_dirs") or [],
+                "claude_default_mode": ((q.CE.read_claude_settings().get("permissions") or {}).get("defaultMode"))}))
         if p == "/api/code":
             return self._send(200, jdump(code_is_stale()))
         if p.startswith("/api/live/"):
@@ -647,6 +672,36 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/claude/mode":
             # a chat's Claude Code permission mode: live if it is answering, and from now on
             return self._send(200, jdump(q.CE.set_permission_mode(d.get("sid", ""), d.get("mode", ""))))
+        if p == "/api/claude/cwd":
+            # the folder a chat's Claude session starts in (and extra folders it may use)
+            sid_, cwd = d.get("sid", ""), (d.get("cwd") or "").strip()
+            if cwd:
+                cwd = os.path.abspath(os.path.expanduser(cwd))
+                if not os.path.isdir(cwd):
+                    return self._send(400, jdump({"error": f"no such folder: {cwd}"}))
+            dirs = [os.path.abspath(os.path.expanduser(x)) for x in (d.get("add_dirs") or []) if str(x).strip()]
+            prefs = q.CE.set_chat_pref(sid_, cwd=cwd or None, add_dirs=dirs or None)
+            st = STATES.get(sid_)
+            started = bool(q.CE.marker_of(st.msgs if st else []))
+            return self._send(200, jdump({"ok": True, "prefs": prefs, "started": started}))
+        if p == "/api/claude/claude_settings":
+            return self._send(200, jdump({"ok": True, "settings": q.CE.write_claude_settings(
+                d.get("patch") or {}, d.get("scope") or "user", d.get("cwd"))}))
+        if p == "/api/claude/skills":
+            op = d.get("op")
+            if op == "toggle": r = q.CE.skill_set_enabled(d.get("name", ""), bool(d.get("on")))
+            elif op == "install": r = q.CE.skill_install(d.get("source", ""), bool(d.get("overwrite")))
+            elif op == "remove": r = q.CE.skill_remove(d.get("name", ""))
+            else: r = {"error": f"unknown op {op}"}
+            return self._send(200, jdump(r))
+        if p == "/api/claude/plugins":
+            if d.get("op") == "marketplace_add":
+                rc, out, err = q.CE.claude_cli(["plugin", "marketplace", "add", d.get("name", "")], timeout=300)
+                return self._send(200, jdump({"ok": rc == 0, "output": (out + err)[-1500:]}))
+            return self._send(200, jdump(q.CE.plugin_action(d.get("op", ""), d.get("name", ""))))
+        if p == "/api/claude/mcp":
+            return self._send(200, jdump(q.CE.mcp_action(d.get("op", ""), d.get("name", ""),
+                                                          d.get("config"), d.get("scope") or "user")))
         if p == "/api/claude/control":
             sub = d.get("subtype", "")
             params = {k: v for k, v in d.items() if k not in ("sid", "subtype")}
@@ -1041,7 +1096,9 @@ class H(http.server.BaseHTTPRequestHandler):
             threading.Thread(target=run_job, args=(job,), daemon=True).start()
             return self._send(200, jdump({"started": jid}))
         if p == "/api/skill/capture":
-            with LOCK: name = q.capture_skill(S.msgs, d.get("name") or "captured-skill")
+            # a Claude Code chat's procedure becomes a Claude skill (~/.claude/skills)
+            writer = q.CE.write_claude_skill if q.CE.is_engine(q.current_model(S.model)) else None
+            with LOCK: name = q.capture_skill(S.msgs, d.get("name") or "captured-skill", writer)
             return self._send(200, jdump({"ok": bool(name), "name": name}))
         if p == "/api/support":
             return self._send(200, jdump({"rows": q.support_check(d.get("answer",""),
@@ -1417,7 +1474,7 @@ class H(http.server.BaseHTTPRequestHandler):
             if kind == "end": return
 
 # stream events worth showing to a tab that rejoins an answer mid-way
-_STATUS_KINDS = ("server_starting", "stagnation", "autocompact", "squeezed", "notice",
+_STATUS_KINDS = ("server_starting", "stagnation", "autocompact", "squeezed", "notice", "status",
                  "long_running", "interjection", "retry", "subtask", "queued", "dequeued",
                  "plan_nudge", "fail_streak", "ultrathink")
 
@@ -1661,7 +1718,7 @@ def run_job(job):
                 st.live = {"thinking": "", "content": "", "tools": [],
                            "status": "", "done": False, "seq": 0}
                 q.ACTIVE_PROJECT["id"] = st.project
-                q.ACTIVE_MODEL["id"] = st.model
+                q.ACTIVE_MODEL["id"] = st.model or job.get("model")
                 _refresh_system(st)
                 st.msgs, _did, _pct = q.maybe_autocompact(st.msgs, sid=st.sid)
                 n0 = len(st.msgs)
@@ -1688,6 +1745,8 @@ def run_job(job):
         else:
             pid = job.get("project") or None
             q.ACTIVE_PROJECT["id"] = pid
+            # the job's own model; it used to run on whichever model the last chat had
+            q.ACTIVE_MODEL["id"] = job.get("model") or None
             msgs = [{"role": "system", "content": q.system_prompt_for(job.get("agent"), pid)}]
             specs, _ = q.active_tools(pid)
             tools = q.tools_for(job.get("agent"), specs)
@@ -1725,7 +1784,6 @@ def scheduler_loop():
         # one thing at a time: no job while any answer (or job) is running, and
         # a gap after the last one finished, so jobs never pile onto a chat
         if running_sids() or JOBS_INFLIGHT or q.slot_busy(): return
-        if q.quiet_left(): return        # quiet mode: scheduled work waits until it ends
         if time.time() - q.GEN_STATE.get("ended", 0) < float(q.S.get("schedule_gap_min") or 0) * 60:
             return
         for job in q.sched_load().get("jobs", []):

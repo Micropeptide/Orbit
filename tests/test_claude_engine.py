@@ -34,10 +34,12 @@ class TestClaudeEngine(unittest.TestCase):
         cls.saved_endpoint, cls.saved_wake = CE.model_endpoint, CE._wake_model
         cls.saved_settings = dict(q.S)
         CE._wake_model = lambda emit: None
+        cls.saved_runlog = CE._run_log
+        CE._run_log = lambda *a, **k: None                      # nor into Orbit's logs
         cls.saved_workdir = CE._work_dir
         wd = os.path.join(cls.tmp, "engine-files"); os.makedirs(wd)
         CE._work_dir = lambda: wd                               # nor into Orbit's config
-        q.S["claude_qwen"] = {"profile": "focused", "orbit_skills": False, "mcp_servers": []}
+        q.S["claude_qwen"] = {"mcp_servers": []}
         q.S["autonomy_mode"] = "ask"
 
     @classmethod
@@ -45,6 +47,7 @@ class TestClaudeEngine(unittest.TestCase):
         for k, v in cls.saved.items(): setattr(q, k, v)
         CE.model_endpoint, CE._wake_model = cls.saved_endpoint, cls.saved_wake
         CE._work_dir = cls.saved_workdir
+        CE._run_log = cls.saved_runlog
         q.S.clear(); q.S.update(cls.saved_settings)
         os.environ.pop("ORBIT_CLAUDE_CONFIG_DIR", None)
         shutil.rmtree(cls.tmp, ignore_errors=True)
@@ -72,6 +75,7 @@ class TestClaudeEngine(unittest.TestCase):
         return out, events
 
     def requests(self):
+        if not os.path.exists(self.log): return []
         rows = [json.loads(l)["body"] for l in open(self.log)]
         return [r for r in rows if r.get("tools")]
 
@@ -107,10 +111,10 @@ class TestClaudeEngine(unittest.TestCase):
         self.assertIn("claude", msgs[1])
         self.assertTrue(msgs[1]["content"] == "write hello.txt")
         self.assertIn("secs", msgs[-1])
-        # the message the model saw carries the time it was sent
-        first = self.requests()[0]["messages"]
-        said = json.dumps(first)
-        self.assertRegex(said, r"\[\w{3} \d{2} \w{3} \d{4}, \d{2}:\d{2}")
+        # as in the terminal: the message goes to Claude as typed (no Orbit additions)
+        said = json.dumps(self.requests()[0]["messages"])
+        self.assertNotRegex(said, r"\[\w{3} \d{2} \w{3} \d{4}, \d{2}:\d{2}")
+        self.assertNotIn("Running inside Orbit", json.dumps(self.requests()[0].get("system")))
 
         # a second message resumes the same Claude session: the model sees the history
         out2, _ = self.run_turn(msgs, "and again?")
@@ -281,9 +285,46 @@ class TestClaudeEngine(unittest.TestCase):
         hits = [s["name"] for s in CE.route_skills("find pubmed literature on DNA methylation readers")]
         self.assertEqual(hits[0], "pubmed-database")
         self.assertNotIn("docx", hits)
-        st = CE.skill_settings(["pubmed-database"], {**CE.DEFAULTS, "profile": "focused"})
+        sp, _ = CE.launcher_files({**CE.DEFAULTS, "skill_routing": True}, "t", skills=["pubmed-database"])
+        st = json.load(open(sp))
         self.assertEqual(st["skillOverrides"].get("docx"), "off")
         self.assertNotIn("pubmed-database", st["skillOverrides"])
+        self.assertEqual(CE.launcher_files(dict(CE.DEFAULTS), "t", skills=["x"])[0], None)   # off: Claude lists all
+
+    def test_your_claude_setup_is_changed_in_claude(self):
+        src = os.path.join(self.tmp, "repo")
+        for n in ("alpha", "nested/beta"):
+            os.makedirs(os.path.join(src, n))
+            open(os.path.join(src, n, "SKILL.md"), "w").write(f"---\nname: {n.split('/')[-1]}\ndescription: d\n---\nx")
+        r = CE.skill_install(src)
+        self.assertEqual(sorted(r["installed"]), ["alpha", "beta"])
+        self.assertTrue(os.path.isfile(os.path.join(self.cfgdir, "skills", "beta", "SKILL.md")))
+        self.assertEqual(sorted(CE.skill_install(src)["skipped"]), ["alpha", "beta"])
+        CE.skill_set_enabled("alpha", False)
+        self.assertEqual(CE.read_claude_settings()["skillOverrides"], {"alpha": "off"})
+        self.assertFalse(next(x for x in CE.skills_list() if x["name"] == "alpha")["enabled"])
+        CE.skill_set_enabled("alpha", True)
+        self.assertEqual(CE.read_claude_settings()["skillOverrides"], {})
+        CE.write_claude_settings({"permissions": {"allow": ["Bash(ls:*)"], "defaultMode": "acceptEdits"}})
+        CE.write_claude_settings({"permissions": {"defaultMode": None}})
+        self.assertEqual(CE.read_claude_settings()["permissions"], {"allow": ["Bash(ls:*)"]})
+        self.assertEqual(CE.write_claude_skill("My Proc", "# Do the thing\n1. step"), "my-proc")
+        self.assertIn("name: my-proc", open(os.path.join(self.cfgdir, "skills", "my-proc", "SKILL.md")).read())
+
+    def test_new_chat_starts_in_its_chosen_folder_and_local_commands_show(self):
+        chosen = os.path.join(self.tmp, "chosen")
+        os.makedirs(chosen, exist_ok=True)
+        CE.set_chat_pref("test-ce-dir", cwd=chosen)
+        self.addCleanup(CE.set_chat_pref, "test-ce-dir", cwd=None)
+        self.serve([[{"text": "unused"}]])
+        msgs = [{"role": "system", "content": "s"}]
+        events = []
+        CE.run_turn(msgs, "/cost", [], emit=lambda k, p: events.append((k, p)), approve=None,
+                    cancel=threading.Event(), sid="test-ce-dir", project=None)
+        self.assertEqual(os.path.realpath(msgs[1]["claude"]["cwd"]), os.path.realpath(chosen))
+        said = "".join(p for k, p in events if k == "content_delta")
+        self.assertIn("Total cost", said)            # Claude's own /cost output, not a model answer
+        self.assertEqual(self.requests(), [])
 
 
 class TestClaudeEngineOffline(unittest.TestCase):
@@ -293,13 +334,26 @@ class TestClaudeEngineOffline(unittest.TestCase):
         c = {**CE.DEFAULTS}
         a = CE.build_argv(c, session_id="abc", resume=True, read_only=True)
         self.assertIn("--resume", a); self.assertIn("plan", a)
-        self.assertIn("--setting-sources", a)
+        self.assertNotIn("--setting-sources", a)          # standard: Claude as set up
         self.assertIn("WebSearch", a)                     # unusable on a local model
         self.assertIn("--permission-prompt-tool", a)
+        self.assertNotIn("--permission-mode", CE.build_argv(c, session_id="abc"))   # Claude's own default
+        self.assertIn("acceptEdits", CE.build_argv(c, mode="acceptEdits"))
+        self.assertIn("--add-dir", CE.build_argv(c, add_dirs=["/a"]))
         lean = CE.build_argv({**c, "profile": "lean"}, session_id="abc")
         self.assertIn("--safe-mode", lean); self.assertIn("--session-id", lean)
+        # the terminal command and Orbit's differ only in the transport and session
         term = CE.build_argv(c, sdk=False)
+        orbit = CE.build_argv(c, sdk=True)
         self.assertNotIn("--print", term)
+        extra = [x for x in orbit if x not in term]
+        self.assertEqual(set(extra), {"--print", "--output-format", "stream-json", "--verbose", "--input-format",
+                                      "--include-partial-messages", "--include-hook-events",
+                                      "--permission-prompt-tool", "stdio"})
+        # no Orbit extras by default
+        for k in ("orbit_rules", "orbit_tools", "project_tools", "skill_routing", "skill_hint",
+                  "orbit_skills", "orbit_context", "message_time"):
+            self.assertFalse(CE.DEFAULTS[k], k)
 
     def test_env_drops_other_claude_sessions_and_real_keys(self):
         os.environ["CLAUDE_CODE_ENTRYPOINT"] = "claude-desktop"

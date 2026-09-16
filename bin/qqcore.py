@@ -270,7 +270,8 @@ def build_launch_args():
     setf("--port", sv.get("port"))
     setf("--context-window", sv.get("context_window"))
     setf("--paged-kv-quantization", sv.get("kv_quant"))
-    setf("--fan-mode", sv.get("fan_mode"))
+    # quiet mode: let macOS run the fans (no boost while generating) until it ends
+    setf("--fan-mode", "default" if quiet_left() else sv.get("fan_mode"))
     setf("--depth", sv.get("depth"))
     setf("--prefill-chunk-tokens", sv.get("prefill_chunk_tokens"))
     setf("--reasoning", sv.get("reasoning"))
@@ -402,18 +403,15 @@ def model_is_local(mid=None):
 
 MODEL = None
 def quiet_left():
-    """Minutes of quiet mode left (0 = off). While it lasts the local model is
-    never started, so the fans stay down -- e.g. for a few hours at work."""
+    """Minutes of quiet mode left (0 = off). While it lasts the model server runs
+    with fan mode "default" -- macOS manages the fans, no boost while it
+    generates -- e.g. for a few hours at work. Everything else works as usual."""
     try: return max(0.0, (float(S.get("quiet_until") or 0) - time.time()) / 60)
     except (TypeError, ValueError): return 0.0
 
 def ensure_model(on_status=None):
     global MODEL
     if MODEL and probe(2): return MODEL
-    if quiet_left() and not probe(2):
-        until = time.strftime("%H:%M", time.localtime(float(S.get("quiet_until"))))
-        raise RuntimeError(f"Quiet mode is on until {until}: the local model is not started, "
-                           "to keep the fans down. Turn it off in Settings → General to use it now.")
     MODEL = probe() or autostart(on_status)
     if not MODEL:
         raise RuntimeError(f"No model server on port {PORT}; autostart failed. See {SRVLOG}")
@@ -3689,8 +3687,10 @@ def cluster_poll():
     return {"finished": finished, "running": [{"id": k, **v} for k, v in cur.items()]}
 
 # ==================================================================== SKILL CAPTURE
-def capture_skill(messages, name):
-    """Turn what just happened into a reusable procedure."""
+def capture_skill(messages, name, writer=None):
+    """Turn what just happened into a reusable procedure. writer(name, body)
+    saves it; Orbit's skills folder unless told otherwise (a Claude Code chat
+    saves a Claude skill)."""
     ensure_model()
     convo = []
     for m in messages[1:]:
@@ -3711,7 +3711,7 @@ def capture_skill(messages, name):
     body = stream_call([{"role":"system","content":"You write precise operational procedures."},
                         {"role":"user","content":ask}], None, think=False).get("content","").strip()
     if not body: return None
-    return skill_write(name, body)
+    return (writer or skill_write)(name, body)
 
 # ==================================================================== BULK KNOWLEDGE
 def know_add_bytes(filename, raw):
