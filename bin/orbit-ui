@@ -36,9 +36,12 @@ LOCK = threading.Lock()          # guards the registry itself
 PENDING = {}                     # id -> {"event": Event, "allow": bool}
 STATES = {}                      # sid -> State  (chats can run in parallel)
 def _max_parallel():
-    # chats answering at once (remote models truly in parallel; the local model still one at a time)
-    try: return max(1, int(q.S.get("max_parallel") or 8))
-    except (TypeError, ValueError): return 8
+    """How many chats may answer at once: no limit unless settings.json sets
+    max_parallel. Remote models answer side by side; the local model is never
+    shared -- its chats take turns (qqcore's slot), whatever this says."""
+    try: n = int(q.S.get("max_parallel") or 0)
+    except (TypeError, ValueError): n = 0
+    return n if n > 0 else 10**6
 _APPROVE_SEQ = [0]
 
 
@@ -364,7 +367,7 @@ class H(http.server.BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError): pass
             return
         if p == "/api/running":
-            return self._send(200, jdump({"running": running_sids(), "max": _max_parallel()}))
+            return self._send(200, jdump({"running": running_sids(), "max": (_max_parallel() if _max_parallel() < 10**6 else None)}))
         if p.startswith("/api/claude/config"):
             # your Claude setup, as Claude keeps it: settings, skills
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
@@ -1424,7 +1427,7 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._send(200, jdump({"ok": True, "sid": st.sid}))
         if p == "/api/running":
             return self._send(200, jdump({"running": running_sids(),
-                                          "max": _max_parallel()}))
+                                          "max": (_max_parallel() if _max_parallel() < 10**6 else None)}))
         if p == "/api/prompts/save":
             pr = q.prompts_load(); pr[d.get("name","untitled")] = {"text": d.get("text",""),
                                                                    "desc": d.get("desc","")}
@@ -1539,7 +1542,8 @@ class H(http.server.BaseHTTPRequestHandler):
             item = _queue_add(st, text, atts, effort)
             _drain()
             why = ("this chat is answering" if busy else
-                   f"{_max_parallel()} chats are answering" if full else "earlier messages are queued")
+                   f"{_max_parallel()} chats are answering (your max_parallel setting)" if full
+                   else "earlier messages are queued")
             return _stream_once([("queued_message", {"item": item, "why": why, "queue": _queue_view(st)}),
                                  ("end", {"sid": st.sid, "queued": True})])
         if not st.lock.acquire(blocking=False):
