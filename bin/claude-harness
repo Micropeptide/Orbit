@@ -1,0 +1,20 @@
+#!/bin/sh
+# Claude Code on any of Orbit's harness models, in a terminal:
+#   claude-harness "deepseek v4 pro go" [claude options...]
+#   claude-harness "kimi k3"      claude-harness "local qwen"
+# Keys are the ones saved in Orbit (Settings → Claude Code → Models); gateway
+# models need Orbit running. CLAUDE_QWEN_DRY_RUN=1 prints the command.
+set -eu
+SCRIPT_PATH=$0
+while [ -L "$SCRIPT_PATH" ]; do
+  SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
+  LINK_TARGET=$(readlink "$SCRIPT_PATH")
+  case "$LINK_TARGET" in /*) SCRIPT_PATH=$LINK_TARGET ;; *) SCRIPT_PATH=$SCRIPT_DIR/$LINK_TARGET ;; esac
+done
+ORBIT_ROOT=$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")/.." && pwd)
+if [ $# -lt 1 ]; then
+  echo "usage: claude-harness <model> [claude options]   e.g. claude-harness \"deepseek v4 pro go\"" >&2
+  exec "$ORBIT_ROOT/venv/bin/python" "$ORBIT_ROOT/bin/claude_engine.py" harness "--list"
+fi
+MODEL=$1; shift
+exec "$ORBIT_ROOT/venv/bin/python" "$ORBIT_ROOT/bin/claude_engine.py" harness "$MODEL" "$@"

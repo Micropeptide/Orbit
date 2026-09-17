@@ -43,7 +43,8 @@ class H(http.server.BaseHTTPRequestHandler):
         req = json.loads(self.rfile.read(n) or b"{}")
         with lock:
             with open(LOG, "a") as f:
-                f.write(json.dumps({"path": self.path, "body": req}) + "\n")
+                f.write(json.dumps({"path": self.path, "body": req,
+                                    "headers": {k.lower(): v for k, v in self.headers.items()}}) + "\n")
         if "count_tokens" in self.path:
             body = json.dumps({"input_tokens": 100}).encode()
             self.send_response(200)

@@ -1,14 +1,41 @@
-# Claude Code on the local model
+# Claude Code harness mode
 
-Pick **Claude Code · local Qwen** as a chat's model and that chat is the
-`claude-qwen` command in a window: the same Claude Code command line, your
-Claude setup exactly as it is (`~/.claude`: skills, plugins, hooks, MCP servers,
-permission rules, memory), pointed at the model on your Mac. Orbit shows
-everything the session does and passes on everything you do. It adds nothing of
-its own unless you turn an "Orbit extra" on.
+Pick a model from one of the **Claude Code** groups in the model picker and that
+chat runs through the real Claude Code harness — the `claude-qwen` command in a
+window: the same Claude Code command line, your Claude setup exactly as it is
+(`~/.claude`: skills, plugins, hooks, MCP servers, permission rules, memory),
+pointed at the model you chose. Orbit shows everything the session does and
+passes on everything you do. It adds nothing of its own unless you turn an
+"Orbit extra" on.
 
-Requires Claude Code (`claude`) installed. No Anthropic account or key is used:
-every request goes to the local model server.
+Requires Claude Code (`claude`) installed. The local model needs no key; remote
+providers use the key you add in Settings, and requests go only to that provider.
+
+## Harness mode: any model
+
+Every model in the **Claude Code** groups of the model picker runs through the
+same harness, not only the local Qwen:
+
+| Provider | How Claude Code reaches it |
+|---|---|
+| Local (MTPLX on this Mac) | directly |
+| OpenCode Go, OpenCode Zen | Orbit's gateway, for every model (DeepSeek, Kimi, GLM, MiMo via OpenAI chat; Qwen, MiniMax via Messages; GPT, Grok via Responses) |
+| DeepSeek, Qwen (Model Studio), GLM (Z.ai / BigModel), MiniMax, Kimi, Anthropic | directly, at their Anthropic-compatible endpoints |
+| Your own provider | directly (Messages API) or through the gateway (OpenAI chat or Responses) |
+
+- **Keys**: Settings → Claude Code → Models. Paste a provider's key there; it is kept
+  in Orbit's secrets. Through the gateway the key never reaches the Claude
+  process; the gateway listens on loopback and only answers Orbit's own runs.
+- **The gateway** (`bin/harness_gateway.py`) translates Claude Code's Messages API
+  to OpenAI chat completions or the Responses API and back: text, thinking,
+  tool calls, usage and errors.
+- **Switch models freely**: a chat keeps its Claude session when you change its model.
+- **New chat with…** (the ▾ next to New chat, or Cmd/Ctrl+Shift+K): model, folder and
+  permission mode together, saved as presets.
+- **Scheduled tasks** name their model — in the task form, or in words when you ask
+  a chat to schedule something ("every morning at 7, on deepseek v4 pro").
+- **Terminal**: `claude-harness "<model>"` (e.g. `claude-harness "kimi k3"`,
+  `claude-harness --list`).
 
 ## What you see
 
@@ -109,4 +136,4 @@ anything inherited from another Claude session.
 Tests: `tests/test_claude_engine.py` drives the real `claude` binary against a
 scripted stand-in for the Messages API (`tests/mock_anthropic.py`).
 
-See also: [200 ideas, and what became of them](claude-code-ideas.md).
+See also: [200 ideas, and what became of them](claude-code-ideas.md) · [200 further ideas for harness mode](claude-code-harness-ideas.md).
