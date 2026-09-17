@@ -218,3 +218,24 @@ FORWARD_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "DISABLE_", "MCP_TOOL_TIME
 def remote_env(env):
     return {k: v for k, v in env.items() if k.startswith(FORWARD_ENV_PREFIXES)
             and k not in ("CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH")}
+
+
+def fetch_transcript(host, cwd, session, since=0.0):
+    """A Claude session's transcript on the host, if it changed after `since` (its
+    modification time there). Returns (mtime, text or None), or (None, None)."""
+    if not re.fullmatch(r"[0-9a-fA-F-]{8,64}", str(session or "")): return None, None
+    script = ('c=' + shlex.quote(cwd or "~") + '\n'
+              'case "$c" in "~"|"~/"*) c="$HOME${c#\\~}";; esac\n'
+              'cd "$c" 2>/dev/null || exit 0\n'
+              'enc=$(pwd | sed "s/[^A-Za-z0-9]/-/g")\n'
+              'f="$HOME/.claude/projects/$enc/' + session + '.jsonl"\n'
+              '[ -f "$f" ] || exit 0\n'
+              'm=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f")\n'
+              'echo "META=$m"\n'
+              'if [ "$m" -gt ' + str(int(since or 0)) + ' ]; then cat "$f"; fi\n')
+    rc, out, err = run(host, script, timeout=120)
+    if rc != 0 or not out.startswith("META="): return None, None
+    head, _, body = out.partition("\n")
+    try: mtime = float(head[5:])
+    except ValueError: return None, None
+    return mtime, (body if body.strip() else None)

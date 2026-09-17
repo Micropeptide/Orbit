@@ -39,7 +39,7 @@ class TestClaudeEngine(unittest.TestCase):
         cls.saved_workdir = CE._work_dir
         wd = os.path.join(cls.tmp, "engine-files"); os.makedirs(wd)
         CE._work_dir = lambda: wd                               # nor into Orbit's config
-        q.S["claude_qwen"] = {"mcp_servers": []}
+        q.S["claude_qwen"] = {"mcp_servers": [], "permission_mode": ""}      # ask first: these tests check approvals
         q.S["autonomy_mode"] = "ask"
 
     @classmethod

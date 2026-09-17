@@ -1536,7 +1536,7 @@ async function drawClaudeBar(){
  b.style.display='';
  try{CQ_INFO=await (await fetch('/api/claude/info?sid='+encodeURIComponent(sid))).json();CQ_INFO.sid_for=sid}catch(e){return}
  b.querySelector('select').value=(CQ_INFO.prefs||{}).permission_mode||(CQ_INFO.settings||{}).permission_mode||CQ_INFO.claude_default_mode||'default';
- const dir=CQ_INFO.cwd||CQ_INFO.cwd_pref;const chip=b.querySelector('.cqdir');
+ const dir=CQ_INFO.cwd||CQ_INFO.cwd_pref||CQ_INFO.cwd_default;const chip=b.querySelector('.cqdir');
  const rh=CQ_INFO.host;
  chip.textContent=(rh?'🖥 '+rh+':':'📁 ')+(dir?dir.replace(/^\/Users\/[^/]+/,'~'):(rh?'~':'workspace'));
  chip.classList.toggle('remote',!!rh);
@@ -1642,7 +1642,14 @@ async function newChatWith(){
  $('#nwx').onclick=closeModal;
  remoteHosts().then(hs=>{const sel=$('#nw_where');if(!sel)return;
   hs.forEach(h=>sel.appendChild(el(`<option value="${esc(h.host)}">${esc(h.host)} (SSH)</option>`)))});
- $('#nw_where').onchange=async()=>{const h=$('#nw_where').value;$('#nw_browse').innerHTML='';
+ const nwPlaces=async()=>{const h=$('#nw_where').value;
+  let d;try{d=await (await fetch('/api/claude/folders?host='+encodeURIComponent(h))).json()}catch(e){return}
+  const dl=$('#nw_dirs');if(!dl)return;
+  dl.innerHTML=[...(d.bookmarks||[]).map(p=>['★ bookmark',p]),...(d.recent||[]).map(p=>['recent',p]),...(d.folders||[]).map(f=>[f.why,f.path])]
+   .map(([w,p])=>`<option value="${esc(p)}">${esc(w)}</option>`).join('');
+  if(h&&!$('#nw_cwd').value&&(d.bookmarks||[])[0])$('#nw_cwd').value=d.bookmarks[0]};
+ nwPlaces();
+ $('#nw_where').onchange=async()=>{const h=$('#nw_where').value;$('#nw_browse').innerHTML='';$('#nw_cwd').value='';nwPlaces();
   if(!h){$('#nw_probe').innerHTML='';return}
   if(!$('#nw_cwd').value)$('#nw_cwd').value=((((REMOTE_HOSTS||[]).find(x=>x.host===h)||{}).saved)||{}).default_dir||'~';
   $('#nw_probe').innerHTML='checking '+esc(h)+'…';
@@ -1867,6 +1874,28 @@ async function remoteBrowser(hostName,startPath,onPick){
   box.appendChild(list)};
  load(startPath||'~');
  return box}
+// bookmarked and recent folders, kept per machine (this Mac, each SSH host)
+let FOLDER_MARKS={};
+async function folderPlaces(box,where,pick){
+ let d;try{d=await (await fetch('/api/claude/folders?host='+encodeURIComponent(where||''))).json()}catch(e){return}
+ FOLDER_MARKS[where||'']=d.bookmarks||[];
+ box.innerHTML='';
+ const tilde=p=>String(p).replace(/^\/Users\/[^/]+/,'~');
+ const row=(path,why,marked)=>{
+  const r=el(`<div class=memrow style="cursor:pointer;align-items:center"><button class=ghost style="padding:0 6px" title="${marked?'remove bookmark':'bookmark'}">${marked?'★':'☆'}</button><b style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></b><span></span></div>`);
+  r.querySelector('b').textContent=where?path:tilde(path);r.querySelector('b').title=path;r.querySelector('span').textContent=why||'';
+  r.onclick=e=>{if(e.target.closest('button'))return;pick(path)};
+  r.querySelector('button').onclick=async e=>{e.stopPropagation();
+   const x=await apiPost('/api/folders/bookmark',{host:where||'',path,on:!marked},'bookmark');
+   if(x){FOLDER_MARKS[where||'']=x.bookmarks;folderPlaces(box,where,pick)}};
+  return r};
+ const marks=d.bookmarks||[], recent=d.recent||[];
+ const others=(d.folders||[]).filter(f=>!marks.includes(f.path)&&!recent.includes(f.path));
+ if(marks.length){box.appendChild(el('<div class=sec>Bookmarks</div>'));marks.forEach(p=>box.appendChild(row(p,'',true)))}
+ if(recent.length||others.length){box.appendChild(el(`<div class=sec>Recent${where?' on '+esc(where):''}</div>`));
+  recent.forEach(p=>box.appendChild(row(p,'you chose it lately',false)));
+  others.forEach(f=>box.appendChild(row(f.path,f.why,false)))}
+ if(!box.children.length)box.appendChild(el(`<div class=note style="margin-top:8px">No bookmarks${where?' on '+esc(where):''} yet — choose a folder and press ☆ to keep it here.</div>`))}
 async function folderDialog(){
  const info=await (await fetch('/api/claude/info?sid='+encodeURIComponent(sid))).json();
  const fl=(await (await fetch('/api/claude/folders')).json()).folders||[];
@@ -1881,26 +1910,34 @@ async function folderDialog(){
    <div class=grid style="margin-top:8px">
    <label>Where</label><select id=fd_where><option value="">This Mac</option>${hosts.map(h=>`<option value="${esc(h.host)}">${esc(h.host)} (SSH)</option>`).join('')}</select>
    <div class=hint2 id=fd_probe></div>
-   <label>Folder</label><div style="display:flex;gap:6px"><input type=text id=fd_cwd spellcheck=false placeholder="type a path, or choose…" style="flex:1"><button class=ghost id=fd_pick title="choose a folder">Choose…</button></div>
+   <label>Folder</label><div style="display:flex;gap:6px"><input type=text id=fd_cwd spellcheck=false placeholder="type a path, or choose…" style="flex:1"><button class=ghost id=fd_star title="bookmark this folder">☆</button><button class=ghost id=fd_pick title="choose a folder">Choose…</button></div>
    <label>Also allow</label><div><textarea class=ta id=fd_add style="min-height:50px" placeholder="more folders, one per line (--add-dir)"></textarea><button class=ghost id=fd_pickadd style="font-size:11.5px">+ choose a folder…</button></div></div>
    <div id=fd_browse></div>
-   <div class=sec id=fd_recenthead>Recent</div><div id=fd_list></div>
+   <div id=fd_places></div>
    <div style="margin-top:10px"><button class=primary id=fd_ok>${started?'New chat there':'Use this folder'}</button>
    <span class=note id=fd_note></span></div></div></div></div>`;
  $('#fd_where').value=where;
- $('#fd_cwd').value=info.cwd||info.cwd_pref||'';$('#fd_add').value=(info.add_dirs||[]).join('\n');
- const list=$('#fd_list');
- fl.forEach(f=>{const r=el('<div class=memrow style="cursor:pointer"><b></b><span></span></div>');
-  r.querySelector('b').textContent=f.path.replace(/^\/Users\/[^/]+/,'~');r.querySelector('span').textContent=f.why;
-  r.onclick=()=>{$('#fd_cwd').value=f.path};list.appendChild(r)});
+ $('#fd_cwd').value=info.cwd||info.cwd_pref||info.cwd_default||'';$('#fd_add').value=(info.add_dirs||[]).join('\n');
+ const places=()=>folderPlaces($('#fd_places'),$('#fd_where').value,p=>{$('#fd_cwd').value=p;starState()});
+ const starState=async()=>{const h=$('#fd_where').value,v=$('#fd_cwd').value.trim();
+  const marks=(FOLDER_MARKS[h]||[]);$('#fd_star').textContent=marks.includes(v)?'★':'☆';
+  $('#fd_star').title=marks.includes(v)?'remove this bookmark':'bookmark this folder'};
+ $('#fd_cwd').oninput=starState;
+ $('#fd_star').onclick=async()=>{const h=$('#fd_where').value,v=$('#fd_cwd').value.trim();if(!v)return toast('type or choose a folder first');
+  const on=!(FOLDER_MARKS[h]||[]).includes(v);
+  const d=await apiPost('/api/folders/bookmark',{host:h,path:v,on},'bookmark');
+  if(d){FOLDER_MARKS[h]=d.bookmarks;toast(on?'bookmarked':'bookmark removed');places();starState()}};
+ places().then(starState);
  const syncWhere=async()=>{
   const h=$('#fd_where').value;
-  $('#fd_list').style.display=$('#fd_recenthead').style.display=h?'none':'';
+  await places();starState();
   $('#fd_browse').innerHTML='';
   if(!h){$('#fd_probe').innerHTML='';$('#fd_cwd').placeholder='type a path, or choose…';return}
   $('#fd_cwd').placeholder='a folder on '+h+' — e.g. ~/project, or choose…';
   const saved=((hosts.find(x=>x.host===h)||{}).saved)||{};
-  if(!$('#fd_cwd').value||$('#fd_cwd').value.startsWith('/Users/'))$('#fd_cwd').value=saved.default_dir||'~';
+  const cur=$('#fd_cwd').value.trim();
+  if(!cur||cur==='~'||cur.startsWith('/Users/'))$('#fd_cwd').value=saved.default_dir||(FOLDER_MARKS[h]||[])[0]||'~';
+  starState();
   $('#fd_probe').innerHTML='checking '+esc(h)+'…';
   const pr=await apiPost('/api/remote/probe',{host:h},'checking the host');
   if($('#fd_where')&&$('#fd_where').value===h)$('#fd_probe').innerHTML=probeLine(pr)};
@@ -3018,6 +3055,15 @@ async function openSettings(tab){
 
     <div class=sec>MCP servers <small>— claude mcp</small></div><div id=mcp_list class=note>checking…</div>
 
+    <div class=sec>Defaults for new chats <small>— each chat can still change its own (model picker, folder chip, mode switch)</small></div><div class=grid>
+    <label>Model</label><select id=cq_dmodel>${modelOptions(MODELS.default||'')}</select>
+    <label>Permission mode</label><select id=cq_mode><option value="">Claude's own (its settings' defaultMode)</option>${Object.entries(CQ_MODES).map(([k,v])=>`<option value=${k}>${v}</option>`).join('')}</select>
+    <div class=hint2>Auto: Claude decides which actions are safe to run without asking, and asks for the rest.</div>
+    <label>Reasoning effort</label><select id=cq_deffort><option value="">Claude's own</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select>
+    <label>Runs on</label><select id=cq_dhost><option value="">This Mac</option></select>
+    <label>Folder on this Mac</label><div style="display:flex;gap:6px"><input type=text id=cq_ddir placeholder="Orbit workspace" style="flex:1"><button class=ghost id=cq_ddirpick>Choose…</button></div>
+    <div class=hint2>On another machine new chats start in that host's folder (Remote machines below), else your first bookmark there, else home.</div>
+    </div>
     <div class=sec>claude-qwen launcher <small>— for the terminal command and Orbit alike</small></div><div class=grid>
     <label>Profile</label><select id=cq_profile><option value=standard>standard — Claude as you have it set up</option>
       <option value=lean>lean — built-in tools and skills only</option></select>
@@ -3028,7 +3074,6 @@ async function openSettings(tab){
     </div>
 
     <div class=sec>In Orbit</div><div class=grid>
-    <label>Mode for new chats</label><select id=cq_mode><option value="">Claude's default mode</option>${Object.entries(CQ_MODES).map(([k,v])=>`<option value=${k}>${v}</option>`).join('')}</select>
     <label>Unattended runs</label><select id=cq_unatt><option value="">same as the chat</option>
       <option value=acceptEdits>accept file edits</option><option value=dontAsk>don't ask (Claude's rules only)</option>
       <option value=bypassPermissions>bypass — allow everything</option></select>
@@ -3050,7 +3095,7 @@ async function openSettings(tab){
     <label>Message times</label><div class=sw><input type=checkbox id=cq_time><span class=note>prefix each message with when it was sent</span></div>
     <label>Extra instructions</label><textarea class=ta id=cq_append style="min-height:50px"></textarea>
     </div></details>
-    <button class=primary id=cq_save style="margin-top:8px">Save launcher and Orbit options</button> <span class=note id=cq_note></span>`;
+    <button class=primary id=cq_save style="margin-top:8px">Save defaults and options</button> <span class=note id=cq_note></span>`;
    $('#cc_tomodels').onclick=()=>tabs('models');
    renderRemoteHosts($('#cc_remote'));
    // permissions
@@ -3113,10 +3158,17 @@ async function openSettings(tab){
    $('#cq_route').checked=!!c.skill_routing;$('#cq_core').value=(c.core_skills||[]).join(', ');$('#cq_hint').checked=!!c.skill_hint;
    $('#cq_oskills').checked=!!c.orbit_skills;$('#cq_octx').checked=!!c.orbit_context;$('#cq_time').checked=!!c.message_time;
    $('#cq_append').value=c.append_system||'';
+   $('#cq_deffort').value=c.default_effort||'';$('#cq_ddir').value=c.default_dir||'';
+   remoteHosts().then(hs=>{const sel=$('#cq_dhost');if(!sel)return;
+    hs.forEach(h=>sel.appendChild(el(`<option value="${esc(h.host)}">${esc(h.host)} (SSH)</option>`)));sel.value=c.default_host||''});
+   $('#cq_ddirpick').onclick=async()=>{const p=await pickFolder($('#cq_ddir').value.trim(),'Folder new chats start in');if(p)$('#cq_ddir').value=p};
    body.querySelectorAll('#cq_mcp input').forEach(x=>x.checked=(c.mcp_servers||[]).includes(x.value));
    const list=v=>v.split(',').map(x=>x.trim()).filter(Boolean);
    $('#cq_save').onclick=async()=>{
+    const dm=$('#cq_dmodel').value;
+    if(dm&&dm!==(MODELS.default||''))await apiPost('/api/model/default',{id:dm},'default model');
     const r=await apiPost('/api/claude/settings',{settings:{profile:$('#cq_profile').value,permission_mode:$('#cq_mode').value,
+     default_effort:$('#cq_deffort').value,default_host:$('#cq_dhost').value,default_dir:$('#cq_ddir').value.trim(),
      unattended_mode:$('#cq_unatt').value,rule_destination:$('#cq_dest').value,history:$('#cq_hist').checked,
      history_all_models:$('#cq_histall').checked,disallowed_tools:list($('#cq_dis').value),
      mcp_servers:[...body.querySelectorAll('#cq_mcp input')].filter(x=>x.checked).map(x=>x.value),
