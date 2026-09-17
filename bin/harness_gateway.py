@@ -405,6 +405,9 @@ def make_handler(resolver, log=None, token=None):
             STATS["by_provider"][provider] = STATS["by_provider"].get(provider, 0) + 1
             STATS["last"] = {"provider": provider, "model": model, "t": time.time(), "format": route["format"]}
             self.close_connection = True
+            cap = route.get("max_output")
+            if cap and int(body.get("max_tokens") or 0) > int(cap):
+                body["max_tokens"] = int(cap)            # a model's own output limit, not Claude's default
             try:
                 if route["format"] == "messages":
                     return self._passthrough(route, body)

@@ -17,6 +17,20 @@
 @media(prefers-color-scheme:dark){:root{
  --bg:#161619;--panel:#1c1c20;--card:#212127;--fg:#e9e7e3;--mut:#9b9a95;--dim:#6d6c68;
  --line:#2e2e34;--acc:#9d8cff;--tool:#d9a441;--think:#a596d6;--err:#e06c5b;--ok:#5fbf87;--warn:#d9a441}}
+/* Claude Code mode: Claude's warm accent everywhere, and a band under the top bar,
+   so it is plain at a glance that chats and settings follow the harness */
+body.harness{--acc:#c96442}
+@media(prefers-color-scheme:dark){body.harness{--acc:#e0876a}}
+body.harness .top{box-shadow:inset 0 -2px 0 var(--acc)}
+#hmode{font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid var(--line);background:transparent;color:var(--mut);cursor:pointer;white-space:nowrap}
+#hmode .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--dim);margin-right:6px;vertical-align:middle}
+body.harness #hmode{border-color:var(--acc);color:var(--acc);background:color-mix(in srgb,var(--acc) 10%,transparent)}
+body.harness #hmode .dot{background:var(--acc)}
+#hpick{display:none;gap:5px;align-items:center}
+body.harness #hpick{display:inline-flex}
+body.harness #modelsel,body.harness #agentsel{display:none}
+#hpick #hprov{max-width:130px}#hpick #hmodel{max-width:200px}
+body.harness #title{min-width:80px;flex-shrink:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* Scrollbars follow the theme. The default macOS overlay bar renders as a bright
    white slab on a dark sidebar, which is what you were seeing. */
 :root{--scroll:#c9c7c2;--scrollhover:#a8a6a1}
@@ -448,6 +462,9 @@ table.stbl{border-collapse:collapse;width:100%;font-size:13px;margin:2px 0 6px}
     <button class=ghost id=toggle>&#9776;</button>
     <b id=title title="click to rename">New chat</b>
     <span id=runbadge class=note style="color:var(--acc)"></span>
+    <button id=hmode title="Claude Code mode: every chat runs through the Claude Code harness, on the provider and model you pick"><span class=dot></span>Claude Code</button>
+    <span id=hpick><select id=hprov class=ghost title="provider"></select><select id=hmodel class=ghost title="model for this chat"></select>
+      <button class=ghost id=hrefresh title="refresh this provider's model list" style="padding:2px 7px">↻</button></span>
     <select id=modelsel class=ghost style="max-width:190px" title="model for this chat"></select>
     <select id=agentsel class=ghost style="max-width:150px"><option value="">no agent</option></select>
     <span class=ctx id=ctxbox style="display:none">
@@ -911,6 +928,14 @@ async function loadModels(){
  try{MODELS=await (await fetch('/api/models')).json()}catch(e){return}
  drawModelPicker()}
 function drawModelPicker(){
+ document.body.classList.toggle('harness',!!MODELS.harness_mode);
+ // the composer says which harness it is talking to
+ q.placeholder=MODELS.harness_mode?'Ask Claude Code — / for commands and skills, drop to attach'
+  :'Ask anything — / for commands, @ for files, drop to attach';
+ const tl=$('#tools');
+ if(tl&&MODELS.harness_mode){tl.dataset.orbit=tl.dataset.orbit||tl.textContent;tl.textContent='Claude Code harness · its own tools, skills and MCP servers'}
+ else if(tl&&tl.dataset.orbit&&/Claude Code harness/.test(tl.textContent)){tl.textContent=tl.dataset.orbit}
+ if(MODELS.harness_mode)drawHarnessPicker();
  const sel=$('#modelsel'); if(!sel)return;
  const cur=MODELS.current||MODELS.default||'';
  sel.innerHTML='';
@@ -1337,6 +1362,52 @@ async function drawClaudeBar(){
  CQ_CMDS=(CQ_INFO.commands||[]).map(c=>({c:'/'+c.name,d:(c.description||'Claude Code').slice(0,120),cc:1}));
  if(!CQ_CMDS.length)fetch('/api/claude/commands').then(r=>r.json()).then(d=>{     // before its first answer too
   CQ_CMDS=(d.commands||[]).map(c=>({c:'/'+c.name,d:(c.description||'Claude Code').slice(0,120),cc:1}))}).catch(()=>{})}
+// Claude Code mode: provider and model pickers in place of Orbit's model list.
+let HPROV_CACHE={};
+function fmtCtx(n){n=+n||0;return n>=1e6?(Math.round(n/1e5)/10+'M'):n>=1000?Math.round(n/1000)+'k':String(n||'')}
+function providerOf(id){id=id||'';if(id.startsWith('claude-qwen-cli'))return 'local';
+ const m=id.match(/^harness:([^/]+)\//);return m?m[1]:''}
+async function drawHarnessPicker(force){
+ const pv=$('#hprov'),ms=$('#hmodel');if(!pv)return;
+ let view;try{view=await (await fetch('/api/harness')).json()}catch(e){return}
+ const cur=MODELS.current||MODELS.default||'';
+ const curProv=providerOf(cur);
+ pv.innerHTML=(curProv?'':'<option value="">— pick a provider —</option>')+(view.providers||[]).map(p=>
+  `<option value="${esc(p.id)}"${p.id===curProv?' selected':''}>${esc(p.label)}${p.auth==='local'||p.key_set?'':' — add a key'}</option>`).join('');
+ if(curProv)await fillHarnessModels(curProv,cur,force);else ms.innerHTML='<option>—</option>'}
+async function fillHarnessModels(pid,cur,refresh){
+ const ms=$('#hmodel');
+ if(refresh||!HPROV_CACHE[pid]){
+  if(refresh)await apiPost('/api/harness/refresh',{provider:pid},'refreshing models');
+  HPROV_CACHE[pid]=await (await fetch('/api/harness/models?provider='+encodeURIComponent(pid))).json()}
+ const d=HPROV_CACHE[pid]||{models:[]};
+ const list=d.models.filter(m=>!m.hidden||m.id===cur);
+ ms.innerHTML=(list.some(m=>m.id===cur)?'':'<option value="">— pick a model —</option>')+list.map(m=>
+  `<option value="${esc(m.id)}"${m.id===cur?' selected':''}>${esc(m.label)}${m.context?' · '+fmtCtx(m.context):''}</option>`).join('');
+ ms.title=`${d.label}: ${d.models.length} models${d.fetched_at?' · list from '+new Date(d.fetched_at*1000).toLocaleDateString():''}`+
+  (d.ready?'':' — add a key in Settings → Claude Code → Models')}
+async function chooseHarnessModel(id){
+ if(!id)return;
+ const d=await apiPost('/api/model/select',{id,sid},'model');if(!d)return;
+ MODELS.current=id;drawClaudeBar();refreshStatus();
+ const m=Object.values(HPROV_CACHE).flatMap(x=>x.models||[]).find(x=>x.id===id);
+ if(m)toast(`this chat uses ${m.label}${m.context?' · '+fmtCtx(m.context)+' context':''}`)}
+$('#hmode').onclick=async()=>{
+ const on=!MODELS.harness_mode;
+ const d=await apiPost('/api/harness/mode',{on},'Claude Code mode');if(!d)return;
+ await loadModels();
+ toast(on?'Claude Code mode: new chats run through the Claude Code harness':'Claude Code mode off')};
+$('#hprov').onchange=async e=>{
+ const pid=e.target.value;if(!pid)return;
+ await fillHarnessModels(pid,'');
+ const d=HPROV_CACHE[pid]||{};
+ if(!d.ready){toast(`${d.label} needs a key — add it in Settings → Claude Code → Models`);openSettings('claude');return}
+ const first=(d.models||[]).find(m=>!m.hidden);
+ if(first){$('#hmodel').value=first.id;chooseHarnessModel(first.id)}};
+$('#hmodel').onchange=e=>chooseHarnessModel(e.target.value);
+$('#hrefresh').onclick=async()=>{const pid=$('#hprov').value;if(!pid||pid==='local')return;
+ $('#hrefresh').textContent='…';await fillHarnessModels(pid,$('#hmodel').value,true);$('#hrefresh').textContent='↻';
+ toast(`${(HPROV_CACHE[pid]||{}).models?.length||0} models`)};
 // New chat with…: model, working folder and permission mode chosen together,
 // and saved as presets to start the same kind of chat again (bunshin's agents).
 async function newChatWith(){
@@ -1395,6 +1466,13 @@ async function renderHarnessModels(box){
   card.open=p.id==='opencode-go'||p.id==='local';
   card.appendChild(el(`<summary style="cursor:pointer"><b>${esc(p.label)}</b> <span class=note>${p.auth==='local'?'on this Mac':(p.key_set?'✓ key set':'needs a key')} · ${p.models.length} models</span></summary>`));
   if(p.docs)card.appendChild(el(`<div class=note style="margin:4px 0">${esc(p.docs)}</div>`));
+  if(p.auth!=='local'){
+   const rf=el(`<div class=note style="margin:2px 0">${p.fetched_at?'model list updated '+new Date(p.fetched_at*1000).toLocaleString():'preset model list'} <button class=ghost style="font-size:11px">refresh model list</button></div>`);
+   rf.querySelector('button').onclick=async()=>{rf.querySelector('button').textContent='…';
+    const d=await apiPost('/api/harness/refresh',{provider:p.id},'refreshing models');
+    const r=d&&d.results&&d.results[p.id];toast(r?`${p.label}: ${r[0]} models${r[1]?' — '+r[1]:''}`:'refresh failed');
+    delete HPROV_CACHE[p.id];renderHarnessModels(box)};
+   card.appendChild(rf)}
   if(p.auth!=='local'){
    const kr=el(`<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0"><span class=note>${esc(p.key)}</span>
      <input type=password autocomplete=off spellcheck=false placeholder="${p.key_set?'replace the key':'paste your key'}" style="flex:1;min-width:200px">
@@ -1818,7 +1896,7 @@ $('#stopgen').onclick=async()=>{
 /* ---------------- settings ---------------- */
 function closeModal(){$('#modalhost').innerHTML=''}
 async function openSettings(tab){
- tab=tab||'general';
+ tab=tab||(MODELS.harness_mode?'claude':'general');   // Claude Code mode: its settings first
  const info=await (await fetch('/api/info')).json();INFO=info;
  const st=info.settings;
  const mem=await (await fetch('/api/memory')).json();
@@ -2567,7 +2645,7 @@ async function openSettings(tab){
    }catch(e){if($('#mcperr'))$('#mcperr').textContent='invalid JSON: '+e;return false}}
   const r=await (await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({settings:draft})})).json();
-  INFO.tools=r.tools;$('#tools').textContent=r.tools.length+' tools ready';
+  INFO.tools=r.tools;$('#tools').dataset.orbit=r.tools.length+' tools ready';if(!MODELS.harness_mode)$('#tools').textContent=r.tools.length+' tools ready';
   $('#snote').textContent='saved '+new Date().toLocaleTimeString();
   return true}
  $('#savebtn').onclick=async()=>{if(await save())setTimeout(closeModal,400)};
@@ -3778,7 +3856,7 @@ addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();
  if(e.key==='?'&&document.activeElement!==q&&!/input|textarea/i.test(document.activeElement.tagName)){
   e.preventDefault();showShortcuts()}});
 fetch('/api/info').then(r=>r.json()).then(d=>{INFO=d;sid=d.sid;
- $('#tools').textContent=d.tools.length+' tools ready';refreshStatus()});
+ $('#tools').dataset.orbit=d.tools.length+' tools ready';if(!MODELS.harness_mode)$('#tools').textContent=d.tools.length+' tools ready';refreshStatus()});
 fetch('/api/prompts').then(r=>r.json()).then(d=>PROMPTS=d);
 async function loadAgents(){
  const d=await (await fetch('/api/agents')).json();
@@ -3788,7 +3866,7 @@ async function loadAgents(){
 $('#agentsel').onchange=async e=>{
  const r=await (await fetch('/api/agent/select',{method:'POST',
   headers:{'Content-Type':'application/json'},body:JSON.stringify({name:e.target.value})})).json();
- INFO.tools=r.tools;$('#tools').textContent=r.tools.length+' tools ready';
+ INFO.tools=r.tools;$('#tools').dataset.orbit=r.tools.length+' tools ready';if(!MODELS.harness_mode)$('#tools').textContent=r.tools.length+' tools ready';
  toast(e.target.value?('agent: '+e.target.value):'agent cleared')};
 loadAgents();
 function showOnboarding(){

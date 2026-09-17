@@ -371,6 +371,27 @@ class H(http.server.BaseHTTPRequestHandler):
                                                         "argumentHint": c.get("argumentHint")}
                                                        for c in cat.get("commands") or []],
                                           "agents": cat.get("agents") or []}))
+        if p.startswith("/api/harness/models"):
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            pid = (qs.get("provider") or [""])[0]
+            provs = q.HARN.providers(q.ROOT, q.local_model_name())
+            pr = provs.get(pid)
+            if not pr: return self._send(404, jdump({"error": "no such provider"}))
+            secrets_ = q.secrets_load()
+            # a list older than a day is refreshed on the way (models.dev needs no key)
+            if pid != "local" and time.time() - float(pr.get("fetched_at") or 0) > 86400:
+                try:
+                    q.HARN.refresh_models(q.ROOT, pid, secrets_)
+                    pr = q.HARN.providers(q.ROOT, q.local_model_name()).get(pid)
+                except Exception: pass
+            hidden = set(q.HARN.load(q.ROOT)["hidden"])
+            models = [{"id": (q.CE.BACKEND + ":default") if pid == "local" else f"harness:{pid}/{m['id']}",
+                       "model": m["id"], "label": m.get("label") or m["id"], "context": m.get("context"),
+                       "output": m.get("output"), "format": m.get("format"), "reasoning": m.get("reasoning"),
+                       "hidden": f"harness:{pid}/{m['id']}" in hidden} for m in pr["models"]]
+            return self._send(200, jdump({"provider": pid, "label": pr["label"], "models": models,
+                                          "ready": q.HARN._ready(pid, pr, secrets_), "key": pr.get("key"),
+                                          "fetched_at": pr.get("fetched_at")}))
         if p == "/api/harness":
             view = q.HARN.public_view(q.ROOT, q.secrets_load(), q.local_model_name())
             view["gateway"] = {"port": q.HARNESS_PORT, "error": GATEWAY["error"]}
@@ -452,7 +473,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 "current": S.model or q.MODELS.load(q.ROOT).get("default") or "",
                 "default": q.MODELS.load(q.ROOT).get("default") or "",
                 "providers": q.MODELS.load(q.ROOT)["providers"],
-                "keys": q.secrets_masked()}))
+                "keys": q.secrets_masked(), "harness_mode": bool(q.S.get("harness_mode"))}))
         if p == "/api/projects":  return self._send(200, jdump(q.projects_load()))
         if p == "/api/stats":
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
@@ -692,6 +713,32 @@ class H(http.server.BaseHTTPRequestHandler):
             st = STATES.get(sid_)
             started = bool(q.CE.marker_of(st.msgs if st else []))
             return self._send(200, jdump({"ok": True, "prefs": prefs, "started": started}))
+        if p == "/api/harness/refresh":
+            ids = [d["provider"]] if d.get("provider") else [k for k in q.HARN.providers(q.ROOT) if k != "local"]
+            out = {}
+            for pid in ids:
+                try: out[pid] = q.HARN.refresh_models(q.ROOT, pid, q.secrets_load())
+                except Exception as e: out[pid] = (0, f"{type(e).__name__}: {e}")
+            return self._send(200, jdump({"ok": True, "results": out}))
+        if p == "/api/harness/mode":
+            # Claude Code mode: new chats, the model picker and Settings follow the harness
+            on = bool(d.get("on"))
+            with LOCK:
+                cur = q.load_settings()
+                reg = q.MODELS.load(q.ROOT)
+                default = reg.get("default") or ""
+                is_h = default.startswith(("harness:", q.CE.BACKEND))
+                if on:
+                    if not is_h: cur["orbit_default"] = default
+                    reg["default"] = cur.get("harness_default") or q.CE.BACKEND + ":default"
+                else:
+                    if is_h: cur["harness_default"] = default
+                    local = q.local_model_name()
+                    reg["default"] = cur.get("orbit_default") or (q.MODELS.model_id("local", local) if local else "")
+                cur["harness_mode"] = on
+                q.save_settings(cur); q.reload_settings()
+                q.MODELS.save(q.ROOT, reg)
+            return self._send(200, jdump({"ok": True, "harness_mode": on, "default": reg["default"]}))
         if p == "/api/harness/save":
             # the registry: provider base URLs, custom providers, hidden models, contexts, proxy.
             # Keys are saved through /api/secrets/save, never here.
@@ -1012,6 +1059,11 @@ class H(http.server.BaseHTTPRequestHandler):
                 else: st.flags["model"] = mid
                 if st is S: q.ACTIVE_MODEL["id"] = mid
             spec = q.current_model(mid)
+            if q.S.get("harness_mode") and mid and spec and q.CE.is_engine(spec):
+                # in Claude Code mode the last model chosen is where new chats start
+                reg = q.MODELS.load(q.ROOT)
+                if reg.get("default") != mid:
+                    reg["default"] = mid; q.MODELS.save(q.ROOT, reg)
             return self._send(200, jdump({"ok": True, "id": mid,
                                           "resolved": spec and spec["id"]}))
         if p == "/api/model/default":
@@ -1601,7 +1653,7 @@ def _gateway_route(provider, model):
     if pc.get("local"):
         base = q.CE.model_endpoint()[0] + "/v1"
     return {"base": base, "format": pc["format"], "api_key": pc["api_key"], "proxy": pc.get("proxy"),
-            "key_required": not pc.get("local"),
+            "key_required": not pc.get("local"), "max_output": pc.get("max_output"),
             # Anthropic itself takes every field Claude Code sends; other vendors may not
             "strict": provider not in ("anthropic",) and not str(model).startswith("claude")}
 
@@ -1979,6 +2031,16 @@ if __name__ == "__main__":
     threading.Thread(target=scheduler_loop, daemon=True).start()
     q.UI_PORT = PORT
     _start_gateway()
+    # model lists for harness providers, refreshed in the background once a day
+    def _refresh_lists():
+        try:
+            for pid in q.HARN.providers(q.ROOT):
+                if pid == "local": continue
+                at = float((q.HARN.fetched(q.ROOT).get(pid) or {}).get("at") or 0)
+                if time.time() - at > 86400: q.HARN.refresh_models(q.ROOT, pid, q.secrets_load())
+        except Exception as e:
+            print(f"  ! model list refresh: {e}")
+    threading.Thread(target=_refresh_lists, daemon=True).start()
     threading.Thread(target=q.CE.history_items_cached, daemon=True).start()   # warm the sidebar
     mode = remote_mode()
     addrs = REMOTE.bind_addresses(mode)

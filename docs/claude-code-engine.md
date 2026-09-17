@@ -11,6 +11,26 @@ passes on everything you do. It adds nothing of its own unless you turn an
 Requires Claude Code (`claude`) installed. The local model needs no key; remote
 providers use the key you add in Settings, and requests go only to that provider.
 
+## Claude Code mode
+
+The **Claude Code** switch in the top bar turns the mode on. The accent turns
+Claude's orange, with a band under the top bar, so it is plain that chats and
+settings follow the harness:
+
+- the model picker becomes **Provider ▾ + Model ▾** — pick OpenCode Go, then any of
+  its models; each shows its context window;
+- new chats start on the last Claude Code model you picked;
+- Settings opens on the Claude Code tab; the composer says it is talking to Claude Code.
+
+Model lists come from [models.dev](https://models.dev) (the catalogue OpenCode
+uses: every model's context window, output limit and API) and, once a key is
+saved, from the provider's own `/models`. They refresh daily, or with ↻.
+
+**Context window per chat**: a chat on a remote model uses that model's own window
+— 1M for DeepSeek V4, 1,048,576 for Kimi K3 — which sets where Claude Code
+compacts; a chat on the local Qwen uses the MTPLX server's setting. Replies are
+capped at each model's output limit.
+
 ## Harness mode: any model
 
 Every model in the **Claude Code** groups of the model picker runs through the
