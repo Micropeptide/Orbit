@@ -36,6 +36,8 @@ each answer names the model that wrote it.*
 - [Chats on another machine (SSH)](#chats-on-another-machine-ssh)
 - [Sessions from other agents](#sessions-from-other-agents)
 - [Many chats at once, and the message queue](#many-chats-at-once-and-the-message-queue)
+- [Scheduled messages](#scheduled-messages)
+- [Answers, files and previews](#answers-files-and-previews)
 - [Orbit's own agent](#orbits-own-agent)
 - [The interface](#the-interface)
 - [Safety](#safety)
@@ -69,6 +71,15 @@ each answer names the model that wrote it.*
 - **A queue, not interruptions.** Messages sent while a chat is answering wait their
   turn and start by themselves; drag to reorder, edit, or push one in right away.
   Any number of chats answer at once on hosted models.
+- **Send later.** Write a message now and have it go out at 9:00 tomorrow, or every
+  weekday at 8:30, into that chat with its model and folder.
+- **Files you can use, not just read about.** Every file an answer names or writes is a
+  link and a card under the answer: open it, preview it in Orbit (pages, PDFs, notebooks,
+  spreadsheets, Word files, images), Quick Look, show in Finder, copy the file or its
+  path, drag it out, attach it to your next message — on the Mac or from an SSH host.
+- **Answers formatted the way models write them.** Tables, math, callouts, footnotes,
+  Mermaid, highlighted code with Run / Open / Preview buttons, and copy that keeps the
+  formatting for Word, Excel and Google Docs.
 - **Your own library, searched before the web.** PDFs, Word files, spreadsheets and
   notes indexed locally (BM25 — no embedding service, nothing uploaded) and cited.
 - **Frugal with context on purpose.** A fresh Orbit-agent conversation costs about
@@ -264,6 +275,67 @@ in between. Deleting one hides it from Orbit; the agent's own history is left al
 
 ---
 
+## Scheduled messages
+
+- **⏱ beside Send** (or right-click Send): in 30 minutes, this evening, tomorrow morning,
+  Monday morning, or any date and time — once, every day, every weekday or every week.
+  From the keyboard: `/later 21:30 …`, `/later tomorrow 9am …`, `/later in 2h …`,
+  `/later daily 8:00 …`, `/later fri 5pm …`.
+- **It goes out as if you sent it**: in that chat, on its model, in its folder or on its
+  SSH host, with the usual approvals. Scheduled messages wait under *Scheduled* in the
+  chat's queue, where you can change the time, edit, send now or remove them; a queued
+  message can be given a time too. They never hold back what you send meanwhile, and
+  Stop does not cancel them.
+- **Sleep and restarts.** Scheduled messages survive restarts. If the Mac was asleep at
+  the time, a message still goes when Orbit is back — up to 6 hours late
+  (`schedule_send_grace_h`); an older one-off is marked *missed* for you to send or
+  drop, and a repeating one waits for its next time. `/scheduled` lists everything
+  scheduled in every chat. (For prompts that run unattended in a fresh chat, use
+  **Tasks**.)
+
+---
+
+## Answers, files and previews
+
+**Formatting.** Answers are parsed as GitHub-flavoured Markdown (marked) and sanitised
+(DOMPurify): tables with alignment, nested and task lists, callouts (`> [!NOTE]`),
+footnotes, `==highlights==`, `<details>`, `<kbd>`, math typeset as it streams (`$…$`,
+`$$…$$`, `\(…\)`, `\[…\]` — prices like `$5 and $10` stay prices), Mermaid diagrams, and
+code highlighted in ~40 languages. Nothing in an answer can run script in Orbit.
+
+**Code blocks** have Copy (shell prompts stripped), Wrap, Save as a file and Insert into
+your message; shell blocks get **▶ Run** (in Terminal, in the chat's folder, after you
+confirm) and `open report.html` becomes a one-click **Open report.html**; HTML and SVG
+get a sandboxed **Preview**, CSV a **Table** view, JSON **Format**.
+
+**Files.** A name in an answer — `report.html`, `./out/fig.png`, `src/app.py:42`,
+`~/data.csv`, a Markdown link or image, a `file://` URL — is looked up where the chat
+works (a Claude Code chat's folder, else its project's folder, else Orbit's workspace;
+on the SSH host for a remote chat) and becomes a link only if it exists.
+Click opens it in its app (at the line, in VS Code/Cursor/Zed, for `file:line`);
+⌥-click shows it in Finder; right-click offers Preview, Quick Look, Open with…, copy
+path / relative path / Markdown link, copy the file itself (to paste into Finder or
+Mail), copy contents, download, attach to your next message, or insert the path. Apps
+and scripts are only ever shown in Finder, never launched. A path that does not exist
+offers *Find files named …*. Files an answer names or wrote are also listed as cards
+under it — drag one to the desktop, or onto the message box to attach it — and
+`/files` lists every file in the chat.
+
+**Previews** open in Orbit: images (HEIC and TIFF included), PDFs, HTML pages (in a
+sandbox that loads the page's own images and scripts but cannot reach Orbit), Markdown,
+CSV/TSV as sortable tables, Jupyter notebooks with their outputs, code, Word/RTF, Excel
+sheets, zip and tar contents, and a Quick Look picture of anything else (Keynote,
+Pages, PowerPoint…). Secrets (`.ssh`, `.env`, keychains, `secrets.json`) are never shown.
+
+**Copying.** Tables copy with formatting (they paste as tables into Word, Excel,
+Numbers and Google Docs), or as Markdown, CSV or TSV, and download as CSV or Excel; they
+sort by any column. Images copy as pictures, save, and open larger (← → between an
+answer's images); diagrams copy as SVG or PNG. A whole answer copies as Markdown, with
+formatting, or as plain text, saves as Markdown or HTML, or prints to PDF; a formula
+copies as LaTeX or MathML; select text anywhere to quote it into your reply.
+
+---
+
 ## Orbit's own agent
 
 **It reads your library.** Drop PDFs, Word files, spreadsheets or notes into Knowledge
@@ -326,8 +398,8 @@ be switched off in Settings → Tools; one Python file in `tools/` adds another
 | | |
 |---|---|
 | **Chats** | Ordered by last use, with state on each row (answering, waiting for you, queued, unread); folding date groups, projects and other agents' sections; search, pin, tag, archive, drag onto a project, ⋯ menu on every row. |
-| **Composer** | `/` for commands and skills (saved prompts take `$ARGUMENTS`, `$1`, `$2`), `@` for files, drag-and-drop or paste to attach, ↑/↓ for earlier messages, a draft kept per chat, the message queue above it. |
-| **Answers** | Thinking, text and each tool call as its own step with a live timer and ✓/✗; diffs; time and tokens per answer; undo the files an answer changed; fork from any message; file paths are links (click to open on the Mac, right-click to show in Finder or copy). |
+| **Composer** | ⏱ send later; `/` for commands and skills (saved prompts take `$ARGUMENTS`, `$1`, `$2`), `@` for files, drag-and-drop or paste to attach, ↑/↓ for earlier messages, a draft kept per chat, the message queue above it. |
+| **Answers** | Thinking, text and each tool call as its own step with a live timer and ✓/✗; diffs; time and tokens per answer; undo the files an answer changed; fork from any message; files as links and cards with previews ([more](#answers-files-and-previews)); copy as Markdown, formatted or plain. |
 | **Files** | Everything Orbit created or you attached, with the chat it came from. |
 | **Library** | Knowledge documents, skills, agents, saved prompts. |
 | **Tasks** | Scheduled prompts, each on the model you choose, and a live view of cluster jobs. |
@@ -519,7 +591,9 @@ venv/bin/python -m unittest discover -s tests -p "test_*.py"
 
 Over 300 tests, none needing a model or network: the core agent loop, safety, sessions
 and ordering, the provider registry, the gateway's translations and account failover,
-the message queue and concurrent chats, Codex/OpenCode session import and resume, the SSH
+the message queue, scheduled messages and concurrent chats, finding and previewing the
+files a chat names (and refusing secrets or paths outside a preview's folder),
+Codex/OpenCode session import and resume, the SSH
 wrapper and its watchdog, and Claude Code end to end — the real `claude` binary against a
 scripted stand-in for the Messages API. `tests/test_endpoints.py` and `tests/test_api.py`
 check a running app and clean up after themselves.
@@ -563,6 +637,7 @@ newer than the running process; click *Restart interface*.
 | [docs/extending.md](docs/extending.md) | Tools and plugins in one Python file |
 | [docs/phone.md](docs/phone.md) · [docs/tailnet-playbook.md](docs/tailnet-playbook.md) | The iPhone app and remote access |
 | [docs/service.md](docs/service.md) | Running as a background service |
+| [docs/answers-files-ideas.md](docs/answers-files-ideas.md) | 200 ideas for answers, files, previews and scheduled messages — which are built |
 | [docs/claude-code-harness-ideas.md](docs/claude-code-harness-ideas.md) · [docs/agent-roadmap.md](docs/agent-roadmap.md) | What has been built, what is next, and why |
 
 ---

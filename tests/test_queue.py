@@ -70,7 +70,7 @@ class TestQueue(unittest.TestCase):
 
     def send(self, st, text, effort=None):
         """What /api/chat does: start now if free, else queue."""
-        if st.lock.locked() or st.queue or len(self.ui.running_sids()) >= self.ui._max_parallel():
+        if st.lock.locked() or self.ui._due_items(st) or len(self.ui.running_sids()) >= self.ui._max_parallel():
             self.ui._queue_add(st, text, None, effort)
             self.ui._drain()
             return "queued"
@@ -186,6 +186,79 @@ class TestQueue(unittest.TestCase):
             self.assertNotIn("base64", str(view))
         finally:
             st.queue.clear(); st.lock.release()
+
+    def test_a_scheduled_message_goes_out_at_its_time_without_holding_others_back(self):
+        ui = self.ui
+        st = self.chat()
+        ui._queue_add(st, "later", at=time.time() + 0.6)
+        # a message scheduled for later does not make new ones queue
+        self.assertEqual(self.send(st, "now"), "started")
+        self.assertTrue(self.wait(lambda: self.starts() == ["now"]))
+        self.assertTrue(self.wait(lambda: not st.lock.locked()))
+        ui._drain()
+        time.sleep(0.2)
+        self.assertEqual(self.starts(), ["now"])                  # not yet
+        time.sleep(0.6)
+        ui._drain()                                                # what the 15-second ticker does
+        self.assertTrue(self.wait(lambda: self.starts() == ["now", "later"]))
+        self.assertFalse(st.queue)
+        self.assertTrue(self.wait(lambda: not st.lock.locked()))
+
+    def test_a_repeating_message_books_its_next_time(self):
+        ui = self.ui
+        st = self.chat()
+        at = time.time() + 0.3
+        st.queue.append({"id": "r1", "text": "daily check", "attachments": [], "effort": None, "t": 0,
+                         "at": at, "repeat": "daily"})
+        time.sleep(0.4)
+        ui._drain()
+        self.assertTrue(self.wait(lambda: self.starts() == ["daily check"]))
+        self.assertTrue(self.wait(lambda: len(st.queue) == 1))
+        nxt = st.queue[0]
+        self.assertEqual((nxt["text"], nxt["repeat"]), ("daily check", "daily"))
+        self.assertAlmostEqual(nxt["at"] - at, 86400, delta=3700)     # same clock time tomorrow (DST aside)
+        self.assertEqual(time.localtime(nxt["at"]).tm_hour, time.localtime(at).tm_hour)
+        st.queue.clear()
+        self.assertTrue(self.wait(lambda: not st.lock.locked()))
+
+    def test_weekdays_skip_the_weekend_and_long_missed_times_are_not_sent(self):
+        ui = self.ui
+        fri = time.mktime((2026, 9, 18, 9, 0, 0, 0, 0, -1))          # a Friday, 09:00
+        mon = ui._next_time(fri, "weekdays", now=fri + 60)
+        self.assertEqual(time.localtime(mon).tm_wday, 0)
+        self.assertEqual(time.localtime(mon).tm_hour, 9)
+        self.assertEqual(time.localtime(ui._next_time(fri, "weekly", now=fri + 60)).tm_mday, 25)
+        st = self.chat()
+        old = time.time() - 30 * 3600
+        st.queue += [{"id": "o", "text": "one-off", "at": old, "attachments": []},
+                     {"id": "r", "text": "repeat", "at": old, "repeat": "daily", "attachments": []}]
+        ui._drain()
+        time.sleep(0.3)
+        self.assertEqual(self.starts(), [])                       # neither goes out a day late
+        one, rep = st.queue
+        self.assertTrue(one["missed"])
+        self.assertGreater(rep["at"], time.time())
+        self.assertEqual(rep["skipped"], 1)
+        with self.assertRaises(ValueError):
+            ui._queue_add(st, "x", at=time.time() + 60, repeat="hourly")
+        st.queue.clear()
+
+    def test_stop_does_not_cancel_a_scheduled_message(self):
+        ui = self.ui
+        st = self.chat()
+        self.gates["long2"] = threading.Event()
+        self.send(st, "long2")
+        self.assertTrue(self.wait(lambda: self.starts() == ["long2"]))
+        self.send(st, "waiting")
+        ui._queue_add(st, "at nine", at=time.time() + 0.5)
+        st.cancel.set()
+        self.assertTrue(self.wait(lambda: not st.lock.locked()))
+        time.sleep(0.7)
+        ui._drain()
+        self.assertTrue(self.wait(lambda: self.starts() == ["long2", "at nine"]))
+        self.assertTrue(self.wait(lambda: not st.lock.locked()))
+        self.assertEqual([it["text"] for it in st.queue], ["waiting"])   # paused ones stay paused
+        st.queue.clear()
 
 
 if __name__ == "__main__":

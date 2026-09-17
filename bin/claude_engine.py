@@ -561,11 +561,17 @@ TERMINAL_NOTE = ("# Local model\n- WebSearch is unavailable with this local mode
                  "known URLs.")
 
 
+_WRITE_LOCK = threading.RLock()
+
+
 def _write_json(name, data):
+    # a temp file per writer: two chats saving at once (one process, two threads)
+    # used to share one temp name, and the second rename failed
     p = os.path.join(_work_dir(), name)
-    tmp = p + f".{os.getpid()}.tmp"
-    with open(tmp, "w") as fh: json.dump(data, fh)
-    os.replace(tmp, p)
+    tmp = p + f".{os.getpid()}.{threading.get_ident()}.tmp"
+    with _WRITE_LOCK:
+        with open(tmp, "w") as fh: json.dump(data, fh)
+        os.replace(tmp, p)
     return p
 
 
@@ -808,6 +814,11 @@ def chat_prefs(sid=None):
 
 
 def set_chat_pref(sid, **kw):
+    with _WRITE_LOCK:                   # read, change, write: one chat at a time, or a change is lost
+        return _set_chat_pref(sid, **kw)
+
+
+def _set_chat_pref(sid, **kw):
     d = chat_prefs()
     cur = dict(d.get(sid) or {})
     for k, v in kw.items():

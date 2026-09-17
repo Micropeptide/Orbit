@@ -691,5 +691,25 @@ class TestClaudeEngineOffline(unittest.TestCase):
         self.assertIn("claude", q.PRIVATE_KEYS)
 
 
+
+class TestChatPrefsUnderLoad(unittest.TestCase):
+    def test_many_chats_saving_settings_at_once_lose_nothing(self):
+        import threading, tempfile, shutil
+        d = tempfile.mkdtemp(prefix="orbit-prefs-"); self.addCleanup(shutil.rmtree, d, True)
+        saved = CE._work_dir; CE._work_dir = lambda: d
+        try:
+            errors = []
+            def one(i):
+                try: CE.set_chat_pref(f"chat{i}", cwd=f"/work/{i}", permission_mode="auto")
+                except Exception as e: errors.append(e)
+            ths = [threading.Thread(target=one, args=(i,)) for i in range(40)]
+            [t.start() for t in ths]; [t.join() for t in ths]
+            self.assertEqual(errors, [])
+            prefs = CE.chat_prefs()
+            self.assertEqual(len(prefs), 40)
+            self.assertEqual(prefs["chat7"]["cwd"], "/work/7")
+        finally:
+            CE._work_dir = saved
+
 if __name__ == "__main__":
     unittest.main()
