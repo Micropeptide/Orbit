@@ -2246,7 +2246,7 @@ q.addEventListener('keydown',e=>{
 // opened from another window, so it can be answered from wherever you are.
 function approvalBox(p){
  const box=el('<div class=approve></div>');
- const h=el('<b></b>');h.textContent=(p.claude?'':'Needs your approval — ')+p.reason;box.appendChild(h);
+ const h=el('<b></b>');h.textContent=(p.claude||p.codex?'':'Needs your approval — ')+p.reason;box.appendChild(h);
  const pre=el('<pre></pre>');
  const hasDiff=!!(p.diff&&p.diff.diff);
  // with a diff to read, the raw file content in the args is just noise
@@ -2256,7 +2256,7 @@ function approvalBox(p){
  if(hasDiff)box.appendChild(diffBlock(p.diff,'proposed change'));
  const btns=el('<div class=btns></div>');
  const yes=el('<button class=yes>Allow once</button>');
- const always=el('<button class=always>Always allow…</button>');
+ const always=el(p.codex?'<button class=always title="Codex stops asking about this for the rest of this chat\'s session">Allow for this session</button>':'<button class=always>Always allow…</button>');
  const no=el('<button class=no>Deny</button>');
  const why=el('<button class=no>Deny with reason…</button>');
  why.onclick=()=>{
@@ -2280,6 +2280,7 @@ function approvalBox(p){
                         :'<b>already answered — in another window, or it timed out</b>'))};
  yes.onclick=()=>send(true);no.onclick=()=>send(false);
  always.onclick=()=>{
+  if(p.codex)return send(true,{always:true});
   const row=el('<div class=alwaysrow></div>');
   const inp=document.createElement('input');inp.type='text';
   inp.value=p.suggested_pattern||'*';inp.spellcheck=false;

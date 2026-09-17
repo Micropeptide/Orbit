@@ -5931,7 +5931,8 @@ def _engine_turn_with_fallback(messages, user_content, tools, emit=None, cancel=
         failed = answered["error"] is not None and not (out or "").strip() and not cancel.is_set()
         why = str(answered["error"] or "")
         local_problem = any(m in why for m in ("SSH", "ssh", "tunnel", "does not fit", "Could not start Claude Code",
-                                                "not signed in", "not installed", "no `claude`"))
+                                                "not signed in", "not installed", "no `claude`", "could not start on",
+                                                "Codex could not start", "Could not reach", "Could not install Codex"))
         nxt = None
         if failed and not local_problem:
             cur = getattr(TURN_CTX, "model", None) or pinned_model()

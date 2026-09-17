@@ -266,9 +266,15 @@ def server(host=None, emit=None):
         sig = (host, exe, tok)
         env = {}
         import ssh_remote
+        # Codex's state database (an index of its sessions) on the node's own disk: a home
+        # folder on network storage, shared by several login nodes, fails to open it
+        user = os.path.basename((info.get("home") or "").rstrip("/")) or "user"
+        sqlite_home = f"/tmp/orbit-codex-{re.sub(r'[^A-Za-z0-9_.-]', '_', user)}"
+        ssh_remote.run(host, f"mkdir -p -m 700 {sqlite_home}", timeout=45)
         def spawn(exe=exe, host=host):
             port = ssh_remote.pick_port()
-            p = ssh_remote.popen(host, exe, "~", ["app-server"], {"ORBIT_GATEWAY_TOKEN": tok},
+            p = ssh_remote.popen(host, exe, "~", ["app-server"],
+                                 {"ORBIT_GATEWAY_TOKEN": tok, "CODEX_SQLITE_HOME": sqlite_home},
                                  forward=(port, _ce().gateway_port()))
             p.orbit_port = port
             return p
@@ -297,17 +303,30 @@ def remote_codex(host, emit=None):
     if not info.get("ok"):
         ssh_remote._PROBES.pop(host, None)
         raise CodexError(f"Could not reach {host}: {info.get('error') or 'SSH failed'}")
-    if info.get("codex"): return info
-    if not _ce().cfg().get("codex_remote_install", True):
-        raise CodexError(f"Codex is not installed on {host}. Install it there (or turn on installing it for you in Settings → Codex).")
     ver = local_version()
-    if emit: emit("notice", {"msg": f"installing Codex {ver} on {host} (~/.local/bin/codex) — once, about a minute"})
+    have = info.get("codex_version") or ""
+    if info.get("codex") and not _older(have, ver): return info
+    if not _ce().cfg().get("codex_remote_install", True):
+        if info.get("codex"): return info                 # an older Codex there, and you install it yourself
+        raise CodexError(f"Codex is not installed on {host}. Install it there (or turn on installing it for you in Settings → Codex).")
+    if emit: emit("notice", {"msg": (f"Codex {have} on {host} is older than this Mac's {ver}; " if have else "")
+                             + f"installing Codex {ver} there (~/.local/bin/codex) — once, about a minute"})
     path, err = ssh_remote.install_codex(host, ver, os.path.join(Q.ROOT, "cache", "codex-linux"), info.get("arch") or "x86_64")
     ssh_remote._PROBES.pop(host, None)
     if err: raise CodexError(f"Could not install Codex on {host}: {err}")
     info = ssh_remote.probe(host, refresh=True)
-    if not info.get("codex"): raise CodexError(f"Codex was installed on {host} but does not run there")
+    if not info.get("codex") or _older(info.get("codex_version") or "", ver):
+        # the newest one wins on the probe; point at what was just installed if the other is still found first
+        info = dict(info, codex=path, codex_version=ver)
     return info
+
+
+def _older(a, b):
+    """Is version a older than version b? (unknown versions are not older)"""
+    try:
+        return tuple(int(x) for x in re.findall(r"\d+", a)[:3]) < tuple(int(x) for x in re.findall(r"\d+", b)[:3])
+    except (TypeError, ValueError):
+        return False
 
 
 def local_version():
@@ -384,15 +403,28 @@ def gap_messages(messages, thread):
 
 
 PERMISSIONS = {
-    # Orbit / Claude permission mode -> (Codex approval policy, sandbox)
-    "plan": ("on-request", "read-only"),
-    "bypassPermissions": ("never", "danger-full-access"),
-    "dontAsk": ("never", "workspace-write"),
-    "acceptEdits": ("on-request", "workspace-write"),
-    "auto": ("on-request", "workspace-write"),
-    "manual": ("untrusted", "workspace-write"),
-    "default": ("untrusted", "workspace-write"),
+    # Orbit / Claude permission mode -> (Codex approval policy, sandbox, who reviews what Codex asks)
+    "plan": ("on-request", "read-only", "user"),
+    "bypassPermissions": ("never", "danger-full-access", "user"),
+    "dontAsk": ("never", "workspace-write", "user"),
+    "acceptEdits": ("on-request", "workspace-write", "user"),
+    # Auto: Codex's own automatic review decides what it asks, as Claude Code's Auto does
+    "auto": ("on-request", "workspace-write", "auto_review"),
+    "manual": ("untrusted", "workspace-write", "user"),
+    "default": ("untrusted", "workspace-write", "user"),
 }
+
+
+def permissions(mode, sandbox_works=True):
+    """(approval policy, sandbox, reviewer) for a chat's permission mode. Where Codex's
+    sandbox cannot start (a Linux host without bubblewrap), commands run unsandboxed:
+    Auto then has the automatic reviewer judge each command, the other modes ask you."""
+    policy, sandbox, reviewer = PERMISSIONS.get(mode, PERMISSIONS["auto"])
+    if not sandbox_works and sandbox != "danger-full-access":
+        if sandbox == "read-only": return "untrusted", "danger-full-access", reviewer
+        if mode == "dontAsk": return "never", "danger-full-access", reviewer
+        return "untrusted", "danger-full-access", reviewer
+    return policy, sandbox, reviewer
 EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
 
@@ -518,7 +550,16 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         cwd, prefs = _cwd_for(sid, project, mk)
     provider_key, config, model = provider_config(spec, srv.forward_port if host else None)
     mode = "plan" if read_only else (prefs.get("permission_mode") or ce.cfg().get("permission_mode") or "auto")
-    policy, sandbox = PERMISSIONS.get(mode, PERMISSIONS["auto"])
+    sandbox_works = True
+    if host:
+        import ssh_remote
+        pinfo = ssh_remote._PROBES.get(host) or {}
+        sandbox_works = bool(pinfo.get("bwrap")) or "bwrap" not in pinfo
+    policy, sandbox, reviewer = permissions(mode, sandbox_works)
+    if host and not mk.get("thread"):
+        # a new chat's folder there, so Codex does not start somewhere else
+        import ssh_remote, shlex
+        ssh_remote.run(host, "mkdir -p " + shlex.quote(cwd), timeout=45)
     if prefs.get("add_dirs") and sandbox == "workspace-write" and not host:
         config = {**config, "sandbox_workspace_write": {"writable_roots": list(prefs["add_dirs"])}}
     dev = ""
@@ -538,7 +579,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         try:
             r = srv.request("thread/resume", {"threadId": mk["thread"], "cwd": cwd, "model": model,
                                               "modelProvider": provider_key, "config": config or None,
-                                              "approvalPolicy": policy, "sandbox": sandbox}, timeout=120)
+                                              "approvalPolicy": policy, "sandbox": sandbox,
+                                              "approvalsReviewer": reviewer}, timeout=120)
             thread = (r.get("thread") or {}).get("id") or mk["thread"]
         except CodexError as e:
             emit("notice", {"msg": f"could not continue Codex's thread ({str(e)[:160]}) — starting a new one with the conversation so far"})
@@ -547,6 +589,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         try:
             r = srv.request("thread/start", {"cwd": cwd, "model": model, "modelProvider": provider_key,
                                              "config": config or None, "approvalPolicy": policy, "sandbox": sandbox,
+                                             "approvalsReviewer": reviewer,
                                              "developerInstructions": dev or None, "serviceName": "orbit"}, timeout=180)
         except CodexError as e:
             return fail(f"Codex could not start a thread: {e}")
@@ -566,7 +609,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
 
     qq = srv.subscribe(thread)
     effort = str(getattr(T, "effort", None) or q.pinned_effort() or "").lower()
-    params = {"threadId": thread, "input": _inputs(user_content, prior), "model": model}
+    params = {"threadId": thread, "input": _inputs(user_content, prior), "model": model,
+              "approvalPolicy": policy, "approvalsReviewer": reviewer}    # a mode changed since the thread began applies now
     if effort in EFFORTS: params["effort"] = effort
     elif effort in ("max", "ultra"): params["effort"] = "xhigh"
     try:
@@ -618,6 +662,17 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
             reason = "Codex wants to run a command" + (f" on {host}" if host else "") + (f": {p['reason']}" if p.get("reason") else "")
             if read_only:
                 return srv.respond(rid, {"decision": "decline"})
+            if mode == "auto":
+                # Auto: Orbit's own safety check decides, as for its own agent. Everyday commands
+                # run; anything destructive or risky is put to you; the unrecoverable is refused.
+                verdict, why = auto_verdict(cmd)
+                if verdict == "allow":
+                    emit("auto_approved", {"name": "shell", "args": {"command": cmd}, "reason": "Auto: " + (why or "no risk found")})
+                    return srv.respond(rid, {"decision": "accept"})
+                if verdict == "refuse":
+                    emit("blocked", {"name": "shell", "reason": why})
+                    return srv.respond(rid, {"decision": "decline"})
+                reason = f"{reason} — {why}" if why else reason
             ok, always = _ask(approve, "run_command", {"command": cmd, "cwd": p.get("cwd") or cwd}, reason, "shell")
             return srv.respond(rid, {"decision": ("acceptForSession" if always else "accept") if ok else "decline"})
         if method in ("item/fileChange/requestApproval", "applyPatchApproval"):
@@ -626,6 +681,10 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
             reason = "Codex wants to change files" + (f": {p['reason']}" if p.get("reason") else "")
             if read_only:
                 return srv.respond(rid, {"decision": "decline"})
+            inside = all(not os.path.isabs(f) or f == cwd or f.startswith(cwd.rstrip("/") + "/") for f in files)
+            if mode in ("auto", "acceptEdits") and inside:
+                emit("auto_approved", {"name": "apply_patch", "args": {"files": files}, "reason": "edits inside the chat's folder"})
+                return srv.respond(rid, {"decision": "accept"})
             ok, always = _ask(approve, "write_file", {"path": files[0] if files else cwd, "files": files,
                                                       "diff": (it.get("args") or {}).get("diff", "")[:6000]}, reason, "apply_patch")
             return srv.respond(rid, {"decision": ("acceptForSession" if always else "accept") if ok else "decline"})
@@ -831,6 +890,18 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     if interrupted:
         return (final_text or "") + "\n\n_(stopped)_"
     return final_text
+
+
+def auto_verdict(cmd):
+    """("allow" | "ask" | "refuse", why) for a command Codex wants to run in Auto mode."""
+    try:
+        level, why = Q.risk_check("run_shell", {"command": str(cmd or "")})
+    except Exception as e:
+        return "ask", f"could not check it ({type(e).__name__})"
+    if not level: return "allow", ""
+    if level == "block" and "protected" not in str(why):
+        return "refuse", why
+    return "ask", why
 
 
 def _ask(approve, fn, args, reason, tool):

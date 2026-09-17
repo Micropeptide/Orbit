@@ -234,9 +234,13 @@ skills, plugins and MCP servers — with every step shown in Orbit. Turn it on w
   (chat completions, Anthropic messages, or Responses), with your key, which never
   reaches Codex. MCP tool groups are offered to such models as plain functions and
   mapped back.
-- **Approvals.** The chat's permission mode maps onto Codex: *Auto* and *Accept edits*
-  work in the folder's sandbox and ask in Orbit before going outside it; *Ask* asks
-  before every command; *Plan* is read-only; *Bypass* has no sandbox. Stop interrupts
+- **Approvals.** The chat's permission mode maps onto Codex. *Auto*: everyday commands run
+  and edits inside the chat's folder go ahead; anything Orbit's safety check finds risky is
+  put to you, and the unrecoverable is refused. *Accept edits*: edits go ahead, commands
+  ask. *Ask* asks before every command; *Plan* is read-only; *Bypass* has no sandbox and no
+  questions. *Allow for this session* stops Codex asking again about the same thing in that
+  chat. On a host where Codex's sandbox cannot start (Linux without bubblewrap), commands
+  run unsandboxed and these rules decide. Stop interrupts
   the answer; a note sent while it works is steered into it.
 - **On an SSH host.** Choose a host with the chat's folder chip, as for Claude Code: Codex
   runs there (installed for you in `~/.local/bin` the first time, the official Linux build
