@@ -252,6 +252,17 @@ them too:
 When Claude itself installs a skill or edits its settings during a chat, that
 goes to the same place, and Orbit shows it next time it reads them.
 
+## Starting fresh
+
+Outside the local model, Claude Code starts exactly as your own setup has it: every
+MCP server in your Claude config and every server your plugins bring, your hooks and
+skills, nothing added to its system prompt, no tools turned off — except WebSearch on
+providers other than Anthropic, since it runs on Anthropic's servers. (Claude Code
+started with `--print` leaves plugins' MCP servers unstarted while their hooks still
+run; Orbit names each such plugin's folder with `--plugin-dir`, as Claude's desktop app
+does, so they start.) The local model keeps its adjustments: tools that cannot work
+there are off and the system prompt stays identical so the model's cache is reused.
+
 ## The `claude-qwen` launcher
 
 Options that shape the command for the terminal and Orbit alike:

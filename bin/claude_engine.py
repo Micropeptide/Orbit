@@ -39,8 +39,11 @@ DEFAULTS = {
     # launcher: "standard" = Claude as you have it set up (all setting sources,
     # skills, plugins, hooks); "lean" = built-in tools and skills only (--safe-mode)
     "profile": "standard",
-    # launcher: MCP servers loaded, by name from your Claude config; "*" = all of them
-    "mcp_servers": ["paper-fetch"],
+    # launcher: MCP servers loaded, by name from your Claude config; "*" = all of them,
+    # including those your plugins bring. A shorter list drops plugin servers too, while
+    # the plugins' hooks still run -- context-mode's then send web fetches to tools that
+    # are not there -- so "standard" loads them all.
+    "mcp_servers": ["*"],
     # launcher: tools that cannot work on a local model (WebSearch needs Anthropic's
     # servers) or that a local chat has no use for
     "disallowed_tools": ["WebSearch", "Workflow", "ScheduleWakeup", "CronCreate", "CronDelete",
@@ -443,9 +446,16 @@ def route_skills(text, limit=6):
 # ------------------------------------------------------------------ arguments
 
 def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None, mode=None,
-               settings_path=None, mcp_path=None, append=None, sdk=True, add_dirs=None, model=None, **_):
+               settings_path=None, mcp_path=None, append=None, sdk=True, add_dirs=None, model=None,
+               kind="local", remote=False, **_):
     """The claude command line. The same for the terminal (sdk=False) and for
-    Orbit, which only adds the stream transport, the session and a chat's mode."""
+    Orbit, which only adds the stream transport, the session and a chat's mode.
+
+    kind: "local" (the MTPLX model: tools that cannot work there are turned off and the
+    system prompt is kept identical so its cache is reused), "provider" (another model
+    through Orbit: only WebSearch, which needs Anthropic's servers, is turned off) or
+    "subscription" (your own Claude: nothing is changed). Outside the local model, Claude
+    Code starts as your own setup has it -- nothing chosen or added by Orbit."""
     exe = which_claude() or "claude"
     argv = [exe]
     if sdk:
@@ -465,13 +475,21 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
     mode = "plan" if read_only else (mode or "")
     if mode in PERMISSION_MODES and mode != "default":     # "default" (ask first) is Claude's own
         argv += ["--permission-mode", mode]
-    dis = [t for t in c.get("disallowed_tools") or [] if t]
+    dis = [t for t in (c.get("disallowed_tools") if kind == "local" else
+                       [] if kind == "subscription" else c.get("provider_disallowed_tools", ["WebSearch"])) or [] if t]
     if dis: argv += ["--disallowedTools", *dis]
     if settings_path: argv += ["--settings", settings_path]
     if mcp_path:
         argv += ["--mcp-config", mcp_path]
         if "*" not in (c.get("mcp_servers") or []) and prof != "full":
             argv.append("--strict-mcp-config")
+    if prof != "lean" and not remote:
+        # plugins' own MCP servers: a Claude Code started with --print marks them failed
+        # without starting them (while the plugins' hooks still run -- context-mode's then
+        # send every web fetch to tools that are not there). Naming each plugin's folder,
+        # as Claude's desktop app does, starts them; the plugins are not loaded twice.
+        for pd in plugin_dirs_with_mcp():
+            argv += ["--plugin-dir", pd]
     if prof != "lean" and c.get("orbit_skills"):
         pd = orbit_skills_plugin()
         if pd: argv += ["--plugin-dir", pd]
@@ -484,7 +502,8 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
     elif c.get("default_effort") in ("low", "medium", "high", "xhigh", "max"):
         argv += ["--effort", c["default_effort"]]
     # identical system text across sessions and days: the local prompt cache keeps it
-    argv.append("--exclude-dynamic-system-prompt-sections")
+    if kind == "local":
+        argv.append("--exclude-dynamic-system-prompt-sections")
     argv += [str(x) for x in (c.get("extra_args") or [])]
     return argv
 
@@ -510,8 +529,30 @@ def launcher_files(c, tag, skills=None, extra_servers=None):
     return settings_path, mcp_path
 
 
-def launcher_append(c, extra=None):
-    parts = [TERMINAL_NOTE] + list(extra or [])
+def plugin_dirs_with_mcp():
+    """Install folders of your enabled Claude plugins that bring MCP servers."""
+    base = os.path.join(claude_dir(), "plugins")
+    try: reg = json.load(open(os.path.join(base, "installed_plugins.json")))
+    except Exception: return []
+    enabled = dict(reg.get("enabledPlugins") or {})
+    try: enabled.update((read_claude_settings("user") or {}).get("enabledPlugins") or {})
+    except Exception: pass
+    out = []
+    for name, installs in (reg.get("plugins") or {}).items():
+        if not enabled.get(name): continue
+        for inst in installs if isinstance(installs, list) else [installs]:
+            d = (inst or {}).get("installPath")
+            if not d or not os.path.isdir(d): continue
+            has = os.path.isfile(os.path.join(d, ".mcp.json"))
+            try: has = has or bool(json.load(open(os.path.join(d, ".claude-plugin", "plugin.json"))).get("mcpServers"))
+            except Exception: pass
+            if has and d not in out: out.append(d)
+            break
+    return out
+
+
+def launcher_append(c, extra=None, kind="local"):
+    parts = ([TERMINAL_NOTE] if kind == "local" else []) + list(extra or [])
     if c.get("append_system"): parts.append(str(c["append_system"]))
     return "\n\n".join(p for p in parts if p)
 
@@ -1016,7 +1057,7 @@ def _system_parts(project):
     return parts
 
 
-def _orbit_append(project, c, orbit_tools, chat_instructions=None):
+def _orbit_append(project, c, orbit_tools, chat_instructions=None, kind="local"):
     """What Orbit adds to Claude's system prompt: the launcher's note, this chat's
     own instructions (/sysprompt), and Orbit's own context only when that extra is
     turned on."""
@@ -1029,7 +1070,7 @@ def _orbit_append(project, c, orbit_tools, chat_instructions=None):
                      "window onto this session.")
     if orbit_tools:
         extra.append("- Orbit's tools are available as mcp__orbit__*.")
-    return launcher_append(c, extra)
+    return launcher_append(c, extra, kind)
 
 
 def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None, inbox=None,
@@ -1214,11 +1255,12 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     mode = prefs.get("permission_mode") or c.get("permission_mode") or None
     if not approve and c.get("unattended_mode"):
         mode = c["unattended_mode"]
+    kind = "subscription" if target.get("subscription") else ("local" if target.get("local") else "provider")
     argv = build_argv(c, session_id=mk["session"], resume=resume, read_only=bool(read_only), mode=mode,
-                      model=target.get("cli_model"),
+                      model=target.get("cli_model"), kind=kind, remote=bool(remote),
                       effort=getattr(T, "effort", None) or q.S.get("reasoning_effort"),
                       settings_path=settings_path, mcp_path=mcp_path, add_dirs=prefs.get("add_dirs"),
-                      append=_orbit_append(project, c, orbit_tools, prefs.get("instructions")))
+                      append=_orbit_append(project, c, orbit_tools, prefs.get("instructions"), kind))
     if fork: argv.append("--fork-session")
     if resume_at: argv += ["--resume-session-at", resume_at]
     env = target_env(target)
@@ -2717,8 +2759,10 @@ def launch_harness(query, args):
             return 4
     c = cfg()
     settings_path, mcp_path = launcher_files(c, "terminal-harness")
-    argv = build_argv(c, settings_path=settings_path, mcp_path=mcp_path, sdk=False,
-                      mode=c.get("permission_mode") or None, append=launcher_append(c), model=t.get("cli_model"))
+    kind = "subscription" if t.get("subscription") else ("local" if t.get("local") else "provider")
+    argv = build_argv(c, settings_path=settings_path, mcp_path=mcp_path, sdk=False, kind=kind,
+                      mode=c.get("permission_mode") or None, append=launcher_append(c, None, kind),
+                      model=t.get("cli_model"))
     env = target_env(t)
     print(f"Claude Code on {spec['label']}", file=sys.stderr)
     if os.environ.get("CLAUDE_QWEN_DRY_RUN") == "1":

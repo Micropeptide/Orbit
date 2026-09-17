@@ -551,6 +551,44 @@ class TestClaudeEngineOffline(unittest.TestCase):
             if old_env is None: os.environ.pop("ORBIT_CLAUDE_CONFIG_DIR", None)
             else: os.environ["ORBIT_CLAUDE_CONFIG_DIR"] = old_env
 
+    def test_claude_code_starts_fresh_outside_the_local_model(self):
+        """REGRESSION: Orbit chose a subset of MCP servers (dropping plugins' servers, whose
+        hooks still redirected web fetches to them) and added local-model tweaks to every
+        model. Outside the local model Claude Code starts as your setup has it."""
+        import tempfile, shutil
+        c = dict(CE.DEFAULTS)
+        local = CE.build_argv(c, kind="local", append=CE.launcher_append(c, None, "local"))
+        prov = CE.build_argv(c, kind="provider", append=CE.launcher_append(c, None, "provider"))
+        sub = CE.build_argv(c, kind="subscription", append=CE.launcher_append(c, None, "subscription"))
+        self.assertIn("--exclude-dynamic-system-prompt-sections", local)
+        self.assertIn("Workflow", local)
+        for a in (prov, sub):
+            self.assertNotIn("--exclude-dynamic-system-prompt-sections", a)
+            self.assertNotIn("--append-system-prompt", a)
+            self.assertNotIn("--strict-mcp-config", a)
+            self.assertNotIn("Workflow", a)
+        self.assertEqual(prov[prov.index("--disallowedTools") + 1], "WebSearch")
+        self.assertNotIn("--disallowedTools", sub)
+        self.assertEqual(CE.launcher_files(c, "fresh")[1], None)          # no --mcp-config: all of yours
+        # plugins that bring MCP servers are named, so Claude Code starts their servers
+        home = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, home, True)
+        with_mcp, without = os.path.join(home, "a"), os.path.join(home, "b")
+        for d in (with_mcp, without): os.makedirs(os.path.join(d, ".claude-plugin"))
+        json.dump({"name": "a", "mcpServers": {"s": {"command": "node"}}}, open(os.path.join(with_mcp, ".claude-plugin", "plugin.json"), "w"))
+        json.dump({"name": "b"}, open(os.path.join(without, ".claude-plugin", "plugin.json"), "w"))
+        os.makedirs(os.path.join(home, "plugins"))
+        json.dump({"plugins": {"a@m": [{"installPath": with_mcp}], "b@m": [{"installPath": without}]},
+                   "enabledPlugins": {"a@m": True, "b@m": True}}, open(os.path.join(home, "plugins", "installed_plugins.json"), "w"))
+        old = CE.claude_dir
+        CE.claude_dir = lambda: home
+        try:
+            self.assertEqual(CE.plugin_dirs_with_mcp(), [with_mcp])
+            argv = CE.build_argv(c, kind="provider")
+            self.assertEqual(argv[argv.index("--plugin-dir") + 1], with_mcp)
+            self.assertNotIn("--plugin-dir", CE.build_argv(c, kind="provider", remote=True))
+        finally:
+            CE.claude_dir = old
+
     def test_a_chats_own_instructions_reach_claude(self):
         a = CE._orbit_append(None, dict(CE.DEFAULTS), False, "Answer in French.")
         self.assertIn("Answer in French.", a)

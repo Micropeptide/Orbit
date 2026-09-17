@@ -3071,7 +3071,7 @@ async function openSettings(tab){
     <div class=sec>claude-qwen launcher <small>— for the terminal command and Orbit alike</small></div><div class=grid>
     <label>Profile</label><select id=cq_profile><option value=standard>standard — Claude as you have it set up</option>
       <option value=lean>lean — built-in tools and skills only</option></select>
-    <label>MCP servers loaded</label><div id=cq_mcp>${known.map(n=>`<label style="display:inline-flex;gap:4px;margin-right:10px"><input type=checkbox value="${esc(n)}"> ${esc(n)}</label>`).join('')}
+    <label>MCP servers loaded</label><div id=cq_mcp><div class=hint2 style="margin:0 0 4px">Keep “all of them” unless you need a short prompt: a shorter list also leaves out the servers your plugins bring, while their hooks still run (context-mode, for one, then sends web fetches to tools that are not loaded).</div>${known.map(n=>`<label style="display:inline-flex;gap:4px;margin-right:10px"><input type=checkbox value="${esc(n)}"> ${esc(n)}</label>`).join('')}
       <label style="display:inline-flex;gap:4px"><input type=checkbox value="*"> all of them</label></div>
     <label>Tools turned off</label><input type=text id=cq_dis>
     <div class=hint2>WebSearch needs Anthropic's servers and cannot work on a local model.</div>
