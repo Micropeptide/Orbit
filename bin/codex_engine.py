@@ -387,7 +387,8 @@ def marker_of(messages):
         if isinstance(m.get("codex"), dict) and m["codex"].get("thread"): return m["codex"]
         a = m.get("agent")
         if isinstance(a, dict) and a.get("source") == "codex" and a.get("id"):
-            return {"thread": a["id"], "cwd": a.get("cwd"), "provider": None, "imported": True}
+            return {"thread": a["id"], "cwd": a.get("cwd"), "provider": None, "imported": True,
+                    "rewound": bool(a.get("rewound"))}
     return None
 
 
@@ -577,6 +578,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     busy = mk.get("thread") in srv.threads
     if (mk.get("host") or None) != host and not mk.get("imported"): same_provider = False    # its thread is on another machine
     fresh = getattr(T, "codex_fresh", False)          # a fallback retry: the failed attempt is in the old thread
+    # the chat was rewound past what Codex's thread holds: a new thread gets the chat as it is now
+    fresh = fresh or bool(mk.get("rewound"))
     T.codex_fresh = False
     if same_provider and mine and not busy and not fresh:
         try:

@@ -122,7 +122,8 @@ class TestParity(unittest.TestCase):
                 {"role": "assistant", "content": "answer " * 80, "reasoning_content": "hmm " * 100},
                 {"role": "tool", "content": "output " * 200, "tool_call_id": "x"}]
         d = self.q.context_breakdown(msgs)
-        for k in ("system prompt", "your messages", "answers", "tool results", "thinking"):
+        self.assertNotIn("thinking", d["parts"])        # kept in the chat, never sent back
+        for k in ("system prompt", "your messages", "answers", "tool results"):
             self.assertIn(k, d["parts"])
             self.assertGreater(d["parts"][k], 0)
         self.assertEqual(d["messages"], 3)
@@ -164,6 +165,43 @@ class TestParity(unittest.TestCase):
         self.assertEqual(code, 200)
         proc.wait(timeout=5)
         self.assertIsNotNone(proc.poll())
+
+    def test_shell_mode_runs_in_the_folder_it_reports_and_stops_runaway_pipes(self):
+        st = self.chat()
+        code, d = self.call("post", "/api/bang", {"sid": st.sid, "command": "pwd"})
+        self.assertEqual(code, 200, d)
+        self.assertEqual(os.path.realpath(d["output"].strip()), os.path.realpath(d["cwd"]))
+        self.assertEqual(st.msgs[-1]["bang"]["cwd"], d["cwd"])
+        self.assertFalse(st.lock.locked())                  # released after the run
+
+    def test_a_remote_command_is_not_retried_and_stops_if_the_folder_is_missing(self):
+        import ssh_remote
+        seen = []
+        saved = (ssh_remote.run, self.ui._chat_files_ctx)
+        ssh_remote.run = lambda host, script, timeout=60, shared=True, _retry=True: (seen.append((script, _retry)) or (0, "ok", ""))
+        self.ui._chat_files_ctx = lambda sid: ("somehost", ["~/proj dir"], [])
+        try:
+            st = self.chat()
+            code, d = self.call("post", "/api/bang", {"sid": st.sid, "command": "ls"})
+        finally:
+            ssh_remote.run, self.ui._chat_files_ctx = saved
+        self.assertEqual(code, 200, d)
+        script, retry = seen[0]
+        self.assertFalse(retry)
+        self.assertTrue(script.startswith("cd \"$HOME\"/'proj dir' && "), script)
+
+    def test_cancel_of_a_chat_that_is_gone(self):
+        self.assertEqual(self.call("post", "/api/cancel", {"sid": "no-such-chat-xyz"})[0], 404)
+
+    def test_rewinding_a_codex_chat_starts_a_new_thread_next_time(self):
+        mk = {"thread": "th-1", "cwd": "/tmp", "provider": "chatgpt", "owner": None}
+        st = self.chat([{"role": "user", "content": "one", "codex": dict(mk)},
+                        {"role": "assistant", "content": "a1", "codex_thread": "th-1"},
+                        {"role": "user", "content": "two", "codex": dict(mk)},
+                        {"role": "assistant", "content": "a2", "codex_thread": "th-1"}])
+        code, d = self.call("post", "/api/rewind", {"sid": st.sid, "index": 1})
+        self.assertEqual(code, 200, d)
+        self.assertTrue(self.q.CX.marker_of(st.msgs).get("rewound"))
 
 
 if __name__ == "__main__":
