@@ -786,6 +786,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/delete":
             did = d.get("id", "")
             q.CE.hide_history(did)          # a deleted Claude-Qwen chat stays out of the sidebar
+            q.CE.close_live(did)            # and its remote session, if one is kept open
             q.AGENT_SESSIONS.hide(q.ROOT, did)      # and a Codex / OpenCode one
             return self._send(200, jdump({"ok": q.session_delete(did) or did.startswith("cq-")
                                           or bool(q.AGENT_SESSIONS.source_of(did))}))
@@ -1591,7 +1592,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 _restart_when_idle()
                 return self._send(200, jdump({"ok": True, "deferred": True, "running": len(busy),
                     "msg": f"will restart as soon as {len(busy)} running answer(s) finish"}))
-            threading.Timer(0.4, lambda: os._exit(0)).start()
+            threading.Timer(0.4, lambda: (q.CE.close_live(), time.sleep(1), os._exit(0))).start()
             return self._send(200, jdump({"ok": True, "msg": "restarting the interface…"}))
         if p == "/api/server/stop":
             return self._send(200, jdump({"msg": q.stop_server()}))
@@ -2428,7 +2429,7 @@ def _restart_when_idle():
     def wait():
         while running_sids() or JOBS_INFLIGHT:
             time.sleep(3)
-        os._exit(0)
+        (q.CE.close_live(), time.sleep(1), os._exit(0))
     threading.Thread(target=wait, daemon=True).start()
 
 def _sched_log(msg):
@@ -2469,6 +2470,15 @@ if __name__ == "__main__":
     threading.Thread(target=scheduler_loop, daemon=True).start()
     q.UI_PORT = PORT
     _start_gateway()
+    # remote Claude Code sessions: any a previous run left open end now; idle ones close
+    try: q.CE.end_leftover_live()
+    except Exception as e: print(f"  ! leftover remote sessions: {e}")
+    def _reap_remote():
+        while True:
+            time.sleep(60)
+            try: q.CE.reap_live()
+            except Exception: pass
+    threading.Thread(target=_reap_remote, daemon=True).start()
     # model lists for harness providers, refreshed in the background once a day
     def _refresh_lists():
         try:

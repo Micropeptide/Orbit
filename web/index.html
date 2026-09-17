@@ -1829,6 +1829,10 @@ async function renderRemoteHosts(box){
  REMOTE_HOSTS=null;const hosts=await remoteHosts();
  box.classList.remove('note');box.innerHTML='';
  box.appendChild(el(`<div class=note style="margin-bottom:6px">A chat can run Claude Code on another machine: choose it under “Where” when you pick a chat's folder (the folder chip by the title) or in New chat with…. Claude Code runs there — editing files and running commands on that machine — in its own process group, ended whenever the answer stops or the connection drops, so nothing piles up on a login node. Models come from this Mac through an SSH tunnel to Orbit's gateway (it needs Orbit's token; keys stay here); your Claude login goes over the connection itself. Hosts are those in <code>~/.ssh/config</code>, with key-based login.</div>`));
+ const ka=el(`<div style="display:flex;gap:6px;align-items:center;margin:4px 0 8px"><span class=note>Keep Claude Code running between messages for</span><input type=number min=0 max=1440 style="width:70px"><span class=note>minutes idle (0 = start it for every message)</span><button class=ghost>save</button></div>`);
+ try{const c=(await (await fetch('/api/claude/info?sid=')).json()).settings||{};ka.querySelector('input').value=c.remote_keep_alive_min??30}catch(e){}
+ ka.querySelector('button').onclick=async()=>{if(await apiPost('/api/claude/settings',{settings:{remote_keep_alive_min:+ka.querySelector('input').value||0}},'saving'))toast('saved — the next message on another machine starts in about a second instead of reconnecting')};
+ box.appendChild(ka);
  if(!hosts.length){box.appendChild(el('<div class=note>No hosts in ~/.ssh/config yet.</div>'));return}
  hosts.forEach(h=>{
   const r=el(`<div class=memrow style="display:block;padding:6px 8px">
