@@ -154,6 +154,7 @@ def fresh_state(temp=False):
     its answer was written into the new chat -- or lost."""
     global S
     old = S
+    if old.temp and not old.lock.locked(): erase_temp_traces(old)      # leaving a temporary chat
     st = State()
     st.agent, st.project = old.agent, old.project
     st.msgs = [{"role": "system", "content": q.system_prompt_for(st.agent, st.project)}]
@@ -165,13 +166,20 @@ def fresh_state(temp=False):
     prune_states()
     return st
 
+def erase_temp_traces(st):
+    """A temporary chat is ending: take away what Claude Code wrote of it too (Orbit itself
+    never saved it). It is kept while the chat lives, because each message resumes it."""
+    if st is None or not st.temp: return
+    try: q.CE.erase_session_traces(st.msgs)
+    except Exception: pass
+
 def prune_states():
     """Drop finished chats you are no longer looking at, so STATES cannot grow
     without bound over a long session. Takes no lock: callers may hold it."""
     idle = [k for k, v in list(STATES.items())
             if v is not S and not v.lock.locked() and not v.queue]     # a queued or scheduled message keeps its chat
     for k in (idle[:-20] if len(idle) > 20 else []):
-        STATES.pop(k, None)
+        erase_temp_traces(STATES.pop(k, None))
 
 def get_state(sid=None, create=True):
     """State for one conversation. Chats run independently, so a turn in one
@@ -1718,6 +1726,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 try:
                     if os.path.exists(q.session_path(was)): os.remove(q.session_path(was))
                 except OSError: pass
+                erase_temp_traces(S)
             fresh_state(temp=True)
             return self._send(200, jdump({"ok": True, "erased": was, "sid": S.sid}))
         if p == "/api/sysprompt":

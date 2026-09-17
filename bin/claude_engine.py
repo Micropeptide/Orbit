@@ -308,6 +308,27 @@ def jsonl_path(session_id, cwd=None):
     return hits[0] if hits else None
 
 
+def erase_session_traces(messages):
+    """Remove what Claude Code keeps of this chat's session -- its transcript, file backups
+    and session environment -- for a temporary chat, which promises to leave nothing on
+    disk. Returns the paths removed."""
+    mk = marker_of(messages) or {}
+    sid = mk.get("session")
+    if not sid or mk.get("host"): return []             # a session on another machine is its own
+    removed = []
+    jp = jsonl_path(sid, mk.get("cwd"))
+    targets = [jp] if jp else []
+    targets += [os.path.join(claude_dir(), "file-history", sid), os.path.join(claude_dir(), "session-env", sid)]
+    if jp: targets.append(os.path.splitext(jp)[0])        # its subagents/ and tool-results/ folder
+    for t in targets:
+        try:
+            if t and os.path.isdir(t): shutil.rmtree(t); removed.append(t)
+            elif t and os.path.exists(t): os.remove(t); removed.append(t)
+        except OSError:
+            pass
+    return removed
+
+
 def user_mcp_servers():
     """MCP servers configured for Claude (user scope), by name."""
     out = {}
