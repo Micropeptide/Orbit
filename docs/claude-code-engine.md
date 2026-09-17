@@ -133,6 +133,12 @@ and keeps the folder new chats there start in.
   (login nodes have per-user process limits, and leftovers fill them).
 - Checks and folder listings share one SSH connection, so Orbit does not open
   connection bursts that clusters block.
+- Claude Code stays running between messages (30 idle minutes by default, Settings →
+  Claude Code → Remote machines): only a chat's first message pays for the connection
+  and Claude Code starting on the host; the next ones go straight into the same session
+  (about a second instead of 20). A changed model, folder or mode starts a fresh process
+  that resumes the session; deleting the chat, a restart of Orbit, or the idle limit
+  closes it.
 - The newest Claude Code on the host is used: on PATH, in `~/.local/bin`, or the
   copies Claude's desktop app keeps there.
 - History: the chat is saved in Orbit as always; Claude's own session stays on the

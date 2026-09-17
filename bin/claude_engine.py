@@ -61,6 +61,7 @@ DEFAULTS = {
     "default_effort": "",            # "" = Claude's own; low, medium, high, xhigh, max
     "default_host": "",              # "" = this Mac; else an SSH host new chats run on
     "default_dir": "",               # "" = Orbit's workspace (on another machine: that host's default)
+    "remote_keep_alive_min": 30,     # a chat on another machine keeps Claude Code running this long between messages
     # permission mode for runs nobody is watching (scheduled jobs)
     "unattended_mode": "",
     # where "Don't ask again" saves: "suggested" (Claude's choice), "userSettings",
@@ -1233,8 +1234,28 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                            f"{s['name']} ({s['description'][:160]})" for s in hint) + "]"})
 
     _run_log(sid, mk, resume, fork, resume_at, c, cwd, argv)
+    # A chat on another machine keeps its Claude Code running between messages: a new
+    # SSH connection and Claude Code starting on the host took most of every answer's
+    # wait. The next message goes straight into the same session while nothing that
+    # shapes the process changed; it closes after a while idle (see LIVE).
+    live = None
+    keep = bool(remote and sid and float(c.get("remote_keep_alive_min", 30) or 0) > 0)
+    sig = None
+    if keep:
+        sig = json.dumps([remote["host"], remote["claude"], cwd, mk["session"], mode,
+                          [a for i, a in enumerate(argv[1:]) if a not in ("--resume", "--session-id")
+                           and argv[i] not in ("--resume", "--session-id")],
+                          sorted((k, v) for k, v in env.items() if k.startswith(("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT",
+                                 "CLAUDE_CODE_MAX_CONTEXT", "CLAUDE_CODE_SUBAGENT")))])
+        live = LIVE.get(sid)
+        if live and (live["sig"] != sig or live["proc"].poll() is not None or fork or resume_at):
+            close_live(sid)
+            live = None
     try:
-        if remote:
+        if live:
+            proc = live["proc"]
+            emit("status", {"msg": f"continuing on {remote['host']}"})
+        elif remote:
             import ssh_remote
             renv, forward = remote_target_env(target, env)
             emit("status", {"msg": f"starting Claude Code on {remote['host']}"})
@@ -1247,7 +1268,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         emit("error", msg); emit("done", None)
         return msg
 
-    wlock = threading.Lock()
+    wlock = live["wlock"] if live else threading.Lock()
     def send(obj):
         try:
             with wlock:
@@ -1257,8 +1278,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         except (BrokenPipeError, OSError, ValueError):
             return False
 
-    lines = collections.deque()
-    got = threading.Event()
+    lines = live["lines"] if live else collections.deque()
+    got = live["got"] if live else threading.Event()
     trace = os.environ.get("ORBIT_ENGINE_TRACE")          # a file to copy Claude Code's events into, when debugging
     def reader():
         for raw in proc.stdout:
@@ -1268,18 +1289,22 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                 except OSError: pass
             lines.append(raw); got.set()
         lines.append(None); got.set()
-    err_tail = collections.deque(maxlen=40)
+    err_tail = live["err_tail"] if live else collections.deque(maxlen=40)
     def err_reader():
         for raw in proc.stderr:
             s = raw.decode("utf-8", "replace").rstrip()
             if s and "unrecognized_model" not in s: err_tail.append(s)
-    threading.Thread(target=reader, daemon=True).start()
-    threading.Thread(target=err_reader, daemon=True).start()
+    if not live:
+        threading.Thread(target=reader, daemon=True).start()
+        threading.Thread(target=err_reader, daemon=True).start()
+    if live:
+        live["err_tail"].clear()
 
     run = {"send": send, "waiters": {}, "session": mk["session"], "started": t_start}
     if sid: RUNS[sid] = run
     # what this Claude setup offers (slash commands with descriptions, agents, models)
-    send({"type": "control_request", "request_id": "orbit-init", "request": {"subtype": "initialize"}})
+    if not live:
+        send({"type": "control_request", "request_id": "orbit-init", "request": {"subtype": "initialize"}})
     send({"type": "user", "message": {"role": "user", "content": blocks},
           "parent_tool_use_id": None, "session_id": mk["session"]})
     pending = 1
@@ -1338,6 +1363,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         messages.append(cur)
 
     stopped = False
+    kept = False
     try:
         while True:
             if not lines:
@@ -1549,16 +1575,25 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                 if pending <= 0 or interrupted_at:
                     if inbox and interrupted_at is None:
                         continue               # a note arrived just as it finished
+                    if keep and proc.poll() is None:
+                        kept = True            # the answer is done; the process waits for the next message
+                        break
                     try: proc.stdin.close()
                     except Exception: pass
                 continue
     finally:
         try:
-            if proc.poll() is None:
+            if kept and proc.poll() is None:
+                LIVE[sid] = {"proc": proc, "sig": sig, "lines": lines, "got": got, "err_tail": err_tail,
+                             "wlock": wlock, "host": remote["host"], "used": time.time()}
+                _live_saved()
+            elif proc.poll() is None:
                 try: proc.stdin.close()
                 except Exception: pass
                 try: proc.wait(timeout=20)
                 except subprocess.TimeoutExpired: _kill(proc)
+            if not kept and LIVE.get(sid, {}).get("proc") is proc:
+                LIVE.pop(sid, None); _live_saved()
         except Exception:
             pass
         if token: BRIDGE.pop(token, None)
@@ -1664,6 +1699,67 @@ def _system_notice(st, ev):
     if st == "stop_hook_summary":
         return g("summary", "message")[:400]
     return ""
+
+
+# ------------------------------------------------------------------ remote sessions kept between messages
+
+LIVE = {}              # chat id -> a remote Claude Code process waiting for its next message
+_LIVE_LOCK = threading.Lock()
+
+
+def _live_path():
+    return os.path.join(_work_dir(), "live-remote.json")
+
+
+def _live_saved():
+    """Which SSH processes are kept, so the next start of Orbit can end any it left
+    behind (a restart does not wait for them)."""
+    try:
+        _write_json("live-remote.json", {s: {"pid": v["proc"].pid, "host": v["host"]} for s, v in LIVE.items()})
+    except Exception:
+        pass
+
+
+def close_live(sid=None, why=""):
+    """End a kept remote session (all of them without a chat id): closing its input ends
+    Claude Code there, and the SSH connection with it."""
+    with _LIVE_LOCK:
+        ids = [sid] if sid else list(LIVE)
+        for k in ids:
+            v = LIVE.pop(k, None)
+            if not v: continue
+            try: v["proc"].stdin.close()
+            except Exception: pass
+            def finish(p=v["proc"]):
+                try: p.wait(timeout=15)
+                except Exception: _kill(p)
+            threading.Thread(target=finish, daemon=True).start()
+        _live_saved()
+
+
+def reap_live(max_idle_min=None):
+    """Close kept remote sessions idle for longer than remote_keep_alive_min."""
+    limit = float(max_idle_min if max_idle_min is not None else (cfg().get("remote_keep_alive_min", 30) or 0)) * 60
+    for k, v in list(LIVE.items()):
+        if v["proc"].poll() is not None or (limit and time.time() - v["used"] > limit and k not in RUNS):
+            close_live(k)
+
+
+def end_leftover_live():
+    """At start: SSH processes a previous run of Orbit kept open (it was restarted) are ended."""
+    try: old = json.load(open(_live_path()))
+    except Exception: return
+    for v in (old or {}).values():
+        pid = int((v or {}).get("pid") or 0)
+        if not pid: continue
+        try:
+            out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
+            if out.startswith("ssh") and "orbit" in out:
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except Exception:
+            pass
+    try: os.remove(_live_path())
+    except OSError: pass
 
 
 def _kill(proc):

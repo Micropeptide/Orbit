@@ -180,6 +180,49 @@ class TestClaudeEngine(unittest.TestCase):
         self.assertEqual(out, "Blue it is.")
         self.assertIn("Blue", json.dumps(self.requests()[-1]["messages"]))
 
+    def test_a_chat_on_another_machine_keeps_claude_running_between_messages(self):
+        """The remote path, played on this Mac: the wrapper that runs on the host, the real
+        claude, the stand-in model. Three messages, one Claude Code process."""
+        import ssh_remote
+        self.serve([[{"text": "ok"}], [{"text": "42"}], [{"text": "50"}]])
+        starts = []
+        clean = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE", "ANTHROPIC"))}
+        def fake_popen(host, claude_path, cwd, args, env, forward=None):
+            p = subprocess.Popen(["bash", "-c", ssh_remote.WRAPPER, "orbit", *args], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, env=clean)
+            p.stdin.write(ssh_remote.env_line({"ORBIT_CLAUDE": claude_path, "ORBIT_CWD": cwd, **env}).encode())
+            p.stdin.flush()
+            starts.append(p)
+            return p
+        saved = (ssh_remote.popen, ssh_remote.probe, CE.remote_target_env)
+        ssh_remote.popen = fake_popen
+        ssh_remote.probe = lambda host, **k: {"ok": True, "claude": CLAUDE, "home": os.path.expanduser("~")}
+        CE.remote_target_env = lambda target, env: (ssh_remote.remote_env(env), None)
+        CE.set_chat_pref("test-ce", host="testhost", cwd=self.work)
+        try:
+            msgs = [{"role": "system", "content": "s"}]
+            outs = [self.run_turn(msgs, t)[0] for t in ("remember 42", "what number?", "add 8")]
+            self.assertEqual(outs, ["ok", "42", "50"])
+            self.assertEqual(len(starts), 1, "each message started Claude Code again")
+            self.assertIn("test-ce", CE.LIVE)
+            self.assertEqual(CE.marker_of(msgs)["host"], "testhost")
+            # the second message went into the same session: the model saw the first exchange
+            last = self.requests()[-1]["messages"]
+            self.assertIn("remember 42", json.dumps(last))
+            proc = CE.LIVE["test-ce"]["proc"]
+            CE.close_live("test-ce")
+            proc.wait(timeout=30)
+            self.assertNotIn("test-ce", CE.LIVE)
+            # a changed model or mode starts a fresh process that resumes the session
+            q.CE.set_chat_pref("test-ce", permission_mode="plan")
+            self.serve([[{"text": "planned"}]])
+            self.assertEqual(self.run_turn(msgs, "and now?")[0], "planned")
+            self.assertEqual(len(starts), 2)
+        finally:
+            ssh_remote.popen, ssh_remote.probe, CE.remote_target_env = saved
+            CE.close_live("test-ce")
+            CE.set_chat_pref("test-ce", host=None, cwd=None, permission_mode=None, remote_last_uuid=None)
+
     def test_todo_list_becomes_the_plan(self):
         self.serve([
             [{"tool_use": {"name": "TaskCreate", "input": {"subject": "Read the data", "description": "d"}}}],

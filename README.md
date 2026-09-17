@@ -218,6 +218,9 @@ signed in, and how many processes you are running against the node's limit.
 - **Nothing is left running.** On the host, Claude Code runs in its own process group
   under a watchdog that ends it when the answer stops or the connection drops. Login
   nodes have per-user process limits; leftovers used to fill them.
+- **Fast follow-ups.** Claude Code stays running between messages (30 idle minutes by
+  default), so only a chat's first message waits for the connection and startup — the
+  next ones answer in about a second.
 - **Few connections.** Checks and folder listings share one SSH connection, so Orbit
   does not trip the connection limits clusters enforce.
 - **History holds.** The session lives on the host and each message resumes it — on
