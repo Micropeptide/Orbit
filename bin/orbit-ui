@@ -1934,7 +1934,9 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                     PENDING[rid] = {"event": ev, "allow": False, "fn": fn, "args": a}
                     req = {"id": rid, "name": (info or {}).get("tool") or fn, "args": a, "reason": reason,
                            "suggested_pattern": q._rule_pattern_suggestion(fn, a)}
-                    if info:
+                    if info and info.get("codex"):
+                        req.update(codex=True)          # "always" = Codex's own approval for the rest of this session
+                    elif info:
                         req.update(claude=True, suggested_pattern=info.get("suggested_pattern") or req["name"],
                                    suggestions=info.get("suggestions") or [])
                     if fn in ("write_file", "edit_file"):

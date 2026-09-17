@@ -61,14 +61,31 @@ def valid_host(host):
     return bool(re.fullmatch(r"[A-Za-z0-9._@-]{1,120}", str(host or "")))
 
 
-def run(host, script, timeout=60, shared=True):
+def reset_master(host):
+    """Close the shared connection to a host. One left over from a network outage stays
+    open but dead, and every request that shares it hangs until its timeout."""
+    try:
+        subprocess.run(["ssh", "-O", "exit", "-o", f"ControlPath={_control_path()}", host],
+                       capture_output=True, timeout=8)
+    except Exception:
+        pass
+
+
+def run(host, script, timeout=60, shared=True, _retry=True):
     """Run a bash script on the host (sent on standard input). (rc, stdout, stderr)"""
     if not valid_host(host): return 2, "", "not a host name"
     argv = ["ssh", *base_opts(shared), host, "bash -s"]
     try:
         r = subprocess.run(argv, input=script, capture_output=True, text=True, timeout=timeout)
+        if shared and _retry and r.returncode == 255 and "mux" in (r.stderr or "").lower():
+            reset_master(host)
+            return run(host, script, timeout, shared, _retry=False)
         return r.returncode, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
+        if shared and _retry:
+            # most often a dead shared connection: drop it and try once on a fresh one
+            reset_master(host)
+            return run(host, script, timeout, shared, _retry=False)
         return 124, "", f"no answer from {host} within {timeout}s"
     except OSError as e:
         return 127, "", str(e)
@@ -99,8 +116,9 @@ for c in "$(command -v codex 2>/dev/null)" "$HOME/.local/bin/codex" "$HOME/bin/c
 done
 emit codex "$cbest"
 emit codex_version "$cver"
-if [ -n "$cbest" ]; then emit codex_login "$("$cbest" login status 2>&1 | head -1)"; fi
+if [ -n "$cbest" ]; then emit codex_login "$("$cbest" login status 2>&1 | grep -i 'logged' | head -1)"; fi
 emit arch "$(uname -m)"
+emit bwrap "$(command -v bwrap 2>/dev/null)"
 emit procs "$(ps -u "$(id -un)" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
 emit proc_limit "$(ulimit -u)"
 emit setsid "$(command -v setsid)"
