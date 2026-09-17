@@ -2936,6 +2936,7 @@ function modelOptions(cur){
   `<optgroup label="${esc(g)}">${list.map(m=>`<option value="${esc(m.id)}"${m.id===cur?' selected':''}>${esc(m.label||m.model)}${m.ready===false?' — needs a key':''}</option>`).join('')}</optgroup>`).join('')}
 async function renderTasks(){
  const box=$('#tasks');
+ if(!(MODELS.models||[]).length)await loadModels();   // or every task's model would read "default"
  const d=await (await fetch('/api/schedule')).json();
  const agents=Object.keys((INFO.agents)||{});
  box.innerHTML=`<div class=pane>

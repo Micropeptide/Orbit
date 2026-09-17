@@ -8,6 +8,11 @@ _BIN = os.path.dirname(os.path.abspath(__file__))
 _VENV = os.path.join(os.path.dirname(_BIN), "venv", "bin", "python")
 if os.path.exists(_VENV) and os.path.realpath(sys.executable) != os.path.realpath(_VENV):
     os.execv(_VENV, [_VENV, os.path.abspath(__file__), *sys.argv[1:]])
+# QQ_PORT is left over from when the model server ran on port 8000. Its launchd
+# job still sets it, and it outranks Orbit's settings: the watchdog was asking
+# port 8000 (now another service) whether a model was loaded, hearing no, and
+# never stopping the real server. The port comes from Orbit's settings.
+os.environ.pop("QQ_PORT", None)
 import hashlib, json, os, subprocess, sys, time, urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import qqcore as q
