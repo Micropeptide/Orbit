@@ -652,6 +652,20 @@ class TestConfigIsRecoverable(unittest.TestCase):
     """Small config files keep their recent versions, so an accidental delete or
     a bad edit can be undone without going to a backup."""
 
+    def setUp(self):
+        # on a copy: these tests used to add and remove projects in the real file
+        import shutil as _sh
+        self._tmp = tempfile.mkdtemp(prefix="orbit-cfg-")
+        self._saved = {k: getattr(q, k) for k in ("PROJECTS", "CONFIG_HISTORY")}
+        q.PROJECTS = os.path.join(self._tmp, "projects.json")
+        if os.path.exists(self._saved["PROJECTS"]):
+            _sh.copy(self._saved["PROJECTS"], q.PROJECTS)
+        q.CONFIG_HISTORY = os.path.join(self._tmp, ".history")
+        self.addCleanup(_sh.rmtree, self._tmp, True)
+
+    def tearDown(self):
+        for k, v in self._saved.items(): setattr(q, k, v)
+
     def test_saving_projects_snapshots_the_previous_version(self):
         before = q.projects_load()
         try:
