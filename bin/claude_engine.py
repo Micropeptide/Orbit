@@ -247,6 +247,28 @@ def harness_env(url, model, ctx, extra=None, small=None, auth=None):
     return env
 
 
+def remote_target_env(target, env):
+    """What a Claude Code run on another machine gets from Orbit: its models come through
+    Orbit's gateway on this Mac, reached by an SSH reverse tunnel (the gateway needs
+    Orbit's token, so other users of a shared machine cannot use it); your Claude
+    subscription token, when the chat uses it. Returns (env, (remote_port, local_port))."""
+    import ssh_remote
+    if target.get("subscription"):
+        out = {k: v for k, v in (target.get("env") or {}).items()}
+        out.update({"DISABLE_AUTOUPDATER": "1", "MCP_TOOL_TIMEOUT": "3600000", "BASH_DEFAULT_TIMEOUT_MS": "600000"})
+        return out, None
+    rport = ssh_remote.pick_port()
+    provider = "local" if target.get("local") else target.get("provider")
+    model = target.get("model")
+    small = target.get("small") or model
+    if target.get("local"):
+        model = small = model_endpoint()[1]
+    url = f"http://127.0.0.1:{rport}/h/{provider}"
+    renv = harness_env(url, model, target.get("ctx") or 128000, extra=dict(target.get("env") or {}), small=small,
+                       auth={"ANTHROPIC_AUTH_TOKEN": gateway_token()})
+    return ssh_remote.remote_env(renv), (rport, gateway_port())
+
+
 def target_env(target, extra=None):
     return harness_env(target["url"], target["model"], target["ctx"], extra={**target.get("env", {}), **(extra or {})},
                        small=target.get("small"), auth=target.get("auth"))
@@ -1054,10 +1076,27 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                 return ""
 
     mk = dict(marker_of(messages) or {})
-    jp = jsonl_path(mk.get("session"), mk.get("cwd")) if mk else None
-    resume = bool(jp)
+    prefs0 = chat_prefs(sid) if sid else {}
+    # a chat that runs on another machine over SSH (its folder is there); a chat keeps
+    # the host its Claude session started on
+    host = (mk.get("host") if mk.get("session") and mk.get("remote_ready") else None) or prefs0.get("host") or None
+    remote = None
+    if host:
+        import ssh_remote
+        info = ssh_remote.probe(host, max_age=1800)
+        if not info.get("ok") or not info.get("claude"):
+            msg = (f"Could not start Claude Code on {host}: " + (info.get("error") or "no `claude` found there — "
+                   "install Claude Code on it (or open a Claude Code SSH session there once), then try again."))
+            messages.append({"role": "user", "content": user_content, "t": time.time()})
+            ssh_remote._PROBES.pop(host, None)
+            emit("error", msg); emit("done", None)
+            return msg
+        remote = {"host": host, "claude": info["claude"], "home": info.get("home") or "~"}
+    jp = None if remote else (jsonl_path(mk.get("session"), mk.get("cwd")) if mk else None)
+    # on another machine the transcript lives there: a session that started there resumes
+    resume = bool(jp) or bool(remote and mk.get("session") and mk.get("host") == host and mk.get("remote_ready"))
     fork, resume_at = False, None
-    if resume:
+    if jp:
         # a chat forked in Orbit shares its parent's Claude session: branch it off
         fork = bool(sid and mk.get("owner") and mk["owner"] != sid)
         # a chat edited or regenerated in Orbit no longer ends where Claude's
@@ -1074,22 +1113,24 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         try: folder = q.project_folder(project) if project else None
         except Exception: folder = None
         cwd = prefs.get("cwd") or folder or q.WORKSPACE
+        if remote: cwd = prefs.get("cwd") or "~"          # a folder on that machine
         prior = _prior_transcript([m for m in messages if m.get("role") != "system"])
         mk = {"session": str(uuid.uuid4()), "cwd": cwd, "skills": [], "owner": sid}
+        if remote: mk["host"] = remote["host"]
     else:
         cwd = mk.get("cwd") or q.WORKSPACE
         prior = ""
         if jp and os.path.dirname(jp) != os.path.join(projects_dir(), encode_cwd(cwd)):
             # resumed from wherever the transcript actually is
             cwd = mk.get("cwd") or cwd
-    if not os.path.isdir(cwd): cwd = q.WORKSPACE
+    if not remote and not os.path.isdir(cwd): cwd = q.WORKSPACE
 
     plain = user_content if isinstance(user_content, str) else " ".join(
         x.get("text", "") for x in user_content if isinstance(x, dict))
     # skills: this chat's set, grown by what this message needs
     chosen = list(dict.fromkeys(mk.get("skills") or []))
     hint = []
-    if c.get("skill_routing") and c.get("profile") != "lean":
+    if c.get("skill_routing") and c.get("profile") != "lean" and not remote:
         routed = route_skills(plain, limit=6)
         hint = routed[:3]
         want = [s["name"] for s in routed]
@@ -1113,7 +1154,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     token = None
     servers = {}
     specs = []
-    if bridge_url():
+    if bridge_url() and not remote:
         if c.get("orbit_tools"):
             allow = set(c.get("orbit_tool_names") or [])
             specs = [x for x in (tools or []) if x.get("function", {}).get("name") in allow]
@@ -1134,7 +1175,9 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         servers["orbit"] = {"type": "stdio", "command": sys.executable,
                             "args": [os.path.join(os.path.dirname(os.path.abspath(__file__)), "orbit-mcp")],
                             "env": {"ORBIT_MCP_URL": bridge_url(), "ORBIT_MCP_TOKEN": token}}
-    settings_path, mcp_path = launcher_files(c, mk["session"], skills=chosen, extra_servers=servers)
+    # on another machine Claude uses that machine's own setup (settings, skills, MCP)
+    settings_path, mcp_path = (None, None) if remote else launcher_files(c, mk["session"], skills=chosen,
+                                                                           extra_servers=servers)
 
     # a chat's own mode, else Orbit's default for new chats, else Claude's own
     mode = prefs.get("permission_mode") or c.get("permission_mode") or None
@@ -1161,9 +1204,15 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
 
     _run_log(sid, mk, resume, fork, resume_at, c, cwd, argv)
     try:
-        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, start_new_session=True)
-    except OSError as e:
+        if remote:
+            import ssh_remote
+            renv, forward = remote_target_env(target, env)
+            emit("status", {"msg": f"starting Claude Code on {remote['host']}"})
+            proc = ssh_remote.popen(remote["host"], remote["claude"], cwd, argv[1:], renv, forward=forward)
+        else:
+            proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, start_new_session=True)
+    except (OSError, ValueError) as e:
         msg = f"Could not start Claude Code: {e}"
         emit("error", msg); emit("done", None)
         return msg
@@ -1432,6 +1481,9 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                                                         "agents", "plugins", "permissionMode", "model",
                                                         "claude_code_version", "output_style") if k in ev})
                     run["mode"] = ev.get("permissionMode")
+                    if remote and not mk.get("remote_ready"):
+                        mk["remote_ready"] = True; mk["host"] = remote["host"]
+                        umsg["claude"] = dict(mk)
                     if ev.get("session_id") and ev["session_id"] != mk["session"]:
                         # a fork got its own session id: this chat follows it from now on
                         mk["session"] = ev["session_id"]; mk["owner"] = sid
@@ -1509,7 +1561,11 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     if not answered and not stopped:
         tail = "\n".join(list(err_tail)[-6:]).strip()
         why = str(result_err or tail or f"Claude Code exited ({rc}) without answering")
-        if "ECONNREFUSED" in why or "Connection error" in why or "fetch failed" in why:
+        if remote and ("remote port forwarding failed" in why or "forwarding" in why.lower()):
+            why += f" — the tunnel from {remote['host']} to this Mac could not open; send the message again."
+        elif remote and rc == 255:
+            why = f"The SSH connection to {remote['host']} failed: {why}"
+        elif "ECONNREFUSED" in why or "Connection error" in why or "fetch failed" in why:
             why += " — the local model server is not answering. Start it (sidebar → Start) and try again."
         emit("error", why[:1200])
     elif result_err and not stopped:
@@ -1998,6 +2054,9 @@ def resume_command(orbit_msgs, spec=None):
     mk = marker_of(orbit_msgs)
     if not mk: return None
     cwd = mk.get("cwd") or HOME
+    if mk.get("host"):
+        return (f"ssh -t {mk['host']} " + json.dumps(f"cd {cwd} && ~/.local/bin/claude --resume {mk['session']}")
+                + "   # models other than your Claude login need Orbit's tunnel: continue these in Orbit")
     pc = (spec or {}).get("provider_cfg") or {}
     if (spec or {}).get("provider") == "harness" and not pc.get("local"):
         return f"cd {json.dumps(cwd)} && claude-harness {json.dumps(spec['id'])} --resume {mk['session']}"
