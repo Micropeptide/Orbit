@@ -224,6 +224,11 @@ def save_session(st=None):
     pl = q.PLANS.get(st.sid)
     if pl and pl.get("steps"): extra["plan"] = pl       # the chat's plan survives a restart
     if getattr(st, "plan_mode", False): extra["plan_mode"] = True
+    try:
+        host = q.CE.chat_prefs(st.sid).get("host")
+        if host: extra["host"] = host
+    except Exception:
+        pass
     if getattr(st, "queue", None):
         extra["queue"] = st.queue
         if st.queue_paused: extra["queue_paused"] = True
@@ -476,9 +481,19 @@ class H(http.server.BaseHTTPRequestHandler):
                 "version": q.CE.INIT.get("claude_code_version"),
                 "mcp_known": sorted(q.CE.user_mcp_servers()),
                 "cwd_pref": q.CE.chat_prefs(sid).get("cwd"), "add_dirs": q.CE.chat_prefs(sid).get("add_dirs") or [],
+                "host": mk.get("host") or q.CE.chat_prefs(sid).get("host"),
                 "claude_default_mode": ((q.CE.read_claude_settings().get("permissions") or {}).get("defaultMode"))}))
         if p == "/api/code":
             return self._send(200, jdump(code_is_stale()))
+        if p == "/api/remote/hosts":
+            import ssh_remote
+            saved = q.S.get("remote_hosts") or {}
+            hosts = []
+            for h in ssh_remote.config_hosts():
+                pr = ssh_remote._PROBES.get(h)
+                hosts.append({"host": h, "saved": saved.get(h) or {},
+                              "probe": {k: v for k, v in (pr or {}).items() if k != "candidates"} if pr else None})
+            return self._send(200, jdump({"hosts": hosts}))
         if p.startswith("/api/live/"):
             sid = p.rsplit("/", 1)[-1]
             st = STATES.get(sid)
@@ -770,12 +785,24 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/claude/cwd":
             # the folder a chat's Claude session starts in (and extra folders it may use)
             sid_, cwd = d.get("sid", ""), (d.get("cwd") or "").strip()
-            if cwd:
-                cwd = os.path.abspath(os.path.expanduser(cwd))
-                if not os.path.isdir(cwd):
-                    return self._send(400, jdump({"error": f"no such folder: {cwd}"}))
-            dirs = [os.path.abspath(os.path.expanduser(x)) for x in (d.get("add_dirs") or []) if str(x).strip()]
+            host = (d.get("host") or "").strip() or None      # a chat on another machine, over SSH
+            if host:
+                import ssh_remote
+                if not ssh_remote.valid_host(host):
+                    return self._send(400, jdump({"error": f"not a host name: {host}"}))
+                dirs = [str(x).strip() for x in (d.get("add_dirs") or []) if str(x).strip()]
+            else:
+                if cwd:
+                    cwd = os.path.abspath(os.path.expanduser(cwd))
+                    if not os.path.isdir(cwd):
+                        return self._send(400, jdump({"error": f"no such folder: {cwd}"}))
+                dirs = [os.path.abspath(os.path.expanduser(x)) for x in (d.get("add_dirs") or []) if str(x).strip()]
             prefs = q.CE.set_chat_pref(sid_, cwd=cwd or None, add_dirs=dirs or None)
+            prefs = q.CE.set_chat_pref(sid_, host=host) if host or "host" in d else prefs
+            st = STATES.get(sid_)
+            if st is not None and not st.temp and os.path.exists(q.session_path(sid_)):
+                try: save_session(st)              # the sidebar shows where the chat runs
+                except Exception: pass
             st = STATES.get(sid_)
             started = bool(q.CE.marker_of(st.msgs if st else []))
             return self._send(200, jdump({"ok": True, "prefs": prefs, "started": started}))
@@ -803,6 +830,27 @@ class H(http.server.BaseHTTPRequestHandler):
                 return self._send(200, jdump({"ok": False, "error": f"could not open: {type(e).__name__}"}))
             return self._send(200, jdump({"ok": True, "path": path, "revealed": reveal,
                                           "why": "shown in Finder rather than run" if runs and not d.get("reveal") else ""}))
+        if p == "/api/remote/probe":
+            import ssh_remote
+            host = str(d.get("host") or "")
+            if not ssh_remote.valid_host(host): return self._send(400, jdump({"error": "not a host name"}))
+            return self._send(200, jdump(ssh_remote.probe(host, refresh=bool(d.get("refresh")))))
+        if p == "/api/remote/ls":
+            import ssh_remote
+            host = str(d.get("host") or "")
+            if not ssh_remote.valid_host(host): return self._send(400, jdump({"error": "not a host name"}))
+            return self._send(200, jdump(ssh_remote.list_dir(host, str(d.get("path") or "~"))))
+        if p == "/api/remote/save":
+            # a host's defaults in Orbit: the folder new chats there start in
+            with LOCK:
+                cur = q.load_settings()
+                rh = cur.get("remote_hosts") or {}
+                h = str(d.get("host") or "")
+                if d.get("remove"): rh.pop(h, None)
+                else: rh[h] = {**(rh.get(h) or {}), **{k: d[k] for k in ("default_dir", "label") if k in d}}
+                cur["remote_hosts"] = rh
+                q.save_settings(cur); q.reload_settings()
+            return self._send(200, jdump({"ok": True, "remote_hosts": rh}))
         if p == "/api/pick_folder":
             # the Mac's own folder chooser, on this Mac's screen (a phone gets the text field)
             start = os.path.expanduser(str(d.get("start") or "~"))

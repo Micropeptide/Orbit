@@ -110,6 +110,32 @@ to Claude's system prompt for that chat. Orbit's automatic memory notes and its
 own compaction are for Orbit's chats only; Claude Code remembers and compacts for
 itself.
 
+## Chats on another machine (SSH)
+
+A Claude Code chat can run on another machine — a cluster's login node, a lab
+server — as Claude Code's own SSH sessions do. Pick it under **Where** when you
+choose the chat's folder (the folder chip next to the title) or in **New chat
+with…**; browse the machine's folders there. Hosts come from `~/.ssh/config` and
+need key-based login. Settings → Claude Code → Remote machines checks each host
+(Claude Code found on it, signed in or not, your process count against its limit)
+and keeps the folder new chats there start in.
+
+- Claude Code runs on that machine, in the chat's folder: it edits files and runs
+  commands there, and Orbit shows every step and asks for approvals as usual. The
+  session lives there too, so the next message resumes it (any login node of a
+  cluster that shares your home folder).
+- Models come from this Mac: an SSH reverse tunnel reaches Orbit's gateway, which
+  needs Orbit's token (a login node has other users), so keys never leave the Mac.
+  Your Claude subscription token, for chats on your plan, goes over the connection's
+  input — never on a command line others could see in `ps`.
+- Nothing is left running: on the host Claude Code runs in its own process group
+  under a watchdog that ends the group when the answer stops or the connection drops
+  (login nodes have per-user process limits, and leftovers fill them).
+- Checks and folder listings share one SSH connection, so Orbit does not open
+  connection bursts that clusters block.
+- The newest Claude Code on the host is used: on PATH, in `~/.local/bin`, or the
+  copies Claude's desktop app keeps there.
+
 ## Sessions from other agents
 
 The sidebar lists conversations that began elsewhere, each source in its own

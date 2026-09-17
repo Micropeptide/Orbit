@@ -84,6 +84,9 @@ aside.hide{display:none}
 .sitem .more{display:none;border:0;background:none;color:var(--mut);cursor:pointer;padding:0 4px;font-size:14px;line-height:1}
 .sitem:hover .more{display:inline}.sitem:hover .ago{display:none}
 .sitem .qn{font-size:10px;padding:0 5px;border-radius:8px;background:color-mix(in srgb,var(--acc) 18%,transparent);color:var(--acc)}
+.sitem .hostmark{font-size:9.5px;padding:0 5px;border-radius:6px;border:1px solid var(--line);color:var(--mut);max-width:70px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#cqbar .cqdir.remote{border-color:var(--acc);color:var(--acc)}
+.rbrowse{border:1px solid var(--line);border-radius:9px;padding:6px 8px;margin:6px 0;background:var(--card)}
 .pathlink{color:var(--acc);cursor:pointer;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:2px;word-break:break-all}
 .pathlink:hover{text-decoration-style:solid}
 .toolopen{margin-left:8px;font-size:11px;text-decoration:none;opacity:.8}
@@ -709,6 +712,7 @@ function pathify(node){
    frag.appendChild(a);last=start+m[2].length}
   if(frag){frag.appendChild(document.createTextNode(v.slice(last)));t.replaceWith(frag)}})}
 async function openPath(path,reveal){
+ if(CQ_INFO&&CQ_INFO.host&&CQ_INFO.sid_for===sid){copy(path);toast('that file is on '+CQ_INFO.host+' — path copied');return}
  const d=await apiPost('/api/open_path',{path,reveal:!!reveal},'open');
  if(d)toast(d.revealed?(d.why?'shown in Finder ('+d.why+')':'shown in Finder'):'opened '+String(d.path).split('/').pop())}
 document.addEventListener('click',e=>{const p=e.target.closest&&e.target.closest('.pathlink');
@@ -960,7 +964,8 @@ function chatRow(s,box){
  const src=extSource(s);
  const d=el(`<div class="sitem${s.id===sid?' on':''}${st.cls?' st-'+st.cls:''}${s.external?' external':''}" title="${esc(s.title||'')}">
    <span class=stc title="${esc(st.tip)}">${st.icon}</span><span class=t></span>${
-   s.pinned?'<span class=pinmark title="pinned">★</span>':''}<span class=ago title="${esc(new Date((s.mtime||0)*1000).toLocaleString())} · ${s.n||0} messages">${agoShort(s.mtime)}</span><button class=more title="Actions">⋯</button></div>`);
+   s.pinned?'<span class=pinmark title="pinned">★</span>':''}${
+   s.host?`<span class=hostmark title="runs on ${esc(s.host)} over SSH">${esc(s.host)}</span>`:''}<span class=ago title="${esc(new Date((s.mtime||0)*1000).toLocaleString())} · ${s.n||0} messages">${agoShort(s.mtime)}</span><button class=more title="Actions">⋯</button></div>`);
  d.querySelector('.t').textContent=s.title||'(untitled)';
  d.dataset.sid=s.id; d.dataset.pinned=s.pinned?'1':'';
  d.onclick=ev=>{
@@ -1513,6 +1518,7 @@ function questionBox(p){
 // and what Claude Code reports about the session.
 const CQ_MODES={default:'Ask',acceptEdits:'Accept edits',plan:'Plan',auto:'Auto',dontAsk:"Don't ask",bypassPermissions:'Bypass'};
 let CQ_INFO=null, CQ_CMDS=[];
+function isClaudeModelId(m){m=m||MODELS.default||'';return m.startsWith('claude-qwen-cli')||m.startsWith('harness:')}
 function isClaudeChat(){const m=MODELS.current||MODELS.default||'';return m.startsWith('claude-qwen-cli')||m.startsWith('harness:')}
 async function drawClaudeBar(){
  let b=$('#cqbar');
@@ -1528,11 +1534,13 @@ async function drawClaudeBar(){
   b.querySelector('.cqi').onclick=()=>claudePanel();
   b.querySelector('.cqdir').onclick=()=>folderDialog()}
  b.style.display='';
- try{CQ_INFO=await (await fetch('/api/claude/info?sid='+encodeURIComponent(sid))).json()}catch(e){return}
+ try{CQ_INFO=await (await fetch('/api/claude/info?sid='+encodeURIComponent(sid))).json();CQ_INFO.sid_for=sid}catch(e){return}
  b.querySelector('select').value=(CQ_INFO.prefs||{}).permission_mode||(CQ_INFO.settings||{}).permission_mode||CQ_INFO.claude_default_mode||'default';
  const dir=CQ_INFO.cwd||CQ_INFO.cwd_pref;const chip=b.querySelector('.cqdir');
- chip.textContent='📁 '+(dir?dir.replace(/^\/Users\/[^/]+/,'~'):'workspace');
- chip.title=(dir||'Orbit workspace (default)')+(CQ_INFO.session?' — this chat\'s Claude session works here':' — click to choose where this chat starts');
+ const rh=CQ_INFO.host;
+ chip.textContent=(rh?'🖥 '+rh+':':'📁 ')+(dir?dir.replace(/^\/Users\/[^/]+/,'~'):(rh?'~':'workspace'));
+ chip.classList.toggle('remote',!!rh);
+ chip.title=(rh?'on '+rh+' over SSH: ':'')+(dir||(rh?'home folder':'Orbit workspace (default)'))+(CQ_INFO.session?' — this chat\'s Claude session works here':' — click to choose where this chat starts');
  CQ_CMDS=(CQ_INFO.commands||[]).map(c=>({c:'/'+c.name,d:(c.description||'Claude Code').slice(0,120),cc:1}));
  if(!CQ_CMDS.length)fetch('/api/claude/commands').then(r=>r.json()).then(d=>{     // before its first answer too
   CQ_CMDS=(d.commands||[]).map(c=>({c:'/'+c.name,d:(c.description||'Claude Code').slice(0,120),cc:1}))}).catch(()=>{})}
@@ -1623,32 +1631,47 @@ async function newChatWith(){
    ${presets.length?`<div class=sec>Presets</div><div id=nw_presets></div>`:''}
    <div class=grid>
     <label>Model</label><select id=nw_model>${modelOptions(MODELS.default||'')}</select>
+    <label>Where</label><select id=nw_where><option value="">This Mac</option></select>
     <label>Folder</label><div style="display:flex;gap:6px"><input type=text id=nw_cwd list=nw_dirs placeholder="Orbit workspace — type a path or choose" spellcheck=false style="flex:1"><button class=ghost id=nw_pick>Choose…</button></div>
+    <div class=hint2 id=nw_probe></div><div id=nw_browse style="grid-column:1/-1"></div>
     <label>Permission mode</label><select id=nw_mode><option value="">Claude's default</option>${Object.entries(CQ_MODES).map(([k,v])=>`<option value=${k}>${v}</option>`).join('')}</select>
     <label>Save as preset</label><input type=text id=nw_name placeholder="name (optional), e.g. Lab analysis · DeepSeek">
    </div><datalist id=nw_dirs>${fl.map(f=>`<option value="${esc(f.path)}">`).join('')}</datalist>
    <div class=note style="margin-top:6px">Folder and permission mode apply to Claude Code models; any model can be picked.</div>
    <button class=primary id=nw_go style="margin-top:8px">Start chat</button></div></div></div>`;
  $('#nwx').onclick=closeModal;
- const start=async({model,cwd,mode})=>{
+ remoteHosts().then(hs=>{const sel=$('#nw_where');if(!sel)return;
+  hs.forEach(h=>sel.appendChild(el(`<option value="${esc(h.host)}">${esc(h.host)} (SSH)</option>`)))});
+ $('#nw_where').onchange=async()=>{const h=$('#nw_where').value;$('#nw_browse').innerHTML='';
+  if(!h){$('#nw_probe').innerHTML='';return}
+  if(!$('#nw_cwd').value)$('#nw_cwd').value=((((REMOTE_HOSTS||[]).find(x=>x.host===h)||{}).saved)||{}).default_dir||'~';
+  $('#nw_probe').innerHTML='checking '+esc(h)+'…';
+  const pr=await apiPost('/api/remote/probe',{host:h},'checking the host');
+  if($('#nw_where')&&$('#nw_where').value===h)$('#nw_probe').innerHTML=probeLine(pr)};
+ const start=async({model,cwd,mode,host:where})=>{
   closeModal();await newChat();
   if(model)await apiPost('/api/model/select',{id:model,sid},'model');
-  if(cwd)await apiPost('/api/claude/cwd',{sid,cwd},'folder');
+  if(cwd||where)await apiPost('/api/claude/cwd',{sid,cwd,host:where||''},'folder');
   if(mode)await apiPost('/api/claude/mode',{sid,mode},'permission mode');
   await loadModels();drawClaudeBar();q.focus()};
  const box=$('#nw_presets');
  presets.forEach((p,i)=>{
   const r=el('<div class=memrow style="cursor:pointer"><b></b><span></span><button class=ghost>start</button><button class=ghost>delete</button></div>');
   const ml=((MODELS.models||[]).find(m=>m.id===p.model)||{}).label||p.model||'default model';
-  r.querySelector('b').textContent=p.name;r.querySelector('span').textContent=[ml,p.cwd,CQ_MODES[p.mode]].filter(Boolean).join(' · ');
+  r.querySelector('b').textContent=p.name;r.querySelector('span').textContent=[ml,(p.host?p.host+':':'')+(p.cwd||''),CQ_MODES[p.mode]].filter(Boolean).join(' · ');
   const [go,del]=r.querySelectorAll('button');
   go.onclick=()=>start(p);
   del.onclick=async e=>{e.stopPropagation();presets.splice(i,1);
    await apiPost('/api/claude/settings',{settings:{presets}},'presets');r.remove()};
   box.appendChild(r)});
- $('#nw_pick').onclick=async()=>{const p=await pickFolder($('#nw_cwd').value.trim(),'Folder for the new chat');if(p)$('#nw_cwd').value=p};
+ $('#nw_pick').onclick=async()=>{
+  const h=$('#nw_where').value;
+  if(h){const b=await remoteBrowser(h,$('#nw_cwd').value.trim()||'~',p=>{$('#nw_cwd').value=p;$('#nw_browse').innerHTML=''});
+   $('#nw_browse').innerHTML='';$('#nw_browse').appendChild(b);return}
+  const p=await pickFolder($('#nw_cwd').value.trim(),'Folder for the new chat');if(p)$('#nw_cwd').value=p};
  $('#nw_go').onclick=async()=>{
-  const p={model:$('#nw_model').value,cwd:$('#nw_cwd').value.trim(),mode:$('#nw_mode').value};
+  const p={model:$('#nw_model').value,cwd:$('#nw_cwd').value.trim(),mode:$('#nw_mode').value,host:$('#nw_where').value};
+  if(p.host&&!isClaudeModelId(p.model))return toast('a chat on another machine runs through Claude Code — pick a Claude Code model');
   const name=$('#nw_name').value.trim();
   if(name){presets.push({name,...p});await apiPost('/api/claude/settings',{settings:{presets}},'presets')}
   start(p)}}
@@ -1793,34 +1816,112 @@ async function pickFolder(start,prompt){
  const d=await apiPost('/api/pick_folder',{start:start||'',prompt:prompt||'Choose a folder'},'folder chooser');
  if(!d||d.cancelled){if(d&&d.error)toast('folder chooser: '+d.error);return null}
  return d.path}
+// Settings → Claude Code → Remote machines: the hosts in ~/.ssh/config, whether each has
+// Claude Code, and the folder new chats there start in.
+async function renderRemoteHosts(box){
+ REMOTE_HOSTS=null;const hosts=await remoteHosts();
+ box.classList.remove('note');box.innerHTML='';
+ box.appendChild(el(`<div class=note style="margin-bottom:6px">A chat can run Claude Code on another machine: choose it under “Where” when you pick a chat's folder (the folder chip by the title) or in New chat with…. Claude Code runs there — editing files and running commands on that machine — in its own process group, ended whenever the answer stops or the connection drops, so nothing piles up on a login node. Models come from this Mac through an SSH tunnel to Orbit's gateway (it needs Orbit's token; keys stay here); your Claude login goes over the connection itself. Hosts are those in <code>~/.ssh/config</code>, with key-based login.</div>`));
+ if(!hosts.length){box.appendChild(el('<div class=note>No hosts in ~/.ssh/config yet.</div>'));return}
+ hosts.forEach(h=>{
+  const r=el(`<div class=memrow style="display:block;padding:6px 8px">
+    <div style="display:flex;gap:6px;align-items:center"><b style="min-width:120px"></b><span class=note style="flex:1" data-p>${h.probe?probeLine(h.probe):'not checked yet'}</span><button class=ghost data-a=check>check</button></div>
+    <div style="display:flex;gap:6px;align-items:center;margin-top:4px"><span class=note>new chats start in</span><input type=text style="flex:1;max-width:320px" placeholder="~ (home folder)"><button class=ghost data-a=save>save</button></div></div>`);
+  r.querySelector('b').textContent=h.host;
+  const inp=r.querySelector('input');inp.value=(h.saved||{}).default_dir||'';
+  r.querySelector('[data-a=check]').onclick=async()=>{r.querySelector('[data-p]').innerHTML='checking…';
+   const pr=await apiPost('/api/remote/probe',{host:h.host,refresh:true},'checking');r.querySelector('[data-p]').innerHTML=probeLine(pr)};
+  r.querySelector('[data-a=save]').onclick=async()=>{if(await apiPost('/api/remote/save',{host:h.host,default_dir:inp.value.trim()},'saving'))toast('saved');REMOTE_HOSTS=null};
+  box.appendChild(r)})}
+// Where a chat's Claude session works: a folder on this Mac, or on another machine over
+// SSH (a cluster's login node…) where it edits files and runs commands. Chosen before
+// its first message; a chat that has begun stays where it is.
+let REMOTE_HOSTS=null;
+async function remoteHosts(){
+ if(!REMOTE_HOSTS){try{REMOTE_HOSTS=(await (await fetch('/api/remote/hosts')).json()).hosts||[]}catch(e){REMOTE_HOSTS=[]}}
+ return REMOTE_HOSTS}
+function probeLine(pr){
+ if(!pr)return '';
+ if(!pr.ok)return `<span style="color:var(--err)">not reachable: ${esc(pr.error||'')}</span>`;
+ if(!pr.claude)return `<span style="color:var(--warn)">${esc(pr.hostname||'')}: no Claude Code found — install it there (or open a Claude Code SSH session to it once)</span>`;
+ const near=pr.proc_limit&&pr.procs>pr.proc_limit*0.8;
+ return `✓ ${esc(pr.hostname||'')} · Claude Code ${esc(pr.claude_version||'')} · ${pr.logged_in?'signed in there':'uses your models from this Mac'} · ${pr.procs}/${pr.proc_limit||'?'} processes${near?' <b style="color:var(--warn)">— near the limit</b>':''} · ${pr.secs}s`}
+async function remoteBrowser(hostName,startPath,onPick){
+ // a small folder browser on the remote machine
+ const box=el(`<div class=rbrowse><div class=note>loading…</div></div>`);
+ const load=async path=>{
+  box.innerHTML='<div class=note>listing '+esc(path)+' on '+esc(hostName)+'…</div>';
+  const d=await apiPost('/api/remote/ls',{host:hostName,path},'listing');
+  if(!d||d.error){box.innerHTML=`<div class=note style="color:var(--err)">${esc((d&&d.error)||'could not list it')}</div>`;return}
+  box.innerHTML='';
+  const head=el(`<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px"><code style="flex:1;overflow:hidden;text-overflow:ellipsis"></code><button class=ghost data-a=up>↑ up</button><button class=primary data-a=use>use this folder</button></div>`);
+  head.querySelector('code').textContent=d.path;
+  head.querySelector('[data-a=up]').onclick=()=>load(d.path.replace(/\/[^/]+\/?$/,'')||'/');
+  head.querySelector('[data-a=use]').onclick=()=>onPick(d.path);
+  box.appendChild(head);
+  const list=el('<div style="max-height:220px;overflow:auto"></div>');
+  d.dirs.filter(x=>!x.startsWith('.')).concat(d.dirs.filter(x=>x.startsWith('.'))).forEach(n=>{
+   const r=el('<div class=memrow style="cursor:pointer;padding:3px 8px">📁 <span></span></div>');r.querySelector('span').textContent=n;
+   r.onclick=()=>load(d.path.replace(/\/$/,'')+'/'+n);list.appendChild(r)});
+  if(!d.dirs.length)list.appendChild(el('<div class=note>no folders here</div>'));
+  box.appendChild(list)};
+ load(startPath||'~');
+ return box}
 async function folderDialog(){
  const info=await (await fetch('/api/claude/info?sid='+encodeURIComponent(sid))).json();
  const fl=(await (await fetch('/api/claude/folders')).json()).folders||[];
+ const hosts=await remoteHosts();
  const started=!!info.session;
  const host=$('#modalhost');
- host.innerHTML=`<div class=modal><div class="sheet cqpanel"><header><b>Working folder</b>
+ const where=info.host||'';
+ host.innerHTML=`<div class=modal><div class="sheet cqpanel"><header><b>Where this chat works</b>
    <button class=ghost style="margin-left:auto" id=fdx>close</button></header><div class=body>
-   ${started?`<div class=note>This chat's Claude session works in <code>${esc(info.cwd||'')}</code>. To work somewhere else, start a new chat there.</div>`:
-    '<div class=note>Claude Code starts this chat in the folder you choose, as if you had run claude-qwen there.</div>'}
-   <div class=grid style="margin-top:8px"><label>Folder</label><div style="display:flex;gap:6px"><input type=text id=fd_cwd spellcheck=false placeholder="type a path, or choose…" style="flex:1"><button class=ghost id=fd_pick title="open the Mac folder chooser">Choose…</button></div>
+   ${started?`<div class=note>This chat's Claude session works in <code>${esc((where?where+':':'')+(info.cwd||''))}</code>. To work somewhere else, start a new chat there.</div>`:
+    '<div class=note>Claude Code starts this chat in the folder you choose — on this Mac, or on another machine over SSH (it edits files and runs commands there; your models still come from this Mac).</div>'}
+   <div class=grid style="margin-top:8px">
+   <label>Where</label><select id=fd_where><option value="">This Mac</option>${hosts.map(h=>`<option value="${esc(h.host)}">${esc(h.host)} (SSH)</option>`).join('')}</select>
+   <div class=hint2 id=fd_probe></div>
+   <label>Folder</label><div style="display:flex;gap:6px"><input type=text id=fd_cwd spellcheck=false placeholder="type a path, or choose…" style="flex:1"><button class=ghost id=fd_pick title="choose a folder">Choose…</button></div>
    <label>Also allow</label><div><textarea class=ta id=fd_add style="min-height:50px" placeholder="more folders, one per line (--add-dir)"></textarea><button class=ghost id=fd_pickadd style="font-size:11.5px">+ choose a folder…</button></div></div>
-   <div class=sec>Recent</div><div id=fd_list></div>
-   <div style="margin-top:10px"><button class=primary id=fd_ok>${started?'New chat in this folder':'Use this folder'}</button>
+   <div id=fd_browse></div>
+   <div class=sec id=fd_recenthead>Recent</div><div id=fd_list></div>
+   <div style="margin-top:10px"><button class=primary id=fd_ok>${started?'New chat there':'Use this folder'}</button>
    <span class=note id=fd_note></span></div></div></div></div>`;
+ $('#fd_where').value=where;
  $('#fd_cwd').value=info.cwd||info.cwd_pref||'';$('#fd_add').value=(info.add_dirs||[]).join('\n');
  const list=$('#fd_list');
  fl.forEach(f=>{const r=el('<div class=memrow style="cursor:pointer"><b></b><span></span></div>');
   r.querySelector('b').textContent=f.path.replace(/^\/Users\/[^/]+/,'~');r.querySelector('span').textContent=f.why;
   r.onclick=()=>{$('#fd_cwd').value=f.path};list.appendChild(r)});
+ const syncWhere=async()=>{
+  const h=$('#fd_where').value;
+  $('#fd_list').style.display=$('#fd_recenthead').style.display=h?'none':'';
+  $('#fd_browse').innerHTML='';
+  if(!h){$('#fd_probe').innerHTML='';$('#fd_cwd').placeholder='type a path, or choose…';return}
+  $('#fd_cwd').placeholder='a folder on '+h+' — e.g. ~/project, or choose…';
+  const saved=((hosts.find(x=>x.host===h)||{}).saved)||{};
+  if(!$('#fd_cwd').value||$('#fd_cwd').value.startsWith('/Users/'))$('#fd_cwd').value=saved.default_dir||'~';
+  $('#fd_probe').innerHTML='checking '+esc(h)+'…';
+  const pr=await apiPost('/api/remote/probe',{host:h},'checking the host');
+  if($('#fd_where')&&$('#fd_where').value===h)$('#fd_probe').innerHTML=probeLine(pr)};
+ $('#fd_where').onchange=syncWhere;if(where)syncWhere();
  $('#fdx').onclick=closeModal;
- $('#fd_pick').onclick=async()=>{const p=await pickFolder($('#fd_cwd').value.trim(),'Working folder for this chat');if(p)$('#fd_cwd').value=p};
- $('#fd_pickadd').onclick=async()=>{const p=await pickFolder($('#fd_cwd').value.trim(),'Another folder Claude may use');
-  if(p){const t=$('#fd_add');t.value=(t.value.trim()?t.value.trim()+'\n':'')+p}};
+ $('#fd_pick').onclick=async()=>{
+  const h=$('#fd_where').value;
+  if(h){const b=await remoteBrowser(h,$('#fd_cwd').value.trim()||'~',p=>{$('#fd_cwd').value=p;$('#fd_browse').innerHTML=''});
+   $('#fd_browse').innerHTML='';$('#fd_browse').appendChild(b);return}
+  const p=await pickFolder($('#fd_cwd').value.trim(),'Working folder for this chat');if(p)$('#fd_cwd').value=p};
+ $('#fd_pickadd').onclick=async()=>{
+  const h=$('#fd_where').value;
+  const add=p=>{const t=$('#fd_add');t.value=(t.value.trim()?t.value.trim()+'\n':'')+p;$('#fd_browse').innerHTML=''};
+  if(h){const b=await remoteBrowser(h,$('#fd_cwd').value.trim()||'~',add);$('#fd_browse').innerHTML='';$('#fd_browse').appendChild(b);return}
+  const p=await pickFolder($('#fd_cwd').value.trim(),'Another folder Claude may use');if(p)add(p)};
  $('#fd_ok').onclick=async()=>{
+  const h=$('#fd_where').value;
   const cwd=$('#fd_cwd').value.trim(),add=$('#fd_add').value.split('\n').map(x=>x.trim()).filter(Boolean);
   if(started){await newChat();}
-  const d=await apiPost('/api/claude/cwd',{sid,cwd,add_dirs:add},'working folder');
-  if(d){closeModal();toast('this chat works in '+(cwd||'the workspace'));drawClaudeBar()}}}
+  const d=await apiPost('/api/claude/cwd',{sid,cwd,add_dirs:add,host:h},'working folder');
+  if(d){closeModal();toast('this chat works in '+(h?h+':':'')+(cwd||'the workspace'));drawClaudeBar();loadSessions()}}}
 async function claudePanel(){
  const d=await (await fetch('/api/claude/info?sid='+encodeURIComponent(sid))).json();
  const host=$('#modalhost');
@@ -2894,6 +2995,8 @@ async function openSettings(tab){
      Changes to skills, plugins, MCP servers and permissions below are made to Claude itself (<code>${esc(cc.paths&&cc.paths.user||'')}</code>), so the terminal sees them too.</div>
     <div class=sec>Models</div>
     <div class=note>Providers, accounts and keys are shared with Orbit's own chat, on one page: <button class=ghost id=cc_tomodels>Settings → Models &amp; keys</button>. Every model there runs through Claude Code in Claude Code mode — including <b>Claude · your subscription</b>, plain Claude Code on your own login with no API key.</div>
+    <div class=sec>Remote machines (SSH) <small>— chats that run Claude Code on another machine</small></div>
+    <div id=cc_remote class=note>loading…</div>
     <div class=sec>Permissions <small>— Claude's settings</small></div><div class=grid>
     <label>Default mode</label><select id=cc_mode><option value="">default (ask)</option>${Object.entries(CQ_MODES).filter(([k])=>k!=='default').map(([k,v])=>`<option value=${k}>${v}</option>`).join('')}</select>
     <label>Allow</label><textarea class=ta id=cc_allow style="min-height:60px" placeholder="one rule per line, e.g. Bash(git diff:*)"></textarea>
@@ -2949,6 +3052,7 @@ async function openSettings(tab){
     </div></details>
     <button class=primary id=cq_save style="margin-top:8px">Save launcher and Orbit options</button> <span class=note id=cq_note></span>`;
    $('#cc_tomodels').onclick=()=>tabs('models');
+   renderRemoteHosts($('#cc_remote'));
    // permissions
    $('#cc_mode').value=perm.defaultMode&&perm.defaultMode!=='default'?perm.defaultMode:'';
    $('#cc_allow').value=lines(perm.allow);$('#cc_ask').value=lines(perm.ask);$('#cc_deny').value=lines(perm.deny);
