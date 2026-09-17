@@ -1328,7 +1328,9 @@ class H(http.server.BaseHTTPRequestHandler):
             merged = dict(q.secrets_load())
             for k, v in (d.get("secrets") or {}).items():
                 if not _re.match(r"^[A-Z][A-Z0-9_]{1,63}$", str(k)): continue
-                if v: merged[k] = str(v).strip()
+                # a key or token never contains spaces: one copied across a wrapped terminal
+                # line comes with a space (or line break) inside it, and is then rejected
+                if v: merged[k] = re.sub(r"\s+", "", str(v)) if k.endswith(("_KEY", "_TOKEN")) else str(v).strip()
                 else: merged.pop(k, None); os.environ.pop(k, None)
             return self._send(200, jdump(q.secrets_save(merged)))
         if p == "/api/schedule/save":

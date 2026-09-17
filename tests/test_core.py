@@ -55,6 +55,21 @@ class Sandbox(unittest.TestCase):
         q._SESS_CACHE["key"] = None
 
 
+class TestSecretsWithSpaces(Sandbox):
+    def test_a_key_copied_across_a_wrapped_line_loses_the_space(self):
+        """REGRESSION: a token copied from a terminal where it wrapped had a space in
+        it, and Claude rejected it as invalid."""
+        saved = q.SECRETS
+        q.SECRETS = os.path.join(self.tmp, "secrets.json")
+        try:
+            json.dump({"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-abc def\nghi", "NOTE": "two words"}, open(q.SECRETS, "w"))
+            d = q.secrets_load()
+            self.assertEqual(d["CLAUDE_CODE_OAUTH_TOKEN"], "sk-ant-oat01-abcdefghi")
+            self.assertEqual(d["NOTE"], "two words")
+        finally:
+            q.SECRETS = saved
+
+
 class TestSessionCache(Sandbox):
     def test_edit_invalidates_cache(self):
         """REGRESSION: pin/tag edits were served stale — a directory's mtime does
