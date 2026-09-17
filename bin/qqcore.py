@@ -585,11 +585,29 @@ def check_magic(path):
         return f"not a valid {ext[1:].upper()} (bad file signature)"
     return None
 
+# Plain text needs no conversion, and markitdown is an optional extra -- a note,
+# a script or a CSV must still be readable (and indexable) when it is missing.
+PLAIN_TEXT = (".md", ".markdown", ".txt", ".text", ".rst", ".org", ".log", ".csv", ".tsv",
+              ".json", ".jsonl", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".xml", ".tex",
+              ".py", ".js", ".ts", ".jsx", ".tsx", ".sh", ".zsh", ".rb", ".go", ".rs",
+              ".c", ".h", ".cpp", ".java", ".swift", ".sql", ".r", ".css", ".srt", ".vtt")
+
 def _md(src):
-    from markitdown import MarkItDown
-    if not str(src).lower().startswith(("http://", "https://")):
-        bad = check_magic(str(src))
+    src = str(src)
+    if not src.lower().startswith(("http://", "https://")):
+        bad = check_magic(src)
         if bad: raise ValueError(bad)
+        if os.path.splitext(src)[1].lower() in PLAIN_TEXT and os.path.exists(src):
+            with open(src, encoding="utf-8", errors="replace") as f: return f.read()[:MAXCH]
+    try:
+        from markitdown import MarkItDown
+    except ImportError:
+        if src.lower().startswith(("http://", "https://")): raise
+        # last resort: read it as text, unless it is plainly binary
+        if _is_binary(src):
+            raise ValueError("markitdown is not installed, so this file cannot be converted "
+                             "to text (pip install markitdown)")
+        with open(src, encoding="utf-8", errors="replace") as f: return f.read()[:MAXCH]
     return (MarkItDown().convert(src).text_content or "")[:MAXCH]
 
 # Borrowed from Guardian: a stealth Chromium it already has installed, used

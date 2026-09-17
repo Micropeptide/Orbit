@@ -166,6 +166,53 @@ class TestParity(unittest.TestCase):
         proc.wait(timeout=5)
         self.assertIsNotNone(proc.poll())
 
+    # -- the welcome page ---------------------------------------------------------
+    def test_home_reports_activity_running_work_and_what_is_coming(self):
+        st = self.chat([{"role": "user", "content": "hi"}])
+        st.title = "busy chat"
+        st.queue.append({"id": "qq2", "text": "later please", "attachments": []})
+        jobs = {"jobs": [{"id": "j1", "name": "nightly", "every": "daily", "at": "09:00", "enabled": True},
+                         {"id": "j2", "name": "paused one", "every": "daily", "at": "10:00", "enabled": False},
+                         {"id": "j3", "name": "broken", "every": "daily", "at": "11:00", "enabled": True,
+                          "last_run": time.time() - 600, "last_ok": False, "last_result": "ssh timed out"}]}
+        saved = (self.q.sched_load, self.q.health_check)
+        self.q.sched_load = lambda *a, **k: jobs
+        self.q.health_check = lambda *a, **k: [{"name": "disk space", "ok": False, "detail": "2 GB free", "fix": "make room"},
+                                               {"name": "model server", "ok": False, "info": True, "detail": "stopped"}]
+        self.addCleanup(lambda: setattr(self.q, "sched_load", saved[0]))
+        self.addCleanup(lambda: setattr(self.q, "health_check", saved[1]))
+        st.lock.acquire()
+        try:
+            code, d = self.call("get", "/api/home")
+        finally:
+            st.lock.release()
+        self.assertEqual(code, 200, d)
+        self.assertEqual(len(d["days"]), 14)                       # two weeks, every day present
+        self.assertEqual(d["days"][-1]["day"], time.strftime("%Y-%m-%d"))
+        for k in ("turns", "tokens", "seconds", "tool_runs"):
+            self.assertIn(k, d["today"])
+        kinds = {(x["kind"], x["id"]) for x in d["tasks"]}
+        self.assertIn(("answer", st.sid), kinds)
+        self.assertIn(("queued", "qq2"), kinds)
+        names = [u["title"] for u in d["upcoming"]]
+        self.assertIn("nightly", names)
+        self.assertNotIn("paused one", names)                      # a paused task is not coming up
+        self.assertEqual([f["title"] for f in d["failed"]], ["broken"])
+        self.assertEqual([p["name"] for p in d["problems"]], ["disk space"])   # "info" checks are not problems
+
+    def test_home_streak_counts_back_from_today_and_stops_at_a_quiet_day(self):
+        day = lambda n: time.strftime("%Y-%m-%d", time.localtime(time.time() - n * 86400))
+        saved = self.q.usage_stats
+        self.q.usage_stats = lambda days=7, now=None: {
+            "turns": 3, "models": {}, "tools": {},
+            "by_day": {day(0): {"turns": 1, "tokens": 10, "seconds": 1.0, "tool_runs": 0},
+                       day(1): {"turns": 0, "tokens": 0, "seconds": 0.0, "tool_runs": 4},   # tools only still counts
+                       day(3): {"turns": 9, "tokens": 90, "seconds": 9.0, "tool_runs": 0}}}
+        self.addCleanup(lambda: setattr(self.q, "usage_stats", saved))
+        code, d = self.call("get", "/api/home")
+        self.assertEqual(code, 200)
+        self.assertEqual(d["streak"], 2)
+
     def test_shell_mode_runs_in_the_folder_it_reports_and_stops_runaway_pipes(self):
         st = self.chat()
         code, d = self.call("post", "/api/bang", {"sid": st.sid, "command": "pwd"})

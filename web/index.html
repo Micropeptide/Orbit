@@ -715,20 +715,70 @@ textarea.memmode{outline:2px solid var(--think)!important}
 .approve.ccask.answered{border-color:var(--line);padding:6px 12px}
 .ccopt .ccbx{font-family:var(--mono);color:var(--mut)}
 /* the greeting in an empty chat */
-.hero{max-width:640px;margin:14vh auto 0;padding:0 18px;text-align:center}
-.herot{font-size:26px;font-weight:500;letter-spacing:-.01em;color:var(--fg)}
-.herostar{color:var(--acc)}
+.hero{max-width:780px;margin:7vh auto 40px;padding:0 18px;text-align:center}
+.herot{font-size:27px;font-weight:500;letter-spacing:-.015em;color:var(--fg)}
+.herostar{color:var(--acc);display:inline-block;animation:herospin 14s linear infinite}
+@keyframes herospin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.herostar{animation:none}}
 .herosub{color:var(--dim);font-size:13px;margin-top:6px}
-.herotips{display:flex;flex-wrap:wrap;gap:7px;justify-content:center;margin:20px 0 26px}
-.herotip{border:1px solid var(--line);border-radius:16px;padding:4px 11px;font-size:12.5px;color:var(--mut);cursor:pointer;background:var(--card)}
+.herosub .hsm{cursor:pointer;border-bottom:1px dashed var(--line)}.herosub .hsm:hover{color:var(--fg);border-color:var(--acc)}
+.herotips{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin:16px 0 18px}
+.herotip{border:1px solid var(--line);border-radius:16px;padding:3px 10px;font-size:12px;color:var(--mut);cursor:pointer;background:var(--card);transition:border-color .15s,color .15s}
 .herotip b{font-family:var(--mono);color:var(--acc);font-weight:600}
-.herotip:hover{border-color:var(--acc)}
-.herorecent{text-align:left;border-top:1px solid var(--line);padding-top:12px}
-.herolbl{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);margin-bottom:6px}
-.herorow{display:flex;gap:10px;padding:6px 8px;border-radius:8px;cursor:pointer;font-size:13.5px}
-.herorow:hover{background:var(--panel)}
-.herorow .hrt{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.herorow .hrw{color:var(--dim);font-size:12px}
+.herotip:hover{border-color:var(--acc);color:var(--fg)}
+.heroalerts{display:flex;flex-direction:column;gap:6px;margin:0 0 12px;text-align:left}
+.halert{display:flex;gap:9px;align-items:center;padding:8px 12px;border-radius:10px;font-size:13px;cursor:pointer;border:1px solid color-mix(in srgb,var(--warn) 35%,var(--line));background:color-mix(in srgb,var(--warn) 8%,var(--card))}
+.halert.bad{border-color:color-mix(in srgb,var(--err) 35%,var(--line));background:color-mix(in srgb,var(--err) 7%,var(--card))}
+.halert .hai{font-size:14px;width:16px;text-align:center}.halert .hat{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.halert .hago{color:var(--dim);font-size:12px}.halert:hover{filter:brightness(.98)}
+.herogrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;text-align:left}
+.hcard{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;min-width:0;display:flex;flex-direction:column}
+.hcard.wide{grid-column:1/-1}
+.hch{display:flex;align-items:center;gap:8px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);margin-bottom:8px}
+.hch .hcl{margin-left:auto;text-transform:none;letter-spacing:0;font-size:12px;color:var(--mut);cursor:pointer;background:none;border:0;padding:0}
+.hch .hcl:hover{color:var(--acc)}
+.hch .hdot{width:7px;height:7px;border-radius:50%;background:var(--dim)}.hch .hdot.live{background:var(--ok);box-shadow:0 0 0 0 color-mix(in srgb,var(--ok) 60%,transparent);animation:hpulse 1.8s infinite}
+@keyframes hpulse{70%{box-shadow:0 0 0 6px transparent}100%{box-shadow:0 0 0 0 transparent}}
+.hnums{display:grid;grid-template-columns:repeat(auto-fit,minmax(78px,1fr));gap:10px 14px;cursor:pointer}
+.hnum b{display:block;font-size:19px;font-weight:600;letter-spacing:-.01em;color:var(--fg);font-variant-numeric:tabular-nums}
+.hnum small{font-size:11.5px;color:var(--dim)}
+.hdelta{font-size:11px;margin-left:4px;font-weight:500}.hdelta.up{color:var(--ok)}.hdelta.down{color:var(--dim)}
+.hbars{display:flex;align-items:flex-end;gap:3px;height:54px;margin-top:12px;cursor:pointer}
+.hbars .hb{flex:1;background:color-mix(in srgb,var(--acc) 22%,transparent);border-radius:3px 3px 1px 1px;min-height:2px;position:relative;transition:background .15s}
+.hbars .hb.today{background:var(--acc)}.hbars .hb:hover{background:color-mix(in srgb,var(--acc) 60%,transparent)}
+.hbars .hb.zero{background:var(--line)}
+.hbaxis{display:flex;justify-content:space-between;font-size:10.5px;color:var(--dim);margin-top:3px}
+.hstreak{font-size:12px;color:var(--mut);margin-top:8px}
+.hlist{display:flex;flex-direction:column;gap:2px}
+.hrow{display:flex;gap:9px;align-items:center;padding:5px 6px;margin:0 -6px;border-radius:7px;font-size:13px;cursor:pointer;min-width:0}
+.hrow:hover{background:var(--panel)}
+.hrow .hri{width:16px;text-align:center;color:var(--mut);flex:none;font-size:12px}
+.hrow .hrt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hrow .hrs{color:var(--dim);font-size:12px;white-space:nowrap;flex:none}
+.hrow .hrx{font-size:11.5px;color:var(--mut);border:1px solid var(--line);border-radius:6px;padding:0 6px;background:none;cursor:pointer;flex:none}
+.hrow .hrx:hover{color:var(--err);border-color:var(--err)}
+.hrow .hrsub{display:block;color:var(--dim);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hrow.wait .hri{color:var(--warn)}
+.hempty{color:var(--dim);font-size:12.5px;padding:4px 0}
+.hempty a{color:var(--acc);cursor:pointer;text-decoration:none}
+.hacct{margin-bottom:8px}.hacct:last-child{margin-bottom:0}
+.hacct .han{font-size:12.5px;color:var(--mut);margin-bottom:4px;display:flex;gap:6px}.hacct .han span{margin-left:auto;color:var(--dim);font-size:11.5px}
+.hmeter{display:grid;grid-template-columns:42px 1fr 38px;gap:8px;align-items:center;font-size:11.5px;color:var(--dim);margin:3px 0}
+.hmeter .hmt{height:6px;border-radius:3px;background:var(--panel);overflow:hidden}
+.hmeter .hmf{height:100%;border-radius:3px;background:var(--ok);transition:width .4s}
+.hmeter .hmf.mid{background:var(--warn)}.hmeter .hmf.low{background:var(--err)}
+.hmeter .hmv{text-align:right;color:var(--fg);font-variant-numeric:tabular-nums}
+.hmodels .hmrow{display:grid;grid-template-columns:minmax(0,1fr) 70px 30px;gap:8px;align-items:center;font-size:12.5px;margin:3px 0}
+.hmodels .hmrow span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hmodels .hmrow i{display:block;height:5px;border-radius:3px;background:color-mix(in srgb,var(--acc) 55%,transparent)}
+.hmodels .hmrow em{font-style:normal;color:var(--dim);text-align:right;font-variant-numeric:tabular-nums}
+.htools{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.htools span{font-family:var(--mono);font-size:11px;color:var(--mut);background:var(--panel);border-radius:5px;padding:1px 6px}
+.herorecent .hrow .hrm{font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:5px;padding:0 5px;flex:none;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hkbd{font-family:var(--mono);font-size:10.5px;color:var(--dim);border:1px solid var(--line);border-radius:4px;padding:0 4px;flex:none}
+.hskel{height:12px;border-radius:5px;background:linear-gradient(90deg,var(--panel),var(--line),var(--panel));background-size:200% 100%;animation:hsk 1.3s infinite;margin:6px 0}
+@keyframes hsk{to{background-position:-200% 0}}
+@media(max-width:680px){.herogrid{grid-template-columns:minmax(0,1fr)}.hero{margin-top:4vh}.herot{font-size:22px}.hnums{gap:12px}}
 /* the chat outline, top right of the transcript */
 main{position:relative;min-width:0}
 .outline{position:absolute;top:58px;right:18px;z-index:30}
@@ -6223,37 +6273,201 @@ function fillOutline(){
 new MutationObserver(()=>{clearTimeout(drawOutline._t);drawOutline._t=setTimeout(drawOutline,200)})
  .observe(wrap,{childList:true});
 
-/* ---------------- an empty chat ----------------
-   A new chat opens on a short greeting with what you can do from the box, and the
-   chats you were last in -- the way Claude Code opens -- instead of a blank page. */
-function drawHero(){
+/* ---------------- an empty chat: the home page ----------------
+   A new chat opens on a short greeting with what you can do from the box -- the way
+   Claude Code opens -- and, around it, what you would otherwise go looking for: what
+   is running or waiting on you, what is coming up, what is left of each allowance,
+   how much you have used Orbit lately, and the chats you were last in. */
+let HOME=null, HOME_AT=0, HOME_LOADING=false;
+async function loadHome(force){
+ if(HOME_LOADING||(!force&&Date.now()-HOME_AT<15000))return;
+ HOME_LOADING=true;
+ try{const r=await fetch('/api/home');if(r.ok){HOME=await r.json();HOME_AT=Date.now()}}
+ catch(e){}
+ finally{HOME_LOADING=false}
+ drawHero(true)}
+function heroVisible(){const h=$('#hero');return !!(h&&h.style.display!=='none')}
+setInterval(()=>{if(heroVisible()&&!document.hidden)loadHome()},20000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&heroVisible())loadHome()});
+function fmtTok(n){n=+n||0;return n>=1e9?(n/1e9).toFixed(1)+'B':n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e4?Math.round(n/1e3)+'k':n>=1e3?(n/1e3).toFixed(1)+'k':String(n)}
+function inTime(t){const s=t-Date.now()/1000;
+ if(s<=60)return s<-60?'overdue':'now';const m=Math.round(s/60);
+ if(m<60)return 'in '+m+'m';const h=Math.floor(m/60);
+ if(h<24)return 'in '+h+'h'+(m%60&&h<6?' '+(m%60)+'m':'');
+ return new Date(t*1000).toLocaleString([], {weekday:'short',hour:'numeric',minute:'2-digit'})}
+function heroCard(title,link,onLink,extra){
+ const c=el(`<div class="hcard${extra?' '+extra:''}"><div class=hch><span class=hct></span></div></div>`);
+ c.querySelector('.hct').textContent=title;
+ if(link){const b=el('<button class=hcl></button>');b.textContent=link;b.onclick=e=>{e.stopPropagation();onLink()};c.querySelector('.hch').appendChild(b)}
+ return c}
+function heroRow(icon,title,side,onclick,sub){
+ const r=el('<div class=hrow><span class=hri></span><span class=hrt></span><span class=hrs></span></div>');
+ r.querySelector('.hri').textContent=icon;
+ const t=r.querySelector('.hrt');t.textContent=title;t.title=title;
+ if(sub){const x=el('<span class=hrsub></span>');x.textContent=sub;t.appendChild(x)}
+ r.querySelector('.hrs').textContent=side||'';
+ if(onclick)r.onclick=onclick;else r.style.cursor='default';
+ return r}
+function openChatFromHome(id){if(!id)return;showPane('log');openSession(id)}
+function drawHero(fromData){
  const h=$('#hero');if(!h)return;
  const empty=!wrap.querySelector('.msg,.sysline,.approve');
  if(!empty||$('#log').style.display==='none'){h.style.display='none';return}
+ if(!fromData)loadHome();
+ // the mutation observer calls this on every change to the chat; skip redrawing an
+ // unchanged page (it would reset hover and flicker)
+ const key=[sid,HOME_AT,(SESSIONS||[]).length,(SESSIONS||[])[0]&&SESSIONS[0].mtime,MODELS.current,
+  isClaudeChat(),isCodexChat(),[...(RUNNING||[])].join()].join('|');
+ if(h._key===key&&h.style.display!=='none')return;
+ const arriving=h.style.display==='none'||(h._key||'').split('|')[0]!==sid;
+ h._key=key;
  const hr=new Date().getHours();
  const when=hr<5?'Up late':hr<12?'Good morning':hr<18?'Good afternoon':'Good evening';
  const engine=isClaudeChat()?'Claude Code':isCodexChat()?'Codex':'Orbit';
  h.innerHTML='';
  h.appendChild(el(`<div class=herot><span class=herostar>✻</span> ${esc(when)} — what's next?</div>`));
- h.appendChild(el(`<div class=herosub>${esc(engine)} · ${esc(modelLabel())}</div>`));
+ const sub=el('<div class=herosub></div>');
+ sub.appendChild(document.createTextNode(engine+' · '));
+ const ms=el('<span class=hsm title="change the model"></span>');ms.textContent=modelLabel();
+ ms.onclick=()=>{const b=$('#hmodel')&&$('#hpick').style.display!=='none'?$('#hmodel'):$('#modelsel');
+  if(b){b.focus();try{b.showPicker()}catch(e){}}};
+ sub.appendChild(ms);h.appendChild(sub);
  const tips=el('<div class=herotips></div>');
  [['/','commands'],['@','mention a file'],['!','run a shell command'],['#','save to memory'],
-  ['⇧Tab','permission mode'],['?','shortcuts']].forEach(([k,t])=>{
+  ['⇧Tab','permission mode'],['⌘P','find a chat'],['?','shortcuts']].forEach(([k,t])=>{
   const c=el('<span class=herotip><b></b> </span>');c.querySelector('b').textContent=k;
   c.appendChild(document.createTextNode(t));
   c.onclick=()=>{if(k==='?'){showShortcuts();return}if(k==='⇧Tab'){cycleMode();return}
+   if(k==='⌘P'){openPal();return}
    q.value=k==='#'?'# ':k;q.focus();q.dispatchEvent(new Event('input'))};
   tips.appendChild(c)});
  h.appendChild(tips);
- const recent=(SESSIONS||[]).filter(x=>x.id!==sid&&!x.archived).slice(0,4);
- if(recent.length){
-  const r=el('<div class=herorecent><div class=herolbl>Pick up where you left off</div></div>');
-  recent.forEach(x=>{const row=el('<div class=herorow><span class=hrt></span><span class=hrw></span></div>');
-   row.querySelector('.hrt').textContent=x.title||'untitled';
-   row.querySelector('.hrw').textContent=x.mtime?relTime(x.mtime):'';
-   row.onclick=()=>openSession(x.id);r.appendChild(row)});
-  h.appendChild(r)}
- h.style.display=''}
+ const d=HOME;
+ const tasks=(d&&d.tasks)||[];
+ // ---- things that want you now
+ const alerts=el('<div class=heroalerts></div>');
+ const alert=(icon,text,side,fn,bad)=>{const a=el(`<div class="halert${bad?' bad':''}"><span class=hai></span><span class=hat></span><span class=hago></span></div>`);
+  a.querySelector('.hai').textContent=icon;a.querySelector('.hat').textContent=text;a.querySelector('.hago').textContent=side||'';a.onclick=fn;alerts.appendChild(a)};
+ const waiting=tasks.filter(t=>t.kind==='answer'&&t.status==='waiting for you');
+ waiting.forEach(t=>alert('⏸',`“${t.title}” is waiting for your answer`,'open →',()=>openChatFromHome(t.sid)));
+ ((d&&d.problems)||[]).forEach(pb=>alert('⚠',pb.name+': '+pb.detail,pb.fix?'fix →':'',()=>showHealth(),true));
+ ((d&&d.failed)||[]).forEach(f=>alert('✕',`Scheduled task “${f.title}” failed${f.result?': '+f.result:''}`,f.at?relTime(f.at):'',()=>f.sid?openChatFromHome(f.sid):showPane('tasks'),true));
+ ((d&&d.allowances)||[]).forEach(a=>{
+  const lim=(a.windows||[]).find(w=>w.limited)||(a.exhausted&&{name:'',resets:a.exhausted.until*1000});
+  const low=!lim&&(a.windows||[]).find(w=>w.left<=15);
+  if(lim)alert('⛔',`${a.label}${a.account?' ('+a.account+')':''}: limit reached`+(lim.resets?' — back '+inTime((typeof lim.resets==='number'?lim.resets:Date.parse(lim.resets))/1000):''),'',()=>{},true);
+  else if(low)alert('◔',`${a.label}${a.account?' ('+a.account+')':''}: only ${low.left}% of the ${low.name} allowance left`,low.resets?'resets '+inTime(Date.parse(low.resets)/1000):'',()=>{})});
+ if(alerts.children.length)h.appendChild(alerts);
+ const grid=el('<div class=herogrid></div>');
+ const skel=c=>{for(let i=0;i<3;i++){const x=el('<div class=hskel></div>');x.style.width=(90-i*18)+'%';c.appendChild(x)}};
+ // ---- running now
+ {const live=tasks.filter(t=>t.kind==='answer'||(t.kind==='shell'&&t.can_stop));
+  const queued=tasks.filter(t=>t.kind==='queued'&&!/^at /.test(t.status||''));
+  const c=heroCard('Running now',tasks.length?'all tasks':'',showTasks);
+  const dot=el(`<span class="hdot${live.length?' live':''}"></span>`);c.querySelector('.hch').prepend(dot);
+  const list=el('<div class=hlist></div>');
+  if(!d)skel(list);
+  else if(!live.length&&!queued.length)list.appendChild(el('<div class=hempty>Nothing running — Orbit is idle.</div>'));
+  live.slice(0,4).forEach(t=>{
+   const el_=heroRow(t.kind==='shell'?'$':t.status==='waiting for you'?'⏸':'⏺',t.title,
+    t.since?fmtSecs(d.now-t.since):'',t.sid?()=>openChatFromHome(t.sid):null,
+    t.kind==='answer'&&t.status&&t.status!=='answering'?t.status:'');
+   if(t.status==='waiting for you')el_.classList.add('wait');
+   if(t.can_stop){const x=el('<button class=hrx>stop</button>');x.title=t.kind==='answer'?'stop this answer':'stop this command';
+    x.onclick=async e=>{e.stopPropagation();x.disabled=true;
+     const ok=t.kind==='answer'?await apiPost('/api/cancel',{sid:t.sid},'stopping'):await apiPost('/api/tasks/stop',{kind:t.kind,id:t.id},'stopping');
+     x.textContent=ok?'stopped':'stop';refreshRunning();setTimeout(()=>loadHome(true),800)};
+    el_.appendChild(x)}
+   list.appendChild(el_)});
+  if(queued.length){const by={};queued.forEach(t=>{by[t.sid]=by[t.sid]||{t,n:0};by[t.sid].n++});
+   Object.values(by).slice(0,3).forEach(({t,n})=>list.appendChild(heroRow('↳',t.title,n+' queued',()=>openChatFromHome(t.sid),t.text?'next: '+t.text:'')))}
+  c.appendChild(list);grid.appendChild(c)}
+ // ---- coming up
+ {const up=(d&&d.upcoming)||[];
+  const c=heroCard('Coming up','scheduled',()=>showPane('tasks'));
+  const list=el('<div class=hlist></div>');
+  if(!d)skel(list);
+  else if(!up.length){const x=el('<div class=hempty>Nothing scheduled. <a>Schedule a task</a> or press ⏱ beside Send.</div>');
+   x.querySelector('a').onclick=()=>showPane('tasks');list.appendChild(x)}
+  up.slice(0,4).forEach(u=>{
+   const icon=u.kind==='limit_resume'?'↻':u.kind==='message'?'✉':u.repeat?'⟳':'⏱';
+   const title=u.kind==='limit_resume'?'Resume “'+u.title.replace(/^.*?:\s*/,'')+'” after the limit':u.title;
+   list.appendChild(heroRow(icon,title,u.missed?'missed':inTime(u.at),
+    u.kind==='message'&&u.sid?()=>openChatFromHome(u.sid):()=>showPane('tasks'),u.text||''))});
+  c.appendChild(list);grid.appendChild(c)}
+ // ---- activity
+ {const c=heroCard('Activity','details',()=>showStats(7));
+  if(!d){skel(c)}
+  else{
+   const w=d.week,lw=d.last_week;
+   const delta=lw.turns?Math.round((w.turns-lw.turns)/lw.turns*100):null;
+   const nums=el(`<div class=hnums title="usage by model">
+     <div class=hnum><b>${(+d.today.turns).toLocaleString()}</b><small>answers today</small></div>
+     <div class=hnum><b>${(+w.turns).toLocaleString()}${delta===null?'':`<span class="hdelta ${delta>=0?'up':'down'}">${delta>=0?'▲':'▼'}${Math.abs(delta)}%</span>`}</b><small>this week</small></div>
+     <div class=hnum><b>${fmtTok(w.tokens)}</b><small>tokens · 7 days</small></div>
+     <div class=hnum><b>${fmtSecs(w.seconds)}</b><small>model time</small></div></div>`);
+   nums.onclick=()=>showStats(7);c.appendChild(nums);
+   const max=Math.max(1,...d.days.map(x=>x.turns+x.tool_runs/10));
+   const bars=el('<div class=hbars></div>');
+   d.days.forEach((x,i)=>{const b=el('<div class=hb></div>');const v=x.turns+x.tool_runs/10;
+    b.style.height=Math.max(3,v/max*100)+'%';
+    if(i===d.days.length-1)b.classList.add('today');else if(!v)b.classList.add('zero');
+    const dt=new Date(x.day+'T12:00');
+    b.title=`${dt.toLocaleDateString([], {weekday:'short',month:'short',day:'numeric'})}: ${x.turns} answers · ${fmtTok(x.tokens)} tokens · ${x.tool_runs} tool calls`;
+    bars.appendChild(b)});
+   bars.onclick=()=>showStats(14);c.appendChild(bars);
+   const ax=el('<div class=hbaxis><span>2 weeks ago</span><span>today</span></div>');c.appendChild(ax);
+   if(d.streak>1){const s=el('<div class=hstreak></div>');s.textContent=`${d.streak}-day streak`;c.appendChild(s)}}
+  grid.appendChild(c)}
+ // ---- allowances (or, with none to track, what this week went to)
+ {const al=((d&&d.allowances)||[]).filter(a=>(a.windows||[]).length||a.exhausted);
+  const c=heroCard(al.length?'Allowance left':'This week',al.length?'models':'',()=>openSettings&&openSettings('models'));
+  if(!d)skel(c);
+  al.slice(0,3).forEach(a=>{
+   const box=el('<div class=hacct><div class=han><b style="font-weight:500"></b><span></span></div></div>');
+   box.querySelector('b').textContent=a.label+(a.account&&a.account!=='Main'?' · '+a.account:'');
+   if(a.spent&&a.spent.month)box.querySelector('.han span').textContent='~$'+(+a.spent.month).toFixed(2)+' this month';
+   (a.windows||[]).forEach(wn=>{
+    const m=el('<div class=hmeter><span></span><div class=hmt><div class=hmf></div></div><span class=hmv></span></div>');
+    m.children[0].textContent=wn.name;
+    const f=m.querySelector('.hmf');f.style.width=wn.left+'%';
+    if(wn.left<=15||wn.limited)f.classList.add('low');else if(wn.left<=40)f.classList.add('mid');
+    m.querySelector('.hmv').textContent=wn.limited?'0%':wn.left+'%';
+    const rs=wn.resets?(typeof wn.resets==='number'?wn.resets:Date.parse(wn.resets)/1000):0;
+    m.title=`${wn.left}% of the ${wn.name} allowance left${rs?' · resets '+new Date(rs*1000).toLocaleString([], {weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):''}`;
+    box.appendChild(m)});
+   c.appendChild(box)});
+  if(d){
+   const models=(d.models||[]);
+   if(models.length){
+    if(al.length)c.appendChild(el('<div class=hch style="margin:10px 0 4px">Most used · 7 days</div>'));
+    const mx=Math.max(...models.map(m=>m.turns),1);
+    const mm=el('<div class=hmodels></div>');
+    models.slice(0,al.length?3:4).forEach(m=>{const r=el('<div class=hmrow><span></span><i></i><em></em></div>');
+     r.children[0].textContent=m.model.replace(/ · your subscription$/,'');r.children[0].title=m.model;
+     r.querySelector('i').style.width=Math.max(6,m.turns/mx*100)+'%';r.querySelector('em').textContent=m.turns;mm.appendChild(r)});
+    c.appendChild(mm)}
+   if(!al.length&&(d.tools||[]).length){const t=el('<div class=htools></div>');
+    d.tools.forEach(x=>{const s_=el('<span></span>');s_.textContent=toolName(x.tool)+' ×'+x.calls;t.appendChild(s_)});c.appendChild(t)}
+   if(!models.length&&!al.length)c.appendChild(el('<div class=hempty>Nothing used this week yet.</div>'))}
+  grid.appendChild(c)}
+ // ---- chats to go back to: pinned first, then the most recent
+ {const pool=(SESSIONS||[]).filter(x=>x.id!==sid&&!x.archived);
+  const pinned=pool.filter(x=>x.pinned).slice(0,3);
+  const recent=pinned.concat(pool.filter(x=>!x.pinned).slice(0,6-pinned.length));
+  if(recent.length){
+   const c=heroCard('Pick up where you left off','all chats',()=>openPal(),'wide herorecent');
+   const list=el('<div class=hlist></div>');
+   recent.forEach((x,i)=>{
+    const r=heroRow(x.pinned?'★':RUNNING&&RUNNING.has&&RUNNING.has(x.id)?'⏺':'›',x.title||'untitled',x.mtime?relTime(x.mtime):'',()=>openSession(x.id));
+    if(x.model){const m=el('<span class=hrm></span>');m.textContent=modelLabel(x.model).replace(/ · .*$/,'');m.title=modelLabel(x.model);r.insertBefore(m,r.querySelector('.hrs'))}
+    if(x.queued){const qd=el('<span class=hrm></span>');qd.textContent=x.queued+' queued';r.insertBefore(qd,r.querySelector('.hrs'))}
+    list.appendChild(r)});
+   c.appendChild(list);grid.appendChild(c)}}
+ h.appendChild(grid);
+ h.style.display='';
+ // opening an empty chat should start at the greeting, not where the last chat was scrolled to
+ if(arriving)$('#log').scrollTop=0}
 function relTime(t){const s=Date.now()/1000-t;
  if(s<90)return 'just now';if(s<3600)return Math.round(s/60)+'m ago';
  if(s<86400)return Math.round(s/3600)+'h ago';return Math.round(s/86400)+'d ago'}
