@@ -55,9 +55,12 @@ DEFAULTS = {
     "append_system": "",
     "effort_passthrough": True,
 
-    # permission mode for a chat that has not picked one: "" = Claude's own
-    # (permissions.defaultMode in your Claude settings)
-    "permission_mode": "",
+    # defaults for a new chat (each chat can change its own):
+    # permission mode ("" = Claude's own, permissions.defaultMode in your Claude settings)
+    "permission_mode": "auto",
+    "default_effort": "",            # "" = Claude's own; low, medium, high, xhigh, max
+    "default_host": "",              # "" = this Mac; else an SSH host new chats run on
+    "default_dir": "",               # "" = Orbit's workspace (on another machine: that host's default)
     # permission mode for runs nobody is watching (scheduled jobs)
     "unattended_mode": "",
     # where "Don't ask again" saves: "suggested" (Claude's choice), "userSettings",
@@ -245,6 +248,19 @@ def harness_env(url, model, ctx, extra=None, small=None, auth=None):
         env["CLAUDE_CONFIG_DIR"] = os.environ["ORBIT_CLAUDE_CONFIG_DIR"]
     env.update(extra or {})
     return env
+
+
+def default_remote_dir(host):
+    """The folder new chats on a host start in: its saved default, else your first
+    bookmark there, else the home folder."""
+    try:
+        d = ((Q.S.get("remote_hosts") or {}).get(host) or {}).get("default_dir")
+        if d: return d
+        marks = (Q.S.get("folder_bookmarks") or {}).get(host) or []
+        if marks: return marks[0]
+    except Exception:
+        pass
+    return "~"
 
 
 def remote_target_env(target, env):
@@ -446,7 +462,8 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
     if session_id:
         argv += (["--resume", session_id] if resume else ["--session-id", session_id])
     mode = "plan" if read_only else (mode or "")
-    if mode in PERMISSION_MODES: argv += ["--permission-mode", mode]
+    if mode in PERMISSION_MODES and mode != "default":     # "default" (ask first) is Claude's own
+        argv += ["--permission-mode", mode]
     dis = [t for t in c.get("disallowed_tools") or [] if t]
     if dis: argv += ["--disallowedTools", *dis]
     if settings_path: argv += ["--settings", settings_path]
@@ -463,6 +480,8 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
     # only an explicit step up ("retry deeper"): the terminal command passes no effort
     if effort and c.get("effort_passthrough") and effort in ("high", "xhigh", "max"):
         argv += ["--effort", effort]
+    elif c.get("default_effort") in ("low", "medium", "high", "xhigh", "max"):
+        argv += ["--effort", c["default_effort"]]
     # identical system text across sessions and days: the local prompt cache keeps it
     argv.append("--exclude-dynamic-system-prompt-sections")
     argv += [str(x) for x in (c.get("extra_args") or [])]
@@ -1079,7 +1098,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     prefs0 = chat_prefs(sid) if sid else {}
     # a chat that runs on another machine over SSH (its folder is there); a chat keeps
     # the host its Claude session started on
-    host = (mk.get("host") if mk.get("session") and mk.get("remote_ready") else None) or prefs0.get("host") or None
+    host = (mk.get("host") if mk.get("session") and mk.get("remote_ready") else None) \
+        or (prefs0.get("host") if "host" in prefs0 else (None if mk.get("session") else c.get("default_host"))) or None
     remote = None
     if host:
         import ssh_remote
@@ -1096,6 +1116,16 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     # on another machine the transcript lives there: a session that started there resumes
     resume = bool(jp) or bool(remote and mk.get("session") and mk.get("host") == host and mk.get("remote_ready"))
     fork, resume_at = False, None
+    if resume and remote:
+        # the transcript is on that machine: Orbit remembers where its session ended
+        # (the last answer it received), so a chat edited or regenerated here resumes
+        # at the last answer it still has, and a forked chat branches off
+        fork = bool(sid and mk.get("owner") and mk["owner"] != sid)
+        mine = next((m.get("claude_uuid") for m in reversed(messages)
+                     if m.get("role") == "assistant" and m.get("claude_uuid")), None)
+        last_there = prefs0.get("remote_last_uuid") if not fork else None
+        if mine and last_there and mine != last_there:
+            resume_at = mine
     if jp:
         # a chat forked in Orbit shares its parent's Claude session: branch it off
         fork = bool(sid and mk.get("owner") and mk["owner"] != sid)
@@ -1112,8 +1142,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         folder = None
         try: folder = q.project_folder(project) if project else None
         except Exception: folder = None
-        cwd = prefs.get("cwd") or folder or q.WORKSPACE
-        if remote: cwd = prefs.get("cwd") or "~"          # a folder on that machine
+        cwd = prefs.get("cwd") or folder or (c.get("default_dir") or "").strip() or q.WORKSPACE
+        if remote: cwd = prefs.get("cwd") or default_remote_dir(remote["host"])     # a folder on that machine
         prior = _prior_transcript([m for m in messages if m.get("role") != "system"])
         mk = {"session": str(uuid.uuid4()), "cwd": cwd, "skills": [], "owner": sid}
         if remote: mk["host"] = remote["host"]
@@ -1546,6 +1576,10 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         last["partial"] = True
     rec = {"secs": round(time.time() - t_start, 1), "usage": dict(usage), "tool_runs": tool_runs,
            "rounds": tool_runs}
+    if remote and sid and not stopped:
+        last_uuid = next((m.get("claude_uuid") for m in reversed(messages)
+                          if m.get("role") == "assistant" and m.get("claude_uuid") and m.get("t", 0) >= now), None)
+        if last_uuid: set_chat_pref(sid, remote_last_uuid=last_uuid)
     if isinstance(umsg.get("claude"), dict):
         # after /compact the old size no longer holds; the next answer measures it again
         umsg["claude"]["ctx"] = 0 if _compacting else int((q.SESSION_TOKENS.get(sid) if sid else 0)
@@ -2026,6 +2060,9 @@ def sync_session(orbit_sid, running=False):
     msgs = d.get("messages") or []
     mk = marker_of(msgs)
     if not mk: return False
+    if mk.get("host"):
+        _remote_sync_later(orbit_sid, mk, float(d.get("saved") or 0))
+        return False
     path = jsonl_path(mk.get("session"), mk.get("cwd"))
     if not path: return False
     saved = float(d.get("saved") or 0)
@@ -2049,14 +2086,69 @@ def sync_session(orbit_sid, running=False):
     return True
 
 
+_REMOTE_SYNC = {}
+
+
+def _remote_sync_later(orbit_sid, mk, saved):
+    """A chat on another machine whose session was continued there (a terminal on
+    that machine): fetch its transcript in the background, at most once a minute, and
+    bring the new part into the chat. Opening the chat never waits for SSH."""
+    now = time.time()
+    if now - _REMOTE_SYNC.get(orbit_sid, 0) < 60: return
+    _REMOTE_SYNC[orbit_sid] = now
+    def work():
+        try:
+            import ssh_remote, tempfile
+            mtime, text = ssh_remote.fetch_transcript(mk["host"], mk.get("cwd"), mk.get("session"), since=saved + 2)
+            if not text: return
+            if orbit_sid in RUNS: return                       # answering now: its own stream is the truth
+            fd, tmp = tempfile.mkstemp(suffix=".jsonl"); os.close(fd)
+            try:
+                with open(tmp, "w", encoding="utf-8") as fh: fh.write(text)
+                merge_transcript(orbit_sid, tmp)
+            finally:
+                os.remove(tmp)
+        except Exception:
+            pass
+    threading.Thread(target=work, daemon=True).start()
+
+
+def merge_transcript(orbit_sid, path):
+    """Bring a Claude transcript's newer part into an Orbit chat. True if it changed."""
+    try: d = json.load(open(Q.session_path(orbit_sid)))
+    except Exception: return False
+    if not isinstance(d, dict): return False
+    msgs = d.get("messages") or []
+    mk = marker_of(msgs)
+    if not mk: return False
+    start = next((i for i, m in enumerate(msgs) if isinstance(m.get("claude"), dict)
+                  and m["claude"].get("session") == mk["session"]), None)
+    if start is None: return False
+    new, _title, cwd = convert(path)
+    ours = [m for m in msgs[start:] if m.get("role") in ("user", "assistant")]
+    theirs = [m for m in new if m.get("role") in ("user", "assistant")]
+    if len(theirs) <= len(ours): return False
+    mk2 = {**mk, "cwd": mk.get("cwd") if mk.get("host") else (cwd or mk.get("cwd"))}
+    for m in new:
+        if m.get("role") == "user": m["claude"] = dict(mk2)
+    extra = {k: v for k, v in d.items() if k not in ("schema", "title", "messages", "saved")}
+    Q.session_save(orbit_sid, msgs[:start] + new, d.get("title"), extra)
+    return True
+
+
 def resume_command(orbit_msgs, spec=None):
     """The terminal command that continues this chat's Claude session."""
     mk = marker_of(orbit_msgs)
     if not mk: return None
     cwd = mk.get("cwd") or HOME
     if mk.get("host"):
-        return (f"ssh -t {mk['host']} " + json.dumps(f"cd {cwd} && ~/.local/bin/claude --resume {mk['session']}")
-                + "   # models other than your Claude login need Orbit's tunnel: continue these in Orbit")
+        try:
+            import ssh_remote
+            exe = (ssh_remote._PROBES.get(mk["host"]) or {}).get("claude") or "claude"
+        except Exception:
+            exe = "claude"
+        return (f"ssh -t {mk['host']} " + json.dumps(f"cd {cwd} && {exe} --resume {mk['session']}")
+                + "   # it runs on your Claude login there; other models need Orbit's tunnel")
     pc = (spec or {}).get("provider_cfg") or {}
     if (spec or {}).get("provider") == "harness" and not pc.get("local"):
         return f"cd {json.dumps(cwd)} && claude-harness {json.dumps(spec['id'])} --resume {mk['session']}"

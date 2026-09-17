@@ -225,7 +225,8 @@ def save_session(st=None):
     if pl and pl.get("steps"): extra["plan"] = pl       # the chat's plan survives a restart
     if getattr(st, "plan_mode", False): extra["plan_mode"] = True
     try:
-        host = q.CE.chat_prefs(st.sid).get("host")
+        host = _chat_host(q.CE.marker_of(st.msgs) or {}, q.CE.chat_prefs(st.sid)) if q.CE.is_engine(
+            q.current_model(st.model)) else None
         if host: extra["host"] = host
     except Exception:
         pass
@@ -458,8 +459,15 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._send(200, jdump({"cwd": cwd, "instructions": q.CE.claude_instruction_files(cwd),
                                           "memory": q.CE.claude_memory(cwd), "folders": q.CE.claude_memory_folders(),
                                           "chat_instructions": q.CE.chat_prefs(sid_).get("instructions") if sid_ else None}))
-        if p == "/api/claude/folders":
-            return self._send(200, jdump({"folders": q.CE.recent_folders()}))
+        if p.split("?")[0] == "/api/claude/folders":
+            # folders to start a chat in, per machine: your bookmarks, the ones you chose
+            # lately, and (on this Mac) where Claude sessions ran and your projects
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            where = (qs.get("host") or [""])[0]
+            marks = (q.S.get("folder_bookmarks") or {}).get(where) or []
+            recent = [x for x in ((q.S.get("folder_recent") or {}).get(where) or []) if x not in marks]
+            return self._send(200, jdump({"host": where, "bookmarks": marks, "recent": recent,
+                                          "folders": [] if where else q.CE.recent_folders()}))
         if p.startswith("/api/claude/info"):
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
             sid = (qs.get("sid") or [""])[0]
@@ -481,7 +489,9 @@ class H(http.server.BaseHTTPRequestHandler):
                 "version": q.CE.INIT.get("claude_code_version"),
                 "mcp_known": sorted(q.CE.user_mcp_servers()),
                 "cwd_pref": q.CE.chat_prefs(sid).get("cwd"), "add_dirs": q.CE.chat_prefs(sid).get("add_dirs") or [],
-                "host": mk.get("host") or q.CE.chat_prefs(sid).get("host"),
+                "host": _chat_host(mk, q.CE.chat_prefs(sid)),
+                "cwd_default": (q.CE.default_remote_dir(_chat_host(mk, q.CE.chat_prefs(sid)))
+                                if _chat_host(mk, q.CE.chat_prefs(sid)) else (q.CE.cfg().get("default_dir") or None)),
                 "claude_default_mode": ((q.CE.read_claude_settings().get("permissions") or {}).get("defaultMode"))}))
         if p == "/api/code":
             return self._send(200, jdump(code_is_stale()))
@@ -785,7 +795,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/claude/cwd":
             # the folder a chat's Claude session starts in (and extra folders it may use)
             sid_, cwd = d.get("sid", ""), (d.get("cwd") or "").strip()
-            host = (d.get("host") or "").strip() or None      # a chat on another machine, over SSH
+            host = (d.get("host") or "").strip() or None      # a chat on another machine, over SSH ("" = this Mac)
             if host:
                 import ssh_remote
                 if not ssh_remote.valid_host(host):
@@ -798,7 +808,16 @@ class H(http.server.BaseHTTPRequestHandler):
                         return self._send(400, jdump({"error": f"no such folder: {cwd}"}))
                 dirs = [os.path.abspath(os.path.expanduser(x)) for x in (d.get("add_dirs") or []) if str(x).strip()]
             prefs = q.CE.set_chat_pref(sid_, cwd=cwd or None, add_dirs=dirs or None)
-            prefs = q.CE.set_chat_pref(sid_, host=host) if host or "host" in d else prefs
+            # "" is kept (this Mac, chosen), so a default host does not apply to this chat
+            prefs = q.CE.set_chat_pref(sid_, host=host or "") if host or "host" in d else prefs
+            if cwd:
+                with LOCK:
+                    cur = q.load_settings()
+                    fr = cur.get("folder_recent") or {}
+                    key = host or ""
+                    fr[key] = ([cwd] + [x for x in (fr.get(key) or []) if x != cwd])[:15]
+                    cur["folder_recent"] = fr
+                    q.save_settings(cur); q.reload_settings()
             st = STATES.get(sid_)
             if st is not None and not st.temp and os.path.exists(q.session_path(sid_)):
                 try: save_session(st)              # the sidebar shows where the chat runs
@@ -830,6 +849,19 @@ class H(http.server.BaseHTTPRequestHandler):
                 return self._send(200, jdump({"ok": False, "error": f"could not open: {type(e).__name__}"}))
             return self._send(200, jdump({"ok": True, "path": path, "revealed": reveal,
                                           "why": "shown in Finder rather than run" if runs and not d.get("reveal") else ""}))
+        if p == "/api/folders/bookmark":
+            where, path = str(d.get("host") or ""), str(d.get("path") or "").strip()
+            if not path: return self._send(400, jdump({"error": "which folder?"}))
+            with LOCK:
+                cur = q.load_settings()
+                bm = cur.get("folder_bookmarks") or {}
+                lst = [x for x in (bm.get(where) or []) if x != path]
+                if d.get("on", True): lst.insert(0, path)
+                if lst: bm[where] = lst[:40]
+                else: bm.pop(where, None)
+                cur["folder_bookmarks"] = bm
+                q.save_settings(cur); q.reload_settings()
+            return self._send(200, jdump({"ok": True, "bookmarks": bm.get(where) or []}))
         if p == "/api/remote/probe":
             import ssh_remote
             host = str(d.get("host") or "")
@@ -2027,6 +2059,13 @@ def _gateway_route(provider, model):
             "strict": provider not in ("anthropic",) and not str(model).startswith("claude")}
 
 _ACTIVE_ACCT = {}
+
+def _chat_host(mk, prefs):
+    """Where a chat runs: the host its session started on, the one chosen for it, or,
+    for a chat that has not started, the default ("" / None = this Mac)."""
+    if mk.get("session"): return mk.get("host") or None
+    if "host" in prefs: return prefs.get("host") or None
+    return q.CE.cfg().get("default_host") or None
 
 def _usage_brief(pid, model):
     """What a model has used through Orbit, and what is left where the provider publishes an allowance."""

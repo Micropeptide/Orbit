@@ -135,6 +135,21 @@ and keeps the folder new chats there start in.
   connection bursts that clusters block.
 - The newest Claude Code on the host is used: on PATH, in `~/.local/bin`, or the
   copies Claude's desktop app keeps there.
+- History: the chat is saved in Orbit as always; Claude's own session stays on the
+  host and each message resumes it (on any login node sharing your home folder, and
+  after Orbit restarts). A message you edit or regenerate in Orbit resumes at the
+  last answer Orbit still has, so Claude does not remember what you took back; a
+  session you continue in a terminal on the host comes back into the chat when you
+  open it.
+
+## Folders and defaults
+
+The folder picker keeps, for this Mac and for each host separately, the folders you
+chose lately and your **bookmarks** (☆ next to the folder, or on any listed one).
+Settings → Claude Code → **Defaults for new chats** sets the model, permission mode
+(**Auto** unless you change it: Claude runs what it judges safe and asks for the
+rest), reasoning effort, where new chats run (this Mac or a host) and their folder.
+Each chat can still change its own.
 
 ## Sessions from other agents
 
