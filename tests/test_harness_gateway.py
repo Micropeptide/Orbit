@@ -196,6 +196,20 @@ class TestServer(unittest.TestCase):
         self.assertEqual(s["headers"].get("Authorization"), "Bearer sk-upstream")
         self.assertEqual(s["body"]["model"], "deepseek-v4-pro")
 
+    def test_output_is_capped_at_the_models_limit(self):
+        Upstream.seen.clear()
+        Upstream.script = [{"chunks": [delta(content="ok"), {"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}]}]
+        old = type(self).gw.RequestHandlerClass
+        cap_resolver = lambda p, m: {"base": f"http://127.0.0.1:{self.up.server_address[1]}/v1", "format": "chat",
+                                     "api_key": "k", "max_output": 8000}
+        gw = G.serve(0, cap_resolver); self.addCleanup(gw.shutdown)
+        req = urllib.request.Request(f"http://127.0.0.1:{gw.server_address[1]}/h/p/v1/messages",
+                                     data=json.dumps({"model": "m", "max_tokens": 64000, "stream": True,
+                                                      "messages": [{"role": "user", "content": "hi"}]}).encode(),
+                                     headers={"content-type": "application/json"})
+        urllib.request.urlopen(req, timeout=10).read()
+        self.assertEqual(Upstream.seen[-1]["body"]["max_tokens"], 8000)
+
     def test_messages_model_passes_through_with_the_key(self):
         Upstream.seen.clear()
         Upstream.script = [{"raw": "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"}]

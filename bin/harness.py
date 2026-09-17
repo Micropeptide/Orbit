@@ -120,6 +120,109 @@ def _path(root):
     return os.path.join(root, "config", "harness.json")
 
 
+# ------------------------------------------------------------------ live model lists
+#
+# models.dev (the catalogue OpenCode itself uses) lists each provider's models
+# with their context window, output limit and API. A provider's own /models
+# endpoint, asked with your key, says what your account can use right now.
+
+MODELS_DEV_URL = "https://models.dev/api.json"
+MODELS_DEV_ID = {"opencode-go": "opencode-go", "opencode-zen": "opencode", "deepseek": "deepseek",
+                 "qwen": "alibaba", "glm": "zai", "minimax": "minimax", "kimi": "moonshotai",
+                 "anthropic": "anthropic"}
+
+
+def _fetched_path(root):
+    return os.path.join(root, "config", "harness-models.json")
+
+
+def fetched(root):
+    try:
+        return json.load(open(_fetched_path(root)))
+    except (OSError, ValueError):
+        return {}
+
+
+def _http_json(url, headers=None, timeout=20):
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "orbit", **(headers or {})})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def models_dev(root, max_age=86400, timeout=30):
+    """The models.dev catalogue, kept for a day in config/models-dev.json."""
+    import time
+    path = os.path.join(root, "config", "models-dev.json")
+    try:
+        if time.time() - os.path.getmtime(path) < max_age:
+            return json.load(open(path))
+    except (OSError, ValueError):
+        pass
+    try:
+        d = _http_json(MODELS_DEV_URL, timeout=timeout)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as fh: json.dump(d, fh)
+        os.replace(tmp, path)
+        return d
+    except Exception:
+        try: return json.load(open(path))
+        except (OSError, ValueError): return {}
+
+
+def _format_from_npm(npm):
+    npm = npm or ""
+    if "anthropic" in npm: return "messages"
+    if npm.endswith("/openai"): return "responses"
+    if "google" in npm: return None                  # Gemini's own API: not supported
+    return "chat"
+
+
+def refresh_models(root, pid, secrets=None, timeout=20):
+    """Bring a provider's model list up to date. Returns (count, note)."""
+    import time
+    base_p = providers(root).get(pid)
+    if not base_p or base_p.get("auth") == "local": return 0, "not a remote provider"
+    dev = (models_dev(root).get(MODELS_DEV_ID.get(pid, pid)) or {}).get("models") or {}
+    live, note = None, ""
+    key = _key_value(base_p, secrets)
+    if key and base_p.get("base"):
+        try:
+            base = base_p["base"].rstrip("/")
+            url = base + ("/v1/models" if base.endswith("/anthropic") else "/models")
+            d = _http_json(url, {"Authorization": "Bearer " + key, "x-api-key": key,
+                                 "anthropic-version": "2023-06-01"}, timeout)
+            live = [m.get("id") for m in (d.get("data") or d.get("models") or []) if isinstance(m, dict) and m.get("id")]
+        except Exception as e:
+            note = f"live list unavailable ({type(e).__name__})"
+    ids = live if live else list(dev.keys())
+    if not ids: return 0, note or "no models found"
+    preset = {m["id"]: m for m in PRESETS.get(pid, {}).get("models") or []}
+    out = []
+    for mid in ids:
+        info = dev.get(mid) or {}
+        lim = info.get("limit") or {}
+        if base_p.get("auth") == "api_key":
+            fmt = "messages"                              # these endpoints are Anthropic-compatible
+        elif mid in preset:
+            fmt = preset[mid]["format"]
+        else:
+            fmt = _format_from_npm((info.get("provider") or {}).get("npm") if isinstance(info.get("provider"), dict)
+                                   else None)
+        if fmt is None: continue
+        out.append({"id": mid, "format": fmt, "label": info.get("name") or _label(mid),
+                    "context": int(lim.get("context") or (preset.get(mid) or {}).get("context") or 128000),
+                    "output": int(lim.get("output") or 0) or None,
+                    "reasoning": bool(info.get("reasoning")), "free": "free" in mid})
+    out.sort(key=lambda m: (m["free"], m["id"]))
+    cache = fetched(root)
+    cache[pid] = {"at": time.time(), "source": ("live+models.dev" if live else "models.dev"), "models": out, "note": note}
+    tmp = _fetched_path(root) + ".tmp"
+    with open(tmp, "w") as fh: json.dump(cache, fh, indent=1)
+    os.replace(tmp, _fetched_path(root))
+    return len(out), note
+
+
 def load(root):
     """The user's choices: custom providers, base URL per provider, extra env,
     per-model context, models hidden from the picker."""
@@ -147,6 +250,7 @@ def save(root, cfg):
 def providers(root, local_name=None):
     """Presets merged with the user's choices, plus custom providers."""
     cfg = load(root)
+    fetched_all = fetched(root)
     out = {}
     for pid, p in list(PRESETS.items()) + [(k, {**v, "custom": True}) for k, v in cfg["custom"].items()]:
         p = json.loads(json.dumps(p))
@@ -157,6 +261,10 @@ def providers(root, local_name=None):
         for m in over.get("extra_models") or []:
             if not any(x["id"] == m.get("id") for x in p["models"]):
                 p["models"].append(_m(m["id"], m.get("format") or "messages", m.get("context") or 128000))
+        got = (fetched_all.get(pid) or {}).get("models")
+        if got and pid != "local":
+            p["models"] = [dict(m) for m in got]
+            p["fetched_at"] = fetched_all[pid].get("at")
         if pid == "local" and local_name:
             p["models"] = [_m(local_name, "messages", 131072, label=f"{local_name}")]
         for m in p["models"]:
@@ -215,7 +323,8 @@ def resolve(root, mid, secrets=None, local_name=None):
                              "format": m["format"], "auth": p.get("auth") or "api_key",
                              "key_name": p.get("key") or "", "api_key": _key_value(p, secrets),
                              "env": dict(p.get("env") or {}), "small": p.get("small") or model,
-                             "context": m["context"], "label": p["label"], "proxy": cfg["proxy"],
+                             "context": m["context"], "max_output": m.get("output"),
+                             "label": p["label"], "proxy": cfg["proxy"],
                              "local": p.get("auth") == "local"}}
 
 
@@ -257,6 +366,6 @@ def public_view(root, secrets=None, local_name=None):
         out.append({"id": pid, "label": p["label"], "base": p.get("base"), "alt_bases": p.get("alt_bases") or [],
                     "key": p.get("key"), "key_set": bool(_key_value(p, secrets)), "auth": p.get("auth"),
                     "docs": p.get("docs") or "", "keys_url": p.get("keys_url") or "", "custom": bool(p.get("custom")),
-                    "env": p.get("env") or {}, "small": p.get("small") or "",
+                    "env": p.get("env") or {}, "small": p.get("small") or "", "fetched_at": p.get("fetched_at"),
                     "models": [{**m, "hidden": f"harness:{pid}/{m['id']}" in cfg["hidden"]} for m in p["models"]]})
     return {"providers": out, "gateway_port": cfg["gateway_port"], "proxy": cfg["proxy"]}

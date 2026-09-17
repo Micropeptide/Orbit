@@ -6,7 +6,7 @@ endpoints. These are the ideas considered while building it (including what
 [bunshin-desktop](https://github.com/frankkk96/bunshin-desktop) offers), marked
 done (✅), partly done (◐) or not yet (·).
 
-Tally: **103 done, 2 partial, 95 not yet.**
+Tally: **107 done, 2 partial, 91 not yet.**
 
 ## A. Providers and models
 
@@ -30,12 +30,12 @@ Tally: **103 done, 2 partial, 95 not yet.**
 18. ✅ Model ids `harness:<provider>/<model>`; old `claude-qwen-cli:default` chats keep working.
 19. ✅ Pick models by words: "deepseek v4 pro on opencode go", "kimi k3", "local qwen".
 20. ✅ A test button per model: one short request through the same route a chat uses.
-21. · Fetch a provider's live model list instead of the preset list.
+21. ✅ Model lists fetched live: models.dev (context, output limit, API per model) and the provider's own `/models` with your key; daily and on demand.
 22. · Price per model and a running cost estimate.
 23. · Per-model thinking/effort defaults.
 24. · Automatic fallback to another provider when one is down.
 25. · Model aliases you name yourself.
-26. · Edit context windows in the page (the registry file supports it).
+26. ✅ Each chat's context window follows its model (1M for DeepSeek V4…); the local Qwen keeps the server's.
 27. · Edit a provider's extra environment in the page (the registry file supports it).
 28. · Import providers from bunshin's database.
 29. · Share a provider list between machines.
@@ -63,7 +63,7 @@ Tally: **103 done, 2 partial, 95 not yet.**
 48. ✅ Starts with Orbit; its port is configurable.
 49. ✅ Brief upstream failures (connection errors, 502/503/504) retried twice inside the gateway.
 50. · Request log with timing per model.
-51. · Cap `max_tokens` to what a model accepts.
+51. ✅ Replies capped at each model's output limit.
 52. · Documents (PDF blocks) converted to text for models that cannot read them.
 53. · Prompt caching hints for providers that support them.
 54. · Rate-limit awareness (wait and resume instead of failing).
@@ -215,7 +215,7 @@ Tally: **103 done, 2 partial, 95 not yet.**
 173. ✅ Claude Code chats recognised for every harness model.
 174. · Model badge in the sidebar.
 175. · Filter the sidebar by model.
-176. · Quick model switch from the chat header.
+176. ✅ Claude Code mode: provider and model pickers in the header, orange accent, new chats and Settings follow the harness.
 177. · Model chosen per message.
 178. · Show the provider's rate limits.
 179. · Per-model colour.

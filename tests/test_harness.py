@@ -64,6 +64,40 @@ class TestRegistry(unittest.TestCase):
         # keys never stored in the registry file
         self.assertNotIn("sk-", open(os.path.join(self.root, "config", "harness.json")).read())
 
+    def test_model_lists_come_from_models_dev_and_the_providers_own_list(self):
+        dev = {"opencode-go": {"models": {
+            "deepseek-v4-pro": {"name": "DeepSeek V4 Pro", "limit": {"context": 1000000, "output": 384000}, "reasoning": True},
+            "minimax-m3": {"name": "MiniMax M3", "limit": {"context": 1000000, "output": 131072},
+                           "provider": {"npm": "@ai-sdk/anthropic"}},
+            "gpt-x": {"limit": {"context": 400000}, "provider": {"npm": "@ai-sdk/openai"}},
+            "gemini-y": {"limit": {"context": 1}, "provider": {"npm": "@ai-sdk/google"}}}},
+               "deepseek": {"models": {"deepseek-v4-pro": {"limit": {"context": 1000000, "output": 384000}}}}}
+        old_dev, old_http = H.models_dev, H._http_json
+        H.models_dev = lambda root, **k: dev
+        seen = []
+        def http(url, headers=None, timeout=20):
+            seen.append((url, headers))
+            return {"data": [{"id": "deepseek-v4-pro"}, {"id": "brand-new-model"}]}
+        H._http_json = http
+        try:
+            n, note = H.refresh_models(self.root, "opencode-go", {})          # no key: models.dev only
+            self.assertEqual(n, 3)                                         # gemini's API is not supported
+            go = {m["id"]: m for m in H.providers(self.root)["opencode-go"]["models"]}
+            self.assertEqual((go["deepseek-v4-pro"]["context"], go["deepseek-v4-pro"]["output"]), (1000000, 384000))
+            self.assertEqual(go["minimax-m3"]["format"], "messages")
+            self.assertEqual(go["gpt-x"]["format"], "responses")
+            self.assertFalse(seen)
+            n, _ = H.refresh_models(self.root, "opencode-go", {"OPENCODE_API_KEY": "k"})   # with a key: the live list
+            self.assertEqual({m["id"] for m in H.providers(self.root)["opencode-go"]["models"]},
+                             {"deepseek-v4-pro", "brand-new-model"})
+            self.assertEqual(seen[-1][0], "https://opencode.ai/zen/go/v1/models")
+            H.refresh_models(self.root, "deepseek", {"DEEPSEEK_API_KEY": "k"})
+            self.assertEqual(seen[-1][0], "https://api.deepseek.com/anthropic/v1/models")
+            spec = H.resolve(self.root, "harness:opencode-go/deepseek-v4-pro", {"OPENCODE_API_KEY": "k"}, "m")
+            self.assertEqual((spec["provider_cfg"]["context"], spec["provider_cfg"]["max_output"]), (1000000, 384000))
+        finally:
+            H.models_dev, H._http_json = old_dev, old_http
+
     def test_public_view_has_no_key_values(self):
         view = H.public_view(self.root, {"OPENCODE_API_KEY": "sk-secret-value"})
         self.assertNotIn("sk-secret-value", json.dumps(view))
