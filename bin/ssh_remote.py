@@ -239,3 +239,56 @@ def fetch_transcript(host, cwd, session, since=0.0):
     try: mtime = float(head[5:])
     except ValueError: return None, None
     return mtime, (body if body.strip() else None)
+
+
+def stat_paths(host, paths, cwd="~"):
+    """Which of these names exist on the host (relative ones in the chat's folder
+    there): {name: {"path", "kind", "size", "mtime"}} for the ones that do."""
+    names = [str(p) for p in paths if p and "\n" not in str(p)][:200]
+    if not names: return {}
+    script = ('c=' + shlex.quote(cwd or "~") + '\n'
+              'case "$c" in "~"|"~/"*) c="$HOME${c#\\~}";; esac\n'
+              'cd "$c" 2>/dev/null || cd\n'
+              'while IFS= read -r n; do\n'
+              '  p="$n"; case "$p" in "~"|"~/"*) p="$HOME${p#\\~}";; esac\n'
+              '  [ -e "$p" ] || continue\n'
+              '  case "$p" in /*) a="$p";; *) a="$(pwd)/$p";; esac\n'
+              '  if [ -d "$p" ]; then k=folder; else k=file; fi\n'
+              '  s=$(stat -c "%s %Y" "$p" 2>/dev/null || stat -f "%z %m" "$p")\n'
+              '  printf "%s\\t%s\\t%s\\t%s\\n" "$n" "$a" "$k" "$s"\n'
+              'done <<\'ORBIT_NAMES\'\n' + "\n".join(names) + '\nORBIT_NAMES\n')
+    rc, out, err = run(host, script, timeout=45)
+    res = {}
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 4: continue
+        size, _, mtime = parts[3].partition(" ")
+        try: res[parts[0]] = {"path": parts[1], "kind": parts[2], "size": int(size), "mtime": float(mtime or 0)}
+        except ValueError: continue
+    return res
+
+
+def fetch_file(host, path, cache_root, max_bytes=200 * 1024 * 1024, timeout=300):
+    """Copy a file (or a small folder) from the host into Orbit's cache on this Mac,
+    to open or preview it here. Returns (local path, error)."""
+    if not valid_host(host): return None, "not a host name"
+    if not path or "\n" in path: return None, "which file?"
+    rc, out, err = run(host, 'p=' + shlex.quote(path) + '\ncase "$p" in "~"|"~/"*) p="$HOME${p#\\~}";; esac\n'
+                       'if [ -d "$p" ]; then echo "D $(du -sk "$p" | cut -f1)"; elif [ -f "$p" ]; then '
+                       'echo "F $(stat -c %s "$p" 2>/dev/null || stat -f %z "$p")"; else echo "N"; fi\necho "P=$p"\n', timeout=45)
+    lines = out.split("\n")
+    head = lines[0].split() if lines else []
+    full = next((l[2:] for l in lines if l.startswith("P=")), path)
+    if rc != 0 or not head: return None, (err.strip().splitlines() or [f"ssh exited {rc}"])[-1][:200]
+    if head[0] == "N": return None, f"not found on {host}: {path}"
+    size = int(head[1]) * (1024 if head[0] == "D" else 1) if len(head) > 1 and head[1].isdigit() else 0
+    if size > max_bytes: return None, f"too large to fetch ({size // (1024 * 1024)} MB)"
+    dest = os.path.join(cache_root, re.sub(r"[^A-Za-z0-9._-]", "_", host), full.lstrip("/"))
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    argv = ["scp", "-q", "-p", *base_opts(True)] + (["-r"] if head[0] == "D" else []) + [f"{host}:{full}", dest]
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None, "the copy took too long"
+    if r.returncode != 0: return None, (r.stderr.strip().splitlines() or ["scp failed"])[-1][:200]
+    return dest, None

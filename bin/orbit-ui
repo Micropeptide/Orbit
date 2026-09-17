@@ -10,6 +10,7 @@ if os.path.exists(_VENV) and os.path.realpath(sys.executable) != os.path.realpat
 import atexit, base64, http.server, urllib.parse as _up, json, os, queue, socketserver, sys, threading, time, uuid, webbrowser
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import qqcore as q
+import file_links as FL
 
 PORT = int(os.environ.get("ORBIT_UI_PORT") or os.environ.get("QQ_UI_PORT") or 8899)
 import remote as REMOTE
@@ -163,7 +164,7 @@ def prune_states():
     """Drop finished chats you are no longer looking at, so STATES cannot grow
     without bound over a long session. Takes no lock: callers may hold it."""
     idle = [k for k, v in list(STATES.items())
-            if v is not S and not v.lock.locked()]
+            if v is not S and not v.lock.locked() and not v.queue]     # a queued or scheduled message keeps its chat
     for k in (idle[:-20] if len(idle) > 20 else []):
         STATES.pop(k, None)
 
@@ -320,6 +321,12 @@ class H(http.server.BaseHTTPRequestHandler):
         self._send(403, jdump({"error": "cross-site request refused"}))
 
     def do_GET(self):
+        if self.path.startswith("/fs/"):
+            # a preview link: the token in it is the permission (one folder, read-only),
+            # so a sandboxed page can load the images and scripts beside it
+            host = (self.headers.get("Host") or "").strip()
+            if host and host not in allowed_hosts(): return self._refuse_cross_site()
+            return self._serve_granted()
         if not self._origin_ok(): return self._refuse_cross_site()
         if not self._authorised(): return self._refuse_unauthorised()
         try:
@@ -329,8 +336,50 @@ class H(http.server.BaseHTTPRequestHandler):
             try: self._send(500, jdump({"error": f"{type(e).__name__}: {e}"}))
             except Exception: pass
 
+    def _serve_granted(self):
+        fp = FL.granted_file(self.path.split("?")[0])
+        if not fp: return self._send(404, b"not found (or the preview link has expired)", "text/plain")
+        return self._send_file(fp, FL.preview_headers(fp))
+
+    def _send_file(self, fp, headers=None, download=False):
+        try:
+            size = os.path.getsize(fp)
+            rng = self.headers.get("Range") or ""
+            m = _re.match(r"bytes=(\d*)-(\d*)$", rng)
+            start, end = 0, size - 1
+            if m and (m.group(1) or m.group(2)):
+                if m.group(1): start = int(m.group(1)); end = int(m.group(2)) if m.group(2) else size - 1
+                else: start = max(0, size - int(m.group(2)))
+                end = min(end, size - 1)
+            with open(fp, "rb") as fh:
+                fh.seek(start); body = fh.read(end - start + 1)
+        except OSError:
+            return self._send(404, b"not found", "text/plain")
+        partial = bool(m and (m.group(1) or m.group(2)))
+        self.send_response(206 if partial else 200)
+        self.send_header("Content-Type", FL.mime_for(fp))
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Accept-Ranges", "bytes")
+        if partial: self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        for k, v in (headers or {}).items(): self.send_header(k, v)
+        if download:
+            self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + _up.quote(os.path.basename(fp)))
+        self.end_headers()
+        try: self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError): pass
+
     def _get(self, _p):
         p = self.path.split("?")[0]
+        if p == "/api/file":
+            # a file a chat names, for an image in an answer, a preview or a download
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            sid = (qs.get("sid") or [""])[0]
+            host, roots, changed = _chat_files_ctx(sid)
+            info = FL.resolve((qs.get("path") or [""])[0], roots, changed)
+            if not info.get("exists") or info.get("kind") != "file":
+                return self._send(404, jdump({"error": "not found"}))
+            if not info.get("servable"): return self._send(403, jdump({"error": "Orbit does not show this file in a page"}))
+            return self._send_file(info["path"], FL.preview_headers(info["path"]), download=bool(qs.get("download")))
         if p == "/":
             # One visit to /?t=<token> stores it as an HttpOnly cookie, so the web
             # app works from a phone browser without the token sitting in history.
@@ -826,30 +875,102 @@ class H(http.server.BaseHTTPRequestHandler):
             st = STATES.get(sid_)
             started = bool(q.CE.marker_of(st.msgs if st else []))
             return self._send(200, jdump({"ok": True, "prefs": prefs, "started": started}))
-        if p == "/api/open_path":
-            # a file or folder named in a chat, opened on this Mac: in its usual app, or
-            # shown in Finder. Anything that would run (an app, a script, a program) is only
-            # shown in Finder, never launched from a click on a chat.
-            raw = str(d.get("path") or "").strip().strip("`'\"")
-            if raw.startswith("file://"): raw = _up.unquote(raw[7:])
-            path = os.path.abspath(os.path.expanduser(raw)) if raw else ""
-            if raw and not os.path.isabs(os.path.expanduser(raw)):
-                path = os.path.abspath(os.path.join(q.WORKSPACE, raw))
-            path = re.sub(r":\d+(?::\d+)?$", "", path) if not os.path.exists(path) else path   # file.py:12
-            if not path or not os.path.exists(path):
-                return self._send(404, jdump({"error": f"not found: {raw[:200]}"}))
-            ext = os.path.splitext(path)[1].lower()
-            runs = ext in (".app", ".command", ".tool", ".terminal", ".scpt", ".applescript", ".workflow",
-                           ".pkg", ".mpkg", ".jar", ".webloc", ".inetloc", ".fileloc", ".action", ".prefpane",
-                           ".shortcut", ".dmg") or (os.path.isfile(path) and os.access(path, os.X_OK) and not ext)
-            reveal = bool(d.get("reveal")) or runs
-            try:
-                subprocess.run(["open", "-R", path] if reveal else ["open", path], timeout=15, check=True,
-                               capture_output=True)
-            except Exception as e:
-                return self._send(200, jdump({"ok": False, "error": f"could not open: {type(e).__name__}"}))
-            return self._send(200, jdump({"ok": True, "path": path, "revealed": reveal,
-                                          "why": "shown in Finder rather than run" if runs and not d.get("reveal") else ""}))
+        if p == "/api/paths/resolve":
+            # which names in an answer are real files, looked up where the chat works
+            sid = d.get("sid") or ""
+            names = [str(x) for x in (d.get("paths") or [])][:300]
+            host, roots, changed = _chat_files_ctx(sid)
+            if host:
+                import ssh_remote
+                cwd = roots[0] if roots else "~"
+                found = ssh_remote.stat_paths(host, [FL.clean(n)[0] for n in names], cwd) if d.get("remote", True) else {}
+                out = {}
+                for n in names:
+                    t, line = FL.clean(n); f = found.get(t)
+                    out[n] = ({"input": n, "exists": True, "host": host, "line": line, "path": f["path"], "kind": f["kind"],
+                               "size": f["size"], "mtime": f["mtime"], "name": os.path.basename(f["path"].rstrip("/")),
+                               "category": FL.category(f["path"], f["kind"] == "folder"),
+                               "ext": os.path.splitext(f["path"])[1].lower()} if f else
+                              {"input": n, "exists": False, "host": host, "path": t})
+                return self._send(200, jdump({"host": host, "cwd": cwd, "items": out}))
+            items = {}
+            for n in names:
+                info = FL.resolve(n, roots, changed)
+                if info.get("exists") and info.get("servable") and info.get("category") in ("image", "pdf", "html", "audio", "video"):
+                    info["url"] = FL.grant(info["path"])
+                items[n] = info
+            return self._send(200, jdump({"host": None, "cwd": roots[0] if roots else None, "items": items}))
+        if p == "/api/file/find":
+            host, roots, _ = _chat_files_ctx(d.get("sid") or "")
+            if host: return self._send(200, jdump({"items": []}))
+            paths = FL.find_by_name(FL.clean(d.get("name") or "")[0], roots)
+            return self._send(200, jdump({"items": [FL.describe(x) for x in paths]}))
+        if p in ("/api/open_path", "/api/file/action"):
+            # a file or folder named in a chat, handled on this Mac: opened in its usual
+            # app (or one you pick), shown in Finder, Quick Look, copied. Anything that
+            # would run (an app, a script) is only shown in Finder, never launched.
+            sid = d.get("sid") or ""
+            act = d.get("action") or ("reveal" if d.get("reveal") else "open")
+            host, roots, changed = _chat_files_ctx(sid)
+            raw = str(d.get("path") or "").strip()
+            if not raw: return self._send(400, jdump({"error": "which file?"}))
+            cache = os.path.join(q.ROOT, "cache", "remote-files")
+            if (host or d.get("host")) and not os.path.abspath(os.path.expanduser(raw)).startswith(cache + os.sep):
+                import ssh_remote
+                host = d.get("host") or host
+                if act in ("copy_path", "copy_scp"):
+                    return self._send(200, jdump({"ok": True}))
+                target = raw if raw.startswith(("/", "~")) else os.path.join(roots[0] if roots else "~", FL.clean(raw)[0])
+                local, err = ssh_remote.fetch_file(host, FL.clean(target)[0], cache)
+                if err: return self._send(200, jdump({"ok": False, "error": err}))
+                raw, roots = local, []
+            info = FL.resolve(raw, roots, changed)
+            if not info.get("exists"):
+                return self._send(404, jdump({"error": f"not found: {FL.clean(raw)[0][:200]}", "path": info.get("path")}))
+            path = info["path"]
+            if not _loopback_ok(self) and act not in ("preview", "info"):
+                return self._send(403, jdump({"error": "that works only at the Mac itself"}))
+            ok, why = True, ""
+            if act in ("open", "reveal"):
+                ok, why = FL.open_path(path, reveal=act == "reveal", line=d.get("line") or info.get("line"))
+            elif act == "open_with":
+                ok, why = FL.open_path(path, app=d.get("app"))
+            elif act == "apps":
+                return self._send(200, jdump({"ok": True, "apps": FL.open_with_apps(path), "info": info,
+                                              "editor": bool(FL.editor_cli())}))
+            elif act == "quicklook":
+                ok = FL.quick_look(path); why = "Quick Look"
+            elif act == "copy_file":
+                ok, why = FL.copy_file(path)
+            elif act == "terminal":
+                ok = FL.open_terminal_at(path); why = "Terminal opened there"
+            elif act == "preview":
+                if not info.get("servable"): return self._send(200, jdump({"ok": False, "error": "Orbit does not show this file in a page"}))
+                return self._send(200, jdump({"ok": True, "info": info, "url": FL.grant(path),
+                                              "local_copy": path if host else None}))
+            elif act == "render":
+                # a document, spreadsheet, HEIC photo, archive… as something a page can show
+                kind, out = FL.render_preview(path, os.path.join(q.ROOT, "cache", "previews"))
+                if not kind: return self._send(200, jdump({"ok": False, "error": out}))
+                return self._send(200, jdump({"ok": True, "kind": kind, "url": FL.grant(out), "info": info}))
+            elif act == "info":
+                return self._send(200, jdump({"ok": True, "info": info}))
+            else:
+                return self._send(400, jdump({"error": f"unknown action {act}"}))
+            if not ok: return self._send(200, jdump({"ok": False, "error": why or "could not do that"}))
+            return self._send(200, jdump({"ok": True, "path": path, "why": why, "revealed": act == "reveal" or "Finder" in why}))
+        if p == "/api/run_in_terminal":
+            if not _loopback_ok(self): return self._send(403, jdump({"error": "that works only at the Mac itself"}))
+            host, roots, _ = _chat_files_ctx(d.get("sid") or "")
+            cmd = str(d.get("command") or "")
+            if host:
+                import ssh_remote, shlex
+                cwd = roots[0] if roots else "~"
+                cmd = "ssh -t " + shlex.quote(host) + " " + shlex.quote(f"cd {cwd} && {cmd}; exec $SHELL -l")
+                ok, why = FL.run_in_terminal(cmd)
+            else:
+                ok, why = FL.run_in_terminal(cmd, roots[0] if roots else None)
+            return self._send(200, jdump({"ok": ok, "why": why, "error": None if ok else why}))
         if p == "/api/folders/bookmark":
             where, path = str(d.get("host") or ""), str(d.get("path") or "").strip()
             if not path: return self._send(400, jdump({"error": "which folder?"}))
@@ -1493,7 +1614,23 @@ class H(http.server.BaseHTTPRequestHandler):
             op, iid = d.get("op", ""), d.get("id")
             find = lambda: next((it for it in st.queue if it["id"] == iid), None)
             if op == "add":
-                _queue_add(st, d.get("text", ""), d.get("attachments"), d.get("effort"))
+                try: _queue_add(st, d.get("text", ""), d.get("attachments"), d.get("effort"), at=d.get("at"), repeat=d.get("repeat"))
+                except ValueError as e: return self._send(400, jdump({"error": str(e)}))
+            elif op == "schedule":
+                # set, change or clear when a waiting message goes out
+                it = find()
+                if not it: return self._send(404, jdump({"error": "that message has already started"}))
+                rp = d.get("repeat") or None
+                if rp and rp not in REPEATS: return self._send(400, jdump({"error": "repeat must be daily, weekdays or weekly"}))
+                if d.get("at"):
+                    at = float(d["at"])
+                    it["at"] = _next_time(at, rp) if rp and at <= time.time() else at
+                    it.pop("missed", None)
+                    if rp: it["repeat"] = rp
+                    else: it.pop("repeat", None)
+                else:
+                    for k in ("at", "repeat", "missed", "skipped"): it.pop(k, None)
+                _queue_saved(st)
             elif op == "edit":
                 it = find()
                 if not it: return self._send(404, jdump({"error": "that message has already started"}))
@@ -1515,15 +1652,32 @@ class H(http.server.BaseHTTPRequestHandler):
                     st.queue.remove(it); _queue_saved(st)
                     st.inbox.append({"text": it["text"], "t": time.time()}); st.interrupt.set()
                     return self._send(200, jdump({"ok": True, "interjected": True, "queue": _queue_view(st)}))
-                st.queue.remove(it); st.queue.insert(0, it); st.queue_paused = False; _queue_saved(st)
+                st.queue.remove(it)
+                if it.get("repeat") in REPEATS:     # sending a repeating one early keeps the series
+                    st.queue.append(dict(it, id=uuid.uuid4().hex[:10], at=_next_time(float(it["at"]), it["repeat"])))
+                it = {k: v for k, v in it.items() if k not in ("at", "repeat", "missed", "skipped")}
+                st.queue.insert(0, it); st.queue_paused = False; _queue_saved(st)
             elif op in ("pause", "resume"):
                 st.queue_paused = op == "pause"; _queue_saved(st)
             elif op == "clear":
                 st.queue = []; st.queue_paused = False; _queue_saved(st)
             elif op != "get":
                 return self._send(400, jdump({"error": f"unknown op {op}"}))
-            if op in ("add", "now", "resume"): _drain()
+            if op in ("add", "now", "resume", "schedule"): _drain()
             return self._send(200, jdump({"ok": True, "queue": _queue_view(st)}))
+        if p == "/api/scheduled_sends":
+            out = []
+            try: idx = json.load(open(QUEUE_INDEX))
+            except Exception: idx = {}
+            for qsid in set(idx) | {k for k, v in STATES.items() if v.queue}:
+                if qsid not in STATES and not os.path.exists(q.session_path(qsid)): continue
+                stt = get_state(qsid)
+                for it in stt.queue:
+                    if it.get("at"):
+                        out.append({"sid": qsid, "title": stt.title, "id": it["id"], "text": it.get("text", "")[:300],
+                                    "at": it["at"], "repeat": it.get("repeat"), "missed": bool(it.get("missed"))})
+            out.sort(key=lambda x: x["at"])
+            return self._send(200, jdump({"items": out}))
         if p == "/api/interject":
             # A note for an answer that is still running: queued, and handed to
             # the model at its next step. The interrupt cuts a long generation
@@ -1650,9 +1804,15 @@ class H(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(f"data: {jdump({'k': k, 'p': pl})}\n\n".encode())
             except Exception: pass
         text, atts, effort = d.get("message", ""), d.get("attachments") or [], d.get("effort")
+        if d.get("at"):
+            # sent later: it waits in the chat's queue until its time
+            try: item = _queue_add(st, text, atts, effort, at=float(d["at"]), repeat=d.get("repeat"))
+            except ValueError as e: return self._send(400, jdump({"error": str(e)}))
+            return _stream_once([("queued_message", {"item": item, "why": "scheduled", "queue": _queue_view(st)}),
+                                 ("end", {"sid": st.sid, "queued": True, "scheduled": True})])
         busy = st.lock.locked()
         full = len(running_sids()) >= _max_parallel()
-        if busy or full or st.queue:
+        if busy or full or _due_items(st):
             # it waits its turn: after the answer running now (and anything queued
             # before it), or for a free slot when many chats are answering
             if d.get("now") and busy and not atts:
@@ -1900,7 +2060,7 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
             except RuntimeError: pass
             # Stop pauses the chat's queue (the rest waits for you); otherwise the next
             # queued message starts, and chats waiting for a free slot get one
-            if st.cancel.is_set() and st.queue: st.queue_paused = True; _queue_saved(st)
+            if st.cancel.is_set() and _due_items(st): st.queue_paused = True; _queue_saved(st)
             threading.Thread(target=_drain, daemon=True).start()
     threading.Thread(target=work, daemon=True).start()
     return Q
@@ -1914,6 +2074,50 @@ class _Sink:
 DRAIN_LOCK = threading.Lock()
 INDEX_LOCK = threading.Lock()
 QUEUE_INDEX = os.path.join(q.ROOT, "config", "queues.json")
+
+REPEATS = ("daily", "weekdays", "weekly")
+
+def _next_time(at, repeat, now=None):
+    """The next time a repeating scheduled message is due after `now`, at the same
+    time of day (local time, so it stays at 9:00 across daylight-saving changes)."""
+    now = time.time() if now is None else now
+    t = time.localtime(at)
+    day = 0
+    while True:
+        day += 1
+        cand = time.mktime((t.tm_year, t.tm_mon, t.tm_mday + day, t.tm_hour, t.tm_min, 0, 0, 0, -1))
+        wd = time.localtime(cand).tm_wday
+        if repeat == "weekdays" and wd >= 5: continue
+        if repeat == "weekly" and wd != t.tm_wday: continue
+        if cand > now: return cand
+        if day > 3660: return now + 86400
+
+def _is_due(it, now=None):
+    return not it.get("at") or (float(it["at"]) <= (time.time() if now is None else now) and not it.get("missed"))
+
+def _due_items(st, now=None):
+    return [it for it in st.queue if _is_due(it, now)]
+
+def _schedule_grace():
+    """How late a scheduled message may still go out (Orbit was closed, the Mac slept)."""
+    try: return float(q.S.get("schedule_send_grace_h", 6)) * 3600
+    except (TypeError, ValueError): return 6 * 3600
+
+def _catch_up_schedules(st, now=None):
+    """Messages whose time passed long ago: a repeating one moves to its next time, a
+    one-off is kept, marked missed, for you to send or drop. Returns True if changed."""
+    now = time.time() if now is None else now
+    changed = False
+    for it in st.queue:
+        at = it.get("at")
+        if not at or it.get("missed") or now - float(at) <= _schedule_grace(): continue
+        if it.get("repeat") in REPEATS:
+            it["skipped"] = int(it.get("skipped") or 0) + 1
+            it["at"] = _next_time(float(at), it["repeat"], now)
+        else:
+            it["missed"] = True
+        changed = True
+    return changed
 
 def _queue_view(st):
     return {"items": [{k: v for k, v in it.items() if k != "attachments"} |
@@ -1938,9 +2142,15 @@ def _queue_saved(st):
             json.dump(idx, open(tmp, "w")); os.replace(tmp, QUEUE_INDEX)
     except Exception: pass
 
-def _queue_add(st, text, atts=None, effort=None):
+def _queue_add(st, text, atts=None, effort=None, at=None, repeat=None):
     item = {"id": uuid.uuid4().hex[:10], "text": str(text or ""), "attachments": list(atts or []),
             "effort": effort, "t": time.time()}
+    if at:
+        if repeat and repeat not in REPEATS: raise ValueError(f"repeat must be one of {', '.join(REPEATS)}")
+        at = float(at)
+        if repeat and at <= time.time(): at = _next_time(at, repeat)
+        item["at"] = at
+        if repeat: item["repeat"] = repeat
     st.queue.append(item)
     _queue_saved(st)
     return {k: v for k, v in item.items() if k != "attachments"}
@@ -1950,13 +2160,27 @@ def _drain():
     free slots. Called when an answer ends and when something is queued."""
     started = []
     with DRAIN_LOCK:
+        now = time.time()
         for st in list(STATES.values()):
-            if not st.queue or st.queue_paused: continue
+            if not st.queue: continue
+            if _catch_up_schedules(st, now): _queue_saved(st)
+            # Stop pauses the waiting messages; one you scheduled still goes at its time
+            due = [it for it in _due_items(st, now) if it.get("at") or not st.queue_paused]
+            if not due: continue
             if len(running_sids()) >= _max_parallel(): break
             if not st.lock.acquire(blocking=False): continue
-            if not st.queue:
+            due = [it for it in _due_items(st, now) if it.get("at") or not st.queue_paused]
+            if not due:
                 st.lock.release(); continue
-            item = st.queue.pop(0)
+            item = due[0]
+            st.queue.remove(item)
+            if item.get("repeat") in REPEATS:
+                # the next one waits for its own time, in the same place
+                nxt = dict(item, id=uuid.uuid4().hex[:10], at=_next_time(float(item["at"]), item["repeat"], now))
+                nxt.pop("skipped", None)
+                st.queue.append(nxt)
+            if item.get("at"):
+                item["text"] = str(item.get("text") or "")
             started.append((st, item))
     for st, item in started:
         _queue_saved(st)
@@ -2067,6 +2291,39 @@ def _chat_host(mk, prefs):
     if mk.get("session"): return mk.get("host") or None
     if "host" in prefs: return prefs.get("host") or None
     return q.CE.cfg().get("default_host") or None
+
+def _loopback_ok(handler):
+    """Acting on the Mac (opening apps, the clipboard, Terminal) is for you at the Mac,
+    not for a paired phone."""
+    return handler._from_loopback()
+
+def _chat_files_ctx(sid):
+    """Where a chat's file names point: (SSH host or None, folders most likely first,
+    files its answers changed)."""
+    st = STATES.get(sid) if sid else None
+    msgs, project = [], None
+    if st is not None:
+        msgs, project = list(st.msgs), st.project
+    elif sid and os.path.exists(q.session_path(sid)):
+        try:
+            d = json.load(open(q.session_path(sid)))
+            msgs, project = d.get("messages") or [], d.get("project")
+        except Exception: pass
+    mk = q.CE.marker_of(msgs) or {} if msgs else {}
+    prefs = q.CE.chat_prefs(sid) if sid else {}
+    host = (mk.get("host") if mk.get("session") else prefs.get("host")) or None
+    cwd = mk.get("cwd") or prefs.get("cwd")
+    if host:
+        return host, [cwd or q.CE.default_remote_dir(host) or "~"], []
+    changed = []
+    for m in msgs[-200:]:
+        for c in m.get("changes") or []:
+            if c.get("path"): changed.append(c["path"])
+    try: pdir = q.project_folder(project) if project else None
+    except Exception: pdir = None
+    # a chat that works in a folder means that folder; other chats their project's, or Orbit's workspace
+    roots = FL.roots_for(cwd, prefs.get("add_dirs") or ()) if cwd else FL.roots_for(None, (), pdir, q.WORKSPACE)
+    return None, roots, changed[::-1]
 
 def _usage_brief(pid, model):
     """What a model has used through Orbit, and what is left where the provider publishes an allowance."""
@@ -2503,6 +2760,19 @@ if __name__ == "__main__":
             if os.path.exists(q.session_path(qsid)): get_state(qsid)
         _drain()
     threading.Thread(target=_resume_queues, daemon=True).start()
+    def _schedule_ticker():
+        # scheduled messages go out on time (checked every 15 s), not only when an answer ends
+        time.sleep(20)
+        while True:
+            try:
+                now = time.time()
+                if any(it.get("at") and (_is_due(it, now) or now - float(it["at"]) > _schedule_grace())
+                       for st in list(STATES.values()) for it in list(st.queue)):
+                    _drain()
+            except Exception as e:
+                print(f"  ! scheduled messages: {type(e).__name__}: {e}", flush=True)
+            time.sleep(15)
+    threading.Thread(target=_schedule_ticker, daemon=True).start()
     threading.Thread(target=q.CE.history_items_cached, daemon=True).start()   # warm the sidebar
     mode = remote_mode()
     addrs = REMOTE.bind_addresses(mode)

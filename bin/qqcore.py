@@ -2257,7 +2257,8 @@ def session_list():
                    "mtime": _activity(meta, msgs, f, p),
                    "pinned": bool(meta.get("pinned")), "archived": bool(meta.get("archived")),
                    "tags": meta.get("tags") or [], "project": meta.get("project"), "order": meta.get("order"),
-                   "queued": len(meta.get("queue") or []), "model": meta.get("model"), "host": meta.get("host"),
+                   "queued": len([x for x in (meta.get("queue") or []) if not x.get("at")]),
+                   "scheduled": min([x["at"] for x in (meta.get("queue") or []) if x.get("at")] or [0]) or None, "model": meta.get("model"), "host": meta.get("host"),
                    "n": len([m for m in (msgs or []) if isinstance(m, dict) and m.get("role") in ("user", "assistant")])}
             hit = (k, row)
             _SESS_ROWS[f] = hit
