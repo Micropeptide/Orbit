@@ -29,7 +29,7 @@ TAILSCALE_BINS = ["/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale",
 def mac_name():
     """The Mac's own name as its owner set it (System Settings → General → About), for the
     phone to show. The network host name changes with the network (a VPN hands out names
-    like vpn-172-27-…), so it is only the fallback."""
+    like vpn-10-0-0-1…), so it is only the fallback."""
     for key in ("ComputerName", "LocalHostName"):
         try:
             out = subprocess.run(["scutil", "--get", key], capture_output=True, text=True, timeout=3).stdout.strip()
