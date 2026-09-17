@@ -1464,10 +1464,13 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
     prov = spec["provider_cfg"]
     if prov.get("kind") == "cli":
         # a CLI agent answers with its own tools; Orbit's are not offered to it
+        # a quick call with no tools (a title, a note, a summary) leaves no session behind
+        # in the agent's own history -- the Codex app listed every chat title as a session
+        quick = tools is None and prov["backend"] == "codex-cli"
         out = MODELS.cli_stream(prov["backend"], spec["model"], as_saved,
                                 emit=emit, cancel=stop,
                                 timeout=float(S.get("cli_timeout_s") or 900),
-                                cwd=WORKSPACE)
+                                cwd=WORKSPACE, extra_args=["--ephemeral"] if quick else None)
         out["model"] = spec.get("label") or spec["model"]
         return out
     if prov.get("kind") == "anthropic":

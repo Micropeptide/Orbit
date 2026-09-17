@@ -2366,11 +2366,18 @@ async function codexPanel(){
    <label>Installed</label><div>${i.installed?esc(i.version||'yes'):'no — <code>brew install codex</code>'}</div>
    <label>Your account</label><div>${i.login==='chatgpt'?'signed in with ChatGPT':i.login==='api_key'?'an API key':'not signed in — run <code>codex login</code> in a terminal'}</div>
    <label>This chat</label><div>${CQ_INFO&&CQ_INFO.codex_thread?'Codex thread <code>'+esc(CQ_INFO.codex_thread)+'</code> — also in the Codex CLI and app (<code>codex resume '+esc(CQ_INFO.codex_thread)+'</code>)':'starts a Codex thread with its first message'}</div>
-   <label>Folder</label><div>${esc((CQ_INFO&&(CQ_INFO.cwd||CQ_INFO.cwd_pref||CQ_INFO.cwd_default))||'Orbit workspace')}</div>
+   <label>Where</label><div>${CQ_INFO&&CQ_INFO.host?'on <b>'+esc(CQ_INFO.host)+'</b> over SSH — Codex runs there, reaching your models through Orbit':'this Mac'} · ${esc((CQ_INFO&&(CQ_INFO.cwd||CQ_INFO.cwd_pref||CQ_INFO.cwd_default))||(CQ_INFO&&CQ_INFO.host?'home folder':'Orbit workspace'))} <span class=note>(the folder chip at the top changes it)</span></div>
+   ${CQ_INFO&&CQ_INFO.host?`<label>On ${esc(CQ_INFO.host)}</label><div style="display:flex;gap:6px;flex-wrap:wrap"><button class=ghost id=cx_install>Install or check Codex there</button><button class=ghost id=cx_copylogin title="copies this Mac's ~/.codex/auth.json there (readable only by you) — only needed for your ChatGPT account's models">Copy this Mac's Codex sign-in there</button></div>`:''}
    ${rl.primary||rl.secondary?`<label>ChatGPT limits</label><div>${[pct(rl.primary)&&'5 hours: '+pct(rl.primary),pct(rl.secondary)&&'week: '+pct(rl.secondary)].filter(Boolean).join(' · ')}</div>`:''}
    <label>Permissions</label><div class=note>Auto and Accept edits: Codex works in the folder's sandbox and asks here before going outside it. Ask: every command is asked. Plan: read-only. Bypass: no sandbox, no questions.</div>
    <label>Models</label><div class=note>Your ChatGPT account's models use Codex's own sign-in. Every other provider in Settings → Models & keys runs through Orbit's gateway, with your key kept in Orbit.</div>
-  </div>`},{sub:i.running?'Codex is running':'starts with the first Codex message'})}
+  </div>`;
+  const h=CQ_INFO&&CQ_INFO.host;
+  if(h){body.querySelector('#cx_install').onclick=async ev=>{ev.target.textContent='checking '+h+'…';
+    const r=await apiPost('/api/codex/install',{host:h},'install');ev.target.textContent='Install or check Codex there';if(r)toast('Codex '+(r.version||'')+' on '+h+': '+r.path)};
+   body.querySelector('#cx_copylogin').onclick=async()=>{if(!confirm('Copy your Codex sign-in (this Mac\'s ~/.codex/auth.json) to '+h+'? It is saved there readable only by your account. Other people with admin rights on that machine could still read it.'))return;
+    const r=await apiPost('/api/codex/copy_login',{host:h},'copy sign-in');if(r)toast('signed in on '+h)}}
+  },{sub:i.running?'Codex is running':'starts with the first Codex message'})}
 // Claude Code mode: provider and model pickers in place of Orbit's model list.
 let HPROV_CACHE={};
 function fmtCtx(n){n=+n||0;return n>=1e6?(Math.round(n/1e5)/10+'M'):n>=1000?Math.round(n/1000)+'k':String(n||'')}

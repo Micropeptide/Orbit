@@ -1924,7 +1924,10 @@ class TestRound1(TestLongAnswers):
             return {"role": "assistant", "content": "ok"}
         q.stream_call = slow
         ev2 = []
-        t1 = threading.Thread(target=lambda: q.turn(self.chat(), "first", [], sid="c1"))
+        def first():
+            q.TURN_CTX.pin_model = "local:test-local-model"     # a new thread: pin it too, whatever your default model is
+            q.turn(self.chat(), "first", [], sid="c1")
+        t1 = threading.Thread(target=first)
         t1.start(); started.wait(2)
         q.turn(self.chat(), "second", [], emit=lambda k, p: ev2.append(k), sid="c2")
         t1.join()

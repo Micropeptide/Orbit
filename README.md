@@ -238,6 +238,14 @@ skills, plugins and MCP servers — with every step shown in Orbit. Turn it on w
   work in the folder's sandbox and ask in Orbit before going outside it; *Ask* asks
   before every command; *Plan* is read-only; *Bypass* has no sandbox. Stop interrupts
   the answer; a note sent while it works is steered into it.
+- **On an SSH host.** Choose a host with the chat's folder chip, as for Claude Code: Codex
+  runs there (installed for you in `~/.local/bin` the first time, the official Linux build
+  of your Mac's version), works in that machine's folders, and reaches your models through
+  an SSH tunnel back to Orbit's gateway — keys stay on the Mac. One connection serves every
+  Codex chat on that host, and it closes after `remote_keep_alive_min` idle minutes so
+  nothing lingers on a login node. Your ChatGPT account's models there need Codex signed in
+  on that machine (`codex login --device-auth`, or *Copy this Mac's sign-in* in the chat's
+  Codex panel); other providers need nothing there.
 - **Shared sessions.** Each chat is a Codex thread in `~/.codex/sessions`, so
   `codex resume <thread>` continues it in a terminal, and a Codex session started
   elsewhere can be opened and continued in Orbit.

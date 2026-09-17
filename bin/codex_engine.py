@@ -16,7 +16,7 @@ pick them up too. One app-server process serves every Codex chat; each chat is a
 thread in it. A chat that moves here from Orbit's own agent or Claude Code brings
 what was said since Codex last saw it.
 """
-import json, os, queue, re, shutil, subprocess, threading, time, uuid
+import io, json, os, queue, re, shutil, subprocess, threading, time, uuid
 
 Q = None               # qqcore, bound by qqcore (no import cycle)
 BACKEND = "codex"
@@ -123,9 +123,13 @@ class AppServer:
     """One `codex app-server` process: JSON-RPC over stdio, events routed to the
     thread (chat) they belong to."""
 
-    def __init__(self, exe, env):
-        self.exe, self.env = exe, env
+    def __init__(self, exe, env, spawn=None, host=None):
+        self.exe, self.env, self.spawn, self.host = exe, env, spawn, host
         self.proc = None
+        self.inp = self.out = None
+        self.forward_port = None      # on an SSH host: the tunnel's port there, back to Orbit's gateway
+        self.home = None
+        self.used = time.time()
         self.lock = threading.Lock()
         self.next_id = 0
         self.pending = {}            # id -> [Event, reply]
@@ -137,9 +141,15 @@ class AppServer:
         return self.proc is not None and self.proc.poll() is None
 
     def start(self):
-        self.proc = subprocess.Popen([self.exe, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE, text=True, bufsize=1, env=self.env,
-                                     cwd=os.path.expanduser("~"), start_new_session=True)
+        if self.spawn:
+            self.proc = self.spawn()               # over SSH, on another machine
+        else:
+            self.proc = subprocess.Popen([self.exe, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.PIPE, env=self.env,
+                                         cwd=os.path.expanduser("~"), start_new_session=True)
+        self.inp = io.TextIOWrapper(self.proc.stdin, encoding="utf-8", line_buffering=True, write_through=True)
+        self.out = io.TextIOWrapper(self.proc.stdout, encoding="utf-8", errors="replace")
+        self.err = io.TextIOWrapper(self.proc.stderr, encoding="utf-8", errors="replace")
         threading.Thread(target=self._read, daemon=True).start()
         threading.Thread(target=self._read_err, daemon=True).start()
         self.request("initialize", {"clientInfo": {"name": "orbit", "title": "Orbit", "version": "1.0"}}, timeout=60)
@@ -149,8 +159,8 @@ class AppServer:
         with self.lock:
             if not self.alive(): raise CodexError("Codex stopped")
             try:
-                self.proc.stdin.write(json.dumps(obj) + "\n")
-                self.proc.stdin.flush()
+                self.inp.write(json.dumps(obj) + "\n")
+                self.inp.flush()
             except (OSError, ValueError) as e:            # it died between the check and the write
                 raise CodexError(f"Codex stopped ({type(e).__name__})")
 
@@ -193,7 +203,7 @@ class AppServer:
         self.threads.pop(thread_id, None)
 
     def _read(self):
-        for line in self.proc.stdout:
+        for line in self.out:
             try: m = json.loads(line)
             except ValueError: continue
             if not isinstance(m, dict): continue
@@ -217,11 +227,14 @@ class AppServer:
             qq.put(("exit", None, {}, None))
 
     def _read_err(self):
-        for line in self.proc.stderr:
+        for line in self.err:
             self.stderr.append(line.rstrip())
             del self.stderr[:-60]
 
     def close(self):
+        if self.inp is not None:
+            try: self.inp.close()                  # on a host, the watchdog there ends Codex when SSH goes
+            except Exception: pass
         if self.alive():
             try: self.proc.terminate(); self.proc.wait(5)
             except Exception:
@@ -229,32 +242,120 @@ class AppServer:
                 except Exception: pass
 
 
-_SERVER = {"srv": None, "sig": None}
+_SERVERS = {}            # "" (this Mac) or an SSH host -> {"srv", "sig"}
 _SERVER_LOCK = threading.Lock()
+_SERVER = {}             # kept for callers that read the local one
 
 
-def server():
-    """The shared app-server, started (or restarted) as needed."""
-    exe = which_codex()
-    if not exe: raise CodexError("Codex is not installed (no `codex` on PATH). Install it with `brew install codex`.")
-    import providers
-    env = providers.cli_env(exe)
-    env["ORBIT_GATEWAY_TOKEN"] = _ce().gateway_token()
-    sig = (exe, env["ORBIT_GATEWAY_TOKEN"])
+def server(host=None, emit=None):
+    """The app-server for this Mac or an SSH host, started (or restarted) as needed.
+    On a host, Codex runs there under the SSH watchdog, and reaches Orbit's gateway
+    through a reverse tunnel; one connection serves every chat on that host."""
+    key = host or ""
+    tok = _ce().gateway_token()
+    if not host:
+        exe = which_codex()
+        if not exe: raise CodexError("Codex is not installed (no `codex` on PATH). Install it with `brew install codex`.")
+        import providers
+        env = providers.cli_env(exe)
+        env["ORBIT_GATEWAY_TOKEN"] = tok
+        sig, spawn, info = (exe, tok), None, {}
+    else:
+        info = remote_codex(host, emit)
+        exe = info["codex"]
+        sig = (host, exe, tok)
+        env = {}
+        import ssh_remote
+        def spawn(exe=exe, host=host):
+            port = ssh_remote.pick_port()
+            p = ssh_remote.popen(host, exe, "~", ["app-server"], {"ORBIT_GATEWAY_TOKEN": tok},
+                                 forward=(port, _ce().gateway_port()))
+            p.orbit_port = port
+            return p
     with _SERVER_LOCK:
-        srv = _SERVER["srv"]
-        if srv is None or not srv.alive() or _SERVER["sig"] != sig:
+        cur = _SERVERS.get(key) or {}
+        srv = cur.get("srv")
+        if srv is None or not srv.alive() or cur.get("sig") != sig:
             if srv is not None: srv.close()
-            srv = AppServer(exe, env)
+            srv = AppServer(exe, env, spawn=spawn, host=host)
             srv.start()
-            _SERVER.update(srv=srv, sig=sig)
+            if host:
+                srv.forward_port = getattr(srv.proc, "orbit_port", None)
+                srv.home = info.get("home")
+            _SERVERS[key] = {"srv": srv, "sig": sig}
+            if not host: _SERVER["srv"] = srv
+            _start_reaper()
+        srv.used = time.time()
         return srv
+
+
+def remote_codex(host, emit=None):
+    """Codex on an SSH host: found, or installed there (the official Linux build of this
+    Mac's version, in ~/.local/bin) when `codex_remote_install` is on."""
+    import ssh_remote
+    info = ssh_remote.probe(host, max_age=1800)
+    if not info.get("ok"):
+        ssh_remote._PROBES.pop(host, None)
+        raise CodexError(f"Could not reach {host}: {info.get('error') or 'SSH failed'}")
+    if info.get("codex"): return info
+    if not _ce().cfg().get("codex_remote_install", True):
+        raise CodexError(f"Codex is not installed on {host}. Install it there (or turn on installing it for you in Settings → Codex).")
+    ver = local_version()
+    if emit: emit("notice", {"msg": f"installing Codex {ver} on {host} (~/.local/bin/codex) — once, about a minute"})
+    path, err = ssh_remote.install_codex(host, ver, os.path.join(Q.ROOT, "cache", "codex-linux"), info.get("arch") or "x86_64")
+    ssh_remote._PROBES.pop(host, None)
+    if err: raise CodexError(f"Could not install Codex on {host}: {err}")
+    info = ssh_remote.probe(host, refresh=True)
+    if not info.get("codex"): raise CodexError(f"Codex was installed on {host} but does not run there")
+    return info
+
+
+def local_version():
+    exe = which_codex()
+    try:
+        import providers
+        out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=10, env=providers.cli_env(exe)).stdout
+        m = re.search(r"(\d+\.\d+\.\d+)", out)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
+_REAPER = {"on": False}
+
+
+def _start_reaper():
+    """Codex left idle on an SSH host is closed (login nodes limit processes); the next
+    message starts it again. `remote_keep_alive_min`, as for Claude Code."""
+    if _REAPER["on"]: return
+    _REAPER["on"] = True
+    def loop():
+        while True:
+            time.sleep(60)
+            try: reap_idle()
+            except Exception: pass
+    threading.Thread(target=loop, daemon=True).start()
+
+
+def reap_idle(now=None):
+    now = now or time.time()
+    try: keep = float(_ce().cfg().get("remote_keep_alive_min") or 30) * 60
+    except (TypeError, ValueError): keep = 1800
+    with _SERVER_LOCK:
+        for key, cur in list(_SERVERS.items()):
+            srv = cur["srv"]
+            if not key or srv.threads: continue                 # this Mac's stays; a busy one stays
+            if not srv.alive() or now - srv.used > keep:
+                srv.close(); _SERVERS.pop(key, None)
 
 
 def shutdown():
     with _SERVER_LOCK:
-        if _SERVER["srv"]: _SERVER["srv"].close()
-        _SERVER["srv"] = None
+        for cur in _SERVERS.values():
+            try: cur["srv"].close()
+            except Exception: pass
+        _SERVERS.clear()
+        _SERVER.clear()
 
 
 # ------------------------------------------------------------------ chats
@@ -295,15 +396,16 @@ PERMISSIONS = {
 EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
 
-def provider_config(spec):
-    """(modelProvider, config) for a thread, and the model name Codex should ask for."""
+def provider_config(spec, port=None):
+    """(modelProvider, config) for a thread, and the model name Codex should ask for.
+    port: where Orbit's gateway is reached from where Codex runs (a tunnel on an SSH host)."""
     c = spec.get("codex") or {}
     pid, model = c.get("provider"), c.get("model")
     if pid == CHATGPT:
         return None, {}, model
     key = f"orbit-{pid}"
     cfg = {"model_providers": {key: {"name": f"Orbit · {spec.get('provider_label') or pid}".replace("Codex · ", ""),
-                                     "base_url": f"http://127.0.0.1:{_ce().gateway_port()}/h/{pid}/v1",
+                                     "base_url": f"http://127.0.0.1:{port or _ce().gateway_port()}/h/{pid}/v1",
                                      "wire_api": "responses", "env_key": "ORBIT_GATEWAY_TOKEN",
                                      "stream_idle_timeout_ms": 600000}}}
     ctx = int(spec.get("context") or 0)
@@ -332,10 +434,26 @@ def _inputs(user_content, prior):
     return parts
 
 
+def host_for(sid, mk, prefs=None):
+    """Where a Codex chat runs: the host its thread started on, the one chosen for the
+    chat, or for a new chat the default machine (None = this Mac)."""
+    prefs = prefs if prefs is not None else (_ce().chat_prefs(sid) if sid else {})
+    if mk and mk.get("thread") and not mk.get("imported"): return mk.get("host") or None
+    if "host" in prefs: return prefs.get("host") or None
+    return _ce().cfg().get("default_host") or None
+
+
+def _remote_cwd(host, prefs, mk, home):
+    cwd = (mk or {}).get("cwd") if (mk or {}).get("host") == host else None
+    cwd = cwd or prefs.get("cwd") or _ce().default_remote_dir(host) or "~"
+    if home and (cwd == "~" or cwd.startswith("~/")): cwd = home + cwd[1:]
+    return cwd
+
+
 def _cwd_for(sid, project, mk):
     ce = _ce()
     prefs = ce.chat_prefs(sid) if sid else {}
-    if mk and mk.get("cwd") and os.path.isdir(mk["cwd"]): return mk["cwd"], prefs
+    if mk and mk.get("cwd") and not mk.get("host") and os.path.isdir(mk["cwd"]): return mk["cwd"], prefs
     folder = None
     try: folder = Q.project_folder(project) if project else None
     except Exception: folder = None
@@ -367,9 +485,12 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         return ""
 
     c = spec.get("codex") or {}
+    mk = dict(marker_of(messages) or {})
+    prefs0 = ce.chat_prefs(sid) if sid else {}
+    host = host_for(sid, mk, prefs0)
     if not which_codex():
         return fail("Codex is not installed (no `codex` on PATH). Install it (`brew install codex`), or pick another model.")
-    if c.get("provider") == CHATGPT and login_state(max_age=30) != "chatgpt":
+    if not host and c.get("provider") == CHATGPT and login_state(max_age=30) != "chatgpt":
         return fail("Codex is not signed in to a ChatGPT account on this Mac. In a terminal run `codex login`, "
                     "then send this again — or pick a Codex model from another provider.")
     if c.get("provider") != CHATGPT:
@@ -377,17 +498,28 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         if not (h.get("provider_cfg") or {}).get("api_key") and not (h.get("provider_cfg") or {}).get("local"):
             return fail(f"No API key for {spec.get('provider_label') or c.get('provider')}. "
                         "Add it in Settings → Models & keys.")
+    if host: emit("status", {"msg": f"starting Codex on {host}"})
     try:
-        srv = server()
+        srv = server(host, emit)
     except Exception as e:
-        return fail(f"Codex could not start: {e}")
+        return fail(f"Codex could not start{' on ' + host if host else ''}: {e}")
+    if host and c.get("provider") == CHATGPT:
+        import ssh_remote
+        st = str((ssh_remote._PROBES.get(host) or {}).get("codex_login") or "")
+        if "chatgpt" not in st.lower():
+            return fail(f"Codex on {host} is not signed in to a ChatGPT account. Sign in there once "
+                        f"(`codex login --device-auth` in a terminal on {host}), or use Copy this Mac's sign-in "
+                        f"in the chat's Codex panel — or pick a Codex model from another provider, which needs no sign-in there.")
 
-    mk = dict(marker_of(messages) or {})
-    cwd, prefs = _cwd_for(sid, project, mk)
-    provider_key, config, model = provider_config(spec)
+    if host:
+        prefs = prefs0
+        cwd = _remote_cwd(host, prefs, mk, srv.home)
+    else:
+        cwd, prefs = _cwd_for(sid, project, mk)
+    provider_key, config, model = provider_config(spec, srv.forward_port if host else None)
     mode = "plan" if read_only else (prefs.get("permission_mode") or ce.cfg().get("permission_mode") or "auto")
     policy, sandbox = PERMISSIONS.get(mode, PERMISSIONS["auto"])
-    if prefs.get("add_dirs") and sandbox == "workspace-write":
+    if prefs.get("add_dirs") and sandbox == "workspace-write" and not host:
         config = {**config, "sandbox_workspace_write": {"writable_roots": list(prefs["add_dirs"])}}
     dev = ""
     try: dev = "\n\n".join(ce._system_parts(project))
@@ -399,6 +531,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     # the conversation as it is now (the parent's thread holds messages cut from this one)
     mine = not mk.get("owner") or not sid or mk.get("owner") == sid
     busy = mk.get("thread") in srv.threads
+    if (mk.get("host") or None) != host and not mk.get("imported"): same_provider = False    # its thread is on another machine
     fresh = getattr(T, "codex_fresh", False)          # a fallback retry: the failed attempt is in the old thread
     T.codex_fresh = False
     if same_provider and mine and not busy and not fresh:
@@ -426,6 +559,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     prev_total = list((old_mk.get("usage_total") or {}).get(thread) or [0, 0]) if old_mk.get("thread") == thread else [0, 0]
     if sid: q.LAST_TURN.pop(sid, None)
     mk = {"thread": thread, "cwd": cwd, "model": spec.get("id"), "provider": provider_key or CHATGPT, "owner": sid}
+    if host: mk["host"] = host
     messages.append({"role": "user", "content": user_content, "t": time.time(), "codex": dict(mk)})
     umsg = messages[-1]
     _remember_thread(thread, sid)
@@ -442,7 +576,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         emit("error", f"Codex could not start the answer: {e}"); emit("done", None)
         return ""
     turn_id = (r.get("turn") or {}).get("id")
-    RUNS[sid or thread] = {"thread": thread, "turn": turn_id, "srv": srv}
+    RUNS[sid or thread] = {"thread": thread, "turn": turn_id, "srv": srv, "host": host}
 
     t0 = time.time()
     cur = None                        # the assistant step being written
@@ -481,7 +615,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         """Codex asks for approval, or for your input."""
         if method in ("item/commandExecution/requestApproval", "execCommandApproval"):
             cmd = p.get("command") or " ".join(p.get("command") or [])
-            reason = "Codex wants to run a command" + (f": {p['reason']}" if p.get("reason") else "")
+            reason = "Codex wants to run a command" + (f" on {host}" if host else "") + (f": {p['reason']}" if p.get("reason") else "")
             if read_only:
                 return srv.respond(rid, {"decision": "decline"})
             ok, always = _ask(approve, "run_command", {"command": cmd, "cwd": p.get("cwd") or cwd}, reason, "shell")
@@ -588,7 +722,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                 elif t == "fileChange":
                     ok = it.get("status") == "completed"
                     ch = it.get("changes") or []
-                    for x in ch:
+                    for x in ch if not host else []:
                         if x.get("path"):
                             path = x["path"] if os.path.isabs(x["path"]) else os.path.join(cwd, x["path"])
                             if not any(y.get("path") == path for y in T.changes):
@@ -656,6 +790,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                 try: checkpoint()
                 except Exception: pass
     finally:
+        srv.used = time.time()
         srv.unsubscribe(thread)
         RUNS.pop(sid or thread, None)
         # a tool call that never reported back still gets an answer, or the next
@@ -743,6 +878,8 @@ def info():
     """For Settings: installed, signed in, models, rate limits."""
     exe = which_codex()
     srv = _SERVER.get("srv")
+    remote = {k: {"running": v["srv"].alive(), "idle_min": round((time.time() - v["srv"].used) / 60, 1)}
+              for k, v in _SERVERS.items() if k}
     ver = None
     if exe:
         try:
@@ -753,4 +890,4 @@ def info():
     return {"installed": bool(exe), "version": ver, "login": login_state(max_age=60),
             "models": [{"id": f"codex:{CHATGPT}/{m['slug']}", "label": m.get("display_name") or m["slug"]} for m in chatgpt_models()],
             "rate_limits": srv.rate_limits if srv else None, "running": bool(srv and srv.alive()),
-            "chats_answering": len(RUNS)}
+            "chats_answering": len(RUNS), "hosts": remote, "remote_install": _ce().cfg().get("codex_remote_install", True)}

@@ -98,7 +98,8 @@ class TestCodexEngine(unittest.TestCase):
         self.addCleanup(lambda: [setattr(q.CE, k, v) for k, v in saved_ce.items()])
         q.CE.gateway_token = lambda: "gw-token"
         q.CE.gateway_port = lambda: 18897
-        q.CE.chat_prefs = lambda sid=None: {"cwd": self.work} if sid else {}
+        q.CE.chat_prefs = lambda sid=None: dict(self.prefs.get(sid) or {"cwd": self.work, "host": ""}) if sid else {}
+        self.prefs = {}
         q.CE._system_parts = lambda project: []
         CX.shutdown()
         self.addCleanup(CX.shutdown)
@@ -208,6 +209,49 @@ class TestCodexEngine(unittest.TestCase):
         calls = [c["id"] for m in items_msgs if m.get("tool_calls") for c in m["tool_calls"]]
         results = {m.get("tool_call_id") for m in items_msgs if m.get("role") == "tool"}
         self.assertTrue(set(calls) <= results)
+
+    def test_a_chat_on_an_ssh_host_runs_codex_there_through_a_tunnel(self):
+        import subprocess, ssh_remote
+        home = os.path.join(self.tmp, "remote-home"); os.makedirs(os.path.join(home, "proj"))
+        spawned = []
+        def fake_popen(host, exe, cwd, args, env, forward=None):
+            # what ssh would run on the host: the wrapper, with the environment on its first input line
+            spawned.append({"host": host, "exe": exe, "args": args, "env": env, "forward": forward})
+            p = subprocess.Popen(["bash", "-c", ssh_remote.WRAPPER, "orbit", *args], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+                                 env=dict(os.environ, FAKE_CODEX_LOG=self.log))
+            p.stdin.write(ssh_remote.env_line({"ORBIT_CLAUDE": exe, "ORBIT_CWD": cwd, **env}).encode()); p.stdin.flush()
+            return p
+        saved = (ssh_remote.popen, ssh_remote.probe, ssh_remote.pick_port)
+        ssh_remote.popen = fake_popen
+        ssh_remote._PROBES["cluster"] = {"ok": True, "codex": self.exe, "home": home, "codex_login": "Logged in using ChatGPT",
+                                          "at": time.time(), "host": "cluster"}
+        ssh_remote.probe = lambda host, max_age=300, refresh=False: ssh_remote._PROBES[host]
+        ssh_remote.pick_port = lambda: 45678
+        self.addCleanup(lambda: (setattr(ssh_remote, "popen", saved[0]), setattr(ssh_remote, "probe", saved[1]),
+                                 setattr(ssh_remote, "pick_port", saved[2]), ssh_remote._PROBES.pop("cluster", None)))
+        self.prefs["remote-chat"] = {"host": "cluster", "cwd": "~/proj"}
+        msgs = [{"role": "system", "content": "sys"}]
+        out = CX.run_turn(msgs, "list the files", [], emit=self.emit, approve=self.approve, sid="remote-chat")
+        self.assertEqual(out, "Done: a.txt")
+        self.assertEqual(spawned[0]["args"], ["app-server"])
+        self.assertEqual(spawned[0]["forward"][0], 45678)
+        self.assertEqual(spawned[0]["env"], {"ORBIT_GATEWAY_TOKEN": "gw-token"})       # on input, not on the command line
+        start = next(m for m in self.rpc() if m.get("method") == "thread/start")["params"]
+        self.assertEqual(start["cwd"], os.path.join(home, "proj"))                   # ~ is the host's home
+        self.assertIn("on cluster", self.asked[0][2])
+        self.assertEqual((msgs[1]["codex"]["host"], msgs[1]["codex"]["cwd"]), ("cluster", os.path.join(home, "proj")))
+        # a provider model reaches Orbit's gateway through the tunnel's port there
+        spec = {"codex": {"provider": "opencode-go", "model": "kimi"}, "provider_label": "OpenCode Go"}
+        key, cfg, _ = CX.provider_config(spec, port=45678)
+        self.assertEqual(cfg["model_providers"][key]["base_url"], "http://127.0.0.1:45678/h/opencode-go/v1")
+        # the next message stays on the host and continues the thread; idle, it is closed
+        CX.run_turn(msgs, "and again", [], emit=self.emit, approve=self.approve, sid="remote-chat")
+        self.assertEqual(len(spawned), 1)
+        self.assertTrue(any(m.get("method") == "thread/resume" for m in self.rpc()))
+        CX._SERVERS["cluster"]["srv"].used -= 3 * 3600
+        CX.reap_idle()
+        self.assertNotIn("cluster", CX._SERVERS)
 
 
 if __name__ == "__main__":
