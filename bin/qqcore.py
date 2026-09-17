@@ -3766,8 +3766,11 @@ def snapshot_config(path, keep=20):
         if not os.path.exists(path): return
         os.makedirs(CONFIG_HISTORY, exist_ok=True)
         base = os.path.basename(path)
+        # microseconds in the name: two saves in one second used to share a name,
+        # so the second snapshot was skipped and that version was lost
+        now = time.time()
         dst = os.path.join(CONFIG_HISTORY,
-                           f"{base}.{time.strftime('%Y%m%d-%H%M%S')}")
+                           f"{base}.{time.strftime('%Y%m%d-%H%M%S', time.localtime(now))}-{int(now % 1 * 1e6):06d}")
         if not os.path.exists(dst):
             with open(path, "rb") as a, open(dst, "wb") as b: b.write(a.read())
         old = sorted(f for f in os.listdir(CONFIG_HISTORY) if f.startswith(base + "."))
