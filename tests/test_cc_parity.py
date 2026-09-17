@@ -203,6 +203,30 @@ class TestParity(unittest.TestCase):
         self.assertEqual(code, 200, d)
         self.assertTrue(self.q.CX.marker_of(st.msgs).get("rewound"))
 
+    def test_a_temporary_chat_leaves_no_claude_code_transcript_behind(self):
+        cfg = os.path.join(self.tmp, "claude-config")
+        old = os.environ.get("ORBIT_CLAUDE_CONFIG_DIR")
+        os.environ["ORBIT_CLAUDE_CONFIG_DIR"] = cfg
+        self.addCleanup(lambda: os.environ.pop("ORBIT_CLAUDE_CONFIG_DIR", None) if old is None
+                        else os.environ.__setitem__("ORBIT_CLAUDE_CONFIG_DIR", old))
+        CE = self.q.CE
+        sid, cwd = "11111111-2222-3333-4444-555555555555", "/tmp/somewhere"
+        folder = os.path.join(CE.projects_dir(), CE.encode_cwd(cwd))
+        os.makedirs(folder)
+        jp = os.path.join(folder, sid + ".jsonl"); open(jp, "w").write("{}")
+        os.makedirs(os.path.join(folder, sid, "subagents"))
+        os.makedirs(os.path.join(CE.claude_dir(), "file-history", sid))
+        st = self.chat([{"role": "user", "content": "hi", "claude": {"session": sid, "cwd": cwd}},
+                        {"role": "assistant", "content": "hello"}])
+        st.temp = False
+        self.ui.erase_temp_traces(st)                  # a real chat keeps its session
+        self.assertTrue(os.path.exists(jp))
+        st.temp = True
+        self.ui.erase_temp_traces(st)
+        self.assertFalse(os.path.exists(jp))
+        self.assertFalse(os.path.exists(os.path.join(folder, sid)))
+        self.assertFalse(os.path.exists(os.path.join(CE.claude_dir(), "file-history", sid)))
+
 
 if __name__ == "__main__":
     unittest.main()

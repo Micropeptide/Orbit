@@ -25,6 +25,19 @@ TAILSCALE_BINS = ["/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale",
 
 # ------------------------------------------------------------------ the token
 
+
+def mac_name():
+    """The Mac's own name as its owner set it (System Settings → General → About), for the
+    phone to show. The network host name changes with the network (a VPN hands out names
+    like vpn-172-27-…), so it is only the fallback."""
+    for key in ("ComputerName", "LocalHostName"):
+        try:
+            out = subprocess.run(["scutil", "--get", key], capture_output=True, text=True, timeout=3).stdout.strip()
+            if out: return out
+        except Exception:
+            pass
+    return socket.gethostname().replace(".local", "")
+
 def token_path(root):
     return os.path.join(root, "config", "remote-token")
 
@@ -300,6 +313,7 @@ def status(root, mode, port):
         "tailscale": {"running": bool(ts_ip), "ip": ts_ip, "name": ts_name,
                       "installed": ts_installed},
         "lan_ip": lan_ip(),
+        "mac_name": mac_name(),
         "port": port,
         "hint": hint,
     }
@@ -314,7 +328,7 @@ def pair_payload(root, mode, port):
     tok = load_token(root, create=True)
     return {"v": 1, "url": url, "token": tok, "alts": alt_urls(mode, port),
             "web": f"{url}/?t={tok}",     # for a phone browser or the PWA
-            "name": socket.gethostname().replace(".local", "")}
+            "name": mac_name()}
 
 
 def pair_uri(root, mode, port):
@@ -352,7 +366,7 @@ def advertise(port, name=None):
     """
     stop_advertising()
     if not os.path.exists("/usr/bin/dns-sd"): return False
-    label = name or socket.gethostname().replace(".local", "")
+    label = name or mac_name()
     try:
         _BONJOUR["proc"] = subprocess.Popen(
             ["/usr/bin/dns-sd", "-R", f"Orbit on {label}", "_orbit._tcp", "local",
