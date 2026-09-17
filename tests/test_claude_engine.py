@@ -86,6 +86,21 @@ class TestClaudeEngine(unittest.TestCase):
         rows = [json.loads(l)["body"] for l in open(self.log)]
         return [r for r in rows if r.get("tools")]
 
+    def test_a_command_you_ran_yourself_reaches_a_resumed_session(self):
+        """"! command" output lives in Orbit's chat; Claude's own session never saw it.
+        The next message hands it over, once."""
+        self.serve([[{"text": "first answer"}], [{"text": "saw it"}], [{"text": "third"}]])
+        msgs = [{"role": "system", "content": "sys"}]
+        self.assertEqual(self.run_turn(msgs, "hello")[0], "first answer")
+        msgs.append({"role": "user", "content": "I ran this myself:\n```bash\n$ echo zebra-output\n```\nzebra-output",
+                     "bang": {"cmd": "echo zebra-output", "rc": 0, "out": "zebra-output"}})
+        self.assertEqual(self.run_turn(msgs, "what did the command print?")[0], "saw it")
+        self.assertIn("zebra-output", json.dumps(self.requests()[-1]["messages"]))
+        self.assertIn("ran these commands themselves", json.dumps(self.requests()[-1]["messages"]))
+        self.run_turn(msgs, "and now?")
+        last_user = [m for m in self.requests()[-1]["messages"] if m["role"] == "user"][-1]
+        self.assertNotIn("ran these commands themselves", json.dumps(last_user))
+
     def test_tools_approval_resume_and_history(self):
         target = os.path.join(self.work, "hello.txt")
         self.serve([
@@ -189,6 +204,8 @@ class TestClaudeEngine(unittest.TestCase):
         self.serve([[{"text": "ok"}], [{"text": "42"}], [{"text": "50"}]])
         starts = []
         clean = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE", "ANTHROPIC"))}
+        # the "remote" claude is the real CLI on this Mac: keep its transcripts out of ~/.claude
+        clean["CLAUDE_CONFIG_DIR"] = self.cfgdir
         def fake_popen(host, claude_path, cwd, args, env, forward=None):
             p = subprocess.Popen(["bash", "-c", ssh_remote.WRAPPER, "orbit", *args], stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, env=clean)
@@ -687,7 +704,13 @@ class TestClaudeEngineOffline(unittest.TestCase):
         p2 = CE._Plan()
         p2.from_tool("TaskCreate", {"subject": "one"}, "Task #1 created successfully: one")
         p2.from_tool("TaskUpdate", {"taskId": "1", "status": "completed"}, "")
-        self.assertEqual(p2.steps(), [{"text": "one", "done": True}])
+        self.assertEqual(p2.steps(), [{"text": "one", "done": True, "active": False}])
+        # the step in hand is marked, as Claude Code's list marks it
+        p3 = CE._Plan()
+        p3.from_tool("TodoWrite", {"todos": [{"content": "a", "status": "completed"},
+                                             {"content": "b", "status": "in_progress"},
+                                             {"content": "c", "status": "pending"}]}, "")
+        self.assertEqual(p3.text(), "0. [x] a\n1. [>] b\n2. [ ] c")
 
     def test_messages_never_carry_the_marker_to_a_model(self):
         self.assertIn("claude", q.PRIVATE_KEYS)

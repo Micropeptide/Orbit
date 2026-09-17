@@ -812,7 +812,9 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                     emit("notice", {"msg": "Codex compacted the conversation to make room"})
             elif method == "turn/plan/updated":
                 steps = p.get("plan") or []
-                txt = "\n".join(f"[{'x' if s.get('status') == 'completed' else ' '}] {s.get('step')}" for s in steps)
+                # numbered like Orbit's own plan, so the page reads it; ">" is the step in hand
+                mark = lambda st: "x" if st == "completed" else ">" if st in ("inProgress", "in_progress") else " "
+                txt = "\n".join(f"{i}. [{mark(s.get('status'))}] {s.get('step')}" for i, s in enumerate(steps))
                 if txt:
                     try: q.PLANS[sid or "_"] = {"steps": [{"text": s.get("step"), "done": s.get("status") == "completed"} for s in steps],
                                                 "updated": time.time()}

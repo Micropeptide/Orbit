@@ -40,6 +40,7 @@ each answer names the model that wrote it.*
 - [Scheduled messages](#scheduled-messages)
 - [When a model keeps failing](#when-a-model-keeps-failing)
 - [Cheaper hours](#cheaper-hours)
+- [Working like Claude Code](#working-like-claude-code)
 - [Answers, files and previews](#answers-files-and-previews)
 - [Orbit's own agent](#orbits-own-agent)
 - [The interface](#the-interface)
@@ -75,6 +76,11 @@ each answer names the model that wrote it.*
 - **Chats on a cluster.** Run a Claude Code chat on an HPC login node or a lab server
   over SSH: it edits files and runs commands there, your models still come from the
   Mac, and nothing is left running on the node afterwards.
+- **Reads like Claude Code.** Every model's tool calls, not only Claude's, show as
+  Claude Code shows them: `⏺ Read notes.md` with a one-line `⎿ Read 40 lines` under it,
+  runs of look-ups folded into "Read 3 files, Searched for 2 patterns", a live
+  `✻ Pondering… (12s · ↓ 1.2k tokens · esc to interrupt)` line, ☒ ◼ ☐ todos, numbered
+  permission prompts, `!` shell mode, Esc-Esc rewind, Shift+Tab modes and `/context`.
 - **Continue other agents' conversations.** Sessions from the Claude CLI, Claude's
   desktop app, Codex and OpenCode appear in their own sidebar sections; open one and
   keep going in that agent's own session.
@@ -391,6 +397,54 @@ lists them all and can hide the markers.
 
 ---
 
+## Working like Claude Code
+
+Orbit's transcript and controls follow Claude Code's, whichever engine answers — Orbit's
+own agent, Claude Code or Codex — so moving between them changes nothing you have to learn.
+
+**The transcript.** One answer is one block: what it said, then the tools it called, in
+order. Each call is a line — `⏺ Update src/app.py` — with what came back under it:
+`⎿ Added 4 lines, removed 1 line`, `⎿ Found 12 matches`, `⎿ exit 1 · no such file`.
+Finished look-ups in a row fold into one line ("Read 3 files, Searched for 1 pattern").
+Click a line for the arguments and the whole output; **Ctrl+O** (or `/verbose`) opens
+every call. Edits show as diffs with line numbers. Hook notices from Claude Code fold into
+"Ran 12 hooks". Thinking reads "✻ Thinking…" and then "✻ Thought for 12s".
+
+**While it works.** A status line above the box: a spinner, what it is doing, how long,
+roughly how much has come back, and `esc to interrupt`. The todo list shows ☒ done,
+◼ in hand, ☐ to do (**Ctrl+T** hides it). `/tasks` lists everything running — answers
+in any chat, queued messages, shell jobs a model left running — with open and stop.
+
+**Permission prompts.** "Do you want to proceed?" with numbered choices: `1` yes, `2` yes
+and don't ask again (as a rule you can edit), `3` no — and tell it what to do instead.
+Arrows and Enter work too; Esc means no. Questions a model asks come the same way.
+**Shift+Tab** cycles the permission mode (manual → accept edits → plan → auto), shown
+under the box as `⏵⏵ accept edits on`; in one of Orbit's own chats it switches plan mode.
+
+**The box.** `/` commands (typing `/ctx` finds `/context`), `@` files, and two
+shortcuts from Claude Code:
+
+* `! command` runs it yourself, in the chat's folder (or on its SSH host). The output
+  shows as a terminal block and joins the conversation, so the model sees it with your
+  next message — Claude Code and Codex sessions included. Risky commands ask first.
+* `# note` saves the line to memory.
+
+**Going back.** **Esc Esc** (or `/rewind`, or *rewind* on any message) lists your
+messages; pick one to put the chat back to just before it, and — when later answers
+changed files — the files too. `/fork` copies the chat and carries on in the copy.
+
+**Seeing the window.** `/context` draws the context window as a grid — system prompt,
+tool definitions, your messages, answers, tool results, thinking, free — with a
+*Compact now* button. The meter in the top bar measures the chat on screen, and warns
+when it is nearly full.
+
+Also: `/copy` (the last answer, or `/copy 2`), `/diff` (every change shown in the chat),
+`/usage`, `/model`, `/permissions`, `/theme`, `/help`; Ctrl+R searches what you sent
+before; Ctrl+J adds a new line; Ctrl+L clears the box; a floating outline of your messages
+in long chats; an empty chat opens on your recent chats instead of a blank page.
+
+---
+
 ## Answers, files and previews
 
 **Formatting.** Answers are parsed as GitHub-flavoured Markdown (marked) and sanitised
@@ -494,8 +548,8 @@ be switched off in Settings → Tools; one Python file in `tools/` adds another
 | | |
 |---|---|
 | **Chats** | Ordered by last use, with state on each row (answering, waiting for you, queued, unread); folding date groups, projects and other agents' sections; search, pin, tag, archive, drag onto a project, ⋯ menu on every row. |
-| **Composer** | ⏱ send later; `/` for commands and skills (saved prompts take `$ARGUMENTS`, `$1`, `$2`), `@` for files, drag-and-drop or paste to attach, ↑/↓ for earlier messages, a draft kept per chat, the message queue above it. |
-| **Answers** | Thinking, text and each tool call as its own step with a live timer and ✓/✗; diffs; time and tokens per answer; undo the files an answer changed; fork from any message; files as links and cards with previews ([more](#answers-files-and-previews)); copy as Markdown, formatted or plain. |
+| **Composer** | ⏱ send later; `/` for commands and skills (saved prompts take `$ARGUMENTS`, `$1`, `$2`), `@` for files, `!` shell mode, `#` memory, drag-and-drop or paste to attach, ↑/↓ and Ctrl+R for earlier messages, Esc to stop, Esc Esc to rewind, Shift+Tab for the permission mode, a draft kept per chat, the message queue above it. |
+| **Answers** | Thinking, text and tool calls in Claude Code's style (`⏺` call, `⎿` result, look-ups folded, Ctrl+O for everything); line-numbered diffs; time and tokens per answer; undo the files an answer changed; fork from any message; files as links and cards with previews ([more](#answers-files-and-previews)); copy as Markdown, formatted or plain. |
 | **Files** | Everything Orbit created or you attached, with the chat it came from. |
 | **Library** | Knowledge documents, skills, agents, saved prompts. |
 | **Scheduled** | Messages scheduled in any chat and tasks that run on their own — edit text, time, repeat and model in place — and a live view of cluster jobs. |
