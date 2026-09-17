@@ -4108,8 +4108,8 @@ def context_breakdown(messages=None, sid=None, agent=None, project=None):
              "tool definitions": tool_schema_tokens(),
              "your messages": sum(estimate_tokens([m]) for m in msgs if m.get("role") == "user"),
              "answers": sum(estimate_tokens([m]) for m in msgs if m.get("role") == "assistant"),
-             "tool results": sum(estimate_tokens([m]) for m in msgs if m.get("role") == "tool"),
-             "thinking": sum(len(str(m.get("reasoning_content") or "")) // 4 for m in msgs)}
+             "tool results": sum(estimate_tokens([m]) for m in msgs if m.get("role") == "tool")}
+    # (thinking is not listed: it is kept in the chat but never sent back to a model)
     images = sum(1 for m in msgs if isinstance(m.get("content"), list)
                  for x in m["content"] if isinstance(x, dict) and x.get("type") == "image_url")
     known = sum(parts.values())

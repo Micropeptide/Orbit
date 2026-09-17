@@ -1447,7 +1447,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                 cancel.set()
             if next_notice and time.time() >= next_notice:
                 emit("long_running", {"minutes": int((time.time() - t_start) / 60), "rounds": tool_runs,
-                                      "pending": [t for t, d in plan.tasks.values() if not d]})
+                                      "pending": [t for t, d, *_ in plan.tasks.values() if not d]})
                 next_notice += every
             while inbox and interrupted_at is None:
                 note = inbox.popleft()

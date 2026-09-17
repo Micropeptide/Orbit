@@ -444,7 +444,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 items.append({"kind": "answer", "id": sid_, "title": (st_.title if st_ else sid_) or sid_,
                               "status": ("waiting for you" if lv.get("approval") or lv.get("question")
                                          else lv.get("status") or "answering"),
-                              "since": (st_.running if st_ and isinstance(getattr(st_, "running", None), (int, float)) else None),
+                              "since": (st_.busy_since or None) if st_ else None,
                               "sid": sid_, "can_stop": True})
             for sid_, st_ in list(STATES.items()):
                 for it in (st_.queue or []):
@@ -1084,7 +1084,6 @@ class H(http.server.BaseHTTPRequestHandler):
             st = get_state(d.get("sid")) if d.get("sid") else S
             cmd = str(d.get("command") or "").strip()
             if not cmd: return self._send(400, jdump({"error": "which command?"}))
-            if st.lock.locked(): return self._send(409, jdump({"error": "that chat is answering — run it after"}))
             level, why = q.risk_check("run_shell", {"command": cmd})
             if level == "block":
                 return self._send(403, jdump({"error": f"refused: {why}"}))
@@ -1092,33 +1091,58 @@ class H(http.server.BaseHTTPRequestHandler):
                 return self._send(200, jdump({"ok": False, "confirm": why or "this could change or remove things"}))
             bad = q._interactive(cmd)
             if bad: return self._send(400, jdump({"error": bad}))
-            host, roots, _ = _chat_files_ctx(st.sid)
-            t0 = time.time()
+            # the chat is held while the command runs, as an answer holds it: a message sent
+            # meanwhile queues instead of landing in the middle of this one
+            if not st.lock.acquire(blocking=False):
+                return self._send(409, jdump({"error": "that chat is answering — run it after"}))
             try:
+                host, roots, _ = _chat_files_ctx(st.sid)
+                t0 = time.time()
                 if host:
                     import ssh_remote, shlex
-                    rc, out, err = ssh_remote.run(host, f"cd {shlex.quote(roots[0]) if roots and roots[0] != '~' else '~'} 2>/dev/null; {cmd}", timeout=120)
+                    where = roots[0] if roots else "~"
+                    # "~/proj" quoted whole is never expanded; and a folder that is not there
+                    # must stop the command rather than let it run in the home folder
+                    if where == "~": go_to = "cd"
+                    elif where.startswith("~/"): go_to = 'cd "$HOME"/' + shlex.quote(where[2:])
+                    else: go_to = "cd " + shlex.quote(where)
+                    # no retry: a command that ran past the time limit must not run a second time
+                    rc, out, err = ssh_remote.run(host, f"{go_to} && {{ {cmd}\n}}", timeout=120, _retry=False)
+                    cwd = where
                 else:
-                    cwd = roots[0] if roots and os.path.isdir(os.path.expanduser(roots[0])) else q.WORKSPACE
-                    r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120,
-                                       cwd=os.path.expanduser(cwd), env=q._batch_env(), stdin=subprocess.DEVNULL)
-                    rc, out, err = r.returncode, r.stdout, r.stderr
-            except subprocess.TimeoutExpired:
-                rc, out, err = 124, "", "timed out after 120 s"
-            secs = round(time.time() - t0, 1)
-            text = (out or "") + (("\n" if out and err else "") + err if err else "")
-            cap = 20000
-            shown = text if len(text) <= cap else text[:cap] + f"\n… ({len(text) - cap} more characters)"
-            where = f" on {host}" if host else ""
-            body = (f"I ran this myself{where}:\n```bash\n$ {cmd}\n```\nExit {rc} after {secs}s. Output:\n"
-                    f"```\n{shown.rstrip() or '(no output)'}\n```")
-            with LOCK:
-                st.msgs.append({"role": "user", "content": body, "t": time.time(),
-                                "bang": {"cmd": cmd, "rc": rc, "secs": secs, "host": host,
-                                         "out": shown[-6000:]}})
-                save_session(st)
+                    want = os.path.expanduser(roots[0]) if roots else ""
+                    cwd = want if want and os.path.isdir(want) else q.WORKSPACE
+                    proc = subprocess.Popen(cmd, shell=True, cwd=cwd, env=q._batch_env(), text=True,
+                                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE, start_new_session=True)
+                    try:
+                        out, err = proc.communicate(timeout=120)
+                        rc = proc.returncode
+                    except subprocess.TimeoutExpired:
+                        # the whole process group: a child still holding the output (sleep | cat)
+                        # would otherwise keep this request waiting forever
+                        import signal
+                        try: os.killpg(proc.pid, signal.SIGKILL)
+                        except OSError: pass
+                        try: out, err = proc.communicate(timeout=5)
+                        except Exception: out, err = "", ""
+                        rc, err = 124, (err or "") + "\ntimed out after 120 s"
+                secs = round(time.time() - t0, 1)
+                text = (out or "") + (("\n" if out and err else "") + err if err else "")
+                cap = 20000
+                shown = text if len(text) <= cap else text[:cap] + f"\n… ({len(text) - cap} more characters)"
+                there = f" on {host}" if host else ""
+                body = (f"I ran this myself{there} in {cwd}:\n```bash\n$ {cmd}\n```\nExit {rc} after {secs}s. Output:\n"
+                        f"```\n{shown.rstrip() or '(no output)'}\n```")
+                with LOCK:
+                    st.msgs.append({"role": "user", "content": body, "t": time.time(),
+                                    "bang": {"cmd": cmd, "rc": rc, "secs": secs, "host": host, "cwd": cwd,
+                                             "out": shown[:6000] + ("\n…" if len(shown) > 6000 else "")}})
+                    save_session(st)
+            finally:
+                st.lock.release()
             return self._send(200, jdump({"ok": True, "rc": rc, "output": shown, "secs": secs,
-                                          "host": host, "cwd": roots[0] if roots else None}))
+                                          "host": host, "cwd": cwd}))
         if p == "/api/folders/bookmark":
             where, path = str(d.get("host") or ""), str(d.get("path") or "").strip()
             if not path: return self._send(400, jdump({"error": "which folder?"}))
@@ -1426,6 +1450,14 @@ class H(http.server.BaseHTTPRequestHandler):
                             undone += q.undo_changes(m["changes"])
                             m["changes_undone"] = True
                 dropped = len(st.msgs) - len(keep)
+                # Codex's thread still holds the turns cut here: its next message starts a
+                # new thread with the chat as it now is (Claude Code resumes at the last kept answer)
+                if any(isinstance(m.get("codex"), dict) or m.get("codex_thread") for m in st.msgs[cut:]):
+                    for m in reversed(keep):
+                        if isinstance(m.get("codex"), dict) and m["codex"].get("thread"):
+                            m["codex"] = dict(m["codex"], rewound=True); break
+                        if isinstance(m.get("agent"), dict) and m["agent"].get("source") == "codex":
+                            m["agent"] = dict(m["agent"], rewound=True); break
                 st.msgs = keep
                 save_session(st)
             return self._send(200, jdump({"ok": True, "n": len(st.msgs), "dropped": dropped,
@@ -1882,7 +1914,11 @@ class H(http.server.BaseHTTPRequestHandler):
             if d.get("sid") in JOB_RUNS:           # a scheduled run in its own chat
                 JOB_RUNS[d["sid"]].set()
                 return self._send(200, jdump({"ok": True, "sid": d["sid"]}))
-            st = get_state(d.get("sid"), create=False)
+            # only the chat named: get_state falls back to the open chat, and a stop meant
+            # for a chat that has since finished used to stop whichever chat was open
+            want = d.get("sid")
+            st = S if (not want or want == S.sid) else STATES.get(want)
+            if st is None: return self._send(404, jdump({"error": "that chat is not answering"}))
             st.cancel.set()
             return self._send(200, jdump({"ok": True, "sid": st.sid}))
         if p == "/api/running":

@@ -46,6 +46,9 @@ class TestTranscriptHelpers(unittest.TestCase):
         self.assertEqual(self.js("toolTarget('Read',{file_path:'/a/b/c/d.py'})"), "c/d.py")
         self.assertEqual(self.js("toolTarget('Bash',{command:'git   status'})"), "git status")
         self.assertEqual(self.js("toolTarget('Grep',{pattern:'def main',path:'/x/y/z'})"), "def main in y/z")
+        # Codex runs every command through a login shell; the row shows the command
+        self.assertEqual(self.js("toolTarget('shell',{command:\"/bin/zsh -lc 'ls | head -3'\"})"), "ls | head -3")
+        self.assertEqual(self.js("toolTarget('shell',{command:['bash','-lc','echo hi']})"), "echo hi")
 
     def test_result_summaries(self):
         cases = {

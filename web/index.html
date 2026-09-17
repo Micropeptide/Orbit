@@ -666,7 +666,9 @@ details.tgroup .tgbody{margin-left:16px;border-left:1px solid var(--line);paddin
 .msg.a.cont>.who{position:absolute;right:0;top:-14px;margin:0;z-index:1;opacity:0;transition:opacity .15s}
 .msg.a.cont:hover>.who{opacity:1}
 /* the step that carries the answer's time and tokens keeps them in view */
-.msg.a.cont>.who:has(.bystat:not(:empty)){position:static;opacity:1;justify-content:flex-end;margin-bottom:1px}
+.msg.a.cont:not(:has(+ .msg.a.cont))>.who:has(.bystat:not(:empty)){position:static;opacity:1;justify-content:flex-end;margin-bottom:1px}
+/* time and tokens once per answer, on its last step, as Claude Code reports a turn */
+.msg.a:has(+ .msg.a.cont)>.who .bystat{display:none}
 .msg.a.cont>.who .byline{display:none}
 .msg.a.cont>.who .bystat{opacity:.8}
 /* ! shell mode: the box turns shell-coloured, and a run shows as a terminal block */
@@ -753,6 +755,10 @@ details.hookbox .hl{font-family:var(--mono);font-size:11px;margin:4px 0 0 16px;w
 .taskrow .ttitle{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .taskrow .tsub{font-size:11.5px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .taskrow .tacts{display:flex;gap:6px;flex:0 0 auto}
+.autotag{font-size:10px;color:var(--ok);border:1px solid color-mix(in srgb,var(--ok) 45%,transparent);border-radius:5px;padding:0 4px;flex:0 0 auto}
+#log:not(.verbose) .autoappr.vonly{display:none}
+body.statuson #wrap .msg.a:last-child .bub>.working:only-child{display:none}
+.approve.ccask:focus{outline:2px solid color-mix(in srgb,var(--acc) 60%,transparent);outline-offset:1px}
 .plandock{font-size:12.5px;border:1px solid var(--line);border-radius:9px;background:var(--card);
  padding:5px 11px;margin-bottom:7px}
 .plandock .pdh{cursor:pointer;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -867,6 +873,10 @@ table.stbl{border-collapse:collapse;width:100%;font-size:13px;margin:2px 0 6px}
 
 <script>
 const $=s=>document.querySelector(s), wrap=$('#wrap'), q=$('#q'), log=$('#log');
+// the box grows with what you type, up to 200px; an empty box goes back to one line (its
+// placeholder wraps when the box is briefly narrow, and used to set a tall height)
+function fitQ(){q.style.height='auto';if(!q.value){q.style.height='';return}
+ q.style.height=Math.min(q.scrollHeight,200)+'px'}
 let atts=[], sid=null, busy=false, stoppedSid=null, RUNNING=new Set(), INFO={tools:[],settings:{}}, SESSIONS=[], PROMPTS={}, filterMode='active';
 // Chats this TAB is actively streaming right now, kept independently of RUNNING —
 // RUNNING is refreshed from the server every couple of seconds and a stale
@@ -2096,7 +2106,7 @@ function syncBusy(){
  $('#send').disabled=false;
  $('#send').textContent=busy?'Queue':'Send';
  $('#send').title=busy?'Queue this message: it starts when the answer running now is done. ⌘/Ctrl+Enter puts it in right away instead.':'';
- q.placeholder=busy?'Queue a message — it starts when this answer is done · ⌘Enter sends it in now':Q_PLACEHOLDER;
+ q.placeholder=busy?'Queue a message · ⌘Enter sends it in now':Q_PLACEHOLDER;
  if(QUEUE_SID!==sid){QUEUE={items:[],paused:false,running:false};drawQueue();if(sid)loadQueue(sid)}
  $('#stopgen').style.display=busy?'':'none';
  const kh=$('#keyhint');if(kh)kh.textContent=busy?'Enter queue · ⌘Enter send in now · Shift+Enter newline':'Enter send · Shift+Enter newline';
@@ -2195,9 +2205,9 @@ function attachLive(theSid, initial){
     const args='('+Object.entries(t.args||{}).map(([k,v])=>k+'='+String(v).slice(0,60)).join(', ')+')';
     c=el(auto?'<div class=autoappr></div>':'<div class=tool></div>');
     c.textContent=(auto?'✓ auto-approved — ':'* ')+name+args}
-   lrows.push(c);a.tools.appendChild(c);if(c.classList.contains('done'))groupTool(c)});
+   lrows.push(c);a.tools.appendChild(c);if(c.classList.contains('done'))groupTool(c,0,true)});
   shownTools=tl.length;
-  tl.forEach((t,i)=>{const r=lrows[i];if(r&&r.classList.contains('live')&&t.ok!=null){finishTool(r,t);groupTool(r)}});
+  tl.forEach((t,i)=>{const r=lrows[i];if(r&&r.classList.contains('live')&&t.ok!=null){finishTool(r,t);groupTool(r,0,true)}});
   if(lv.question&&lv.question.id!==a._q){a._q=lv.question.id;a.tools.appendChild(questionBox(lv.question))}
   // an approval waiting in this chat, raised by a stream some other tab owns
   if(lv.approval&&lv.approval.id!==shownApproval){
@@ -2213,10 +2223,10 @@ function attachLive(theSid, initial){
   bottom()};
  paint(initial||{});
  livePoll=setInterval(async()=>{
-  if(sid!==theSid){stopLive();return}          // user moved on again
+  if(sid!==theSid){stopLive();stopStatus(theSid);return}          // user moved on again
   try{
    const lv=await (await fetch('/api/live/'+theSid)).json();
-   if(!lv.known){stopLive();return}
+   if(!lv.known){stopLive();stopStatus(theSid);return}
    paint(lv);
    if(!lv.running){
     stopLive(); note.remove(); stopStatus(theSid);
@@ -2226,7 +2236,7 @@ function attachLive(theSid, initial){
 
     setTimeout(()=>afterTurn(theSid),300);
    }
-  }catch(e){stopLive()}
+  }catch(e){stopLive();stopStatus(theSid)}
  },800);
 }
 
@@ -2251,6 +2261,7 @@ async function openSession(id){
  if(lastPlan){const st=parsePlan(lastPlan);if(st.length)PLANS[d.sid]=st}else delete PLANS[d.sid];
  syncBusy();
  if(d.running)setTimeout(()=>attachLive(d.sid,d.live||{}),60);
+ else if(STATUS_SID===d.sid&&!SENDING.has(d.sid))stopStatus(d.sid);     // it finished while you were away
  // user-message index in the saved chat, for fork (earlier ones may not be drawn)
  let ui=0;const uix=d.messages.map(m=>m.role==='user'?ui++:-1);
  const drawMsg=(m,i,merge)=>{if(m.role!=='user')return savedAssistant(m,merge).m;
@@ -2441,7 +2452,7 @@ async function editFrom(node,text){
  const idx=users.indexOf(node); if(idx<0)return;
  if(!await apiPost('/api/truncate',{index:idx,id:sid},'edit'))return;
  let cur=node; while(cur){const nx=cur.nextElementSibling;cur.remove();cur=nx}
- q.value=text;q.focus();q.style.height='auto';q.style.height=Math.min(q.scrollHeight,200)+'px'}
+ q.value=text;q.focus();fitQ()}
 
 let FILECACHE=[];
 async function refreshFileCache(){
@@ -2464,7 +2475,7 @@ function showAt(){
   d.onclick=()=>{q.value=v.replace(/@[^\s@]*$/,f.rel+' ');closeAt();q.focus()};
   atMenu.appendChild(d)});
  $('.row').appendChild(atMenu)}
-q.addEventListener('input',()=>{q.style.height='auto';q.style.height=Math.min(q.scrollHeight,200)+'px';
+q.addEventListener('input',()=>{fitQ();
  showMenu(); showAt(); histPos=-1;
  const s=sid;clearTimeout(draftT);draftT=setTimeout(()=>saveDraft(s),400)});
 let lastEsc=0;
@@ -2505,7 +2516,7 @@ q.addEventListener('keydown',e=>{
 function approvalBox(p){
  // Claude Code's permission prompt: what it wants to do, "Do you want to proceed?",
  // and numbered choices you can pick with 1/2/3, the arrows and Enter, or Esc for "no".
- const box=el('<div class="approve ccask"></div>');
+ const box=el('<div class="approve ccask" tabindex=0 title="click here, then 1 / 2 / 3, arrows and Enter, or Esc"></div>');
  const disp=toolName(p.name);
  const title={Bash:'Bash command',Python:'Python',Update:'Edit file',Write:'Write file',
   'Edit notebook':'Edit notebook',Fetch:'Fetch',Agent:'Agent'}[disp]||disp;
@@ -2601,21 +2612,23 @@ function approvalBox(p){
   if(e.key==='Escape'){whyRow();return true}
   return false};
  return box}
-// the newest unanswered prompt on screen takes 1/2/3, arrows, Enter and Esc -- when you
-// are not typing something of your own
+// A prompt takes 1/2/3, the arrows, Enter and Esc only when it has the focus (click it, or
+// Tab to it) or nothing else does -- never while the message box has it, where a "1" or an
+// Enter meant for your own message would otherwise answer "yes" to a command.
 addEventListener('keydown',e=>{
- if(e.metaKey||e.ctrlKey||e.altKey)return;
+ if(e.metaKey||e.ctrlKey||e.altKey||$('#modalhost').innerHTML)return;
  const ae=document.activeElement;
- const typing=ae&&(/input|select/i.test(ae.tagName)||(ae===q&&q.value)||(ae.tagName==='TEXTAREA'&&ae!==q));
- if(typing||$('#modalhost').innerHTML)return;
- const open=[...document.querySelectorAll('#wrap .ccask:not(.answered)')].filter(b=>b._keys&&!b._done).pop();
- if(open&&open._keys(e)){e.preventDefault();e.stopImmediatePropagation()}},true);
+ const inBox=ae&&ae.closest&&ae.closest('.ccask:not(.answered)');
+ if(!inBox&&ae&&ae!==document.body)return;
+ if(inBox&&/^(input|textarea|select|button|summary)$/i.test(ae.tagName))return;   // their own keys
+ const open=inBox||[...document.querySelectorAll('#wrap .ccask:not(.answered)')].filter(b=>b._keys&&!b._done).pop();
+ if(open&&open._keys&&open._keys(e)){e.preventDefault();e.stopImmediatePropagation()}},true);
 
 // A question the model asks mid-task (ask_user): pick an option or type an answer.
 function questionBox(p){
  // a question with choices, laid out as Claude Code asks one: numbered options you can
  // pick with the keys, a box for your own words, and ticks when several may apply
- const box=el('<div class="approve ccask ccqbox"></div>');
+ const box=el('<div class="approve ccask ccqbox" tabindex=0></div>');
  const h=el('<div class=ccttl></div>');h.textContent=p.header||'Question';box.appendChild(h);
  const qq=el('<div class=ccq></div>');qq.textContent=p.question;box.appendChild(qq);
  const send=async ans=>{
@@ -3245,7 +3258,7 @@ async function steer(t){
  if(atts.length)toast('the note goes without the attachments — send those after');
  q.value='';q.style.height='auto';closeMenu();closeAt();clearDraft(sid);
  document.querySelectorAll('#chips [data-paste]').forEach(x=>x.remove());PASTES={};
- const n=noteBubble(t,'queued — it reads this at its next step');
+ const n=noteBubble(t,'queued — it reads this at its next step');n.node.classList.add('pending');
  const rec={text:t,sid,...n,done:false};PENDING_NOTES.push(rec);
  try{
   const r=await (await fetch('/api/interject',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -3507,7 +3520,7 @@ async function go(opts){
   a=addAssistant(modelLabel());thinking='';answer='';tmarks=[];return true};
  a.bub.innerHTML='<span class=working>working<span class=dots></span></span>';
  let thinking='',answer='',lastRender=0,pendingRender=null,thinkPending=null,tmarks=[];
- const t0=performance.now(), trows={};      // trows: live tool rows by call id
+ const t0=performance.now(), trows={}, autoTags=[];      // trows: live tool rows by call id
  let tThink=0, endP=null, errored=false, queuedBy=null;
  const thoughtFor=()=>'thought for '+fmtSecs((performance.now()-tThink)/1000);
  try{
@@ -3541,7 +3554,7 @@ async function go(opts){
      continue}
     // a finished call closes its row; the plan/diff/images branches below still run
     if(m.k==='tool_result'&&m.p&&m.p.id&&trows[m.p.id]){
-     finishTool(trows[m.p.id],m.p);groupTool(trows[m.p.id]);statusSay('')}
+     finishTool(trows[m.p.id],m.p);groupTool(trows[m.p.id],0,true);statusSay('')}
     if(m.k==='thinking_delta'||m.k==='content_delta')nextStep();
     if(m.k==='thinking_delta'){
      if(!thinking){                             // first reasoning token
@@ -3576,14 +3589,27 @@ async function go(opts){
     else if(m.k==='tool'){
      {const d=toolName(m.p.name);
       statusSay((TOOLVERB[d]||d)+' '+toolTarget(m.p.name,m.p.args).slice(0,40))}
-     if(m.p.id){const r=toolRow(m.p);trows[m.p.id]=r;a.tools.appendChild(r)}
+     if(m.p.id){const r=toolRow(m.p);trows[m.p.id]=r;a.tools.appendChild(r);
+      const ai=autoTags.findIndex(x=>x.name===m.p.name);
+      if(ai>=0){const x=autoTags.splice(ai,1)[0];const tg=el('<span class=autotag>auto</span>');
+       tg.title='allowed without asking — '+x.reason+(x.rule?' (your rule: '+x.rule+')':'');
+       r.querySelector('.thead').insertBefore(tg,r.querySelector('.tt'))}}
      else{const c=el('<div class=tool></div>');     // older server: no id, no result pairing
       c.textContent='* '+m.p.name+'('+Object.entries(m.p.args||{}).map(([k,v])=>k+'='+String(v).slice(0,60)).join(', ')+')';
       a.tools.appendChild(c)}
      bottom()}
     else if(m.k==='approval_request'){a.tools.appendChild(approvalBox(m.p));bottom();
      notify(sendSid,'Needs your approval',m.p.name+(m.p.reason?' — '+m.p.reason:''))}
-    else if(m.k==='auto_approved'){const b=el('<div class=autoappr></div>');
+    else if(m.k==='auto_approved'){
+     // Claude Code does not stop to say so: the call's own line gets a small "auto" tag
+     // (why, in its tooltip); the full note shows only with Ctrl+O
+     {const row=(m.p.call_id&&trows[m.p.call_id])||
+       Object.values(trows).reverse().find(r=>r.classList.contains('live')&&toolName(m.p.name)===r.dataset.disp);
+      if(row&&!row.querySelector('.autotag')){const tg=el('<span class=autotag>auto</span>');
+       tg.title='allowed without asking — '+m.p.reason+(m.p.rule?' (your rule: '+m.p.rule+')':'');
+       row.querySelector('.thead').insertBefore(tg,row.querySelector('.tt'))}
+      else if(!row)autoTags.push(m.p)}
+     const b=el('<div class="autoappr vonly"></div>');
      b.textContent='✓ auto-approved — '+m.p.reason+' ('+m.p.name+')'+
        (m.p.rule?' — matched your rule: '+m.p.rule:'');a.tools.appendChild(b);bottom()}
     else if(m.k==='blocked'){const b=el('<div class=blocked></div>');
@@ -3680,7 +3706,7 @@ async function go(opts){
       else if(!thinking&&!a.tools.childElementCount)a.m.remove();
       else a.bub.innerHTML='';
       a.think.classList.remove('live');if(thinking)thinkLabel(a,thoughtFor());
-      if(pn){pn.done=true;pn.tag.textContent='✓ read';wrap.appendChild(pn.node)}
+      if(pn){pn.done=true;pn.tag.textContent='✓ read';pn.node.classList.remove('pending');wrap.appendChild(pn.node)}
       else noteBubble(m.p.text,'✓ read — sent from another window');
       a=addAssistant(modelLabel());
       a.bub.innerHTML='<span class=working>reading your note<span class=dots></span></span>';
@@ -3729,7 +3755,7 @@ async function go(opts){
     else if(m.k==='end'){endP=m.p||{};if(m.p&&m.p.title&&sid===sendSid){
      $('#title').textContent=m.p.title; if(m.p.sid)sid=m.p.sid}}
    }}
-  if(queuedBy){SENDING.delete(sendSid);await refreshRunning();syncBusy();renderSessions();return}
+  if(queuedBy){SENDING.delete(sendSid);stopStatus(sendSid);await refreshRunning();syncBusy();renderSessions();return}
   if(pendingRender){clearTimeout(pendingRender);pendingRender=null}
  if(thinkPending){clearTimeout(thinkPending);thinkPending=null;
   renderThink(a.think.querySelector('.body'),thinking,tmarks)}
@@ -5739,6 +5765,7 @@ const THINK_LADDER=[[45,'deep in thought'],[30,'thinking some more'],[20,'thinki
  [10,'still thinking'],[0,'thinking']];
 let STATUS_SID=null,statusTimer=null,statusT0=0,statusVerb='',statusFrame=0,statusNote='',statusChars=0,statusThinkT0=0;
 function startStatus(){
+ document.body.classList.add('statuson');
  STATUS_SID=sid;statusT0=Date.now();statusVerb=VERBS[Math.floor(Math.random()*VERBS.length)];
  statusNote='';statusChars=0;statusThinkT0=0;statusFrame=0;
  const n=$('#statusline');if(!n)return;
@@ -5747,6 +5774,7 @@ function startStatus(){
 function stopStatus(forSid){
  if(forSid&&STATUS_SID&&forSid!==STATUS_SID)return;     // another chat's answer owns the line now
  STATUS_SID=null;
+ document.body.classList.remove('statuson');
  if(statusTimer){clearInterval(statusTimer);statusTimer=null}
  const n=$('#statusline');if(n){n.style.display='none';n.innerHTML=''}}
 function statusSay(note){statusNote=String(note||'')}
@@ -5827,8 +5855,14 @@ function toolTarget(name,args){args=args||{};
  const disp=toolName(name);
  const fp=args.file_path||args.notebook_path||args.path||args.file;
  if(fp&&['Read','Write','Update','Edit notebook','List'].includes(disp))return shortPath(fp);
- if(disp==='Bash'||disp==='Python')return String(args.command||args.code||args.script||'')
-   .replace(/\s+/g,' ').trim().slice(0,120);
+ if(disp==='Bash'||disp==='Python'){
+  let c=args.command||args.code||args.script||'';
+  if(Array.isArray(c))c=(c.length===3&&/^-l?c$/.test(c[1])&&/sh$/.test(c[0]))?c[2]:c.join(' ');
+  c=String(c).replace(/\s+/g,' ').trim();
+  // Codex wraps every command in a login shell: show the command itself
+  const w=c.match(/^(?:\/(?:usr\/)?bin\/)?(?:ba|z)?sh -l?c (['"])([\s\S]*)\1$/);
+  if(w)c=w[2];
+  return c.slice(0,120)}
  if(disp==='Search')return String(args.pattern||args.query||args.glob||'').slice(0,90)+
    (args.path?' in '+shortPath(args.path):'');
  if(disp==='Fetch'||disp==='Web Search')return String(args.url||args.query||'').slice(0,90);
@@ -5971,17 +6005,25 @@ function updateGroup(g){
  const secs=[...g.querySelectorAll('.tgbody>details.tool')]
    .reduce((a,r)=>a+(parseFloat(r.dataset.secs)||0),0);
  g.querySelector('.tt').textContent=secs>=0.5?fmtSecs(secs):''}
-function groupTool(row){
+function groupTool(row,_depth,live){
  if(!row||!row.dataset.fam||row.classList.contains('bad')||row.classList.contains('live'))return;
+ // calls made in parallel finish in any order: once this one is done, the one after it
+ // (already done, and waiting on this one) may fold in too
+ let after=row.nextElementSibling;
+ while(after&&after.classList.contains('vonly'))after=after.nextElementSibling;
+ if(!_depth&&after&&after.matches('details.tool.done'))setTimeout(()=>groupTool(after,1,live),0);
+ // notes shown only with Ctrl+O (auto-approvals) sit between calls without splitting them
  let prev=row.previousElementSibling;
+ while(prev&&prev.classList.contains('vonly'))prev=prev.previousElementSibling;
  // first call of a step that has said nothing yet: it carries on the step before, so it
  // may fold into that step's last look-up (the same as a reopened chat draws it)
- if(!prev){
+ if(!prev&&live){
   const blk=row.closest('.msg.a'),pb=blk&&blk.previousElementSibling;
   const quiet=blk&&blk._a&&(!blk._a.bub.textContent.trim()||blk._a.bub.querySelector('.working'))
    &&blk._a.think.style.display==='none';
   if(quiet&&pb&&pb.classList.contains('a')&&pb._a){
-   const last=pb._a.tools.lastElementChild;
+   let last=pb._a.tools.lastElementChild;
+   while(last&&last.classList.contains('vonly'))last=last.previousElementSibling;
    if(last&&(last.matches('details.tgroup')||(last.matches('details.tool.done')&&last.dataset.fam&&!last.classList.contains('bad')))){
     pb._a.tools.appendChild(row);prev=last}}}
  if(!prev)return;
@@ -6045,7 +6087,7 @@ function diffBlock(D,label){
   pre.appendChild(sp)});
  box.appendChild(pre);return box}
 if(PREF.get('hidetools','0')==='1')log.classList.add('hidedone');
-VERBOSE=PREF.get('verbose','0')==='1';
+VERBOSE=PREF.get('verbose','0')==='1';log.classList.toggle('verbose',VERBOSE);
 if(PREF.get('plandock','1')==='0'){const _pd=$('#plandock');if(_pd)_pd.dataset.hidden='1'}
 
 /* ---------------- /tasks ----------------
@@ -6288,7 +6330,7 @@ async function rememberNote(text){
    see the todo list (ctrl+t), go back to an earlier point (esc esc), and find
    something you typed before (ctrl+r). */
 function setVerbose(v){
- VERBOSE=!!v;PREF.set('verbose',VERBOSE?'1':'0');
+ VERBOSE=!!v;PREF.set('verbose',VERBOSE?'1':'0');log.classList.toggle('verbose',VERBOSE);
  document.querySelectorAll('#wrap details.tool,#wrap details.tgroup').forEach(d=>{d.open=VERBOSE});
  toast(VERBOSE?'showing every tool call in full (ctrl+o)':'tool calls folded again (ctrl+o)')}
 function togglePlanDock(){
@@ -6354,7 +6396,7 @@ function openPromptSearch(){
 /* ---------------- fork ---------------- */
 // index among the saved chat's user messages; older ones may not be drawn
 function userIndex(node){
- const us=[...wrap.querySelectorAll('.msg.u')],i=us.indexOf(node);if(i<0)return -1;
+ const us=[...wrap.querySelectorAll('.msg.u:not(.pending)')],i=us.indexOf(node);if(i<0)return -1;
  for(let j=i;j>=0;j--)if(us[j].dataset.ui!=null)return +us[j].dataset.ui+(i-j);
  return i}
 async function forkAt(node,text){
@@ -6363,7 +6405,7 @@ async function forkAt(node,text){
  const d=await apiPost('/api/branch',{id:sid,index:idx},'fork');
  if(!d||!d.sid)return;
  showPane('log');await openSession(d.sid);
- q.value=text;q.focus();q.style.height='auto';q.style.height=Math.min(q.scrollHeight,200)+'px';
+ q.value=text;q.focus();fitQ();
  saveDraft(d.sid);toast('forked — edit it and send')}
 
 /* ---------------- prompt history, drafts, pastes ---------------- */
@@ -6386,7 +6428,7 @@ function histWalk(dir){
  if(dir<0)histPos=histPos<0?h.length-1:Math.max(0,histPos-1);
  else{if(histPos<0)return false;
   if(++histPos>=h.length){histPos=-1;q.value='';return true}}
- q.value=h[histPos];q.style.height='auto';q.style.height=Math.min(q.scrollHeight,200)+'px';
+ q.value=h[histPos];fitQ();
  q.selectionStart=q.selectionEnd=q.value.length;return true}
 const PASTE_RE=/\[Pasted #(\d+) · ~\d+ lines\]/g;
 function pasteToken(n,lines){return `[Pasted #${n} · ~${lines} lines]`}
@@ -6401,7 +6443,7 @@ function loadDraft(s){let d=null;
  document.querySelectorAll('#chips [data-paste]').forEach(x=>x.remove());
  q.value=(d&&d.t)||'';histPos=-1;
  if(d&&d.p)Object.entries(d.p).forEach(([n,t])=>{PASTES[n]=t;pasteN=Math.max(pasteN,+n);pasteChip(n,t)});
- q.style.height='auto';q.style.height=Math.min(q.scrollHeight,200)+'px'}
+ fitQ()}
 function pasteChip(n,t){
  const lines=t.split('\n').length;
  const c=el(`<div class=chip data-paste="${n}"><b>Pasted #${n}</b><span>~${lines} lines · ${
