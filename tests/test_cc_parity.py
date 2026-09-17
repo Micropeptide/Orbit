@@ -227,6 +227,30 @@ class TestParity(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(folder, sid)))
         self.assertFalse(os.path.exists(os.path.join(CE.claude_dir(), "file-history", sid)))
 
+    # -- chat titles ---------------------------------------------------------------------
+    def test_titles_are_cleaned_names_from_the_request_and_latest_words(self):
+        ui = self.ui
+        self.assertEqual(ui._clean_title('{"title": "DRM2 methylation in pollen"}'), "DRM2 methylation in pollen")
+        self.assertEqual(ui._clean_title('Title: "octopus facts".'), "Octopus facts")
+        self.assertEqual(ui._clean_title('```json\n{"title":"FastAPI 422 on /upload"}\n```'), "FastAPI 422 on /upload")
+        self.assertIsNone(ui._clean_title(""))
+        msgs = [{"role": "system", "content": "sys"},
+                {"role": "user", "content": "why does my sgRNA script crash on empty FASTA"},
+                {"role": "assistant", "content": "x" * 3000 + " the latest words"},
+                {"role": "user", "content": "run it", "nudge": True}]
+        m = ui._title_material(msgs)
+        self.assertTrue(m.startswith("user: why does my sgRNA script crash"))
+        self.assertTrue(m.endswith("the latest words"))
+        self.assertNotIn("sys", m.split("\n")[0])
+        seen = {}
+        saved = self.q.stream_call
+        self.q.stream_call = lambda messages, tools, **kw: (seen.update(m=messages) or {"content": '{"title": "sgRNA script empty FASTA crash"}'})
+        try:
+            self.assertEqual(ui.autotitle(msgs), "sgRNA script empty FASTA crash")
+        finally:
+            self.q.stream_call = saved
+        self.assertIn("noun phrase", seen["m"][0]["content"])
+
 
 if __name__ == "__main__":
     unittest.main()
