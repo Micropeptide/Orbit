@@ -260,6 +260,60 @@ class TestQueue(unittest.TestCase):
         self.assertEqual([it["text"] for it in st.queue], ["waiting"])   # paused ones stay paused
         st.queue.clear()
 
+    def test_a_scheduled_message_can_be_edited_and_given_its_own_model(self):
+        ui = self.ui
+        st = self.chat(model="model-chat")
+        ui._queue_add(st, "report", at=time.time() + 3600)
+        iid = st.queue[0]["id"]
+        it, err = ui.queue_update(st, iid, {"text": "report, briefly", "repeat": "weekdays", "model": "model-B"})
+        self.assertIsNone(err)
+        self.assertEqual((it["text"], it["repeat"], it["model"]), ("report, briefly", "weekdays", "model-B"))
+        self.assertEqual(ui.queue_update(st, iid, {"at": time.time() - 3600, "repeat": None})[1], "that time has passed")
+        it, err = ui.queue_update(st, iid, {"model": ""})
+        self.assertNotIn("model", it)
+        ui.queue_update(st, iid, {"model": "model-B", "at": time.time() + 0.3, "repeat": None})
+        self.assertNotIn("repeat", st.queue[0])
+        rows = [r for r in ui.scheduled_messages() if r["sid"] == st.sid]
+        self.assertEqual((rows[0]["model"], rows[0]["chat_model"]), ("model-B", "model-chat"))
+        time.sleep(0.4); ui._drain()
+        self.assertTrue(self.wait(lambda: self.starts() == ["report, briefly"]))
+        start = [e for e in self.log if e[0] == "start"][0]
+        self.assertEqual(start[3], "model-B")                     # it ran on the model it was scheduled for
+        self.assertEqual(st.model, "model-B")                     # and the chat moved to it
+        self.assertTrue(self.wait(lambda: not st.lock.locked()))
+        # a plain queued message can be given a time, and a scheduled one sent back to the queue
+        st.lock.acquire()
+        try:
+            ui._queue_add(st, "later maybe")
+            iid = st.queue[0]["id"]
+            ui.queue_update(st, iid, {"at": time.time() + 999})
+            self.assertTrue(st.queue[0].get("at"))
+            ui.queue_update(st, iid, {"at": None})
+            self.assertNotIn("at", st.queue[0])
+        finally:
+            st.queue.clear(); st.lock.release()
+
+    def test_sending_a_repeating_message_now_into_a_running_answer_keeps_the_series(self):
+        ui = self.ui
+        st = self.chat()
+        st.queue.append({"id": "rep1", "text": "daily digest", "attachments": [], "at": time.time() + 3600, "repeat": "daily"})
+        st.lock.acquire()
+        try:
+            import types
+            h = types.SimpleNamespace(sent=None)
+            class Fake(ui.H):
+                def __init__(self): self.path = "/api/queue"
+                def _body(self): return {"sid": st.sid, "op": "now", "id": "rep1"}
+                def _send(self, code, body, ctype="application/json"): h.sent = (code, body)
+            Fake()._post("/api/queue")
+            self.assertIn("interjected", h.sent[1])
+            self.assertEqual(len(st.queue), 1)
+            self.assertEqual((st.queue[0]["text"], st.queue[0]["repeat"]), ("daily digest", "daily"))
+            self.assertGreater(st.queue[0]["at"], time.time() + 3600 * 20)
+            self.assertEqual(st.inbox[-1]["text"], "daily digest")
+        finally:
+            st.queue.clear(); st.inbox.clear(); st.lock.release()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -922,7 +922,7 @@ def t_schedule_task(prompt, start="now", repeat_every_minutes=None, daily_at=Non
     # a run in a new chat still belongs to the project it was scheduled from,
     # with that project's rules, folder and tools
     if current_project(): job["project"] = current_project()
-    cfg = sched_load(); cfg.setdefault("jobs", []).append(job); sched_save(cfg)
+    sched_update(lambda cfg: cfg.setdefault("jobs", []).append(job))
     first = time.strftime("%a %H:%M", time.localtime(start_ts))
     rep = (f"every {job['n']:g} min" if job["every"] == "minutes" else
            f"daily at {job['at']}" if job["every"] == "daily" else "once")
@@ -947,11 +947,13 @@ def t_list_scheduled_tasks():
     return "\n".join(out)
 
 def t_cancel_scheduled_task(id):
-    cfg = sched_load()
-    jobs = cfg.get("jobs", [])
-    kept = [j for j in jobs if j.get("id") != id]
-    if len(kept) == len(jobs): return f"Error: no scheduled task {id!r} — list_scheduled_tasks shows them."
-    cfg["jobs"] = kept; sched_save(cfg)
+    found = []
+    def drop(cfg):
+        jobs = cfg.get("jobs", [])
+        cfg["jobs"] = [j for j in jobs if j.get("id") != id]
+        found.append(len(cfg["jobs"]) != len(jobs))
+    sched_update(drop)
+    if not found[0]: return f"Error: no scheduled task {id!r} — list_scheduled_tasks shows them."
     return f"Cancelled {id}."
 
 def t_fetch_paper_pdf(query, out_dir=None):
@@ -1386,7 +1388,7 @@ class _Either:
 # keys Orbit keeps on a stored message for itself -- never sent to a model
 PRIVATE_KEYS = ("partial", "interjection", "compacted", "t", "secs", "ok", "usage", "tool_runs",
                 "reasoning_marks", "nudge", "changes", "changes_undone", "claude", "claude_uuid",
-                "agent")
+                "agent", "codex", "codex_thread")
 
 def para_marks(marks, state, chunk, now=None):
     """Note when each paragraph of thinking began: [offset, time] pairs, kept
@@ -1743,6 +1745,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
         TURN_CTX.read_only = bool(read_only)   # plan mode: look, think, propose -- change nothing
     # what a helper started by the task tool inherits from this answer
     TURN_CTX.emit, TURN_CTX.approve, TURN_CTX.cancel, TURN_CTX.tools = emit, approve, cancel, tools
+    fell_back = []                     # models this answer has moved to after failures
     remote = not model_is_local()
     if remote:
         spec = current_model()
@@ -1882,6 +1885,23 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                 seen_calls["__stream_fail__"] = fails
                 give_up = {"auth": 1, "setup": 1, "bad_request": 2, "overflow": 2}.get(kind, 5)
                 emit("stream_error", {"error": err, "attempt": fails, "kind": kind, "of": give_up})
+                # a provider that keeps failing: carry on with another model (fallback_*)
+                if kind in FALLBACK_KINDS and fails >= min(give_up, _fallback_after()):
+                    nxt = next((m for m in fallback_candidates(getattr(TURN_CTX, "model", None) or pinned_model())
+                                if m not in fell_back), None)
+                    if nxt:
+                        was = getattr(TURN_CTX, "model", None) or pinned_model()
+                        fell_back.append(nxt)
+                        TURN_CTX.model = TURN_CTX.pin_model = nxt
+                        emit("fallback", {"from": was, "to": nxt, "why": err[:300], "after": fails})
+                        seen_calls.pop("__stream_fail__", None)
+                        remote = not model_is_local()
+                        try:
+                            sp = current_model()
+                            emit("model", {"id": sp["id"], "label": sp.get("label") or sp["model"],
+                                           "provider": sp.get("provider_label")})
+                        except Exception: pass
+                        continue
                 if kind == "overflow" and fails <= 2:
                     # too long for the window: retrying the same request can only
                     # fail again, so fold the conversation down first
@@ -3656,18 +3676,60 @@ def sched_update(fn):
         fn(cfg)
         return sched_save(cfg)
 
+EVERY_KINDS = ("once", "minutes", "hours", "daily", "weekly")
+
+def _hhmm(v):
+    """'8:30' -> '08:30'; None when it is not a clock time."""
+    m = _re.match(r"^\s*(\d{1,2}):(\d{2})\s*$", str(v or ""))
+    if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59: return None
+    return f"{int(m.group(1)):02d}:{m.group(2)}"
+
+def sched_validate(job):
+    """A task as it will be saved, or an error a person can act on."""
+    job = dict(job)
+    every = job.get("every", "daily")
+    if every not in EVERY_KINDS: return job, f"repeat must be one of {', '.join(EVERY_KINDS)}"
+    if every in ("daily", "weekly"):
+        t = _hhmm(job.get("at") or "09:00")
+        if not t: return job, f"the time {job.get('at')!r} is not a clock time like 08:30"
+        job["at"] = t
+    if every == "weekly":
+        try: wd = int(job.get("weekday", 0))
+        except (TypeError, ValueError): wd = -1
+        if not 0 <= wd <= 6: return job, "weekday must be 0 (Monday) to 6 (Sunday)"
+        job["weekday"] = wd
+    if every in ("minutes", "hours"):
+        try: n = float(job.get("n", 30 if every == "minutes" else 6))
+        except (TypeError, ValueError): n = 0
+        if n < (2 if every == "minutes" else 1) or n != n: return job, "every N must be at least 2 minutes or 1 hour"
+        job["n"] = n
+    if every == "once":
+        try: job["at_ts"] = float(job.get("at_ts"))
+        except (TypeError, ValueError): return job, "a one-off task needs a date and time"
+    if job.get("stop_at"):
+        t = _hhmm(job["stop_at"])
+        if not t: return job, f"stop at {job['stop_at']!r} is not a clock time like 06:00"
+        job["stop_at"] = t
+    if not str(job.get("prompt", "")).strip(): return job, "a task needs a prompt"
+    return job, None
+
 def sched_due(job, now=None):
+    # a task with data that can't be read is never due -- and never stops the others
+    try: return _sched_due(job, now)
+    except (TypeError, ValueError, AttributeError): return False
+
+def _sched_due(job, now=None):
     now = now or time.time()
     if not job.get("enabled", True): return False
     if job.get("until") and now > float(job["until"]): return False
     if job.get("start") and now < float(job["start"]): return False
-    last = job.get("last_run") or 0
+    last = max(float(job.get("last_run") or 0), float(job.get("not_before") or 0))
     kind = job.get("every", "daily")
     if kind in ("daily", "weekly") and not last:
         # a new daily job waits for its next time: one created at 09:33 for
         # 07:30 used to count today's 07:30 as missed and run at once
         last = float(job.get("created") or 0)
-    if kind == "once": return not last and now >= float(job.get("at_ts") or 0)
+    if kind == "once": return not job.get("last_run") and now >= float(job.get("at_ts") or 0)
     if kind == "minutes":  return now - last >= 60 * float(job.get("n", 30))
     if kind == "hours":    return now - last >= 3600 * float(job.get("n", 6))
     if kind == "daily":
@@ -3694,8 +3756,38 @@ def minutes_until(hhmm, now=None):
     if target <= now: target += 86400
     return (target - now) / 60.0
 
+def sched_next_ts(job, now=None):
+    """When a task next runs (a timestamp), or None (paused, finished, unreadable)."""
+    now = now or time.time()
+    try:
+        if not job.get("enabled", True): return None
+        if job.get("until") and now > float(job["until"]): return None
+        kind = job.get("every", "daily")
+        last = float(job.get("last_run") or 0)
+        if kind == "once": return None if last else float(job.get("at_ts") or now)
+        last = max(last, float(job.get("not_before") or 0))
+        if kind in ("minutes", "hours"):
+            step = float(job.get("n", 30 if kind == "minutes" else 6)) * (60 if kind == "minutes" else 3600)
+            start = float(job.get("start") or 0)
+            if not last: return max(start, now)
+            return max(last + step, now)
+        hh, mm = [int(x) for x in (job.get("at") or "09:00").split(":")]
+        lt = time.localtime(now)
+        for d in range(0, 8):
+            cand = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday + d, hh, mm, 0, 0, 0, -1))
+            if cand <= now: continue
+            if kind == "weekly" and time.localtime(cand).tm_wday != int(job.get("weekday", 0)): continue
+            return cand
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return None
+
 def sched_next(job):
     """Human-readable next run."""
+    try: return _sched_next(job)
+    except (TypeError, ValueError, AttributeError, IndexError): return "?"
+
+def _sched_next(job):
     kind = job.get("every", "daily")
     if kind == "once":
         if job.get("last_run"): return "done"
@@ -5813,10 +5905,88 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None, **
         TURN_CTX.effort = pinned_effort()
         proj = kw.pop("project", _NO_PROJECT_ARG)
         proj = ACTIVE_PROJECT.get("id") if proj is _NO_PROJECT_ARG else proj
-        return CE.run_turn(messages, user_content, tools, emit=emit, approve=approve,
-                           cancel=cancel or CANCEL, project=proj, **kw)
+        return _engine_turn_with_fallback(messages, user_content, tools, emit=emit, approve=approve,
+                                          cancel=cancel or CANCEL, project=proj, **kw)
     finally:
         slot_exit()
+
+def _engine_turn_with_fallback(messages, user_content, tools, emit=None, cancel=None, **kw):
+    """A Claude Code answer that ended in a model error (after Claude Code's own
+    retries) runs again, from the same message, on the next fallback model. The
+    failed attempt's error stays hidden unless there is nothing left to try."""
+    emit = emit or (lambda k, p: None)
+    tried = []
+    while True:
+        run = CX.run_turn if CX.is_engine(current_model()) else CE.run_turn
+        n0 = len(messages)
+        held, answered = [], {"error": None}
+        def catch(k, p, held=held, answered=answered):
+            if k == "error": answered["error"] = p; held.append((k, p)); return
+            if k == "done": held.append((k, p)); return
+            emit(k, p)
+        out = run(messages, user_content, tools, emit=catch, cancel=cancel, **kw)
+        failed = answered["error"] is not None and not (out or "").strip() and not cancel.is_set()
+        why = str(answered["error"] or "")
+        local_problem = any(m in why for m in ("SSH", "ssh", "tunnel", "does not fit", "Could not start Claude Code",
+                                                "not signed in", "not installed", "no `claude`"))
+        nxt = None
+        if failed and not local_problem:
+            cur = getattr(TURN_CTX, "model", None) or pinned_model()
+            tried.append(cur)
+            nxt = next((m for m in fallback_candidates(cur) if m not in tried), None)
+        if not nxt:
+            for k, p in held: emit(k, p)
+            return out
+        del messages[n0:]              # the failed attempt's message and steps: it runs again
+        if run is CX.run_turn: TURN_CTX.codex_fresh = True     # Codex's thread still holds the failed attempt
+        emit("fallback", {"from": tried[-1], "to": nxt, "why": why[:300], "after": 1})
+        TURN_CTX.model = TURN_CTX.pin_model = nxt
+
+# ------------------------------------------------------------------ fallback models
+FALLBACK_KINDS = ("transient", "auth", "setup")
+
+def _fallback_after():
+    try: return max(1, int(S.get("fallback_after") or 3))
+    except (TypeError, ValueError): return 3
+
+def _engine_of(mid):
+    mid = str(mid or "")
+    if mid.startswith("harness:") or mid.startswith("claude-qwen"): return "claude"
+    if mid.startswith("codex:"): return "codex"
+    return "orbit"
+
+def _as_engine(mid, engine):
+    """The same model id, for a chat on this engine (harness:x/y <-> harness-direct:x/y <-> codex:x/y)."""
+    mid = str(mid or "")
+    body = next((mid[len(p):] for p in ("harness-direct:", "harness:", "codex:") if mid.startswith(p)), None)
+    if body is None: return mid if _engine_of(mid) == engine else None
+    if body.startswith("chatgpt/"): return mid if engine == "codex" else None
+    return {"claude": "harness:", "codex": "codex:", "orbit": "harness-direct:"}[engine] + body
+
+def _model_name(m):
+    name = str((m or {}).get("model") or "").split("/")[-1].lower()
+    return name[:-7] if name.endswith("-latest") else name
+
+def fallback_candidates(mid):
+    """Where an answer goes when its model keeps failing, best first: the same model
+    from another provider, then your fallback list -- each in the chat's own engine
+    (Orbit, Claude Code, Codex), ready to use, the local model last."""
+    if not S.get("fallback_enabled", True) or not mid: return []
+    engine = _engine_of(mid)
+    try: cat = [m for m in model_catalogue() if m.get("ready") and not m.get("switch")]
+    except Exception: return []
+    ids = {m["id"]: m for m in cat}
+    me = ids.get(mid) or next((m for m in model_catalogue() if m["id"] == mid), None) or {"model": str(mid).split(":", 1)[-1]}
+    out = []
+    def add(x):
+        if x and x != mid and x in ids and x not in out and _engine_of(x) == engine: out.append(x)
+    if S.get("fallback_same_model", True) and _model_name(me):
+        for m in cat:
+            if _model_name(m) == _model_name(me): add(m["id"])
+    for x in S.get("fallback_models") or []:
+        add(_as_engine(x, engine))
+    local = [x for x in out if ids[x].get("provider") == "local"]
+    return [x for x in out if x not in local] + local
 
 # ==================================================================== HARNESS MODELS
 # Every model in harness mode runs through Claude Code: the local Qwen, and any
@@ -5930,7 +6100,10 @@ def session_list():
         for r in rows:
             src = AGENT_SESSIONS.source_of(r["id"])
             if src: r["source"] = src
-        if S.get("agent_history", True): extra = list(extra) + AGENT_SESSIONS.rows_cached(ROOT)
+        if S.get("agent_history", True):
+            # Codex threads that are Orbit chats already (Codex mode) are not listed again
+            owned = set(CX.owned_threads())
+            extra = list(extra) + [r for r in AGENT_SESSIONS.rows_cached(ROOT) if str(r.get("id", ""))[3:] not in owned]
     except Exception:
         pass
     if not extra: return rows
@@ -5963,3 +6136,63 @@ def agent_session_open(sid):
     extra.setdefault("tags", [marker["source"]])
     session_save(sid, [sysmsg] + msgs, meta.get("title") or title, extra)
     return True
+
+
+# ==================================================================== CODEX MODE
+# "codex:<provider>/<model>" ids run through Codex's own agent (bin/codex_engine.py):
+# codex:chatgpt/... on the ChatGPT account Codex is signed in to, any other provider
+# through Orbit's gateway.
+import codex_engine as CX
+CX.Q = sys.modules[__name__]
+
+def _harness_spec(hid):
+    return HARN.resolve(ROOT, hid, secrets_load(), local_model_name())
+
+_current_model_before_codex = current_model
+def current_model(mid=None):
+    want = mid or getattr(TURN_CTX, "model", None) or pinned_model()
+    if not want:
+        want = MODELS.load(ROOT).get("default") or None
+    if want and str(want).startswith("codex:"):
+        spec = CX.resolve(want, _harness_spec)
+        if spec: return spec
+        want = None
+    return _current_model_before_codex(want)
+
+_model_catalogue_before_codex = model_catalogue
+def model_catalogue():
+    cat = _model_catalogue_before_codex()
+    try:
+        have = {m["id"] for m in cat}
+        cat += [m for m in CX.catalogue(HARN.catalogue(ROOT, secrets_load(), local_model_name())) if m["id"] not in have]
+    except Exception:
+        pass
+    return cat
+
+def uses_codex_engine(mid=None):
+    try: return CX.is_engine(current_model(mid))
+    except Exception: return False
+
+_turn_before_codex = turn
+def turn(messages, user_content, tools, emit=None, approve=None, cancel=None, **kw):
+    if getattr(TURN_CTX, "depth", 0) or not uses_codex_engine():
+        return _turn_before_codex(messages, user_content, tools, emit=emit, approve=approve, cancel=cancel, **kw)
+    TURN_CTX.model = pinned_model()
+    TURN_CTX.effort = pinned_effort()
+    proj = kw.pop("project", _NO_PROJECT_ARG)
+    proj = ACTIVE_PROJECT.get("id") if proj is _NO_PROJECT_ARG else proj
+    return _engine_turn_with_fallback(messages, user_content, tools, emit=emit, approve=approve,
+                                      cancel=cancel or CANCEL, project=proj, **kw)
+
+_stream_call_before_codex = stream_call
+def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None, interrupt=None):
+    """A title or a note for a Codex chat: straight to the same provider, or for your
+    ChatGPT account a one-shot `codex exec`."""
+    try:
+        spec = current_model(model)
+        if CX.is_engine(spec):
+            c = spec.get("codex") or {}
+            model = "codex-cli:default" if c.get("provider") == CX.CHATGPT else f"harness-direct:{c.get('provider')}/{c.get('model')}"
+    except Exception:
+        pass
+    return _stream_call_before_codex(messages, tools, think=think, emit=emit, cancel=cancel, model=model, interrupt=interrupt)
