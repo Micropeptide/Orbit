@@ -135,6 +135,19 @@ def which(name):
     return None
 
 
+def cli_env(exe=None):
+    """The environment a CLI runs in. Orbit's server starts with launchd's short PATH,
+    so a Node-based CLI (codex, qwen) found by its full path still failed on its first
+    line: `env: node: No such file or directory`. Its own folder and the usual ones go
+    on PATH."""
+    env = dict(os.environ)
+    have = env.get("PATH", "").split(":")
+    extra = ([os.path.dirname(os.path.realpath(exe)), os.path.dirname(exe)] if exe else []) + \
+            [os.path.expanduser(d) for d in EXTRA_BIN_DIRS]
+    env["PATH"] = ":".join(dict.fromkeys([p for p in have + extra if p and os.path.isdir(p)]))
+    return env
+
+
 def cli_available(backend):
     return bool(which((CLI_BACKENDS.get(backend) or {}).get("bin") or ""))
 
@@ -212,17 +225,45 @@ def cli_stream(backend, model, messages, emit=None, cancel=None, timeout=900,
     if not exe: raise RuntimeError(f"{b['bin']} is not installed or not on PATH")
 
     system, prompt = _transcript(messages)
-    argv = [exe, *b["argv"]]
-    if model and model != "default" and b.get("model_flag"):
-        argv += [b["model_flag"], model]
-    if system and b.get("system_flag"):
-        argv += [b["system_flag"], system[:6000]]
-    argv += list(extra_args or [])
-    argv.append(prompt if (system and b.get("system_flag")) else
-                ((system + "\n\n" + prompt) if system else prompt))
+    # Codex and OpenCode keep their own sessions: a chat that has one continues it,
+    # sending only what is new, instead of replaying the conversation as one prompt
+    resume_mk, AG = None, None
+    try:
+        import agent_sessions as AG
+        resume_mk = AG.marker_of(messages, backend)
+    except Exception:
+        resume_mk = None
+    if resume_mk and backend in ("codex-cli", "opencode-cli"):
+        new = [m for m in AG.since_marker(messages) if m.get("role") in ("user", "assistant", "tool")]
+        last = next((m for m in reversed(new) if m.get("role") == "user"), None) or \
+               next((m for m in reversed(messages) if m.get("role") == "user"), {})
+        said = last.get("content")
+        if isinstance(said, list): said = " ".join(x.get("text", "") for x in said if x.get("type") == "text")
+        said = str(said or "")
+        between = [m for m in new if m is not last]
+        if between:
+            said = ("[Meanwhile, in this chat on another model:]\n" + _transcript(between)[1]
+                    + "\n\n[Now:]\n" + said)
+        if resume_mk.get("cwd") and os.path.isdir(resume_mk["cwd"]): cwd = resume_mk["cwd"]
+        if backend == "codex-cli":
+            argv = [exe, "exec", "--json", "--skip-git-repo-check", *list(extra_args or []), "resume", resume_mk["id"], said]
+        else:
+            argv = [exe, "run", "--format", "json", "--session", resume_mk["id"]]
+            if model and model != "default": argv += ["--model", model]
+            argv += [*list(extra_args or []), said]
+    else:
+        argv = [exe, *b["argv"]]
+        if model and model != "default" and b.get("model_flag"):
+            argv += [b["model_flag"], model]
+        if system and b.get("system_flag"):
+            argv += [b["system_flag"], system[:6000]]
+        argv += list(extra_args or [])
+        argv.append(prompt if (system and b.get("system_flag")) else
+                    ((system + "\n\n" + prompt) if system else prompt))
+    session_id = None
 
     proc = subprocess.Popen(argv, cwd=cwd or None, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=cli_env(exe),
                             start_new_session=True)   # own group, so cancel kills children
 
     killed = {"why": None}
@@ -250,6 +291,10 @@ def cli_stream(backend, model, messages, emit=None, cancel=None, timeout=900,
             except ValueError:
                 continue                       # progress chatter, not an event
             if not isinstance(ev, dict): continue
+            if not session_id:
+                # the session the CLI answered in, so the next message continues it
+                session_id = (ev.get("thread_id") if ev.get("type") == "thread.started" else None) \
+                    or ev.get("sessionID") or ev.get("session_id")
             kind, text = _cli_text(ev)
             if not text: continue
             if kind == "delta":
@@ -296,6 +341,9 @@ def cli_stream(backend, model, messages, emit=None, cancel=None, timeout=900,
         raise RuntimeError(f"{b['bin']} exited {rc}: " + (tail[-1][:300] if tail else "no output"))
     msg = {"role": "assistant", "content": text}
     if think: msg["reasoning_content"] = "".join(think)
+    if AG is not None and backend in AG.BACKEND_SOURCE and (session_id or resume_mk):
+        msg["agent"] = {"source": AG.BACKEND_SOURCE[backend], "id": session_id or resume_mk["id"],
+                        "cwd": cwd or (resume_mk or {}).get("cwd") or ""}
     return msg
 
 

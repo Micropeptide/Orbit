@@ -417,7 +417,8 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._send(200, jdump({"provider": pid, "label": pr["label"], "models": models, "live": live,
                                           "ready": q.HARN._ready(pid, pr, secrets_), "key": pr.get("key"),
                                           "fetched_at": pr.get("fetched_at")}))
-        if p == "/api/harness":
+        if p.split("?")[0] == "/api/harness":
+            if "fresh=1" in self.path: q.HARN._LOGIN["at"] = 0      # "check again": ask claude now
             view = q.HARN.public_view(q.ROOT, q.secrets_load(), q.local_model_name())
             for pv in view["providers"]:
                 for m in pv["models"]: m["usage"] = _usage_brief(pv["id"], m["id"])
@@ -436,6 +437,18 @@ class H(http.server.BaseHTTPRequestHandler):
                 view["gateway"]["stats"] = harness_gateway.STATS
             except Exception: pass
             return self._send(200, jdump(view))
+        if p.startswith("/api/claude/memory"):
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            cwd = (qs.get("cwd") or [""])[0] or None
+            sid_ = (qs.get("sid") or [""])[0]
+            if not cwd and sid_:
+                st_ = STATES.get(sid_)
+                mk = q.CE.marker_of(st_.msgs if st_ else []) or {}
+                cwd = mk.get("cwd") or q.CE.chat_prefs(sid_).get("cwd")
+            cwd = cwd or q.WORKSPACE
+            return self._send(200, jdump({"cwd": cwd, "instructions": q.CE.claude_instruction_files(cwd),
+                                          "memory": q.CE.claude_memory(cwd), "folders": q.CE.claude_memory_folders(),
+                                          "chat_instructions": q.CE.chat_prefs(sid_).get("instructions") if sid_ else None}))
         if p == "/api/claude/folders":
             return self._send(200, jdump({"folders": q.CE.recent_folders()}))
         if p.startswith("/api/claude/info"):
@@ -644,6 +657,11 @@ class H(http.server.BaseHTTPRequestHandler):
             if not sid:
                 return self._send(400, jdump({"error": "which chat?"}))
             _claude_sync(sid)
+            if q.AGENT_SESSIONS.source_of(sid):
+                st_ = STATES.get(sid)
+                if not (st_ and st_.lock.locked()):
+                    try: q.agent_session_open(sid)
+                    except Exception as e: print(f"  ! opening {sid}: {type(e).__name__}: {e}")
             try:
                 # Look the chat up by its own id. Mutating the global S here used to
                 # hijack whichever chat was mid-answer, so its reply was appended to
@@ -739,7 +757,9 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/delete":
             did = d.get("id", "")
             q.CE.hide_history(did)          # a deleted Claude-Qwen chat stays out of the sidebar
-            return self._send(200, jdump({"ok": q.session_delete(did) or did.startswith("cq-")}))
+            q.AGENT_SESSIONS.hide(q.ROOT, did)      # and a Codex / OpenCode one
+            return self._send(200, jdump({"ok": q.session_delete(did) or did.startswith("cq-")
+                                          or bool(q.AGENT_SESSIONS.source_of(did))}))
         if p == "/api/claude/mode":
             # a chat's Claude Code permission mode: live if it is answering, and from now on
             return self._send(200, jdump(q.CE.set_permission_mode(d.get("sid", ""), d.get("mode", ""))))
@@ -822,6 +842,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 cur["harness_mode"] = on
                 q.save_settings(cur); q.reload_settings()
                 q.MODELS.save(q.ROOT, reg)
+            q.CE._HIST["at"] = 0          # the sidebar's terminal sessions follow the mode (all of them in Claude Code mode)
             return self._send(200, jdump({"ok": True, "harness_mode": on, "default": reg["default"]}))
         if p == "/api/harness/save":
             # the registry: provider base URLs, custom providers, hidden models, contexts, proxy.
@@ -896,6 +917,16 @@ class H(http.server.BaseHTTPRequestHandler):
                                               "reply": (out.get("content") or "")[:200]}))
             except Exception as e:
                 return self._send(200, jdump({"ok": False, "error": f"{type(e).__name__}: {str(e)[:500]}"}))
+        if p == "/api/claude/memory":
+            op, cwd = d.get("op", ""), d.get("cwd") or None
+            if op == "instructions": r = q.CE.save_claude_instructions(d.get("scope", "user"), d.get("text") or "", cwd)
+            elif op == "save": r = q.CE.save_claude_memory(cwd, d.get("file"), d.get("text") or "")
+            elif op == "delete": r = q.CE.delete_claude_memory(cwd, d.get("file"))
+            elif op == "chat":
+                r = {"ok": True, "prefs": q.CE.set_chat_pref(d.get("sid") or S.sid,
+                                                             instructions=(d.get("text") or "").strip() or None)}
+            else: r = {"error": f"unknown op {op}"}
+            return self._send(200 if not r.get("error") else 400, jdump(r))
         if p == "/api/claude/claude_settings":
             return self._send(200, jdump({"ok": True, "settings": q.CE.write_claude_settings(
                 d.get("patch") or {}, d.get("scope") or "user", d.get("cwd"))}))
@@ -1270,6 +1301,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/sysprompt":
             with LOCK:
                 S.sys_override = (d.get("text") or "").strip() or None
+                q.CE.set_chat_pref(S.sid, instructions=S.sys_override)   # a Claude Code chat's own instructions
                 base = q.system_prompt_for(S.agent)
                 S.msgs[0]["content"] = (base + "\n\n## This chat\n" + S.sys_override
                                         if S.sys_override else base)
@@ -1698,7 +1730,10 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                 slotted[0] = True
                 _refresh_system(st)
                 st.refresh_tools()     # a project's own tools, and any added since
-                st.msgs, did, pct = q.maybe_autocompact(st.msgs, emit=lambda k, p: Q.put((k, p)),
+                # a Claude Code chat is compacted by Claude Code itself (Orbit's copy of it
+                # is only what you see); Orbit's compaction is for its own chats
+                engine_chat = _is_engine_chat(st)
+                st.msgs, did, pct = (st.msgs, False, 0) if engine_chat else q.maybe_autocompact(st.msgs, emit=lambda k, p: Q.put((k, p)),
                                                         sid=st.sid)
                 if did: save_session(st)
                 _t0 = time.time()
@@ -1743,7 +1778,7 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                 except Exception: pass
                 st.running = False
                 save_session(st)
-                _learn_later(st, n0)
+                if not _is_engine_chat(st): _learn_later(st, n0)     # Claude keeps its own memory
             if first and not st.cancel.is_set():
                 # the title is written alongside, not before the chat is free: a queued
                 # message used to wait for it (16 s on a reasoning model)
@@ -1994,6 +2029,12 @@ def _live_emitter(st):
     so opening that chat mid-run shows it working, like any other answer."""
     return lambda k, p: _live_record(st, k, p)
 
+def _is_engine_chat(st, model=None):
+    """Whether a chat runs through Claude Code (which has its own memory, compaction
+    and instructions)."""
+    try: return q.CE.is_engine(q.current_model(model or st.model))
+    except Exception: return False
+
 def _learn_later(st, n0, min_steps=3):
     """After a substantial answer (min_steps tool calls or more), pull out
     durable facts and save them as memory — in the background, after the
@@ -2158,7 +2199,8 @@ def run_job(job):
                 q.ACTIVE_MODEL["id"] = job.get("model") or st.model
                 q.TURN_CTX.pin_model = q.TURN_CTX.model = job.get("model") or st.model
                 _refresh_system(st)
-                st.msgs, _did, _pct = q.maybe_autocompact(st.msgs, sid=st.sid)
+                if not _is_engine_chat(st, job.get("model")):
+                    st.msgs, _did, _pct = q.maybe_autocompact(st.msgs, sid=st.sid)
                 n0 = len(st.msgs)
                 prompt = (f"[Scheduled task “{label}”, running unattended at "
                           f"{time.strftime('%H:%M')}]\n{_job_prompt(job)}")
@@ -2170,7 +2212,7 @@ def run_job(job):
                              max_minutes=_job_minutes(job), read_only=st.plan_mode)
                 st.running = False
                 save_session(st)
-                _learn_later(st, n0)
+                if not _is_engine_chat(st): _learn_later(st, n0)     # Claude keeps its own memory
                 result_sid = st.sid
             finally:
                 st.live["done"] = True

@@ -66,6 +66,11 @@ class TestClaudeEngine(unittest.TestCase):
                 time.sleep(0.1)
         CE.model_endpoint = lambda: (f"http://127.0.0.1:{port}", "mtplx-test-model", 131072)
 
+    def setUp(self):
+        # these run on the local model (the stand-in answers for it), whatever your
+        # own default model is; the harness tests below name theirs
+        q.TURN_CTX.model = CE.BACKEND + ":default"
+
     def run_turn(self, msgs, text, approve=None, cancel=None, ask=None, read_only=False):
         events = []
         q.TURN_CTX.ask = ask
@@ -181,6 +186,8 @@ class TestClaudeEngine(unittest.TestCase):
             [{"text": "Planned."}],
         ])
         _, ev = self.run_turn([{"role": "system", "content": "s"}], "plan it", approve=lambda *a: True)
+        if any("is disabled for this session" in str((p or {}).get("output")) for k, p in ev if k == "tool_result"):
+            self.skipTest("this Claude Code has its Task tools switched off (its own setting, not Orbit's)")
         plans = [p for k, p in ev if k == "tool_result" and p.get("name") == "plan"]
         self.assertTrue(plans, [k for k, _ in ev])
         self.assertIn("[ ] Read the data", plans[-1]["output"])
@@ -434,9 +441,16 @@ class TestHarnessModels(unittest.TestCase):
                   "ANTHROPIC_DEFAULT_SONNET_MODEL"):
             self.assertNotIn(k, env)
         argv = CE.build_argv(CE.DEFAULTS, model=t["cli_model"])
+        # a sign-in token saved in Orbit (from `claude setup-token`) goes to Claude Code itself
+        old_secrets = q.secrets_load
+        q.secrets_load = lambda: {"CLAUDE_CODE_OAUTH_TOKEN": "tok-from-setup"}
+        try:
+            self.assertEqual(CE.target_env(CE.harness_target(spec)).get("CLAUDE_CODE_OAUTH_TOKEN"), "tok-from-setup")
+        finally:
+            q.secrets_load = old_secrets
         self.assertEqual(argv[argv.index("--model") + 1], "opus")
         old = self.H.claude_login
-        self.H.claude_login = lambda max_age=120: "no"
+        self.H.claude_login = lambda max_age=120, token=None: "no"
         try:
             q.TURN_CTX.model = "harness:claude/opus"
             out, ev = self.run_turn([{"role": "system", "content": "s"}], "hi")
@@ -458,6 +472,46 @@ class TestHarnessModels(unittest.TestCase):
 
 class TestClaudeEngineOffline(unittest.TestCase):
     """The parts that need no Claude Code at all."""
+
+    def test_claude_memory_and_instructions_are_claudes_own_files(self):
+        import tempfile, shutil
+        cdir, folder = tempfile.mkdtemp(), tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, cdir, True); self.addCleanup(shutil.rmtree, folder, True)
+        old_env, old_trash = os.environ.get("ORBIT_CLAUDE_CONFIG_DIR"), CE._to_trash
+        os.environ["ORBIT_CLAUDE_CONFIG_DIR"] = cdir
+        trashed = []
+        CE._to_trash = lambda path: (trashed.append(path), os.remove(path))[0]
+        try:
+            self.assertTrue(CE.save_claude_instructions("user", "Be brief.")["ok"])
+            self.assertEqual(open(os.path.join(cdir, "CLAUDE.md")).read(), "Be brief.\n")
+            self.assertTrue(CE.save_claude_instructions("local", "Only here.", folder)["ok"])
+            self.assertTrue(os.path.isfile(os.path.join(folder, "CLAUDE.local.md")))
+            self.assertIn("error", CE.save_claude_instructions("project", "x"))       # no folder chosen
+            text = "---\nname: lab\ndescription: the lab's setup\nmetadata:\n  type: user\n---\n\nUses MTPLX.\n"
+            r = CE.save_claude_memory(folder, "lab.md", text)
+            self.assertTrue(r["new"])
+            m = CE.claude_memory(folder)
+            self.assertEqual([(i["name"], i["description"]) for i in m["items"]], [("lab", "the lab's setup")])
+            self.assertIn("- [lab](lab.md) — the lab's setup", m["index"])
+            esc = CE.save_claude_memory(folder, "../escape.md", "x")        # only ever inside the memory folder
+            self.assertEqual(os.path.dirname(esc["path"]), CE.claude_memory_dir(folder))
+            CE.delete_claude_memory(folder, "escape.md"); trashed.clear()
+            self.assertIn("error", CE.delete_claude_memory(folder, "../../CLAUDE.md"))
+            self.assertTrue(CE.delete_claude_memory(folder, "lab.md")["ok"])
+            self.assertNotIn("lab.md", CE.claude_memory(folder)["index"])
+            self.assertEqual(len(trashed), 1)
+            old_scratch, CE._SCRATCH = CE._SCRATCH, ()     # this test's folder is a temporary one
+            try: self.assertEqual(CE.claude_memory_folders()[0]["count"], 0)
+            finally: CE._SCRATCH = old_scratch
+        finally:
+            CE._to_trash = old_trash
+            if old_env is None: os.environ.pop("ORBIT_CLAUDE_CONFIG_DIR", None)
+            else: os.environ["ORBIT_CLAUDE_CONFIG_DIR"] = old_env
+
+    def test_a_chats_own_instructions_reach_claude(self):
+        a = CE._orbit_append(None, dict(CE.DEFAULTS), False, "Answer in French.")
+        self.assertIn("Answer in French.", a)
+        self.assertNotIn("standing instructions", a)      # Orbit's own instructions stay out
 
     def test_argv_profiles(self):
         c = {**CE.DEFAULTS}
