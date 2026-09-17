@@ -883,7 +883,7 @@ def _parse_when(s, now=None):
                      "'tomorrow 07:00' or '2026-09-12 21:00'")
 
 def t_schedule_task(prompt, start="now", repeat_every_minutes=None, daily_at=None,
-                    until=None, name=None, in_this_chat=True, stop_at=None):
+                    until=None, name=None, in_this_chat=True, stop_at=None, model=None):
     """Set up work to run later, or again and again, with nobody watching."""
     prompt = str(prompt or "").strip()
     if not prompt: return "Error: a scheduled task needs a prompt — what to do each time it runs."
@@ -894,6 +894,12 @@ def t_schedule_task(prompt, start="now", repeat_every_minutes=None, daily_at=Non
         return f"Error: {e}"
     job = {"id": "job" + os.urandom(3).hex(), "prompt": prompt, "enabled": True,
            "name": str(name or prompt)[:60], "created": time.time(), "created_by": "model"}
+    if model:
+        mid = find_model(model)
+        if not mid:
+            names = ", ".join(m["label"] for m in model_catalogue()[:25])
+            return f"Error: no model matches {model!r}. Available: {names}"
+        job["model"] = mid
     if daily_at:
         if not _re.match(r"^\d{1,2}:\d{2}$", str(daily_at).strip()):
             return "Error: daily_at must look like '07:30'."
@@ -922,6 +928,8 @@ def t_schedule_task(prompt, start="now", repeat_every_minutes=None, daily_at=Non
            f"daily at {job['at']}" if job["every"] == "daily" else "once")
     stop = f", until {time.strftime('%a %H:%M', time.localtime(until_ts))}" if until_ts else ""
     where = "in this chat, with its history" if job.get("sid") else "in a new chat each time"
+    if job.get("model"):
+        where += f", on {next((m['label'] for m in model_catalogue() if m['id'] == job['model']), job['model'])}"
     return (f"Scheduled {job['id']}: {rep}{stop}, first run {first}, {where}. The local model "
             "starts by itself if it's asleep. Actions that need approval are refused in a run "
             "nobody is watching. Cancel it with cancel_scheduled_task.")
@@ -1291,7 +1299,8 @@ ALL_SPECS = [
    "until":{"type":"string","description":"Stop repeating after this time (same formats as start)."},
    "name":{"type":"string"},
    "stop_at":{"type":"string","description":"Clock time each run must be finished by, e.g. '06:00' for work that should only happen overnight. The run wraps up with a summary when it gets there."},
-   "in_this_chat":{"type":"boolean"}},"required":["prompt"]}}},
+   "in_this_chat":{"type":"boolean"},
+   "model":{"type":"string","description":"Which model runs it, in words or as an id: e.g. 'deepseek v4 pro on opencode go', 'local qwen', 'kimi k3'. Omit to use the chat's model (or Orbit's default for a new chat)."}},"required":["prompt"]}}},
  {"type":"function","function":{"name":"list_scheduled_tasks","description":"List scheduled tasks: id, next run, last result.",
   "parameters":{"type":"object","properties":{}}}},
  {"type":"function","function":{"name":"cancel_scheduled_task","description":"Cancel a scheduled task by id.",
@@ -5769,14 +5778,80 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None, **
     finally:
         slot_exit()
 
+# ==================================================================== HARNESS MODELS
+# Every model in harness mode runs through Claude Code: the local Qwen, and any
+# provider in bin/harness.py (OpenCode Go/Zen, DeepSeek, Qwen, GLM, MiniMax, Kimi,
+# Anthropic, custom). "harness:<provider>/<model>" ids.
+import harness as HARN
+HARNESS_PORT = None            # set by orbit-ui when it starts the gateway
+
+_current_model_before_harness = current_model
+def current_model(mid=None):
+    want = mid or getattr(TURN_CTX, "model", None) or ACTIVE_MODEL.get("id")
+    if not want:
+        want = MODELS.load(ROOT).get("default") or None
+    if want and str(want).startswith("harness:"):
+        spec = HARN.resolve(ROOT, want, secrets_load(), local_model_name())
+        if spec: return spec
+        want = None
+    if want and str(want).startswith("harness-direct:"):
+        # a plain request (a title, a memory note) to a harness model's own provider
+        spec = HARN.resolve(ROOT, "harness:" + str(want)[len("harness-direct:"):], secrets_load(), local_model_name())
+        if spec:
+            pc = spec["provider_cfg"]
+            t = CE.harness_target(spec)
+            return {**spec, "id": want, "provider": "harness-direct", "model": pc["model"],
+                    "provider_cfg": {"kind": "anthropic", "api_key": (t["auth"].get("ANTHROPIC_API_KEY")
+                                                                   or t["auth"].get("ANTHROPIC_AUTH_TOKEN") or "orbit"),
+                                     "base_url": t["url"]}}
+    return _current_model_before_harness(want)
+
+_model_catalogue_before_harness = model_catalogue
+def model_catalogue():
+    cat = _model_catalogue_before_harness()
+    try:
+        have = {m["id"] for m in cat}
+        cat += [m for m in HARN.catalogue(ROOT, secrets_load(), local_model_name()) if m["id"] not in have]
+    except Exception:
+        pass
+    return cat
+
+_model_is_local_before_harness = model_is_local
+def model_is_local(mid=None):
+    """The local Qwen in harness mode is still the local model: one answer at a time."""
+    spec = current_model(mid)
+    if spec and (spec.get("provider") == CE.BACKEND or
+                 (spec.get("provider") == "harness" and (spec.get("provider_cfg") or {}).get("local"))):
+        return True
+    return bool(spec and spec.get("provider") == "local")
+
+def find_model(text):
+    """A model named in words ("deepseek pro on opencode go", "local qwen") -> its id, or None."""
+    text = str(text or "").strip()
+    if not text: return None
+    cat = model_catalogue()
+    if any(m["id"] == text for m in cat): return text
+    spec = HARN.find(ROOT, text, secrets_load(), local_model_name())
+    if spec:
+        return CE.BACKEND + ":default" if (spec.get("provider_cfg") or {}).get("local") else spec["id"]
+    low = text.lower()
+    hit = [m for m in cat if low in (m.get("label") or "").lower() or low in m["id"].lower()]
+    return hit[0]["id"] if hit else None
+
 _stream_call_before_engine = stream_call
 def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None, interrupt=None):
-    """Titles, memory notes, summaries: a quick call straight to the local model
-    the engine runs on, rather than a whole Claude Code session for one line."""
+    """Titles, memory notes, summaries: a quick call straight to the model the
+    engine runs on, rather than a whole Claude Code session for one line -- the
+    local server for the local Qwen, the provider itself for a harness model."""
     try:
-        if CE.is_engine(current_model(model)):
-            local = local_model_name()
-            if local: model = MODELS.model_id("local", local)
+        spec = current_model(model)
+        if CE.is_engine(spec):
+            pc = spec.get("provider_cfg") or {}
+            if spec.get("provider") == "harness" and not pc.get("local"):
+                model = "harness-direct:" + spec["model"]
+            else:
+                local = local_model_name()
+                if local: model = MODELS.model_id("local", local)
     except Exception:
         pass
     return _stream_call_before_engine(messages, tools, think=think, emit=emit, cancel=cancel,

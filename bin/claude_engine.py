@@ -50,6 +50,8 @@ DEFAULTS = {
     # launcher: "claude" = run the hooks your Claude settings define; "off" = none
     "hooks": "claude",
     "extra_args": [],
+    # "New chat with…" presets (bunshin's agents): name, model, folder, permission mode
+    "presets": [],
     "append_system": "",
     "effort_passthrough": True,
 
@@ -111,11 +113,61 @@ def which_claude():
 
 
 def is_engine(spec):
-    """True when a resolved model spec should run through this engine."""
+    """True when a resolved model spec should run through this engine: the local
+    Qwen (claude-qwen) or any harness model (bin/harness.py)."""
     try:
-        return (spec or {}).get("provider") == BACKEND
+        return (spec or {}).get("provider") in (BACKEND, "harness")
     except Exception:
         return False
+
+
+def gateway_token():
+    """The token Orbit's gateway asks for, so only Orbit's Claude runs can use
+    the keys behind it. Made once, kept private (0600) in config/claude."""
+    path = os.path.join(_work_dir(), "gateway-token")
+    try:
+        tok = open(path).read().strip()
+        if len(tok) >= 32: return tok
+    except OSError:
+        pass
+    tok = secrets.token_urlsafe(32)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh: fh.write(tok)
+    return tok
+
+
+def gateway_port():
+    port = getattr(Q, "HARNESS_PORT", None)
+    if port: return int(port)
+    try:
+        import harness
+        return int(harness.load(Q.ROOT).get("gateway_port") or 8897)
+    except Exception:
+        return 8897
+
+
+def harness_target(spec=None):
+    """Where a Claude Code run for this model sends its requests: base URL, the
+    model ids for Claude's tiers, context window, credentials, extra env, and
+    whether it is the local server (which may need waking)."""
+    spec = spec or {}
+    pc = spec.get("provider_cfg") or {}
+    if spec.get("provider") != "harness" or pc.get("local"):
+        url, model, ctx = model_endpoint()
+        return {"url": url, "model": model, "small": model, "ctx": ctx, "local": True, "provider": "local",
+                "auth": {"ANTHROPIC_AUTH_TOKEN": "local-qwen"}, "env": {}, "key_missing": False}
+    if pc.get("auth") == "gateway" or pc.get("format") != "messages":
+        url = f"http://127.0.0.1:{gateway_port()}/h/{pc['provider']}"
+        auth = {"ANTHROPIC_AUTH_TOKEN": gateway_token()}           # the gateway adds the real key
+    else:
+        url = pc.get("base") or ""
+        auth = {"ANTHROPIC_API_KEY": pc.get("api_key") or ""}
+    env = dict(pc.get("env") or {})
+    if pc.get("proxy") and "ANTHROPIC_API_KEY" in auth:
+        env.update(HTTPS_PROXY=pc["proxy"], HTTP_PROXY=pc["proxy"])
+    return {"url": url, "model": pc.get("model"), "small": pc.get("small") or pc.get("model"),
+            "ctx": int(pc.get("context") or 128000), "local": False, "provider": pc.get("provider"),
+            "auth": auth, "env": env, "key_missing": not pc.get("api_key"), "key_name": pc.get("key_name")}
 
 
 # ------------------------------------------------------------------ the process
@@ -135,7 +187,7 @@ def model_endpoint():
     return base, mid, ctx
 
 
-def harness_env(url, model, ctx, extra=None):
+def harness_env(url, model, ctx, extra=None, small=None, auth=None):
     """The gateway variables, and nothing inherited from another Claude session.
 
     A shell started from a Claude desktop session carries CLAUDE_CODE_* values
@@ -150,12 +202,12 @@ def harness_env(url, model, ctx, extra=None):
     env["PATH"] = ":".join(p for p in paths if p)
     env.update({
         "ANTHROPIC_BASE_URL": url,
-        "ANTHROPIC_AUTH_TOKEN": "local-qwen",
         "ANTHROPIC_MODEL": model,
         "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
         "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
-        "ANTHROPIC_SMALL_FAST_MODEL": model,
+        # Claude's quick background calls go to the provider's small model
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": small or model,
+        "ANTHROPIC_SMALL_FAST_MODEL": small or model,
         "CLAUDE_CODE_SUBAGENT_MODEL": model,
         "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(ctx),
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
@@ -166,10 +218,16 @@ def harness_env(url, model, ctx, extra=None):
         "MCP_TOOL_TIMEOUT": "3600000",
         "BASH_DEFAULT_TIMEOUT_MS": "600000",
     })
+    env.update(auth if auth is not None else {"ANTHROPIC_AUTH_TOKEN": "local-qwen"})
     if os.environ.get("ORBIT_CLAUDE_CONFIG_DIR"):
         env["CLAUDE_CONFIG_DIR"] = os.environ["ORBIT_CLAUDE_CONFIG_DIR"]
     env.update(extra or {})
     return env
+
+
+def target_env(target, extra=None):
+    return harness_env(target["url"], target["model"], target["ctx"], extra={**target.get("env", {}), **(extra or {})},
+                       small=target.get("small"), auth=target.get("auth"))
 
 
 def encode_cwd(path):
@@ -683,13 +741,12 @@ def command_catalog(max_age=600):
             return INIT
         exe = which_claude()
         if not exe: return INIT
-        url, model, ctx = model_endpoint()
         c = cfg()
         settings_path, mcp_path = launcher_files(c, "catalog")
         argv = build_argv(c, settings_path=settings_path, mcp_path=mcp_path, append=launcher_append(c))
         try:
             proc = subprocess.Popen(argv + ["--no-session-persistence"], cwd=HOME,
-                                    env=harness_env(url, model, ctx), stdin=subprocess.PIPE,
+                                    env=target_env(harness_target()), stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
         except OSError:
             return INIT
@@ -928,7 +985,15 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     label = (spec.get("label") or "Claude Code · local Qwen").replace(" · CLI", "")
     if not label.startswith("Claude Code"): label = "Claude Code · " + label
     emit("model", {"id": spec.get("id"), "label": label, "provider": "Claude Code"})
-    _wake_model(emit)
+    target = harness_target(spec)
+    if target["local"]:
+        _wake_model(emit)
+    elif target["key_missing"]:
+        msg = (f"No API key for {spec.get('provider_label') or target['provider']} "
+               f"({target.get('key_name') or 'key'}). Add it in Settings → Claude Code → Models.")
+        messages.append({"role": "user", "content": user_content, "t": time.time()})
+        emit("error", msg); emit("done", None)
+        return msg
 
     mk = dict(marker_of(messages) or {})
     jp = jsonl_path(mk.get("session"), mk.get("cwd")) if mk else None
@@ -1014,14 +1079,13 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     mode = prefs.get("permission_mode") or c.get("permission_mode") or None
     if not approve and c.get("unattended_mode"):
         mode = c["unattended_mode"]
-    url, model_name, ctxw = model_endpoint()
     argv = build_argv(c, session_id=mk["session"], resume=resume, read_only=bool(read_only), mode=mode,
                       effort=getattr(T, "effort", None) or q.S.get("reasoning_effort"),
                       settings_path=settings_path, mcp_path=mcp_path, add_dirs=prefs.get("add_dirs"),
                       append=_orbit_append(project, c, orbit_tools))
     if fork: argv.append("--fork-session")
     if resume_at: argv += ["--resume-session-at", resume_at]
-    env = harness_env(url, model_name, ctxw)
+    env = target_env(target)
 
     stamp = f"[{q.sent_at(now)}] " if c.get("message_time") else ""
     blocks = _content_blocks(user_content, stamp)
@@ -1472,6 +1536,18 @@ _CMD_RE = re.compile(r"<command-name>/?([^<]+)</command-name>.*?(?:<command-args
 _SR_RE = re.compile(r"<system-reminder>.*?</system-reminder>\s*", re.S)
 
 
+def harness_model_names():
+    """Model ids of every harness provider: a Claude session that ran on one of
+    them is a harness session, whichever provider served it."""
+    try:
+        import harness
+        # Claude's own models are left out: a session on those is ordinary Claude Code
+        return {m["id"].lower() for p in harness.providers(Q.ROOT).values() for m in p["models"]
+                if not m["id"].lower().startswith("claude")}
+    except Exception:
+        return set()
+
+
 def _is_local_model(name, local):
     n = (name or "").lower()
     return bool(n) and (n in local or n.startswith(LOCAL_MODEL_PREFIXES))
@@ -1512,9 +1588,11 @@ def _summarise(path, local, include_all):
             raw = fh.read()
     except OSError:
         return None
-    if not include_all and not any(b'"model":"' + p.encode() in raw
-                                   for p in LOCAL_MODEL_PREFIXES + tuple(m for m in local if m)):
-        return None
+    if not include_all:
+        # one pass over the file: which models answered in it
+        used = {x.decode("utf-8", "replace").lower() for x in re.findall(rb'"model":"([^"]{1,120})"', raw)}
+        if not any(_is_local_model(x, local) for x in used):
+            return None
     first, title, ai_title, cwd, last_t, first_t, n, models, entry = None, None, None, None, None, None, 0, set(), None
     for line in raw.splitlines():
         try: d = json.loads(line)
@@ -1550,7 +1628,7 @@ def scan_history(include_all=None, local=None):
     """Claude sessions run on the local model, newest first."""
     c = cfg()
     include_all = c.get("history_all_models") if include_all is None else include_all
-    local = set(x.lower() for x in (local or []))
+    local = set(x.lower() for x in (local or [])) | harness_model_names()
     try:
         local.add((Q.local_model_name() or "").lower())
     except Exception:
@@ -1769,7 +1847,8 @@ def import_session(orbit_sid):
         if m.get("role") == "user":
             m["claude"] = dict(mk)
     sysmsg = {"role": "system", "content": Q.system_prompt_for(None, None)}
-    extra = {"model": f"{BACKEND}:default", "tags": ["claude-qwen"], "source": "claude-qwen",
+    summ = next((h for h in scan_history() if h["session"] == session), None)
+    extra = {"model": model_for_session((summ or {}).get("models")), "tags": ["claude-qwen"], "source": "claude-qwen",
              "claude_session": session}
     proj = next((r["project"] for r in history_items() if r["id"] == orbit_sid), None)
     extra["project"] = proj
@@ -1819,11 +1898,33 @@ def sync_session(orbit_sid, running=False):
     return True
 
 
-def resume_command(orbit_msgs):
+def resume_command(orbit_msgs, spec=None):
+    """The terminal command that continues this chat's Claude session."""
     mk = marker_of(orbit_msgs)
     if not mk: return None
     cwd = mk.get("cwd") or HOME
+    pc = (spec or {}).get("provider_cfg") or {}
+    if (spec or {}).get("provider") == "harness" and not pc.get("local"):
+        return f"cd {json.dumps(cwd)} && claude-harness {json.dumps(spec['id'])} --resume {mk['session']}"
     return f"cd {json.dumps(cwd)} && claude-qwen --resume {mk['session']}"
+
+
+def model_for_session(models):
+    """The Orbit model id for a Claude session, from the model names in its transcript."""
+    try:
+        import harness
+        names = [m for m in models or [] if m and m != "<synthetic>"]
+        provs = harness.providers(Q.ROOT, Q.local_model_name())
+        secrets_ = Q.secrets_load()
+        for name in reversed(names):
+            hits = [(pid, p) for pid, p in provs.items() if any(x["id"] == name for x in p["models"])]
+            if not hits: continue
+            hits.sort(key=lambda h: (h[0] == "local", not harness._ready(h[0], h[1], secrets_)))
+            pid = hits[0][0]
+            return f"{BACKEND}:default" if pid == "local" else f"harness:{pid}/{name}"
+    except Exception:
+        pass
+    return f"{BACKEND}:default"
 
 
 # ------------------------------------------------------------------ your Claude setup
@@ -2098,7 +2199,59 @@ def launch(args):
     os.execvpe(exe, argv + list(args), env)
 
 
+def launch_harness(query, args):
+    """`claude-harness <model> [claude args]`: the interactive harness on any
+    harness model -- "deepseek v4 pro go", "kimi k3", "local qwen" or an id."""
+    global Q
+    here = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, here)
+    import qqcore
+    Q = qqcore
+    if query in ("--list", "-l", "?"):
+        for m in [m for m in Q.model_catalogue() if not m.get("switch") and not m["id"].startswith("local-dir:")
+                  and Q.CE.is_engine(Q.current_model(m["id"]))]:
+            print(f"  {m['id']:<52} {m['label']}{'' if m.get('ready', True) else '  (needs a key)'}")
+        return 0
+    mid = Q.find_model(query) if query else None
+    spec = Q.current_model(mid) if mid else None
+    if not spec or not is_engine(spec):
+        print(f"No harness model matches {query!r}. Some choices:", file=sys.stderr)
+        for m in [m for m in Q.model_catalogue() if m["id"].startswith("harness:")][:30]:
+            print(f"  {m['id']:<48} {m['label']}", file=sys.stderr)
+        return 2
+    t = harness_target(spec)
+    if t["local"]:
+        if os.environ.get("CLAUDE_QWEN_DRY_RUN") != "1" and not Q.probe(2):
+            print("Starting the local model...", file=sys.stderr)
+            Q.ensure_model(lambda s: print(s, file=sys.stderr, flush=True))
+    elif t["key_missing"]:
+        print(f"No API key for {spec['provider_label']} ({t.get('key_name')}). Add it in Orbit → Settings → "
+              "Claude Code → Models.", file=sys.stderr)
+        return 3
+    elif t["url"].startswith("http://127.0.0.1:"):
+        import urllib.request
+        try:
+            urllib.request.urlopen(t["url"].split("/h/")[0] + "/health", timeout=3).read()
+        except Exception:
+            print("Orbit's gateway is not answering; this model needs Orbit running.", file=sys.stderr)
+            return 4
+    c = cfg()
+    settings_path, mcp_path = launcher_files(c, "terminal-harness")
+    argv = build_argv(c, settings_path=settings_path, mcp_path=mcp_path, sdk=False,
+                      mode=c.get("permission_mode") or None, append=launcher_append(c))
+    env = target_env(t)
+    print(f"Claude Code on {spec['label']}", file=sys.stderr)
+    if os.environ.get("CLAUDE_QWEN_DRY_RUN") == "1":
+        print(json.dumps({"argv": argv + list(args), "env": {k: ("<set>" if "KEY" in k else v) for k, v in env.items()
+                                                             if k.startswith(("ANTHROPIC", "CLAUDE"))}}, indent=1))
+        return 0
+    exe = which_claude()
+    os.execvpe(exe, argv + list(args), env)
+
+
 if __name__ == "__main__":
+    if len(sys.argv) > 2 and sys.argv[1] == "harness":
+        sys.exit(launch_harness(sys.argv[2], sys.argv[3:]) or 0)
     if len(sys.argv) > 1 and sys.argv[1] == "launch":
         sys.exit(launch(sys.argv[2:]) or 0)
     print(__doc__)

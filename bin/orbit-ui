@@ -371,6 +371,14 @@ class H(http.server.BaseHTTPRequestHandler):
                                                         "argumentHint": c.get("argumentHint")}
                                                        for c in cat.get("commands") or []],
                                           "agents": cat.get("agents") or []}))
+        if p == "/api/harness":
+            view = q.HARN.public_view(q.ROOT, q.secrets_load(), q.local_model_name())
+            view["gateway"] = {"port": q.HARNESS_PORT, "error": GATEWAY["error"]}
+            try:
+                import harness_gateway
+                view["gateway"]["stats"] = harness_gateway.STATS
+            except Exception: pass
+            return self._send(200, jdump(view))
         if p == "/api/claude/folders":
             return self._send(200, jdump({"folders": q.CE.recent_folders()}))
         if p.startswith("/api/claude/info"):
@@ -382,7 +390,7 @@ class H(http.server.BaseHTTPRequestHandler):
             spec = q.current_model((st.model if st else None) or None) or {}
             return self._send(200, jdump({
                 "engine": q.CE.is_engine(spec), "session": mk.get("session"), "cwd": mk.get("cwd"),
-                "skills": mk.get("skills") or [], "resume": q.CE.resume_command(msgs),
+                "skills": mk.get("skills") or [], "resume": q.CE.resume_command(msgs, spec),
                 "transcript": q.CE.jsonl_path(mk.get("session"), mk.get("cwd")) if mk else None,
                 "installed": bool(q.CE.which_claude()), "settings": q.CE.cfg(),
                 "defaults": q.CE.DEFAULTS, "modes": q.CE.PERMISSION_MODES,
@@ -684,6 +692,33 @@ class H(http.server.BaseHTTPRequestHandler):
             st = STATES.get(sid_)
             started = bool(q.CE.marker_of(st.msgs if st else []))
             return self._send(200, jdump({"ok": True, "prefs": prefs, "started": started}))
+        if p == "/api/harness/save":
+            # the registry: provider base URLs, custom providers, hidden models, contexts, proxy.
+            # Keys are saved through /api/secrets/save, never here.
+            cfg = q.HARN.load(q.ROOT)
+            for k in ("providers", "contexts"):          # per-provider entries merge
+                for pid, v in (d.get(k) or {}).items():
+                    if v is None: cfg[k].pop(pid, None)
+                    elif isinstance(v, dict): cfg[k][pid] = {**(cfg[k].get(pid) or {}), **v}
+                    else: cfg[k][pid] = v
+            for k in ("custom", "hidden", "proxy", "gateway_port"):
+                if k in d: cfg[k] = d[k]
+            return self._send(200, jdump({"ok": True, "saved": q.HARN.save(q.ROOT, cfg)}))
+        if p == "/api/harness/test":
+            # one tiny request to a model, through the same route a chat uses
+            spec = q.HARN.resolve(q.ROOT, d.get("id", ""), q.secrets_load(), q.local_model_name())
+            if not spec: return self._send(404, jdump({"error": "no such model"}))
+            t0 = time.time()
+            try:
+                out = q.stream_call([{"role": "user", "content": "Reply with the single word: ready"}], None,
+                                    think=False, model="harness-direct:" + spec["model"]) \
+                    if not spec["provider_cfg"].get("local") else \
+                    q.stream_call([{"role": "user", "content": "Reply with the single word: ready"}], None,
+                                  think=False, model=q.MODELS.model_id("local", q.local_model_name()))
+                return self._send(200, jdump({"ok": True, "secs": round(time.time() - t0, 1),
+                                              "reply": (out.get("content") or "")[:200]}))
+            except Exception as e:
+                return self._send(200, jdump({"ok": False, "error": f"{type(e).__name__}: {str(e)[:500]}"}))
         if p == "/api/claude/claude_settings":
             return self._send(200, jdump({"ok": True, "settings": q.CE.write_claude_settings(
                 d.get("patch") or {}, d.get("scope") or "user", d.get("cwd"))}))
@@ -1069,7 +1104,14 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/trash/purge":
             return self._send(200, jdump({"purged": q.trash_purge(d.get("name") or None)}))
         if p == "/api/secrets/save":
-            return self._send(200, jdump(q.secrets_save(d.get("secrets") or {})))
+            # merged into what is saved: sending one provider's key used to replace
+            # the whole file, erasing every other key. An empty value removes a key.
+            merged = dict(q.secrets_load())
+            for k, v in (d.get("secrets") or {}).items():
+                if not _re.match(r"^[A-Z][A-Z0-9_]{1,63}$", str(k)): continue
+                if v: merged[k] = str(v).strip()
+                else: merged.pop(k, None); os.environ.pop(k, None)
+            return self._send(200, jdump(q.secrets_save(merged)))
         if p == "/api/schedule/save":
             cfg = q.sched_load()
             jobs = {j["id"]: j for j in cfg.get("jobs", [])}
@@ -1535,6 +1577,46 @@ def _live_record(st, k, p):
         lv["status"] = _status_text(k, p)
     lv["seq"] = lv.get("seq", 0) + 1
 
+GATEWAY = {"srv": None, "error": None}
+
+def _gateway_route(provider, model):
+    """The gateway's lookup: where a harness model's request goes, with its key."""
+    import harness_gateway  # noqa: F401
+    spec = q.HARN.resolve(q.ROOT, f"harness:{provider}/{model}", q.secrets_load(), q.local_model_name())
+    if spec is None:
+        # a model the registry does not list (say, a provider's small model): same
+        # provider, format guessed from the name
+        provs = q.HARN.providers(q.ROOT, q.local_model_name())
+        p = provs.get(provider)
+        if not p: return None
+        low = model.lower()
+        fmt = ("messages" if low.startswith(("claude", "qwen3.", "minimax")) else
+               "responses" if low.startswith(("gpt", "grok", "o3", "o4")) else "chat")
+        if p.get("auth") == "api_key": fmt = "messages"
+        key = q.secrets_load().get(p.get("key") or "") or os.environ.get(p.get("key") or "") or ""
+        return {"base": p.get("base") or "", "format": fmt, "api_key": key,
+                "proxy": q.HARN.load(q.ROOT).get("proxy") or ""}
+    pc = spec["provider_cfg"]
+    base = pc["base"]
+    if pc.get("local"):
+        base = q.CE.model_endpoint()[0] + "/v1"
+    return {"base": base, "format": pc["format"], "api_key": pc["api_key"], "proxy": pc.get("proxy"),
+            "key_required": not pc.get("local")}
+
+def _start_gateway():
+    """Orbit's translating gateway for harness models (loopback only)."""
+    import harness_gateway
+    port = int(q.HARN.load(q.ROOT).get("gateway_port") or 8897)
+    try:
+        GATEWAY["srv"] = harness_gateway.serve(port, _gateway_route,
+                                               log=lambda m: print("  gateway: " + m),
+                                               token=q.CE.gateway_token())
+        q.HARNESS_PORT = GATEWAY["srv"].server_address[1]
+        print(f"  harness gateway on 127.0.0.1:{q.HARNESS_PORT}")
+    except OSError as e:
+        GATEWAY["error"] = str(e)
+        print(f"  ! harness gateway could not start on {port}: {e}")
+
 def _claude_sync(sid):
     """Opening a chat: a Claude-Qwen session from a terminal is brought in (or,
     if it was continued there since, its new part is), unless it is running."""
@@ -1889,6 +1971,7 @@ if __name__ == "__main__":
         print(f"  ! could not check for chats cut off mid-answer: {e}")
     threading.Thread(target=scheduler_loop, daemon=True).start()
     q.UI_PORT = PORT
+    _start_gateway()
     threading.Thread(target=q.CE.history_items_cached, daemon=True).start()   # warm the sidebar
     mode = remote_mode()
     addrs = REMOTE.bind_addresses(mode)

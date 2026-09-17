@@ -421,7 +421,8 @@ table.stbl{border-collapse:collapse;width:100%;font-size:13px;margin:2px 0 6px}
     <button id=nav_tasks>Tasks</button>
     <button id=nav_trash>Trash</button>
   </div>
-  <button class=newbtn id=newchat>+ New chat</button>
+  <div style="display:flex;gap:4px"><button class=newbtn id=newchat style="flex:1">+ New chat</button>
+   <button class=newbtn id=newwith title="New chat with a model, folder and permission mode — or a saved preset" style="width:auto;padding:0 10px">▾</button></div>
   <input class=search id=search placeholder="Search chats…  (right-click a chat for actions)">
   <div id=projwrap></div>
   <div class=addproj id=addproj>+ New project</div>
@@ -1313,7 +1314,7 @@ function questionBox(p){
 // and what Claude Code reports about the session.
 const CQ_MODES={default:'Ask',acceptEdits:'Accept edits',plan:'Plan',auto:'Auto',dontAsk:"Don't ask",bypassPermissions:'Bypass'};
 let CQ_INFO=null, CQ_CMDS=[];
-function isClaudeChat(){return (MODELS.current||MODELS.default||'').startsWith('claude-qwen-cli')}
+function isClaudeChat(){const m=MODELS.current||MODELS.default||'';return m.startsWith('claude-qwen-cli')||m.startsWith('harness:')}
 async function drawClaudeBar(){
  let b=$('#cqbar');
  if(!isClaudeChat()||!sid){if(b)b.style.display='none';return}
@@ -1336,6 +1337,121 @@ async function drawClaudeBar(){
  CQ_CMDS=(CQ_INFO.commands||[]).map(c=>({c:'/'+c.name,d:(c.description||'Claude Code').slice(0,120),cc:1}));
  if(!CQ_CMDS.length)fetch('/api/claude/commands').then(r=>r.json()).then(d=>{     // before its first answer too
   CQ_CMDS=(d.commands||[]).map(c=>({c:'/'+c.name,d:(c.description||'Claude Code').slice(0,120),cc:1}))}).catch(()=>{})}
+// New chat with…: model, working folder and permission mode chosen together,
+// and saved as presets to start the same kind of chat again (bunshin's agents).
+async function newChatWith(){
+ await loadModels();
+ const info=await (await fetch('/api/claude/info?sid=')).json();
+ const presets=(info.settings||{}).presets||[];
+ const fl=(await (await fetch('/api/claude/folders')).json()).folders||[];
+ const host=$('#modalhost');
+ host.innerHTML=`<div class=modal><div class="sheet cqpanel"><header><b>New chat with…</b>
+   <button class=ghost style="margin-left:auto" id=nwx>close</button></header><div class=body>
+   ${presets.length?`<div class=sec>Presets</div><div id=nw_presets></div>`:''}
+   <div class=grid>
+    <label>Model</label><select id=nw_model>${modelOptions(MODELS.default||'')}</select>
+    <label>Folder</label><input type=text id=nw_cwd list=nw_dirs placeholder="Orbit workspace" spellcheck=false>
+    <label>Permission mode</label><select id=nw_mode><option value="">Claude's default</option>${Object.entries(CQ_MODES).map(([k,v])=>`<option value=${k}>${v}</option>`).join('')}</select>
+    <label>Save as preset</label><input type=text id=nw_name placeholder="name (optional), e.g. Lab analysis · DeepSeek">
+   </div><datalist id=nw_dirs>${fl.map(f=>`<option value="${esc(f.path)}">`).join('')}</datalist>
+   <div class=note style="margin-top:6px">Folder and permission mode apply to Claude Code models; any model can be picked.</div>
+   <button class=primary id=nw_go style="margin-top:8px">Start chat</button></div></div></div>`;
+ $('#nwx').onclick=closeModal;
+ const start=async({model,cwd,mode})=>{
+  closeModal();await newChat();
+  if(model)await apiPost('/api/model/select',{id:model,sid},'model');
+  if(cwd)await apiPost('/api/claude/cwd',{sid,cwd},'folder');
+  if(mode)await apiPost('/api/claude/mode',{sid,mode},'permission mode');
+  await loadModels();drawClaudeBar();q.focus()};
+ const box=$('#nw_presets');
+ presets.forEach((p,i)=>{
+  const r=el('<div class=memrow style="cursor:pointer"><b></b><span></span><button class=ghost>start</button><button class=ghost>delete</button></div>');
+  const ml=((MODELS.models||[]).find(m=>m.id===p.model)||{}).label||p.model||'default model';
+  r.querySelector('b').textContent=p.name;r.querySelector('span').textContent=[ml,p.cwd,CQ_MODES[p.mode]].filter(Boolean).join(' · ');
+  const [go,del]=r.querySelectorAll('button');
+  go.onclick=()=>start(p);
+  del.onclick=async e=>{e.stopPropagation();presets.splice(i,1);
+   await apiPost('/api/claude/settings',{settings:{presets}},'presets');r.remove()};
+  box.appendChild(r)});
+ $('#nw_go').onclick=async()=>{
+  const p={model:$('#nw_model').value,cwd:$('#nw_cwd').value.trim(),mode:$('#nw_mode').value};
+  const name=$('#nw_name').value.trim();
+  if(name){presets.push({name,...p});await apiPost('/api/claude/settings',{settings:{presets}},'presets')}
+  start(p)}}
+// Settings → Claude Code → Models: the providers harness mode can use, their
+// keys (typed by you, stored in Orbit's secrets), region, models and a test.
+async function renderHarnessModels(box){
+ const h=await (await fetch('/api/harness')).json();
+ const fmtName={messages:'native',chat:'via gateway',responses:'via gateway (Responses)'};
+ box.innerHTML='';box.classList.remove('note');
+ const gw=h.gateway||{};
+ box.appendChild(el(`<div class=note style="margin-bottom:6px">Pick any of these as a chat's model (or a scheduled task's). Providers that speak Anthropic's API go straight to Claude Code; the rest go through Orbit's gateway on 127.0.0.1:${esc(String(gw.port||'—'))}${gw.error?' — <b style="color:var(--err)">not running: '+esc(gw.error)+'</b>':''}, which adds your key so it never reaches the Claude process.</div>`));
+ const st=(gw.stats||{});
+ if(st.requests)box.appendChild(el(`<div class=note>Gateway since Orbit started: ${st.requests} requests${st.errors?`, ${st.errors} failed`:''} · ${esc(Object.entries(st.by_provider||{}).map(([k,v])=>k+' '+v).join(', '))}</div>`));
+ const hidden=new Set();(h.providers||[]).forEach(p=>p.models.forEach(m=>{if(m.hidden)hidden.add('harness:'+p.id+'/'+m.id)}));
+ const saveReg=async patch=>apiPost('/api/harness/save',patch,'saving models');
+ (h.providers||[]).forEach(p=>{
+  const card=el('<details class=memrow style="display:block;margin:6px 0;padding:8px 10px;border:1px solid var(--line);border-radius:9px"></details>');
+  card.open=p.id==='opencode-go'||p.id==='local';
+  card.appendChild(el(`<summary style="cursor:pointer"><b>${esc(p.label)}</b> <span class=note>${p.auth==='local'?'on this Mac':(p.key_set?'✓ key set':'needs a key')} · ${p.models.length} models</span></summary>`));
+  if(p.docs)card.appendChild(el(`<div class=note style="margin:4px 0">${esc(p.docs)}</div>`));
+  if(p.auth!=='local'){
+   const kr=el(`<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0"><span class=note>${esc(p.key)}</span>
+     <input type=password autocomplete=off spellcheck=false placeholder="${p.key_set?'replace the key':'paste your key'}" style="flex:1;min-width:200px">
+     <button class=ghost>save key</button>${p.key_set?'<button class=ghost>remove</button>':''}
+     ${p.keys_url?`<a href="${esc(p.keys_url)}" target=_blank class=note>get a key</a>`:''}</div>`);
+   const [inp]=kr.querySelectorAll('input'),[sv,rm]=kr.querySelectorAll('button');
+   sv.onclick=async()=>{if(!inp.value.trim())return;const d=await apiPost('/api/secrets/save',{secrets:{[p.key]:inp.value.trim()}},'saving the key');
+    inp.value='';if(d){toast('key saved');loadModels();renderHarnessModels(box)}};
+   if(rm)rm.onclick=async()=>{if(!confirm('Remove the '+p.key+' key from Orbit?'))return;
+    await apiPost('/api/secrets/save',{secrets:{[p.key]:''}},'removing the key');loadModels();renderHarnessModels(box)};
+   card.appendChild(kr);
+   if((p.alt_bases||[]).length){
+    const br=el(`<div style="margin:4px 0"><span class=note>region </span><select>${[p.base,...p.alt_bases].filter((x,i,a)=>a.indexOf(x)===i)
+      .map(b=>`<option>${esc(b)}</option>`).join('')}</select></div>`);
+    br.querySelector('select').value=p.base;
+    br.querySelector('select').onchange=async e=>{const cur=(await (await fetch('/api/harness')).json());
+     await saveReg({providers:{[p.id]:{base:e.target.value}}});toast('region saved')};
+    card.appendChild(br)}}
+  const list=el('<div style="max-height:260px;overflow:auto"></div>');
+  p.models.forEach(m=>{
+   const mid='harness:'+p.id+'/'+m.id;
+   const r=el(`<div style="display:flex;gap:8px;align-items:center;font-size:12.5px;padding:2px 0">
+     <input type=checkbox title="show in the model picker"><span style="flex:1">${esc(m.label)} <span class=note>${esc(m.id)} · ${fmtName[m.format]||m.format} · ${Math.round((m.context||0)/1000)}k</span></span>
+     <button class=ghost style="font-size:11px">test</button></div>`);
+   const cb=r.querySelector('input');cb.checked=!hidden.has(mid);
+   cb.onchange=async()=>{cb.checked?hidden.delete(mid):hidden.add(mid);await saveReg({hidden:[...hidden]});loadModels()};
+   const tb=r.querySelector('button');
+   tb.onclick=async()=>{tb.textContent='…';const d=await apiPost('/api/harness/test',{id:mid},'test');
+    tb.textContent='test';if(d)toast(d.ok?`${m.label}: replied in ${d.secs}s — ${String(d.reply).slice(0,40)}`:`${m.label}: ${String(d.error).slice(0,160)}`)};
+   list.appendChild(r)});
+  card.appendChild(list);box.appendChild(card)});
+ // a provider of your own
+ const cf=el(`<details style="margin:8px 0"><summary class=note style="cursor:pointer">Add your own provider</summary><div class=grid style="margin-top:6px">
+   <label>Name</label><input type=text id=cp_label placeholder="My server">
+   <label>Base URL</label><input type=text id=cp_base placeholder="https://example.com/v1 or …/anthropic">
+   <label>API</label><select id=cp_fmt><option value=messages>Anthropic Messages (native)</option><option value=chat>OpenAI chat completions (gateway)</option><option value=responses>OpenAI Responses (gateway)</option></select>
+   <label>Key name</label><input type=text id=cp_key placeholder="MY_SERVER_KEY (then save the key above)">
+   <label>Models</label><input type=text id=cp_models placeholder="model-a, model-b">
+   <label>Context</label><input type=number id=cp_ctx value=128000>
+   </div><button class=ghost id=cp_add>Add provider</button></details>`);
+ box.appendChild(cf);
+ cf.querySelector('#cp_add').onclick=async()=>{
+  const label=$('#cp_label').value.trim(),base=$('#cp_base').value.trim();
+  const models=$('#cp_models').value.split(',').map(x=>x.trim()).filter(Boolean);
+  if(!label||!base||!models.length)return toast('name, base URL and at least one model');
+  const id=label.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')||'custom';
+  const reg=await (await fetch('/api/harness')).json();
+  const custom={};(reg.providers||[]).filter(x=>x.custom).forEach(x=>custom[x.id]={label:x.label,base:x.base,key:x.key,auth:x.auth,
+    models:x.models.map(m=>({id:m.id,format:m.format,context:m.context}))});
+  const fmt=$('#cp_fmt').value,key=($('#cp_key').value.trim()||id.toUpperCase().replace(/-/g,'_')+'_API_KEY').toUpperCase();
+  custom[id]={label,base,key,auth:fmt==='messages'?'api_key':'gateway',
+   models:models.map(m=>({id:m,format:fmt,context:+$('#cp_ctx').value||128000}))};
+  if(await saveReg({custom})){toast('provider added — now save its key');renderHarnessModels(box)}};
+ const px=el(`<div style="margin-top:6px"><span class=note>Proxy for model requests </span><input type=text placeholder="http://127.0.0.1:7890 (optional)" style="max-width:260px"> <button class=ghost>save</button></div>`);
+ px.querySelector('input').value=h.proxy||'';
+ px.querySelector('button').onclick=async()=>{if(await saveReg({proxy:px.querySelector('input').value.trim()}))toast('proxy saved')};
+ box.appendChild(px)}
 // Where a chat's Claude session works: chosen before its first message, like
 // starting claude-qwen in a folder. A chat that has begun stays in its folder.
 async function folderDialog(){
@@ -2270,6 +2386,8 @@ async function openSettings(tab){
    const lines=a=>(a||[]).join('\n'), unlines=v=>v.split('\n').map(x=>x.trim()).filter(Boolean);
    body.innerHTML=`<div class=note style="margin-bottom:10px">Claude Code · local Qwen is <b>claude-qwen</b> in a window: the same command, your Claude setup as it is.
      Changes to skills, plugins, MCP servers and permissions below are made to Claude itself (<code>${esc(cc.paths&&cc.paths.user||'')}</code>), so the terminal sees them too.</div>
+    <div class=sec>Models <small>— every model here runs through Claude Code</small></div>
+    <div id=hm_box class=note>loading…</div>
     <div class=sec>Permissions <small>— Claude's settings</small></div><div class=grid>
     <label>Default mode</label><select id=cc_mode><option value="">default (ask)</option>${Object.entries(CQ_MODES).filter(([k])=>k!=='default').map(([k,v])=>`<option value=${k}>${v}</option>`).join('')}</select>
     <label>Allow</label><textarea class=ta id=cc_allow style="min-height:60px" placeholder="one rule per line, e.g. Bash(git diff:*)"></textarea>
@@ -2324,6 +2442,7 @@ async function openSettings(tab){
     <label>Extra instructions</label><textarea class=ta id=cq_append style="min-height:50px"></textarea>
     </div></details>
     <button class=primary id=cq_save style="margin-top:8px">Save launcher and Orbit options</button> <span class=note id=cq_note></span>`;
+   renderHarnessModels($('#hm_box'));
    // permissions
    $('#cc_mode').value=perm.defaultMode&&perm.defaultMode!=='default'?perm.defaultMode:'';
    $('#cc_allow').value=lines(perm.allow);$('#cc_ask').value=lines(perm.ask);$('#cc_deny').value=lines(perm.deny);
@@ -2460,6 +2579,7 @@ async function openSettings(tab){
 }
 
 async function refreshRunning(){
+ if(document.hidden&&!RUNNING.size)return;          // a hidden tab with nothing running has nothing to learn
  try{const r=await (await fetch('/api/running')).json();
   const now=new Set(r.running||[]);
   let changed = now.size!==RUNNING.size || [...now].some(x=>!RUNNING.has(x));
@@ -2809,6 +2929,11 @@ async function renderLibrary(){
 }
 
 /* ---------------- scheduler ---------------- */
+// the model picker's choices, grouped, for a scheduled task ("" = the chat's / the default)
+function modelOptions(cur){
+ const groups={};(MODELS.models||[]).filter(m=>!m.switch).forEach(m=>{(groups[m.provider_label]=groups[m.provider_label]||[]).push(m)});
+ return `<option value="">${esc('default model')}</option>`+Object.entries(groups).map(([g,list])=>
+  `<optgroup label="${esc(g)}">${list.map(m=>`<option value="${esc(m.id)}"${m.id===cur?' selected':''}>${esc(m.label||m.model)}${m.ready===false?' — needs a key':''}</option>`).join('')}</optgroup>`).join('')}
 async function renderTasks(){
  const box=$('#tasks');
  const d=await (await fetch('/api/schedule')).json();
@@ -2831,6 +2956,7 @@ async function renderTasks(){
        .map((w,i)=>`<option value=${i}>${w}</option>`).join('')}</select></div>
    <label>Agent</label><select id=j_agent><option value="">none</option>${
      agents.map(a=>`<option>${a}</option>`).join('')}</select>
+   <label>Model</label><select id=j_model>${modelOptions('')}</select>
   </div>
   <textarea class=ta id=j_prompt style="min-height:110px;margin-top:9px"
     placeholder="What should it do? e.g. Search PubMed for new CLSY/RdDM papers from the last 7 days and summarise the top 3 with DOIs."></textarea>
@@ -2875,6 +3001,11 @@ async function renderTasks(){
     :`every ${j.n} ${j.every}`;
   r.appendChild(el(`<div class=sub>${when} · next ${esc(j.next||'-')} · ${
     j.enabled===false?'paused':'active'}${j.agent?' · agent '+esc(j.agent):''}</div>`));
+  // which model runs it: change it here, or ask the chat ("run it on deepseek")
+  const ms=el(`<select style="max-width:320px;margin:4px 0">${modelOptions(j.model||'')}</select>`);
+  ms.onchange=async()=>{await apiPost('/api/schedule/save',{job:{id:j.id,prompt:j.prompt,model:ms.value||null}},'task model');
+   toast('this task now runs on '+(ms.selectedOptions[0]||{}).textContent)};
+  r.appendChild(ms);
   if(j.last_run){
    const ago=new Date(j.last_run*1000).toLocaleString();
    r.appendChild(el(`<div class=res><b>${j.last_ok?'ok':'failed'}</b> ${ago} · ${
@@ -2898,7 +3029,7 @@ async function renderTasks(){
  $('#j_add').onclick=async()=>{
   const job={name:$('#j_name').value.trim(),every:$('#j_every').value,
    at:$('#j_at').value.trim()||'09:00',n:Number($('#j_n').value)||30,
-   weekday:Number($('#j_wd').value)||0,agent:$('#j_agent').value||null,
+   weekday:Number($('#j_wd').value)||0,agent:$('#j_agent').value||null,model:$('#j_model').value||null,
    prompt:$('#j_prompt').value.trim(),enabled:true};
   if(!job.name||!job.prompt)return toast('name and prompt required');
   await fetch('/api/schedule/save',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -3533,6 +3664,7 @@ async function showStats(days){
 
 $('#send').onclick=go;
 $('#newchat').onclick=newChat;
+$('#newwith').onclick=()=>newChatWith();
 $('#compact').onclick=doCompact;
 $('#more').onclick=e=>{e.stopPropagation();
  const r=$('#more').getBoundingClientRect();
@@ -3631,6 +3763,7 @@ $('#srv_restart').onclick=async()=>{toast('restarting...');
  const d=await (await fetch('/api/server/restart',{method:'POST'})).json();toast(d.msg);refreshStatus()};
 addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();
  if((e.metaKey||e.ctrlKey)&&e.key===','){e.preventDefault();openSettings()}
+ if((e.metaKey||e.ctrlKey)&&e.shiftKey&&(e.key==='K'||e.key==='k')){e.preventDefault();newChatWith();return}
  if((e.metaKey||e.ctrlKey)&&e.key==='k'){e.preventDefault();newChat()}
  if((e.metaKey||e.ctrlKey)&&e.key==='f'){e.preventDefault();$('#search').focus()}
  if((e.metaKey||e.ctrlKey)&&e.key==='j'){e.preventDefault();showPane('files')}

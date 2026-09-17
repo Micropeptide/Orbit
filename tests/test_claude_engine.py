@@ -327,6 +327,105 @@ class TestClaudeEngine(unittest.TestCase):
         self.assertEqual(self.requests(), [])
 
 
+@unittest.skipUnless(CLAUDE, "Claude Code is not installed")
+class TestHarnessModels(unittest.TestCase):
+    """Models other than the local one, through the same engine: a provider with
+    Anthropic's API (key given to Claude Code), and one with OpenAI's API (through
+    Orbit's gateway, which adds the key)."""
+
+    serve = TestClaudeEngine.serve
+    run_turn = TestClaudeEngine.run_turn
+    requests = TestClaudeEngine.requests
+
+    @classmethod
+    def setUpClass(cls):
+        TestClaudeEngine.setUpClass.__func__(cls)
+        import harness, harness_gateway, http.server
+        cls.H = harness
+        cls.reg = os.path.join(cls.tmp, "harness.json")
+        cls.saved_path, cls.saved_secrets = harness._path, q.secrets_load
+        harness._path = lambda root: cls.reg
+        q.secrets_load = lambda: {"MOCKA_KEY": "sk-direct-test", "MOCKO_KEY": "sk-gateway-test"}
+        sys.path.insert(0, HERE)
+        from test_harness_gateway import Upstream
+        cls.Upstream = Upstream
+        cls.up = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+        threading.Thread(target=cls.up.serve_forever, daemon=True).start()
+        def route(provider, model):
+            spec = harness.resolve(q.ROOT, f"harness:{provider}/{model}", q.secrets_load(), "x")
+            if not spec: return None
+            pc = spec["provider_cfg"]
+            return {"base": pc["base"], "format": pc["format"], "api_key": pc["api_key"]}
+        cls.gw = harness_gateway.serve(0, route)
+        cls.saved_port = q.HARNESS_PORT
+        q.HARNESS_PORT = cls.gw.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.H._path, q.secrets_load = cls.saved_path, cls.saved_secrets
+        q.HARNESS_PORT = cls.saved_port
+        cls.gw.shutdown(); cls.up.shutdown()
+        q.TURN_CTX.model = None
+        TestClaudeEngine.tearDownClass.__func__(cls)
+
+    def register(self, mock_port=None):
+        json.dump({"custom": {
+            "mocka": {"label": "Mock A", "base": f"http://127.0.0.1:{mock_port}", "key": "MOCKA_KEY", "auth": "api_key",
+                      "models": [{"id": "model-a", "format": "messages", "context": 50000}]},
+            "mocko": {"label": "Mock O", "base": f"http://127.0.0.1:{self.up.server_address[1]}/v1", "key": "MOCKO_KEY",
+                      "auth": "gateway", "models": [{"id": "model-o", "format": "chat", "context": 60000}]}}},
+            open(self.reg, "w"))
+
+    def test_anthropic_api_provider_gets_its_key_and_model(self):
+        self.serve([[{"text": "Hello from A."}]])
+        port = int(CE.model_endpoint()[0].rsplit(":", 1)[1])
+        self.register(port)
+        q.TURN_CTX.model = "harness:mocka/model-a"
+        out, ev = self.run_turn([{"role": "system", "content": "s"}], "hi")
+        self.assertEqual(out, "Hello from A.")
+        rows = [json.loads(l) for l in open(self.log)]
+        main = [r for r in rows if r["body"].get("tools")][-1]
+        self.assertEqual(main["body"]["model"], "model-a")
+        self.assertEqual(main["headers"].get("x-api-key"), "sk-direct-test")
+        self.assertEqual(next(p for k, p in ev if k == "model")["label"], "Claude Code · Model A · Mock A")
+
+    def test_openai_api_provider_goes_through_the_gateway(self):
+        self.register(1)
+        from test_harness_gateway import delta
+        self.Upstream.seen.clear()
+        self.Upstream.script = [{"chunks": [delta(reasoning_content="thinking it over"), delta(content="Hello from O."),
+                                            {"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}]}] * 3
+        q.TURN_CTX.model = "harness:mocko/model-o"
+        msgs = [{"role": "system", "content": "s"}]
+        out, ev = self.run_turn(msgs, "hi")
+        self.assertEqual(out, "Hello from O.")
+        self.assertIn("thinking it over", msgs[-1].get("reasoning_content") or "")
+        seen = [s for s in self.Upstream.seen if s["path"] == "/v1/chat/completions"]
+        self.assertTrue(seen)
+        self.assertEqual(seen[-1]["headers"].get("Authorization"), "Bearer sk-gateway-test")
+        self.assertEqual(seen[-1]["body"]["model"], "model-o")
+
+    def test_resume_command_and_imported_model_follow_the_provider(self):
+        self.register(1)
+        msgs = [{"role": "user", "content": "x", "claude": {"session": "abc", "cwd": "/tmp"}}]
+        spec = q.current_model("harness:mocko/model-o")
+        self.assertIn('claude-harness "harness:mocko/model-o" --resume abc', CE.resume_command(msgs, spec))
+        self.assertIn("claude-qwen --resume abc", CE.resume_command(msgs, q.current_model("claude-qwen-cli:default")))
+        self.assertEqual(CE.model_for_session(["model-o"]), "harness:mocko/model-o")
+        self.assertEqual(CE.model_for_session(["something-else"]), "claude-qwen-cli:default")
+
+    def test_missing_key_is_explained_not_run(self):
+        self.register(1)
+        q.secrets_load, old = (lambda: {}), q.secrets_load
+        try:
+            q.TURN_CTX.model = "harness:mocko/model-o"
+            out, ev = self.run_turn([{"role": "system", "content": "s"}], "hi")
+        finally:
+            q.secrets_load = old
+        self.assertIn("No API key", out)
+        self.assertIn("error", [k for k, _ in ev])
+
+
 class TestClaudeEngineOffline(unittest.TestCase):
     """The parts that need no Claude Code at all."""
 
