@@ -392,7 +392,7 @@ def model_catalogue():
 def current_model(mid=None):
     """Resolved model for this turn. None when nothing is configured at all."""
     # a running answer keeps the model it started with, whatever another chat selects
-    want = mid or getattr(TURN_CTX, "model", None) or ACTIVE_MODEL.get("id")
+    want = mid or getattr(TURN_CTX, "model", None) or pinned_model()
     if want and want.startswith("local-dir:"):
         want = None                     # not serving yet: fall back to what is
     return MODELS.resolve(ROOT, want, local_model_name(), secrets_load())
@@ -1649,6 +1649,16 @@ def _run_one_tool(tc, fn, args, messages, emit, approve, seen_calls):
     return True
 
 TURN_CTX = threading.local()   # which chat the running answer belongs to, for tools
+
+def pinned_model():
+    """The model this thread's answer was started with. Several chats answer at
+    once, each on its own thread: ACTIVE_MODEL is shared, so a chat that started a
+    moment later could hand its model to this one. The UI server pins each
+    answer's model (and effort) on the thread that runs it."""
+    return getattr(TURN_CTX, "pin_model", None) or ACTIVE_MODEL.get("id")
+
+def pinned_effort():
+    return getattr(TURN_CTX, "pin_effort", None) or S.get("reasoning_effort")
 _NO_PROJECT_ARG = object()     # turn() called without saying: use the one on screen
 
 _AWAKE = {"n": 0, "proc": None, "lock": threading.Lock()}
@@ -1724,8 +1734,8 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
     TURN_CTX.project = ACTIVE_PROJECT.get("id") if project is _NO_PROJECT_ARG else project
     # model and effort are held for the whole answer too; a helper keeps its parent's
     helper = getattr(TURN_CTX, "depth", 0)
-    TURN_CTX.model = getattr(TURN_CTX, "model", None) if helper else ACTIVE_MODEL.get("id")
-    TURN_CTX.effort = getattr(TURN_CTX, "effort", None) if helper else S.get("reasoning_effort")
+    TURN_CTX.model = getattr(TURN_CTX, "model", None) if helper else pinned_model()
+    TURN_CTX.effort = getattr(TURN_CTX, "effort", None) if helper else pinned_effort()
     if not helper:
         TURN_CTX.changes = []          # files this answer changes, so it can be undone
         TURN_CTX.read_only = bool(read_only)   # plan mode: look, think, propose -- change nothing
@@ -2231,6 +2241,7 @@ def session_list():
                     "pinned": bool(meta.get("pinned")), "archived": bool(meta.get("archived")),
                     "tags": meta.get("tags") or [],
                     "project": meta.get("project"), "order": meta.get("order"),
+                    "queued": len(meta.get("queue") or []),
                     "n": len([m for m in (msgs or []) if m.get("role") in ("user","assistant")])})
     # Manual order wins only when it is complete for the unpinned set; a partial
     # order used to push a few chats above everything else and hide new ones.
@@ -3334,7 +3345,9 @@ def record_file(rel, note=""):
     """Remember which chat produced a file."""
     try:
         d = _prov_load()
-        d[rel] = {"sid": CURRENT_SID.get("sid"), "title": CURRENT_SID.get("title"),
+        mine = getattr(TURN_CTX, "sid", None)
+        d[rel] = {"sid": mine or CURRENT_SID.get("sid"),
+                  "title": None if mine and mine != CURRENT_SID.get("sid") else CURRENT_SID.get("title"),
                   "t": time.time(), "note": note}
         json.dump(d, open(PROV, "w"))
     except Exception: pass
@@ -5772,8 +5785,8 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None, **
         (emit or (lambda k, p: None))("done", None)
         return "(stopped while waiting for another chat to finish)"
     try:
-        TURN_CTX.model = ACTIVE_MODEL.get("id")
-        TURN_CTX.effort = S.get("reasoning_effort")
+        TURN_CTX.model = pinned_model()
+        TURN_CTX.effort = pinned_effort()
         proj = kw.pop("project", _NO_PROJECT_ARG)
         proj = ACTIVE_PROJECT.get("id") if proj is _NO_PROJECT_ARG else proj
         return CE.run_turn(messages, user_content, tools, emit=emit, approve=approve,
@@ -5791,7 +5804,7 @@ HARNESS_PORT = None            # set by orbit-ui when it starts the gateway
 
 _current_model_before_harness = current_model
 def current_model(mid=None):
-    want = mid or getattr(TURN_CTX, "model", None) or ACTIVE_MODEL.get("id")
+    want = mid or getattr(TURN_CTX, "model", None) or pinned_model()
     if not want:
         want = MODELS.load(ROOT).get("default") or None
     if want and str(want).startswith("harness:"):
