@@ -3480,8 +3480,14 @@ def know_delete(name):                         # override: route through trash
 SECRETS = os.path.join(CONFIG, "secrets.json")
 
 def secrets_load():
-    try: return json.load(open(SECRETS))
+    try: d = json.load(open(SECRETS))
     except Exception: return {}
+    # keys and tokens saved with a space inside (copied across a wrapped terminal line)
+    for k, v in list(d.items()):
+        if isinstance(v, str) and k.endswith(("_KEY", "_TOKEN")) and _re.search(r"\s", v):
+            d[k] = _re.sub(r"\s+", "", v)
+    return d
+
 
 def secrets_save(d):
     snapshot_config(SECRETS)
