@@ -2433,7 +2433,7 @@ def _skill_dirs(root, depth=4):
     return found
 
 
-def skill_install(source, overwrite=False):
+def skill_install(source, overwrite=False, dest_base=None):
     """Install skills into ~/.claude/skills from a git repository (URL or
     owner/repo) or a local folder: every folder with a SKILL.md is one skill."""
     import tempfile
@@ -2458,7 +2458,7 @@ def skill_install(source, overwrite=False):
     try:
         dirs = _skill_dirs(root)
         if not dirs: return {"error": "no SKILL.md found there"}
-        dest_base = os.path.join(claude_dir(), "skills")
+        dest_base = dest_base or os.path.join(claude_dir(), "skills")
         os.makedirs(dest_base, exist_ok=True)
         installed, skipped = [], []
         for d in dirs:

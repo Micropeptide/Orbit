@@ -277,6 +277,28 @@ class TestCodexEngine(unittest.TestCase):
         self.assertIn("auto_approved", self.kinds())
         self.assertEqual(next(m for m in self.rpc() if m.get("id") == 900 and "method" not in m)["result"], {"decision": "accept"})
 
+    def test_codex_settings_are_its_own_and_validated(self):
+        saved_load, saved_save, saved_reload = q.load_settings, q.save_settings, q.reload_settings
+        store = {"codex": {"permission_mode": "manual"}}
+        q.load_settings = lambda: json.loads(json.dumps(store))
+        def save(sv): store.clear(); store.update(sv)
+        q.save_settings = save
+        q.reload_settings = lambda: q.S.update(codex=store.get("codex"))
+        old = q.S.get("codex")
+        try:
+            out = CX.save_cfg({"permission_mode": "plan", "remote_keep_alive_min": "0", "unattended": "sometimes",
+                               "orbit_context": 0, "not_a_setting": 1, "default_host": "cluster"})
+            self.assertEqual((out["permission_mode"], out["remote_keep_alive_min"], out["unattended"], out["orbit_context"], out["default_host"]),
+                             ("plan", 1, "auto", False, "cluster"))
+            self.assertNotIn("not_a_setting", store["codex"])
+            # new chats follow them: the default host for a chat that has not started
+            self.assertEqual(CX.host_for("new-chat", {}, {}), "cluster")
+            self.assertEqual(CX.host_for("new-chat", {}, {"host": ""}), None)          # chosen: this Mac
+        finally:
+            q.load_settings, q.save_settings, q.reload_settings = saved_load, saved_save, saved_reload
+            if old is None: q.S.pop("codex", None)
+            else: q.S["codex"] = old
+
 
 if __name__ == "__main__":
     unittest.main()

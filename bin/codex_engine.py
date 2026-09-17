@@ -306,7 +306,7 @@ def remote_codex(host, emit=None):
     ver = local_version()
     have = info.get("codex_version") or ""
     if info.get("codex") and not _older(have, ver): return info
-    if not _ce().cfg().get("codex_remote_install", True):
+    if not cfg().get("remote_install", True):
         if info.get("codex"): return info                 # an older Codex there, and you install it yourself
         raise CodexError(f"Codex is not installed on {host}. Install it there (or turn on installing it for you in Settings → Codex).")
     if emit: emit("notice", {"msg": (f"Codex {have} on {host} is older than this Mac's {ver}; " if have else "")
@@ -358,7 +358,7 @@ def _start_reaper():
 
 def reap_idle(now=None):
     now = now or time.time()
-    try: keep = float(_ce().cfg().get("remote_keep_alive_min") or 30) * 60
+    try: keep = float(cfg().get("remote_keep_alive_min") or 30) * 60
     except (TypeError, ValueError): keep = 1800
     with _SERVER_LOCK:
         for key, cur in list(_SERVERS.items()):
@@ -472,7 +472,7 @@ def host_for(sid, mk, prefs=None):
     prefs = prefs if prefs is not None else (_ce().chat_prefs(sid) if sid else {})
     if mk and mk.get("thread") and not mk.get("imported"): return mk.get("host") or None
     if "host" in prefs: return prefs.get("host") or None
-    return _ce().cfg().get("default_host") or None
+    return cfg().get("default_host") or None
 
 
 def _remote_cwd(host, prefs, mk, home):
@@ -489,7 +489,7 @@ def _cwd_for(sid, project, mk):
     folder = None
     try: folder = Q.project_folder(project) if project else None
     except Exception: folder = None
-    cwd = prefs.get("cwd") or folder or (ce.cfg().get("default_dir") or "").strip() or Q.WORKSPACE
+    cwd = prefs.get("cwd") or folder or (cfg().get("default_dir") or "").strip() or Q.WORKSPACE
     return (cwd if os.path.isdir(cwd) else Q.WORKSPACE), prefs
 
 
@@ -549,7 +549,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     else:
         cwd, prefs = _cwd_for(sid, project, mk)
     provider_key, config, model = provider_config(spec, srv.forward_port if host else None)
-    mode = "plan" if read_only else (prefs.get("permission_mode") or ce.cfg().get("permission_mode") or "auto")
+    mode = "plan" if read_only else (prefs.get("permission_mode") or cfg().get("permission_mode") or "auto")
     sandbox_works = True
     if host:
         import ssh_remote
@@ -563,8 +563,11 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     if prefs.get("add_dirs") and sandbox == "workspace-write" and not host:
         config = {**config, "sandbox_workspace_write": {"writable_roots": list(prefs["add_dirs"])}}
     dev = ""
-    try: dev = "\n\n".join(ce._system_parts(project))
-    except Exception: pass
+    if cfg().get("orbit_context", True):
+        try: dev = "\n\n".join(ce._system_parts(project))
+        except Exception: pass
+    if cfg().get("developer_instructions"):
+        dev = (dev + "\n\n" if dev else "") + str(cfg()["developer_instructions"])
 
     thread = None
     same_provider = mk.get("thread") and (mk.get("imported") or mk.get("provider") == (provider_key or CHATGPT))
@@ -608,7 +611,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     _remember_thread(thread, sid)
 
     qq = srv.subscribe(thread)
-    effort = str(getattr(T, "effort", None) or q.pinned_effort() or "").lower()
+    effort = str(getattr(T, "effort", None) or q.pinned_effort() or cfg().get("default_effort") or "").lower()
     params = {"threadId": thread, "input": _inputs(user_content, prior), "model": model,
               "approvalPolicy": policy, "approvalsReviewer": reviewer}    # a mode changed since the thread began applies now
     if effort in EFFORTS: params["effort"] = effort
@@ -905,8 +908,15 @@ def auto_verdict(cmd):
 
 
 def _ask(approve, fn, args, reason, tool):
-    """(allowed, always) from Orbit's approval prompt."""
-    if not approve: return False, False
+    """(allowed, always) from Orbit's approval prompt. With nobody watching (a scheduled
+    run), the Codex setting for unattended runs decides."""
+    if not approve:
+        how = cfg().get("unattended") or "auto"
+        if how == "allow": return True, False
+        if how == "auto" and fn == "run_command":
+            return auto_verdict((args or {}).get("command"))[0] == "allow", False
+        if how == "auto" and fn == "write_file": return True, False
+        return False, False
     try:
         said = _ce()._call_approve(approve, fn, args, reason, {"codex": True, "tool": tool})
     except Exception:
@@ -961,4 +971,148 @@ def info():
     return {"installed": bool(exe), "version": ver, "login": login_state(max_age=60),
             "models": [{"id": f"codex:{CHATGPT}/{m['slug']}", "label": m.get("display_name") or m["slug"]} for m in chatgpt_models()],
             "rate_limits": srv.rate_limits if srv else None, "running": bool(srv and srv.alive()),
-            "chats_answering": len(RUNS), "hosts": remote, "remote_install": _ce().cfg().get("codex_remote_install", True)}
+            "chats_answering": len(RUNS), "hosts": remote, "remote_install": cfg().get("remote_install", True)}
+
+
+
+# ------------------------------------------------------------------ Codex's settings in Orbit
+
+DEFAULTS = {
+    "permission_mode": "auto",       # new Codex chats: Auto / Ask / Accept edits / Plan / Don't ask / Bypass
+    "default_effort": "",             # "" = Codex's own (config.toml)
+    "default_host": "",               # "" = this Mac
+    "default_dir": "",                # "" = Orbit's workspace
+    "remote_keep_alive_min": 30,      # Codex idle on an SSH host closes after this
+    "remote_install": True,           # install (or upgrade) Codex on a host when a chat needs it
+    "orbit_context": True,            # Orbit's project rules and your standing instructions as developer instructions
+    "developer_instructions": "",     # extra instructions for every Codex chat
+    "unattended": "auto",             # scheduled runs: auto (Orbit's safety check) / allow / deny
+}
+
+
+def cfg():
+    s = dict(DEFAULTS)
+    try: s.update({k: v for k, v in (Q.S.get("codex") or {}).items() if k in DEFAULTS})
+    except Exception: pass
+    return s
+
+
+def save_cfg(changes):
+    cur = Q.load_settings()
+    cx = dict(cur.get("codex") or {})
+    for k, v in (changes or {}).items():
+        if k not in DEFAULTS: continue
+        if k == "remote_keep_alive_min":
+            try: v = max(1, min(24 * 60, int(v)))
+            except (TypeError, ValueError): continue
+        if k in ("remote_install", "orbit_context"): v = bool(v)
+        if k == "permission_mode" and v not in PERMISSIONS: continue
+        if k == "unattended" and v not in ("auto", "allow", "deny"): continue
+        cx[k] = v
+    cur["codex"] = cx
+    Q.save_settings(cur); Q.reload_settings()
+    return cfg()
+
+
+CODEX_HOME = os.path.expanduser("~/.codex")
+
+
+def _cli(args, timeout=60):
+    exe = which_codex()
+    if not exe: return 127, "", "Codex is not installed"
+    import providers
+    try:
+        r = subprocess.run([exe, *args], capture_output=True, text=True, timeout=timeout, env=providers.cli_env(exe))
+        return r.returncode, r.stdout, r.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", "Codex did not answer in time"
+
+
+def _json_out(out):
+    i = min([x for x in (out.find("["), out.find("{")) if x >= 0] or [-1])
+    if i < 0: return None
+    try: return json.loads(out[i:])
+    except ValueError: return None
+
+
+def codex_skills():
+    """~/.codex/skills: each folder with a SKILL.md."""
+    base = os.path.join(CODEX_HOME, "skills")
+    out = []
+    try: names = sorted(os.listdir(base))
+    except OSError: return out
+    for n in names:
+        f = os.path.join(base, n, "SKILL.md")
+        if n.startswith(".") or not os.path.isfile(f): continue
+        try: meta, _ = _ce()._frontmatter(open(f, encoding="utf-8", errors="replace").read(4000))
+        except Exception: meta = {}
+        out.append({"name": meta.get("name") or n, "dir": n, "description": str(meta.get("description") or "")[:400]})
+    return out
+
+
+def config_view():
+    """What the Codex tab shows: install and sign-in, Orbit's Codex defaults, AGENTS.md,
+    skills, plugins, MCP servers, and Codex's own config (model, effort)."""
+    agents = os.path.join(CODEX_HOME, "AGENTS.md")
+    try: agents_md = open(agents, encoding="utf-8", errors="replace").read()
+    except OSError: agents_md = ""
+    toml = {}
+    try:
+        import tomllib
+        with open(os.path.join(CODEX_HOME, "config.toml"), "rb") as fh:
+            t = tomllib.load(fh)
+        toml = {k: t.get(k) for k in ("model", "model_reasoning_effort", "approval_policy", "sandbox_mode", "model_provider") if t.get(k) is not None}
+    except Exception:
+        pass
+    rc, out, err = _cli(["plugin", "list", "--json"], timeout=60)
+    plugins = _json_out(out) if rc == 0 else None
+    rc2, out2, err2 = _cli(["mcp", "list", "--json"], timeout=60)
+    mcp = _json_out(out2) if rc2 == 0 else None
+    return {"settings": cfg(), "defaults": DEFAULTS, "info": info(), "agents_md": agents_md, "agents_md_path": agents,
+            "skills": codex_skills(), "plugins": plugins, "plugins_error": None if rc == 0 else (err or out)[-300:],
+            "mcp": [{k: v for k, v in m.items() if k in ("name", "enabled", "disabled_reason", "transport")}
+                    for m in (mcp or []) if isinstance(m, dict)] if isinstance(mcp, list) else mcp,
+            "mcp_error": None if rc2 == 0 else (err2 or out2)[-300:], "config_toml": toml,
+            "modes": list(PERMISSIONS)}
+
+
+def save_agents_md(text):
+    path = os.path.join(CODEX_HOME, "AGENTS.md")
+    _ce()._backup(path)
+    os.makedirs(CODEX_HOME, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text if not text or text.endswith("\n") else text + "\n")
+    return {"ok": True, "path": path}
+
+
+def manage(kind, op, **kw):
+    """Skills, plugins and MCP servers, through Codex itself where it has a command."""
+    if kind == "skills":
+        if op == "install":
+            return _ce().skill_install(kw.get("source") or "", dest_base=os.path.join(CODEX_HOME, "skills"))
+        if op == "remove":
+            it = next((x for x in codex_skills() if x["name"] == kw.get("name") or x["dir"] == kw.get("name")), None)
+            if not it: return {"error": "no such skill"}
+            return {"ok": True, "trashed": _ce()._to_trash(os.path.join(CODEX_HOME, "skills", it["dir"]))}
+    if kind == "plugins":
+        name = str(kw.get("name") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_.@/-]{1,200}", name): return {"error": "plugin@marketplace"}
+        if op in ("add", "remove"):
+            rc, out, err = _cli(["plugin", op, name], timeout=300)
+            return {"ok": rc == 0, "output": (out + err)[-600:], "error": None if rc == 0 else (err or out)[-300:]}
+        if op == "marketplace":
+            rc, out, err = _cli(["plugin", "marketplace", "add", name], timeout=300)
+            return {"ok": rc == 0, "output": (out + err)[-600:], "error": None if rc == 0 else (err or out)[-300:]}
+    if kind == "mcp":
+        name = str(kw.get("name") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", name): return {"error": "a server name (letters, digits, - _ .)"}
+        if op == "remove":
+            rc, out, err = _cli(["mcp", "remove", name])
+        elif op == "add":
+            cmd = [str(x) for x in (kw.get("command") or []) if str(x)]
+            if not cmd: return {"error": "the command that starts the server"}
+            rc, out, err = _cli(["mcp", "add", name, "--", *cmd])
+        else:
+            return {"error": f"unknown MCP action {op}"}
+        return {"ok": rc == 0, "output": (out + err)[-600:], "error": None if rc == 0 else (err or out)[-300:]}
+    return {"error": f"unknown {kind} action {op}"}

@@ -250,6 +250,12 @@ skills, plugins and MCP servers — with every step shown in Orbit. Turn it on w
   nothing lingers on a login node. Your ChatGPT account's models there need Codex signed in
   on that machine (`codex login --device-auth`, or *Copy this Mac's sign-in* in the chat's
   Codex panel); other providers need nothing there.
+- **Settings → Codex.** Codex's own tab, beside Claude Code's: whether Codex is installed
+  and signed in (and your ChatGPT limits); defaults for new Codex chats (model, permission
+  mode, reasoning effort, machine, folder, what scheduled runs may do); Orbit's context and
+  extra instructions; `~/.codex/AGENTS.md`; Codex on each SSH machine (install or check it,
+  copy your sign-in, keep-alive); and Codex's skills, plugins and MCP servers, changed
+  through Codex itself so the CLI and app see the same.
 - **Shared sessions.** Each chat is a Codex thread in `~/.codex/sessions`, so
   `codex resume <thread>` continues it in a terminal, and a Codex session started
   elsewhere can be opened and continued in Orbit.
