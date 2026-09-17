@@ -94,7 +94,33 @@ Claude login (Pro, Max, Team): no base URL, no key, nothing through the gateway,
 Claude's own context windows. Models: Opus, Sonnet and Haiku (latest), and Opus
 and Sonnet with 1M context. The `claude` command needs to be signed in once
 (`claude auth login` in a terminal — the Claude desktop app keeps a separate
-login); Orbit says so if it is not.
+login); Orbit says so if it is not. If `claude` still says it is not signed in, run
+`claude setup-token` and paste the token it prints under **Claude · your
+subscription** in Settings → Models & keys: Orbit hands it to Claude Code directly,
+whatever the Keychain holds.
+
+## Instructions and memory in Claude Code mode
+
+Claude Code chats use Claude's own instructions and memory, not Orbit's: in Claude
+Code mode, Settings → Memory & instructions shows and edits `~/.claude/CLAUDE.md`,
+the chat folder's `CLAUDE.md` / `.claude/CLAUDE.md` / `CLAUDE.local.md`, and the
+memory Claude keeps for that folder (`~/.claude/projects/<folder>/memory`), with
+the previous version backed up. A chat's own instructions (`/sysprompt`) are added
+to Claude's system prompt for that chat. Orbit's automatic memory notes and its
+own compaction are for Orbit's chats only; Claude Code remembers and compacts for
+itself.
+
+## Sessions from other agents
+
+The sidebar lists conversations that began elsewhere, each source in its own
+section: **From Claude Code** (the Claude CLI and Claude's desktop app — in Claude
+Code mode, every such session, not only those on Orbit's models), **From Codex**
+and **From OpenCode**. Programs' one-shot calls (from temporary folders, the SDKs,
+single-message runs) are left out. Open one to read it; send a message to continue
+it in the agent's own session (`claude --resume`, `codex exec resume`,
+`opencode run --session`), so the agent keeps its context and tools. A chat that
+moved to another model and back tells the agent what was said meanwhile. A session
+on a Claude model continues on your Claude subscription.
 
 Model lists come from [models.dev](https://models.dev) (the catalogue OpenCode
 uses: every model's context window, output limit and API) and, once a key is

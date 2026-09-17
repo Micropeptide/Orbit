@@ -159,9 +159,13 @@ def harness_target(spec=None):
     pc = spec.get("provider_cfg") or {}
     if spec.get("provider") == "harness" and pc.get("subscription"):
         # plain Claude Code on your own login: no base URL, no key, Claude's own windows
+        token = ""
+        try: token = (Q.secrets_load() or {}).get("CLAUDE_CODE_OAUTH_TOKEN") or ""
+        except Exception: pass
         return {"url": None, "model": pc.get("model") or "sonnet", "small": "haiku",
                 "ctx": int(pc.get("context") or 200000), "local": False, "provider": "claude",
-                "auth": {}, "env": {}, "key_missing": False, "subscription": True,
+                "auth": {}, "env": ({"CLAUDE_CODE_OAUTH_TOKEN": token} if token else {}),
+                "key_missing": False, "subscription": True, "token": bool(token),
                 "cli_model": pc.get("model") or "sonnet"}
     if spec.get("provider") != "harness" or pc.get("local"):
         url, model, ctx = model_endpoint()
@@ -970,10 +974,13 @@ def _system_parts(project):
     return parts
 
 
-def _orbit_append(project, c, orbit_tools):
-    """What Orbit adds to Claude's system prompt: the launcher's note, and
-    Orbit's own context only when that extra is turned on."""
+def _orbit_append(project, c, orbit_tools, chat_instructions=None):
+    """What Orbit adds to Claude's system prompt: the launcher's note, this chat's
+    own instructions (/sysprompt), and Orbit's own context only when that extra is
+    turned on."""
     extra = []
+    if chat_instructions:
+        extra.append("# Instructions for this chat\n" + str(chat_instructions)[:8000])
     if c.get("orbit_context"):
         extra += _system_parts(project)
         extra.append("# Running inside Orbit\n- The user is chatting through Orbit, a local desktop "
@@ -1008,9 +1015,11 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     target = harness_target(spec)
     if target["local"]:
         _wake_model(emit)
-    elif target.get("subscription") and _harness().claude_login(max_age=30) != "yes":
-        msg = ("The `claude` command is not signed in to your Claude account (the Claude desktop app keeps "
-               "its own login). Run `claude auth login` once in a terminal, then send this again.")
+    elif target.get("subscription") and _harness().claude_login(
+            max_age=30, token=(target.get("env") or {}).get("CLAUDE_CODE_OAUTH_TOKEN")) != "yes":
+        msg = ("The `claude` command is not signed in to your Claude account. In a terminal run "
+               "`claude setup-token`, then paste the token in Orbit → Settings → Models & keys → "
+               "Claude · your subscription (or run `claude auth login`), and send this again.")
         messages.append({"role": "user", "content": user_content, "t": time.time()})
         emit("error", msg); emit("done", None)
         return msg
@@ -1135,7 +1144,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                       model=target.get("cli_model"),
                       effort=getattr(T, "effort", None) or q.S.get("reasoning_effort"),
                       settings_path=settings_path, mcp_path=mcp_path, add_dirs=prefs.get("add_dirs"),
-                      append=_orbit_append(project, c, orbit_tools))
+                      append=_orbit_append(project, c, orbit_tools, prefs.get("instructions")))
     if fork: argv.append("--fork-session")
     if resume_at: argv += ["--resume-session-at", resume_at]
     env = target_env(target)
@@ -1171,8 +1180,13 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
 
     lines = collections.deque()
     got = threading.Event()
+    trace = os.environ.get("ORBIT_ENGINE_TRACE")          # a file to copy Claude Code's events into, when debugging
     def reader():
         for raw in proc.stdout:
+            if trace:
+                try:
+                    with open(trace, "ab") as fh: fh.write(b"< " + raw)
+                except OSError: pass
             lines.append(raw); got.set()
         lines.append(None); got.set()
     err_tail = collections.deque(maxlen=40)
@@ -1687,9 +1701,11 @@ def _summarise(path, local, include_all):
 
 
 def scan_history(include_all=None, local=None):
-    """Claude sessions run on the local model, newest first."""
+    """Claude sessions from a terminal, newest first: those run on Orbit's models --
+    or, in Claude Code mode (or with "on any model" set), every Claude session."""
     c = cfg()
-    include_all = c.get("history_all_models") if include_all is None else include_all
+    if include_all is None:
+        include_all = bool(c.get("history_all_models") or (getattr(Q, "S", None) or {}).get("harness_mode"))
     local = set(x.lower() for x in (local or [])) | harness_model_names()
     try:
         local.add((Q.local_model_name() or "").lower())
@@ -1707,9 +1723,26 @@ def scan_history(include_all=None, local=None):
             if not hit or hit[0] != key:
                 hit = (key, _summarise(path, local, include_all))
                 _SCAN[path] = hit
-            if hit[1]: out.append(hit[1])
+            if hit[1] and (not include_all or _is_a_conversation(hit[1])
+                           or any(_is_local_model(m.lower(), local) for m in hit[1]["models"])):
+                out.append(hit[1])
     out.sort(key=lambda x: -(x["mtime"] or 0))
     return out
+
+
+_SCRATCH = ("/private/var/folders/", "/var/folders/", "/tmp/", "/private/tmp/")
+
+
+def _is_a_conversation(h):
+    """A session someone had with Claude, not a program's one-shot call: other apps
+    drive Claude Code by the thousand (from temporary folders, the TypeScript/Python
+    SDK, or `claude -p` for a single answer), and those are not chats to list."""
+    cwd = h.get("cwd") or ""
+    if cwd.startswith(_SCRATCH) or "/.claude-mem/" in cwd + "/": return False
+    ep = h.get("entrypoint") or ""
+    if ep in ("sdk-ts", "sdk-py"): return False
+    if ep == "sdk-cli" and (h.get("n") or 0) <= 1: return False
+    return True
 
 
 def convert(path):
@@ -1972,14 +2005,22 @@ def resume_command(orbit_msgs, spec=None):
 
 
 def model_for_session(models):
-    """The Orbit model id for a Claude session, from the model names in its transcript."""
+    """The Orbit model id for a Claude session, from the model names in its transcript.
+    A session on Claude itself (claude-opus-5…) continues on your Claude subscription,
+    as it ran; others on the provider that serves that model; else the local model."""
+    names = [m for m in models or [] if m and m != "<synthetic>"]
+    for name in reversed(names):
+        low = name.lower()
+        if low.startswith("claude-"):
+            for fam in ("opus", "sonnet", "haiku"):
+                if fam in low:
+                    return f"harness:claude/{fam}"
     try:
         import harness
-        names = [m for m in models or [] if m and m != "<synthetic>"]
         provs = harness.providers(Q.ROOT, Q.local_model_name())
         secrets_ = Q.secrets_load()
         for name in reversed(names):
-            hits = [(pid, p) for pid, p in provs.items() if any(x["id"] == name for x in p["models"])]
+            hits = [(pid, p) for pid, p in provs.items() if pid != "claude" and any(x["id"] == name for x in p["models"])]
             if not hits: continue
             hits.sort(key=lambda h: (h[0] == "local", not harness._ready(h[0], h[1], secrets_)))
             pid = hits[0][0]
@@ -2155,6 +2196,136 @@ def skill_remove(name):
     if not it: return {"error": f"no skill {name}"}
     dest = _to_trash(os.path.join(claude_dir(), "skills", it["dir"]))
     _SKILL_INDEX["key"] = None
+    return {"ok": True, "trashed": dest}
+
+
+# ------------------------------------------------------------------ Claude's memory and instructions
+#
+# In Claude Code mode the instructions and memory are Claude's own, as a terminal
+# session sees them: CLAUDE.md for you (~/.claude/CLAUDE.md) and for a folder
+# (<folder>/CLAUDE.md, .claude/CLAUDE.md, CLAUDE.local.md), and the memory Claude
+# keeps per folder (~/.claude/projects/<folder>/memory: MEMORY.md and one file per
+# memory). Orbit reads and edits those files; it adds nothing of its own.
+
+_MEM_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}\.md$")
+
+
+def claude_instruction_files(cwd=None):
+    """Instruction files Claude loads for a folder: user, then the folder's."""
+    out = [{"scope": "user", "path": os.path.join(claude_dir(), "CLAUDE.md"), "label": "You, in every folder"}]
+    if cwd:
+        cwd = os.path.abspath(os.path.expanduser(cwd))
+        out += [{"scope": "project", "path": os.path.join(cwd, "CLAUDE.md"), "label": "This folder (shared, e.g. in git)"},
+                {"scope": "project-dir", "path": os.path.join(cwd, ".claude", "CLAUDE.md"), "label": "This folder's .claude/"},
+                {"scope": "local", "path": os.path.join(cwd, "CLAUDE.local.md"), "label": "This folder, only on this Mac"}]
+    for f in out:
+        f["exists"] = os.path.isfile(f["path"])
+        try: f["text"] = open(f["path"], encoding="utf-8", errors="replace").read() if f["exists"] else ""
+        except OSError: f["text"] = ""
+    return out
+
+
+def claude_memory_dir(cwd):
+    return os.path.join(projects_dir(), encode_cwd(os.path.abspath(os.path.expanduser(cwd or HOME))), "memory")
+
+
+def _mem_meta(text):
+    meta = {}
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end > 0:
+            for line in text[3:end].splitlines():
+                if ":" in line and not line.startswith(" "):
+                    k, _, v = line.partition(":")
+                    meta[k.strip()] = v.strip()
+    return meta
+
+
+def claude_memory(cwd=None):
+    """Claude's memory for a folder: the index and each memory file."""
+    d = claude_memory_dir(cwd)
+    items, index = [], ""
+    try: index = open(os.path.join(d, "MEMORY.md"), encoding="utf-8", errors="replace").read()
+    except OSError: pass
+    for root, _, files in os.walk(d) if os.path.isdir(d) else []:
+        for f in sorted(files):
+            if not f.endswith(".md") or (root == d and f == "MEMORY.md"): continue
+            path = os.path.join(root, f)
+            try: text = open(path, encoding="utf-8", errors="replace").read()
+            except OSError: continue
+            meta = _mem_meta(text)
+            items.append({"file": os.path.relpath(path, d), "name": meta.get("name") or f[:-3],
+                          "description": meta.get("description") or "", "type": meta.get("type") or "",
+                          "mtime": os.path.getmtime(path), "text": text})
+    items.sort(key=lambda x: -x["mtime"])
+    return {"cwd": os.path.abspath(os.path.expanduser(cwd or HOME)), "dir": d, "index": index, "items": items}
+
+
+def claude_memory_folders():
+    """Folders Claude keeps memory for (from ~/.claude/projects/*/memory), with counts."""
+    out = []
+    try: names = os.listdir(projects_dir())
+    except OSError: names = []
+    folders = {encode_cwd(f["path"]): f["path"] for f in (recent_folders() or []) if isinstance(f, dict) and f.get("path")}
+    for n in names:
+        md = os.path.join(projects_dir(), n, "memory")
+        if not os.path.isdir(md): continue
+        cnt = sum(1 for _, _, fs in os.walk(md) for f in fs if f.endswith(".md") and f != "MEMORY.md")
+        # the folder name is encoded (/ and . become -): a folder Orbit knows by path reads back exactly
+        path = folders.get(n) or ("/" + n.lstrip("-").replace("-", "/"))
+        if path.startswith(_SCRATCH): continue          # a temporary folder some program ran Claude in
+        out.append({"key": n, "path": path, "count": cnt, "mtime": os.path.getmtime(md)})
+    return sorted(out, key=lambda x: -x["mtime"])
+
+
+def _backup(path):
+    if os.path.isfile(path):
+        bk = os.path.join(_work_dir(), "backups")
+        os.makedirs(bk, exist_ok=True)
+        shutil.copy2(path, os.path.join(bk, time.strftime("%Y%m%d-%H%M%S-") + os.path.basename(path)))
+
+
+def save_claude_instructions(scope, text, cwd=None):
+    f = next((x for x in claude_instruction_files(cwd) if x["scope"] == scope), None)
+    if not f: return {"error": f"no such instructions file ({scope})" + ("" if cwd else " — pick a folder first")}
+    _backup(f["path"])
+    os.makedirs(os.path.dirname(f["path"]), exist_ok=True)
+    with open(f["path"], "w", encoding="utf-8") as fh: fh.write(text if text.endswith("\n") or not text else text + "\n")
+    return {"ok": True, "path": f["path"]}
+
+
+def save_claude_memory(cwd, file, text):
+    """Write one memory file (new or edited); a new one gets a line in MEMORY.md."""
+    file = os.path.basename(str(file or "").strip())
+    if not file.endswith(".md"): file += ".md"
+    if not _MEM_NAME.match(file) or file == "MEMORY.md": return {"error": "a memory file name like lab-context.md"}
+    d = claude_memory_dir(cwd)
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, file)
+    new = not os.path.exists(path)
+    _backup(path)
+    with open(path, "w", encoding="utf-8") as fh: fh.write(text if text.endswith("\n") else text + "\n")
+    if new:
+        meta = _mem_meta(text)
+        line = f"- [{meta.get('name') or file[:-3]}]({file})" + (f" — {meta['description']}" if meta.get("description") else "")
+        idx = os.path.join(d, "MEMORY.md")
+        _backup(idx)
+        with open(idx, "a", encoding="utf-8") as fh: fh.write(line + "\n")
+    return {"ok": True, "path": path, "new": new}
+
+
+def delete_claude_memory(cwd, file):
+    """A memory file to the Trash, and its line out of MEMORY.md."""
+    d = claude_memory_dir(cwd)
+    path = os.path.normpath(os.path.join(d, str(file or "")))
+    if not path.startswith(d + os.sep) or not os.path.isfile(path): return {"error": "no such memory"}
+    dest = _to_trash(path)
+    idx = os.path.join(d, "MEMORY.md")
+    if os.path.isfile(idx):
+        _backup(idx)
+        rel = os.path.relpath(path, d)
+        lines = open(idx, encoding="utf-8", errors="replace").read().splitlines(keepends=True)
+        open(idx, "w", encoding="utf-8").writelines(l for l in lines if f"({rel})" not in l)
     return {"ok": True, "trashed": dest}
 
 

@@ -158,7 +158,7 @@ class TestRegistry(unittest.TestCase):
         self.assertTrue(pc["subscription"])
         self.assertEqual((pc["model"], pc["api_key"]), ("opus", ""))
         self.assertEqual(H.find(self.root, "claude sonnet subscription", {}, "m")["id"], "harness:claude/sonnet")
-        old, H.claude_login = H.claude_login, (lambda max_age=120: "yes")
+        old, H.claude_login = H.claude_login, (lambda max_age=120, token=None: "yes")
         try:
             self.assertEqual(H.find(self.root, "claude opus", {"OPENCODE_API_KEY": "k"}, "m")["id"], "harness:claude/opus")
         finally:

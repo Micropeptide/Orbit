@@ -337,19 +337,22 @@ def claude_installed():
     return False
 
 
-_LOGIN = {"at": 0.0, "state": None}
+_LOGIN = {"at": 0.0, "state": None, "token": None}
+TOKEN_KEY = "CLAUDE_CODE_OAUTH_TOKEN"      # from `claude setup-token`, saved in Orbit's secrets
 
 
-def claude_login(max_age=120):
+def claude_login(max_age=120, token=None):
     """Whether the `claude` command is signed in to a Claude account: "yes", "no" or
-    "missing". (The Claude desktop app keeps its own login; the command needs
-    `claude auth login` once.)"""
+    "missing". Signed in means its own login (`claude auth login`, kept in the macOS
+    Keychain) or a long-lived token from `claude setup-token` saved in Orbit."""
     import subprocess, time
-    if _LOGIN["state"] and time.time() - _LOGIN["at"] < max_age: return _LOGIN["state"]
+    if _LOGIN["state"] and _LOGIN["token"] == bool(token) and time.time() - _LOGIN["at"] < max_age:
+        return _LOGIN["state"]
     if not claude_installed():
         state = "missing"
     else:
         env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE", "ANTHROPIC"))}
+        if token: env[TOKEN_KEY] = token
         env["PATH"] = ":".join([env.get("PATH", "")] + [os.path.expanduser(d) for d in
                                                         ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")])
         try:
@@ -357,13 +360,13 @@ def claude_login(max_age=120):
             state = "yes" if json.loads(r.stdout or "{}").get("loggedIn") else "no"
         except Exception:
             state = "yes"                     # cannot tell: let Claude Code itself say
-    _LOGIN.update(at=time.time(), state=state)
+    _LOGIN.update(at=time.time(), state=state, token=bool(token))
     return state
 
 
 def _ready(pid, p, secrets):
     if p.get("auth") == "local": return True
-    if p.get("auth") == "subscription": return claude_login() == "yes"
+    if p.get("auth") == "subscription": return claude_login(token=_secret(TOKEN_KEY, secrets)) == "yes"
     return bool(_key_value(p, secrets))
 
 
@@ -466,7 +469,8 @@ def public_view(root, secrets=None, local_name=None):
         out.append({"id": pid, "label": p["label"], "base": p.get("base"), "alt_bases": p.get("alt_bases") or [],
                     "key": p.get("key"), "key_set": bool(_key_value(p, secrets)), "auth": p.get("auth"),
                     "ready": _ready(pid, p, secrets),
-                    "login": claude_login() if p.get("auth") == "subscription" else None,
+                    "login": claude_login(token=_secret(TOKEN_KEY, secrets)) if p.get("auth") == "subscription" else None,
+                    "token_set": bool(_secret(TOKEN_KEY, secrets)) if p.get("auth") == "subscription" else None,
                     "accounts": [{"id": a["id"], "label": a["label"], "key": a["key"],
                                   "key_set": bool(_secret(a["key"], secrets)),
                                   "active": i == 0, "exhausted": _exhausted(root, pid, a["id"])}

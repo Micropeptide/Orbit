@@ -24,6 +24,7 @@ q.LEDGER = os.path.join(_LOGTMP, "ledger.jsonl")
 # engine (tests/test_claude_engine.py covers that) and away from ~/.claude history
 q.uses_claude_engine = lambda mid=None: False
 q.CE.history_items_cached = lambda max_age=20: []
+q.AGENT_SESSIONS.rows_cached = lambda root, max_age=20: []          # nor Codex / OpenCode history
 
 
 class Sandbox(unittest.TestCase):
@@ -42,6 +43,10 @@ class Sandbox(unittest.TestCase):
         self._saved["KNOW_META"] = q.KNOW_META
         q.KNOW_META = os.path.join(q.KNOW, "_meta.json")
         q._SESS_CACHE["key"] = None
+        # Orbit's own model loop on the local model, whatever your default model is
+        # (a 1M-window default made the compaction tests never compact)
+        q.TURN_CTX.model = None
+        q.TURN_CTX.pin_model = "local:test-local-model"
 
     def tearDown(self):
         for k, v in self._saved.items():
@@ -1136,6 +1141,8 @@ class TestLongAnswers(unittest.TestCase):
     def setUp(self):
         import collections
         self.deque = collections.deque
+        q.TURN_CTX.model = None
+        q.TURN_CTX.pin_model = "local:test-local-model"      # the local model, whatever your default is
         self.tmp = tempfile.mkdtemp(prefix="qqtest-long-")
         names = ("stream_call", "probe", "ensure_model", "model_is_local", "notify", "S",
                  "MODEL", "local_model_name", "tool_schema_tokens", "server_status",
@@ -2249,6 +2256,7 @@ class TestRound1(TestLongAnswers):
             return {"role": "assistant", "content": "ok"}
         q.stream_call = fake
         was = q.ACTIVE_MODEL.get("id")
+        q.TURN_CTX.pin_model = None          # the model the answer starts with comes from ACTIVE_MODEL here
         try:
             q.ACTIVE_MODEL["id"] = "my-model"
             q.turn(self.chat(), "go", [], emit=self.emit)

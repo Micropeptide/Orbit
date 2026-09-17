@@ -497,12 +497,13 @@ table.stbl{border-collapse:collapse;width:100%;font-size:13px;margin:2px 0 6px}
     <span class=ct id=chatct></span>
     <select class=filtersel id=filtersel title="Which chats">
      <option value=active>Active</option><option value=pinned>Pinned</option><option value=archived>Archived</option>
-     <option value=all>All</option><option value=claude>Claude Code</option></select></div>
+     <option value=all>All</option></select></div>
    <div class=secbody data-sec=chats>
     <input class=search id=search placeholder="Filter by title  (⌘F)">
     <div class=tagrow id=tagrow></div>
     <div class=slist id=slist></div>
    </div>
+   <div id=extsecs></div>
   </div>
   <div class=foot>
     <a id=opensettings title="Settings (⌘,)">⚙ Settings</a>
@@ -969,6 +970,34 @@ function chatRow(s,box){
  if(RUNNING.has(s.id)){d.classList.add('running');
   d.insertBefore(el('<span class=spin></span>'),d.firstChild)}
  box.appendChild(d);return d}
+// conversations that began outside Orbit, each agent in its own section
+const EXT_SOURCES=[
+ {key:'claude',label:'From Claude Code',tip:"Sessions from the Claude CLI and Claude's desktop app — open one to continue it here, in the same Claude session"},
+ {key:'codex',label:'From Codex',tip:'Codex sessions — open one to continue it here; Orbit runs Codex resuming that same session'},
+ {key:'opencode',label:'From OpenCode',tip:'OpenCode sessions — open one to continue it here; Orbit runs OpenCode resuming that same session'}];
+function extSource(s){
+ const id=String(s.id||'');
+ if(s.source==='codex'||id.startsWith('cx-'))return 'codex';
+ if(s.source==='opencode'||id.startsWith('oc-'))return 'opencode';
+ if(s.external||id.startsWith('cq-'))return 'claude';
+ return null}
+// rows under date headings that fold (older months start folded)
+function groupedRows(list,box,prefix,term){
+ let lastGroup=null, groupBody=null;
+ list.forEach(s=>{
+  const g=s.pinned&&filterMode!=='archived'?'Pinned':dayLabel(s.mtime);
+  if(g!==lastGroup){
+   lastGroup=g;
+   const recent=['Pinned','Today','Yesterday','Previous 7 days','Previous 30 days'].includes(g);
+   const open=term?true:PREF.get(prefix+g,recent?'1':'0')==='1';
+   const h=el(`<div class="daygroup${open?'':' closed'}"><span class=caret>▾</span> ${esc(g)} <span class=gct></span></div>`);
+   groupBody=el(`<div class=grpbody${open?'':' style="display:none"'}></div>`);
+   const gb=groupBody;
+   h.onclick=()=>{const now=gb.style.display==='none';gb.style.display=now?'':'none';
+    h.classList.toggle('closed',!now);PREF.set(prefix+g,now?'1':'0')};
+   box.appendChild(h);box.appendChild(groupBody)}
+  chatRow(s,groupBody);
+  const c=groupBody.previousSibling.querySelector('.gct');c.textContent=groupBody.children.length})}
 function renderSessions(){
  const term=($('#search').value||'').toLowerCase(), box=$('#slist');box.innerHTML='';
  // what needs you, or is working, first: answering, queued, or with news (as Claude's
@@ -989,34 +1018,32 @@ function renderSessions(){
   if(filterMode==='archived')return !!s.archived;
   if(filterMode==='claude')  return s.source==='claude-qwen';
   return true};
- const list=SESSIONS.filter(s=>pass(s)&&(!projFilter||s.project===projFilter)
+ const all_=SESSIONS.filter(s=>pass(s)&&(!projFilter||s.project===projFilter)
    &&(!tagFilter||(s.tags||[]).includes(tagFilter))
    &&(!term||(s.title||'').toLowerCase().includes(term))
    &&(term||!liveIds.has(s.id)));
+ // sessions that began outside Orbit (the Claude CLI, Claude's desktop app) are listed
+ // on their own, below Orbit's chats; one opened here stays with them
+ const list=all_.filter(s=>!extSource(s));
+ const ext=$('#extsecs');ext.innerHTML='';
+ EXT_SOURCES.forEach(src=>{
+  const rows=all_.filter(s=>extSource(s)===src.key);if(!rows.length)return;
+  const open=PREF.get('sec_ext_'+src.key,'1')==='1';
+  const h=el(`<div class="sechead${open?'':' closed'}" title="${esc(src.tip)}"><span class=caret>▾</span><span class=lbl>${esc(src.label)}</span><span class=ct>${rows.length}</span></div>`);
+  const body=el(`<div class="secbody${open?'':' closed'}"><div class=slist></div></div>`);
+  h.onclick=()=>{const now=h.classList.contains('closed');h.classList.toggle('closed',!now);body.classList.toggle('closed',!now);
+   PREF.set('sec_ext_'+src.key,now?'1':'0')};
+  ext.appendChild(h);ext.appendChild(body);
+  groupedRows(rows,body.firstChild,src.key+'_',term)});
  $('#chatct').textContent=list.length+(sessTotal>SESSIONS.length?'+':'');
  $('#chatslbl').textContent=projFilter&&PROJECTS[projFilter]?PROJECTS[projFilter].name:'Chats';
  if(!list.length){box.innerHTML=`<div class=note style="padding:10px 8px;font-size:12.5px">${
    term?'No titles match — ⌘P searches inside chats too.':filterMode==='archived'?'No archived chats.':'No chats here yet.'}</div>`;return}
- let lastGroup=null, groupBody=null;
- list.forEach(s=>{
-  const g=s.pinned&&filterMode!=='archived'?'Pinned':dayLabel(s.mtime);
-  if(g!==lastGroup){
-   lastGroup=g;
-   // older months start folded, so a long history does not bury recent chats
-   const recent=['Pinned','Today','Yesterday','Previous 7 days','Previous 30 days'].includes(g);
-   const open=term?true:PREF.get('grp_'+g,recent?'1':'0')==='1';
-   const h=el(`<div class="daygroup${open?'':' closed'}"><span class=caret>▾</span> ${esc(g)} <span class=gct></span></div>`);
-   groupBody=el(`<div class=grpbody${open?'':' style="display:none"'}></div>`);
-   const gb=groupBody;
-   h.onclick=()=>{const now=gb.style.display==='none';gb.style.display=now?'':'none';
-    h.classList.toggle('closed',!now);PREF.set('grp_'+g,now?'1':'0')};
-   box.appendChild(h);box.appendChild(groupBody)}
-  chatRow(s,groupBody);
-  const c=groupBody.previousSibling.querySelector('.gct');c.textContent=groupBody.children.length})
+ groupedRows(list,box,'grp_',term);
  if(sessTotal>SESSIONS.length){
   const more=el(`<div class=daygroup style="cursor:pointer;color:var(--acc)">load ${sessTotal-SESSIONS.length} more</div>`);
   more.onclick=()=>{sessLimit+=120;loadSessions()};box.appendChild(more)}}
-let sessTotal=0, sessLimit=80;
+let sessTotal=0, sessLimit=500;
 let tagFilter=null;
 async function loadTags(){
  const t=await (await fetch('/api/tags')).json();const row=$('#tagrow');row.innerHTML='';
@@ -1620,10 +1647,28 @@ async function renderHarnessModels(box){
   const card=el('<details class=memrow style="display:block;margin:6px 0;padding:8px 10px;border:1px solid var(--line);border-radius:9px"></details>');
   card.open=p.id==='opencode-go'||p.id==='local'||p.id==='claude';
   const nAcc=(p.accounts||[]).filter(a=>a.key_set).length;
-  const status=p.auth==='local'?'on this Mac':p.auth==='subscription'?(p.ready?'✓ uses your Claude login':p.login==='missing'?'Claude Code not installed':'not signed in — run <code>claude auth login</code> in a terminal')
+  const status=p.auth==='local'?'on this Mac':p.auth==='subscription'?(p.ready?'✓ uses your Claude login':p.login==='missing'?'Claude Code not installed':'not signed in — see below')
    :(p.key_set?(nAcc>1?`✓ ${nAcc} accounts`:'✓ key set'):'needs a key');
   card.appendChild(el(`<summary style="cursor:pointer"><b>${esc(p.label)}</b> <span class=note>${status} · ${p.models.length} models${p.auth==='subscription'?' · Claude Code mode only':''}</span></summary>`));
   if(p.docs)card.appendChild(el(`<div class=note style="margin:4px 0">${esc(p.docs)}</div>`));
+  if(p.auth==='subscription'){
+   // plain Claude Code on your Claude plan: its own login, or a long-lived token from `claude setup-token`
+   const tr=el(`<div style="margin:6px 0">
+     <div class=note>${p.ready?'✓ signed in':'Not signed in.'} ${p.token_set?'Using the sign-in token saved here.':'Uses the <code>claude</code> command\'s own login.'}
+      If it says not signed in: run <code>claude setup-token</code> in a terminal and paste the token it prints below — Orbit then gives it to Claude Code directly.</div>
+     <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:4px">
+      <input type=password autocomplete=off spellcheck=false placeholder="${p.token_set?'replace the sign-in token':'paste the token from claude setup-token'}" style="flex:1;min-width:220px">
+      <button class=ghost data-a=save>save token</button>${p.token_set?'<button class=ghost data-a=rm>remove</button>':''}<button class=ghost data-a=check>check again</button></div></div>`);
+   const ti=tr.querySelector('input');
+   tr.querySelector('[data-a=save]').onclick=async()=>{if(!ti.value.trim())return;
+    const d=await apiPost('/api/secrets/save',{secrets:{CLAUDE_CODE_OAUTH_TOKEN:ti.value.trim()}},'saving the token');
+    ti.value='';if(d){await fetch('/api/harness?fresh=1');toast('token saved');delete HPROV_CACHE[p.id];loadModels();renderHarnessModels(box)}};
+   const rmb=tr.querySelector('[data-a=rm]');
+   if(rmb)rmb.onclick=async()=>{if(!confirm('Remove the Claude sign-in token from Orbit?'))return;
+    await apiPost('/api/secrets/save',{secrets:{CLAUDE_CODE_OAUTH_TOKEN:''}},'removing');await fetch('/api/harness?fresh=1');renderHarnessModels(box)};
+   tr.querySelector('[data-a=check]').onclick=async()=>{const v=await (await fetch('/api/harness?fresh=1')).json();
+    const c=(v.providers||[]).find(x=>x.id==='claude')||{};toast(c.ready?'signed in':'still not signed in');delete HPROV_CACHE[p.id];loadModels();renderHarnessModels(box)};
+   card.appendChild(tr)}
   if(p.id==='opencode-go')card.appendChild(el(`<div class=note style="margin:4px 0">An OpenCode Go account has one allowance shared by all its models, in 5-hour, weekly and monthly windows; what is left comes from OpenCode itself and is shown with each account (and in the provider picker). Each model shows roughly what it has cost through Orbit.</div>`));
   if(p.auth!=='local'&&p.auth!=='subscription'){
    const rf=el(`<div class=note style="margin:2px 0">${p.fetched_at?'model list updated '+new Date(p.fetched_at*1000).toLocaleString():'preset model list'} <button class=ghost style="font-size:11px">refresh model list</button></div>`);
@@ -2182,7 +2227,66 @@ $('#stopgen').onclick=async()=>{
 
 /* ---------------- settings ---------------- */
 function closeModal(){$('#modalhost').innerHTML=''}
+// Settings → Memory & instructions in Claude Code mode: Claude's own files, as a
+// terminal session sees them (CLAUDE.md for you and for the chat's folder, and the
+// memory Claude keeps per folder). Orbit's memory stays for Orbit's own chats.
+let MEM_ORBIT=false;
+async function renderClaudeMemory(body,toOrbit,cwd){
+ const url='/api/claude/memory?sid='+encodeURIComponent(sid||'')+(cwd?'&cwd='+encodeURIComponent(cwd):'');
+ const d=await (await fetch(url)).json();
+ const mem=d.memory||{}, ins=d.instructions||[];
+ const tilde=p=>String(p||'').replace(/^\/Users\/[^/]+/,'~');
+ body.innerHTML=`<div class=note style="margin-bottom:8px">Claude Code chats use Claude's own instructions and memory — the same files a terminal session reads, edited here in place (the previous version is backed up). Orbit adds none of its own. <a style="cursor:pointer;color:var(--acc)" id=cm_orbit>Orbit's own memory (for Orbit chats) →</a></div>
+  <div class=grid><label>Folder</label><div style="display:flex;gap:6px"><select id=cm_folder style="flex:1"></select><button class=ghost id=cm_pick>Choose…</button></div></div>
+  <div class=sec>Instructions <small>— CLAUDE.md files Claude reads in this folder</small></div><div id=cm_ins></div>
+  <div class=sec>This chat's instructions <small>— added to Claude's system prompt for this chat only</small></div>
+  <textarea class=ta id=cm_chat style="min-height:60px" placeholder="e.g. Answer in Chinese in this chat."></textarea>
+  <button class=ghost id=cm_chatsave style="margin-top:6px">Save for this chat</button>
+  <div class=sec>Claude's memory <small>— ${esc(tilde(mem.dir))} · ${(mem.items||[]).length} memories</small></div>
+  <div id=cm_mem></div>
+  <details style="margin-top:8px"><summary class=note style="cursor:pointer">+ Add a memory</summary>
+   <div class=grid style="margin-top:6px"><label>File name</label><input type=text id=cm_file placeholder="lab-context.md"></div>
+   <textarea class=ta id=cm_text style="min-height:110px;margin-top:6px">---\nname: \ndescription: \nmetadata:\n  type: user\n---\n\n</textarea>
+   <button class=ghost id=cm_add style="margin-top:6px">Save memory</button></details>
+  ${mem.index?`<details style="margin-top:8px"><summary class=note style="cursor:pointer">MEMORY.md (the index Claude loads)</summary><pre style="white-space:pre-wrap;font-size:12px">${esc(mem.index)}</pre></details>`:''}`;
+ $('#cm_orbit').onclick=toOrbit;
+ // folders: this chat's, then every folder Claude keeps memory for
+ const sel=$('#cm_folder');
+ const opts=[{path:d.cwd,count:(mem.items||[]).length,cur:true},...(d.folders||[]).filter(f=>f.path!==d.cwd)];
+ sel.innerHTML=opts.map(f=>`<option value="${esc(f.path)}">${esc(tilde(f.path))}${f.cur?' (this chat)':''} · ${f.count} memories</option>`).join('');
+ sel.onchange=()=>renderClaudeMemory(body,toOrbit,sel.value);
+ $('#cm_pick').onclick=async()=>{const p=await pickFolder(d.cwd,'Folder whose Claude instructions and memory to show');if(p)renderClaudeMemory(body,toOrbit,p)};
+ const insBox=$('#cm_ins');
+ ins.forEach(f=>{
+  const r=el(`<details class=memrow style="display:block;padding:6px 8px"><summary style="cursor:pointer"><b>${esc(f.label)}</b> <span class=note>${esc(tilde(f.path))}${f.exists?'':' · not created yet'}</span></summary>
+    <textarea class=ta style="min-height:120px;margin-top:6px" placeholder="Nothing yet — what should Claude always know here?"></textarea>
+    <button class=ghost style="margin-top:4px">Save</button></details>`);
+  if(f.scope==='user'||f.exists)r.open=f.exists;
+  const ta=r.querySelector('textarea');ta.value=f.text||'';
+  r.querySelector('button').onclick=async()=>{const x=await apiPost('/api/claude/memory',{op:'instructions',scope:f.scope,cwd:d.cwd,text:ta.value},'saving');
+   if(x)toast('saved '+tilde(x.path))};
+  insBox.appendChild(r)});
+ $('#cm_chat').value=d.chat_instructions||'';
+ $('#cm_chatsave').onclick=async()=>{if(!sid)return toast('open a chat first');
+  if(await apiPost('/api/claude/memory',{op:'chat',sid,text:$('#cm_chat').value},'saving'))toast('this chat\'s instructions saved')};
+ const mb=$('#cm_mem');
+ if(!(mem.items||[]).length)mb.innerHTML='<div class=note>No memories in this folder yet. Claude writes them as it works (when its memory is on), or add one below.</div>';
+ (mem.items||[]).forEach(m=>{
+  const r=el(`<details class=memrow style="display:block;padding:5px 8px"><summary style="cursor:pointer"><b></b> <span class=note></span></summary>
+    <textarea class=ta style="min-height:120px;margin-top:6px"></textarea>
+    <div style="display:flex;gap:6px;margin-top:4px"><button class=ghost data-a=save>Save</button><button class=ghost data-a=del>Delete</button><span class=note style="margin-left:auto">${esc(m.file)} · ${new Date(m.mtime*1000).toLocaleDateString()}</span></div></details>`);
+  r.querySelector('b').textContent=m.name;r.querySelector('.note').textContent=(m.type?m.type+' · ':'')+m.description;
+  const ta=r.querySelector('textarea');ta.value=m.text;
+  r.querySelector('[data-a=save]').onclick=async()=>{if(await apiPost('/api/claude/memory',{op:'save',cwd:d.cwd,file:m.file,text:ta.value},'saving'))toast('saved')};
+  r.querySelector('[data-a=del]').onclick=async()=>{if(!confirm('Move '+m.file+' to the Trash and remove it from MEMORY.md?'))return;
+   if(await apiPost('/api/claude/memory',{op:'delete',cwd:d.cwd,file:m.file},'deleting'))renderClaudeMemory(body,toOrbit,d.cwd)};
+  mb.appendChild(r)});
+ $('#cm_add').onclick=async()=>{const f=$('#cm_file').value.trim(),t=$('#cm_text').value;
+  if(!f)return toast('a file name, like lab-context.md');
+  const x=await apiPost('/api/claude/memory',{op:'save',cwd:d.cwd,file:f,text:t},'saving');
+  if(x){toast(x.new?'memory added (and listed in MEMORY.md)':'saved');renderClaudeMemory(body,toOrbit,d.cwd)}}}
 async function openSettings(tab){
+ MEM_ORBIT=false;
  tab=tab||(MODELS.harness_mode?'claude':'general');   // Claude Code mode: its settings first
  const info=await (await fetch('/api/info')).json();INFO=info;
  const st=info.settings;
@@ -2598,8 +2702,13 @@ async function openSettings(tab){
      l.appendChild(c);
      const sp=document.createElement('span');sp.textContent=n;l.appendChild(sp);tg.appendChild(l)})})
   }
-  if(name==='memory'){
-   body.innerHTML=`<div class=sec>General instructions <small>— always prepended, like a CLAUDE.md</small></div>
+  if(name==='memory'&&(MODELS.harness_mode||isClaudeChat())&&!MEM_ORBIT){
+   await renderClaudeMemory(body,()=>{MEM_ORBIT=true;render('memory')});
+  }
+  else if(name==='memory'){
+   MEM_ORBIT=false;
+   body.innerHTML=`${MODELS.harness_mode?`<div class=note style="margin-bottom:8px">Orbit's own instructions and memory: used by chats that do not run through Claude Code. <a style="cursor:pointer;color:var(--acc)" id=m_toclaude>Claude Code's →</a></div>`:''}
+    <div class=sec>General instructions <small>— always prepended, like a CLAUDE.md</small></div>
     <textarea class=ta id=m_ins placeholder="e.g. I'm a biology grad student. Prefer concise answers with citations. Always give exact gene IDs."></textarea>
     <div class=sec>Memories <small>— durable facts, injected into every chat</small></div>
     <div id=memlist></div>
@@ -2608,6 +2717,7 @@ async function openSettings(tab){
     <textarea class=ta id=m_text style="min-height:110px;margin-top:8px" placeholder="What should Orbit always know?"></textarea>
     <button class=ghost id=m_add style="margin-top:8px">Add memory</button>`;
    $('#m_ins').value=ins;
+   if($('#m_toclaude'))$('#m_toclaude').onclick=()=>render('memory');
    const ml=$('#memlist');
    if(!mem.length)ml.innerHTML='<div class=note>No memories yet.</div>';
    mem.forEach(m=>{const r=el('<div class=memrow><b></b><span></span><button class=ghost>edit</button><button class=ghost>delete</button></div>');
@@ -2796,7 +2906,7 @@ async function openSettings(tab){
       <option value=localSettings>the folder's .claude/settings.local.json</option><option value=projectSettings>the folder's .claude/settings.json</option>
       <option value=userSettings>~/.claude/settings.json</option><option value=session>this session only</option></select>
     <label>Terminal sessions</label><div class=sw><input type=checkbox id=cq_hist><span class=note>list claude-qwen sessions in the sidebar</span></div>
-    <label>…on any model</label><div class=sw><input type=checkbox id=cq_histall><span class=note>also Claude sessions on other models</span></div>
+    <label>…on any model</label><div class=sw><input type=checkbox id=cq_histall><span class=note>also Claude sessions on other models (always, in Claude Code mode)</span></div>
     </div>
     <details style="margin-top:8px"><summary class=note>Orbit extras — each adds something Claude itself would not do (all off)</summary><div class=grid style="margin-top:6px">
     <label>Orbit's safety rules</label><div class=sw><input type=checkbox id=cq_orules><span class=note>Orbit's rules, autonomy mode and folder limit on top of Claude's</span></div>

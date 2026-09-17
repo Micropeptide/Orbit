@@ -1385,7 +1385,8 @@ class _Either:
 
 # keys Orbit keeps on a stored message for itself -- never sent to a model
 PRIVATE_KEYS = ("partial", "interjection", "compacted", "t", "secs", "ok", "usage", "tool_runs",
-                "reasoning_marks", "nudge", "changes", "changes_undone", "claude", "claude_uuid")
+                "reasoning_marks", "nudge", "changes", "changes_undone", "claude", "claude_uuid",
+                "agent")
 
 def para_marks(marks, state, chunk, now=None):
     """Note when each paragraph of thinking began: [offset, time] pairs, kept
@@ -1452,6 +1453,7 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
                 interrupt=None):
     if think is None: think = getattr(TURN_CTX, "think", None)
     think = S.get("thinking", True) if think is None else think
+    as_saved = messages                    # a CLI agent reads its own session marker from these
     messages = _strip_reasoning(messages)
     stop = _Either(cancel or CANCEL, interrupt)
     spec = current_model(model)
@@ -1460,7 +1462,7 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
     prov = spec["provider_cfg"]
     if prov.get("kind") == "cli":
         # a CLI agent answers with its own tools; Orbit's are not offered to it
-        out = MODELS.cli_stream(prov["backend"], spec["model"], messages,
+        out = MODELS.cli_stream(prov["backend"], spec["model"], as_saved,
                                 emit=emit, cancel=stop,
                                 timeout=float(S.get("cli_timeout_s") or 900),
                                 cwd=WORKSPACE)
@@ -1878,7 +1880,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                 err = f"{type(e).__name__}: {e}"
                 fails = seen_calls.get("__stream_fail__", 0) + 1
                 seen_calls["__stream_fail__"] = fails
-                give_up = {"auth": 1, "bad_request": 2, "overflow": 2}.get(kind, 5)
+                give_up = {"auth": 1, "setup": 1, "bad_request": 2, "overflow": 2}.get(kind, 5)
                 emit("stream_error", {"error": err, "attempt": fails, "kind": kind, "of": give_up})
                 if kind == "overflow" and fails <= 2:
                     # too long for the window: retrying the same request can only
@@ -1890,6 +1892,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                     _finish(None, rnd)
                     emit("done", None)
                     why = {"auth": "the model provider refused the key — check it in Settings → Models",
+                           "setup": "the agent could not start — check it runs in a terminal",
                            "bad_request": "the model server rejected the request",
                            "overflow": "the conversation is too long even after compacting — start a new chat or compact it"
                            }.get(kind, "Check it is running (sidebar → Start)")
@@ -1975,7 +1978,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
             # user's max_tool_rounds before the retry can produce useful work.
             rnd += 1
             said = {k: v for k, v in msg.items()
-                    if k in ("role", "content", "model", "reasoning_content", "reasoning_marks")}
+                    if k in ("role", "content", "model", "reasoning_content", "reasoning_marks", "agent")}
             if cancel.is_set():
                 # a stop mid-stream keeps whatever was written so far, thinking
                 # included, marked partial so the next message hands that
@@ -1995,7 +1998,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
             # stream_call() strips it back out before it is ever sent to a model
             messages.append({**{k: v for k, v in msg.items()
                                 if k in ("role", "content", "tool_calls", "model", "reasoning_content",
-                                         "reasoning_marks")},
+                                         "reasoning_marks", "agent")},
                              "t": time.time()})
             if not calls:
                 if inbox:
@@ -5017,6 +5020,11 @@ def classify_error(e):
     if code == 429 or (isinstance(code, int) and code >= 500) or "overloaded" in low or "rate limit" in low:
         return "transient"
     if code in (400, 404, 422): return "bad_request"
+    # a CLI that cannot start (not installed, or a missing interpreter) or is signed
+    # out: the same thing again in a few seconds fails the same way
+    if any(m in low for m in ("exited 127", "no such file or directory", "is not installed",
+                              "not on path", "is not signed in")):
+        return "setup"
     return "transient"
 
 def _backoff(attempt):
@@ -5799,6 +5807,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None, **
 # provider in bin/harness.py (OpenCode Go/Zen, DeepSeek, Qwen, GLM, MiniMax, Kimi,
 # Anthropic, custom). "harness:<provider>/<model>" ids.
 import harness as HARN
+import agent_sessions as AGENT_SESSIONS
 import harness_usage as USAGE
 HARNESS_PORT = None            # set by orbit-ui when it starts the gateway
 
@@ -5899,7 +5908,15 @@ def session_list():
                 r["source"] = "claude-qwen"
         extra = CE.history_items_cached()
     except Exception:
-        return rows
+        extra = []
+    try:
+        # Codex and OpenCode conversations, listed on their own in the sidebar
+        for r in rows:
+            src = AGENT_SESSIONS.source_of(r["id"])
+            if src: r["source"] = src
+        if S.get("agent_history", True): extra = list(extra) + AGENT_SESSIONS.rows_cached(ROOT)
+    except Exception:
+        pass
     if not extra: return rows
     have = {r["id"] for r in rows}
     extra = [x for x in extra if x["id"] not in have]
@@ -5910,3 +5927,26 @@ def session_list():
     merged = sorted(rest + extra, key=lambda r: -(r.get("mtime") or 0))
     return pinned + merged
 
+
+
+def agent_session_open(sid):
+    """A Codex or OpenCode conversation opened in Orbit: saved as a chat the first
+    time, and brought up to date when the agent's own session has moved on (it was
+    continued in the agent, or by Orbit through it). True if the chat was written."""
+    if not AGENT_SESSIONS.source_of(sid): return False
+    path = session_path(sid)
+    meta = {}
+    if os.path.exists(path):
+        try: meta = json.load(open(path))
+        except Exception: meta = {}
+        if not AGENT_SESSIONS.changed_since(sid, meta.get("agent_synced")): return False
+    got = AGENT_SESSIONS.convert(sid)
+    if not got: return False
+    msgs, title, cwd, marker, model = got
+    sysmsg = {"role": "system", "content": system_prompt_for(None, None)}
+    extra = {k: meta[k] for k in ("pinned", "archived", "tags", "order", "project") if k in meta}
+    extra.update({"source": marker["source"], "agent_session": marker, "agent_synced": time.time(),
+                  "model": meta.get("model") or model.split(":")[0] + ":default"})
+    extra.setdefault("tags", [marker["source"]])
+    session_save(sid, [sysmsg] + msgs, meta.get("title") or title, extra)
+    return True
