@@ -82,6 +82,9 @@ DEFAULTS = {
   # an answer cut off because Orbit itself stopped (crash, update, restart) is
   # picked up again in the same chat a minute after it starts back up
   "resume_after_restart": True,
+  # an answer stopped by a used-up plan allowance (Claude's 5-hour or weekly limit, a
+  # ChatGPT limit, an OpenCode Go allowance) carries on by itself once it resets
+  "resume_after_limit": True,
   # after a substantial answer, extract durable facts and save them as new
   # memory notes by itself — the model rarely stops mid-task to call remember
   "auto_memory": True,
@@ -6263,3 +6266,145 @@ def model_catalogue():
         op = offpeak_for(m)
         if op: m["offpeak"] = {k: op.get(k) for k in ("active", "what", "label", "ends_at", "starts_at", "fraction", "quota", "windows", "windows_local", "peak")}
     return cat
+
+
+
+# ==================================================================== USAGE LIMITS: CARRY ON AFTER THE RESET
+# A plan's allowance running out (Claude's 5-hour or weekly limit, ChatGPT's, an
+# OpenCode Go account) ends an answer part-way. Orbit reads when the allowance comes
+# back -- from the message itself, or from what it knows of the account -- and schedules
+# a one-off run in the same chat a minute after that, to pick the work up.
+import datetime as _dt
+
+LIMIT_WORDS = ("usage limit", "limit reached", "hit your limit", "reached your limit", "5-hour limit",
+               "5 hour limit", "weekly limit", "monthly limit", "session limit", "out of extra usage",
+               "usage_limit", "gousagelimiterror", "quota exceeded", "exceeded your current quota",
+               "insufficient_quota", "rate_limit_exceeded: usage", "limit will reset", "resets at",
+               "try again at")
+LIMIT_MAX_ATTEMPTS = 8
+LIMIT_UNKNOWN_WAIT = 3600          # the message says a limit was hit but not when it resets
+
+_CLOCK = r"(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?"
+
+
+def _next_clock(h, mi, ampm, tzname, now):
+    """The next time the clock shows h:mi (in tzname, or this Mac's zone)."""
+    h, mi = int(h), int(mi or 0)
+    ap = (ampm or "").replace(".", "").lower()
+    if ap == "pm" and h < 12: h += 12
+    if ap == "am" and h == 12: h = 0
+    if h > 23 or mi > 59: return None
+    tz = None
+    if tzname:
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(tzname)
+        except Exception:
+            tz = None
+    base = _dt.datetime.fromtimestamp(now, tz) if tz else _dt.datetime.fromtimestamp(now)
+    t = base.replace(hour=h, minute=mi, second=0, microsecond=0)
+    if t.timestamp() <= now + 30: t += _dt.timedelta(days=1)
+    return t.timestamp()
+
+
+def limit_reset_at(texts, now=None):
+    """(when the limit resets as a timestamp or None, the line that said so) when these
+    messages say a usage allowance ran out; None when they don't."""
+    now = now or time.time()
+    blob = "\n".join(str(t) for t in texts if t)
+    low = blob.lower()
+    hit = next((w for w in LIMIT_WORDS if w in low), None)
+    if not hit: return None
+    line = next((l.strip() for l in blob.splitlines() if hit in l.lower()), hit)[:300]
+    # Claude Code: "Claude AI usage limit reached|1726600000"
+    m = _re.search(r"limit reached\|(\d{10})", low)
+    if m: return float(m.group(1)), line
+    # an ISO time: "resetsAt": "2026-09-17T15:00:00Z"
+    m = _re.search(r"reset[s_]?[ _]?at\"?\s*[:=]\s*\"?(\d{4}-\d{2}-\d{2}t\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:z|[+-]\d{2}:?\d{2})?)", low)
+    if m:
+        try:
+            v = _dt.datetime.fromisoformat(m.group(1).upper().replace("Z", "+00:00"))
+            if v.tzinfo is None: v = v.replace(tzinfo=_dt.timezone.utc)
+            return v.timestamp(), line
+        except ValueError:
+            pass
+    # "resets in 2h 13m", "try again in 45 minutes", "resets in 3 days"
+    m = _re.search(r"(?:reset|try again|available again)\w*\s+in\s+(?:(\d+)\s*d(?:ays?)?)?\s*(?:(\d+)\s*h(?:ours?|rs?)?)?\s*(?:(\d+)\s*m(?:in(?:ute)?s?)?)?", low)
+    if m and any(m.groups()):
+        d, h, mi = (int(x or 0) for x in m.groups())
+        return now + d * 86400 + h * 3600 + mi * 60, line
+    # "resets 3pm (America/Los_Angeles)", "try again at 3:14 PM", "resets at 15:00"
+    m = _re.search(r"(?:resets?|try again|available again)(?:\s+(?:at|after|on))?\s+(?:(mon|tue|wed|thu|fri|sat|sun)\w*\s+)?" + _CLOCK +
+                  r"(?:\s*\(([A-Za-z_]+/[A-Za-z_]+)\))?", blob, _re.I)
+    if m and (m.group(3) or m.group(4) or ":" in (m.group(0) or "")):
+        t = _next_clock(m.group(2), m.group(3), m.group(4), m.group(5), now)
+        if t:
+            if m.group(1):          # a weekday named: move to that day
+                want = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"].index(m.group(1)[:3].lower())
+                while _dt.datetime.fromtimestamp(t).weekday() != want: t += 86400
+            return t, line
+    return None, line
+
+
+def _limit_reset_from_accounts(model_id, now=None):
+    """When the model's allowance comes back, from what Orbit knows of the account: the
+    ChatGPT limits Codex reports, or the soonest OpenCode Go (or other gateway) account
+    marked used up."""
+    now = now or time.time()
+    mid = str(model_id or "")
+    try:
+        if mid.startswith("codex:chatgpt/"):
+            entry = (getattr(CX, "_SERVERS", {}) or {}).get("") or {}
+            rl = getattr(entry.get("srv"), "rate_limits", None) or {}
+            times = [float(w.get("resetsAt")) for w in (rl.get("primary"), rl.get("secondary"))
+                     if isinstance(w, dict) and w.get("resetsAt") and float(w.get("usedPercent") or 0) >= 99]
+            if times: return max(times)
+    except Exception:
+        pass
+    try:
+        pid = model_provider_and_name({"id": mid})[0] if ":" in mid else mid.split("/")[0]
+        marks = (USAGE._state(ROOT).get(pid) or {}) if pid else {}
+        until = [float(v.get("until") or 0) for v in marks.values() if float(v.get("until") or 0) > now]
+        if until: return min(until)
+    except Exception:
+        pass
+    return None
+
+
+def schedule_limit_resume(sid, title, texts, model_id=None, attempt=0, now=None):
+    """If these messages say a usage allowance ran out, schedule this chat to carry on a
+    minute after it resets. Returns the job, or None. One such run per chat at a time: a
+    later limit moves the existing run rather than adding another."""
+    now = now or time.time()
+    if not sid or not S.get("resume_after_limit", True): return None
+    found = limit_reset_at(texts, now)
+    if not found: return None
+    when, line = found
+    when = when or _limit_reset_from_accounts(model_id, now) or now + LIMIT_UNKNOWN_WAIT
+    if when - now > 8 * 86400: return None                 # a monthly cap: not worth a timer
+    at = max(now + 60, when + 60)
+    if attempt >= LIMIT_MAX_ATTEMPTS: return None
+    title = (title or sid)[:40]
+    job = None
+    def edit(cfg):
+        nonlocal job
+        for j in cfg.setdefault("jobs", []):
+            if j.get("kind") == "limit_resume" and j.get("sid") == sid and j.get("enabled"):
+                j["at_ts"] = at; j["attempt"] = attempt; j["why"] = line
+                j.pop("last_run", None)
+                job = j
+                return
+        job = {"id": "job" + os.urandom(3).hex(), "kind": "limit_resume", "every": "once", "at_ts": at,
+               "sid": sid, "enabled": True, "created": now, "created_by": "orbit", "attempt": attempt,
+               "why": line, "name": f"continue after usage limit: {title}",
+               "prompt": ("Your usage limit has reset, so you can carry on. Continue from where you "
+                          "stopped — check `plan` and the latest messages above, and don't redo steps "
+                          "that are already done.")}
+        cfg["jobs"].append(job)
+    sched_update(edit)
+    try:
+        notify("Usage limit reached", f"“{title}” carries on by itself at "
+               f"{time.strftime('%a %H:%M', time.localtime(at))}")
+    except Exception:
+        pass
+    return job

@@ -371,6 +371,13 @@ chat falls back to Claude Code models, a Codex chat to Codex ones. The answer sa
 happened and which model finished it; the chat keeps its own model for the next message.
 A bad request or a conversation too long for the window never falls back.
 
+**When a plan's allowance runs out.** If Claude's 5-hour or weekly limit, a ChatGPT limit
+or an OpenCode Go allowance stops an answer — in a chat or in a scheduled task — Orbit
+reads when it resets (Claude Code reports the time itself; otherwise the limit message or
+what Orbit knows of the account) and schedules that chat to carry on a minute after. The
+run shows in Scheduled, where you can move or cancel it; a limit that keeps coming back
+stops after eight tries. Turn it off in Settings → Models & keys → *Plan limit reached*.
+
 ---
 
 ## Cheaper hours

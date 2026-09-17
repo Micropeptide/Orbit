@@ -2904,14 +2904,16 @@ async function renderFallback(box){
  box.innerHTML=`<div class=sec>When a model keeps failing</div>
   <div class=grid>
    <label>Fall back</label><div><label style="display:flex;gap:7px;align-items:center"><input type=checkbox id=fb_on> carry on with another model instead of stopping</label></div>
+   <label>Plan limit reached</label><div><label style="display:flex;gap:7px;align-items:center"><input type=checkbox id=fb_limit> carry on by itself when the allowance resets</label>
+    <div class=hint2 style="margin-top:4px">When Claude's 5-hour or weekly limit, a ChatGPT limit or an OpenCode Go allowance stops an answer or a scheduled task, the chat continues a minute after the reset (read from the limit message or the account). It shows in Scheduled, where you can move or cancel it.</div></div>
    <label>After</label><div style="display:flex;gap:7px;align-items:center"><input type=number id=fb_after min=1 max=10 style="width:70px"> failed attempts <span class=note>(Claude Code and Codex retry on their own first)</span></div>
    <label>Same model first</label><div><label style="display:flex;gap:7px;align-items:center"><input type=checkbox id=fb_same> try the same model from another provider first (e.g. DeepSeek on OpenCode Zen when OpenCode Go is down)</label></div>
    <label>Then, in order</label><div><div id=fb_list></div><div style="display:flex;gap:6px;margin-top:6px"><select id=fb_add style="max-width:360px"></select><button class=ghost id=fb_addbtn>add</button></div>
    <div class=hint2 style="margin-top:4px">Each chat stays in its own harness: a Claude Code chat uses the Claude Code version of a model, a Codex chat the Codex one, an Orbit chat Orbit's. The answer says when it moves; the chat keeps its own model for the next message.</div></div>
   </div>`;
- $('#fb_on').checked=S_.fallback_enabled!==false;$('#fb_after').value=S_.fallback_after||3;$('#fb_same').checked=S_.fallback_same_model!==false;
+ $('#fb_on').checked=S_.fallback_enabled!==false;$('#fb_limit').checked=S_.resume_after_limit!==false;$('#fb_after').value=S_.fallback_after||3;$('#fb_same').checked=S_.fallback_same_model!==false;
  const save=async()=>{const x=await apiPost('/api/settings',{settings:{fallback_enabled:$('#fb_on').checked,fallback_after:Math.max(1,+$('#fb_after').value||3),
-  fallback_same_model:$('#fb_same').checked,fallback_models:list}},'save');if(x)toast('saved')};
+  fallback_same_model:$('#fb_same').checked,fallback_models:list,resume_after_limit:$('#fb_limit').checked}},'save');if(x)toast('saved')};
  const draw=()=>{const L=$('#fb_list');L.innerHTML=list.length?'':'<div class=note>none — only the same model elsewhere</div>';
   list.forEach((id,i)=>{const row=el(`<div class=memrow style="align-items:center"><span style="flex:1"></span><button class=ghost data-a=up>↑</button><button class=ghost data-a=dn>↓</button><button class=ghost data-a=rm>×</button></div>`);
    row.querySelector('span').textContent=(i+1)+'. '+modelName(id);
@@ -2920,7 +2922,7 @@ async function renderFallback(box){
     draw();save()};L.appendChild(row)})};
  $('#fb_add').innerHTML=modelOptions('','choose a model…');
  $('#fb_addbtn').onclick=()=>{const v=$('#fb_add').value;if(!v||list.includes(v))return;list.push(v);draw();save()};
- ['fb_on','fb_after','fb_same'].forEach(id=>$('#'+id).onchange=save);
+ ['fb_on','fb_after','fb_same','fb_limit'].forEach(id=>$('#'+id).onchange=save);
  draw()}
 async function renderHarnessModels(box){
  const h=await (await fetch('/api/harness')).json();
@@ -3740,6 +3742,8 @@ async function go(opts){
     else if(m.k==='notice'){
      // Claude Code's hooks report on every step; they fold into one line per answer
      if(/^hook\s/i.test(m.p.msg||'')){hookNote(sendSid,m.p.msg);continue}
+     if(m.p.kind==='limit'){const b=el('<div class="injwarn limitnote"></div>');b.textContent='\u23f8 '+(m.p.msg||'');
+      a.m.appendChild(b);bottom();notify(sendSid,'Usage limit',m.p.msg||'');continue}
      sysline(m.p.msg||'')}
     else if(m.k==='status'){const w=a.bub.querySelector('.working');
      statusSay(m.p.msg||'');
