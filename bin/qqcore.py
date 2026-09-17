@@ -1388,7 +1388,7 @@ class _Either:
 # keys Orbit keeps on a stored message for itself -- never sent to a model
 PRIVATE_KEYS = ("partial", "interjection", "compacted", "t", "secs", "ok", "usage", "tool_runs",
                 "reasoning_marks", "nudge", "changes", "changes_undone", "claude", "claude_uuid",
-                "agent", "codex", "codex_thread")
+                "agent", "codex", "codex_thread", "bang")
 
 def para_marks(marks, state, chunk, now=None):
     """Note when each paragraph of thinking began: [offset, time] pairs, kept
@@ -4086,6 +4086,39 @@ def context_state(messages=None, sid=None):
         mx = st.get("context_max") or mx
     return {"used": used, "max": mx, "pct": round(100.0 * used / max(mx, 1), 1),
             "basis": kind}
+
+
+def context_breakdown(messages=None, sid=None, agent=None, project=None):
+    """What is actually filling the window, part by part -- Claude Code's /context.
+    Returns the same totals as context_state plus a share for each kind of content."""
+    st = context_state(messages, sid)
+    msgs = list(messages or [])
+    sys_txt = ""
+    for m in msgs:
+        if m.get("role") == "system": sys_txt += str(m.get("content") or "")
+    if not sys_txt:
+        try: sys_txt = system_prompt_for(agent, project)
+        except Exception: sys_txt = ""
+    def _txt(m):
+        c = m.get("content")
+        if isinstance(c, list):
+            return " ".join(x.get("text", "") for x in c if isinstance(x, dict) and x.get("type") == "text")
+        return str(c or "")
+    parts = {"system prompt": estimate_tokens([{"role": "system", "content": sys_txt}]) if sys_txt else 0,
+             "tool definitions": tool_schema_tokens(),
+             "your messages": sum(estimate_tokens([m]) for m in msgs if m.get("role") == "user"),
+             "answers": sum(estimate_tokens([m]) for m in msgs if m.get("role") == "assistant"),
+             "tool results": sum(estimate_tokens([m]) for m in msgs if m.get("role") == "tool"),
+             "thinking": sum(len(str(m.get("reasoning_content") or "")) // 4 for m in msgs)}
+    images = sum(1 for m in msgs if isinstance(m.get("content"), list)
+                 for x in m["content"] if isinstance(x, dict) and x.get("type") == "image_url")
+    known = sum(parts.values())
+    if st["used"] > known: parts["other"] = st["used"] - known
+    st.update(parts={k: v for k, v in parts.items() if v > 0}, images=images,
+              messages=len([m for m in msgs if m.get("role") in ("user", "assistant", "tool")]),
+              free=max(0, st["max"] - st["used"]),
+              autocompact_at=float(S.get("autocompact_pct") or 0))
+    return st
 
 
 def squeeze_tool_results(messages, keep_recent=6, cap=1500):

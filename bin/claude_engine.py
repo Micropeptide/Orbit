@@ -969,34 +969,38 @@ class _Plan:
     """Claude's todo list (TodoWrite, or TaskCreate/TaskUpdate) as Orbit's plan."""
 
     def __init__(self):
-        self.tasks = collections.OrderedDict()     # id -> [text, done]
+        self.tasks = collections.OrderedDict()     # id -> [text, done, in progress]
 
     def from_tool(self, name, inp, result_text):
         inp = inp or {}
         if name == "TodoWrite":
             self.tasks.clear()
             for i, t in enumerate(inp.get("todos") or []):
-                self.tasks[str(i)] = [t.get("content") or t.get("activeForm") or "", t.get("status") == "completed"]
+                self.tasks[str(i)] = [t.get("content") or t.get("activeForm") or "", t.get("status") == "completed",
+                                      t.get("status") == "in_progress"]
             return True
         if name == "TaskCreate":
             m = re.search(r"#(\d+)", result_text or "")
             tid = m.group(1) if m else str(len(self.tasks) + 1)
-            self.tasks[tid] = [inp.get("subject") or inp.get("description") or "", False]
+            self.tasks[tid] = [inp.get("subject") or inp.get("description") or "", False, False]
             return True
         if name == "TaskUpdate":
             tid = str(inp.get("taskId") or inp.get("id") or "")
             if tid in self.tasks:
                 if inp.get("subject"): self.tasks[tid][0] = inp["subject"]
-                if inp.get("status"): self.tasks[tid][1] = inp["status"] == "completed"
+                if inp.get("status"):
+                    self.tasks[tid][1] = inp["status"] == "completed"
+                    self.tasks[tid][2] = inp["status"] == "in_progress"
                 if inp.get("status") == "deleted": self.tasks.pop(tid, None)
                 return True
         return False
 
     def text(self):
-        return "\n".join(f"{i}. [{'x' if d else ' '}] {t}" for i, (t, d) in enumerate(self.tasks.values()))
+        return "\n".join(f"{i}. [{'x' if d else '>' if a else ' '}] {t}"
+                         for i, (t, d, a) in enumerate(self.tasks.values()))
 
     def steps(self):
-        return [{"text": t[:200], "done": d} for t, d in self.tasks.values()]
+        return [{"text": t[:200], "done": d, "active": a} for t, d, a in self.tasks.values()]
 
 
 def _snapshot(path, pending):
@@ -1198,11 +1202,18 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         cwd = prefs.get("cwd") or folder or (c.get("default_dir") or "").strip() or q.WORKSPACE
         if remote: cwd = prefs.get("cwd") or default_remote_dir(remote["host"])     # a folder on that machine
         prior = _prior_transcript([m for m in messages if m.get("role") != "system"])
+        ran = []
         mk = {"session": str(uuid.uuid4()), "cwd": cwd, "skills": [], "owner": sid}
         if remote: mk["host"] = remote["host"]
     else:
         cwd = mk.get("cwd") or q.WORKSPACE
         prior = ""
+        # shell commands you ran yourself ("!" in the box) since Claude's last answer are
+        # in Orbit's chat but not in Claude's session: hand them over with this message
+        last_seen = max((i for i, m in enumerate(messages) if m.get("role") == "assistant"), default=-1)
+        ran = [m for m in messages[last_seen + 1:] if m.get("role") == "user" and m.get("bang")]
+        if ran:
+            prior_ran = "\n\n".join(str(m.get("content") or "") for m in ran)[-24000:]
         if jp and os.path.dirname(jp) != os.path.join(projects_dir(), encode_cwd(cwd)):
             # resumed from wherever the transcript actually is
             cwd = mk.get("cwd") or cwd
@@ -1278,6 +1289,9 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
 
     stamp = f"[{q.sent_at(now)}] " if c.get("message_time") else ""
     blocks = _content_blocks(user_content, stamp)
+    if resume and ran:
+        blocks.insert(0, {"type": "text", "text": "[Since your last reply, the user ran these commands themselves:]\n"
+                          + prior_ran + "\n[End of the commands.]"})
     if prior:
         blocks.insert(0, {"type": "text", "text": "[Earlier in this chat, before it moved to Claude Code:]\n"
                           + prior + "\n[End of the earlier conversation.]"})

@@ -432,6 +432,32 @@ class H(http.server.BaseHTTPRequestHandler):
                        if st_.lock.locked() and (st_.live.get("approval") or st_.live.get("question"))]
             return self._send(200, jdump({"running": running_sids(), "waiting": waiting,
                                           "max": (_max_parallel() if _max_parallel() < 10**6 else None)}))
+        if p == "/api/tasks":
+            # Claude Code's /tasks: everything running in the background, in one list --
+            # chats answering (and what each is doing), messages waiting in queues, and
+            # shell commands a model started in the background
+            items = []
+            now = time.time()
+            for sid_ in running_sids():
+                st_ = STATES.get(sid_)
+                lv = (st_.live if st_ else {}) or {}
+                items.append({"kind": "answer", "id": sid_, "title": (st_.title if st_ else sid_) or sid_,
+                              "status": ("waiting for you" if lv.get("approval") or lv.get("question")
+                                         else lv.get("status") or "answering"),
+                              "since": (st_.running if st_ and isinstance(getattr(st_, "running", None), (int, float)) else None),
+                              "sid": sid_, "can_stop": True})
+            for sid_, st_ in list(STATES.items()):
+                for it in (st_.queue or []):
+                    items.append({"kind": "queued", "id": it.get("id"), "sid": sid_,
+                                  "title": st_.title or sid_, "status": ("at " + time.strftime("%a %H:%M", time.localtime(it["at"])))
+                                  if it.get("at") else ("paused" if st_.queue_paused else "next in line"),
+                                  "text": str(it.get("text") or "")[:160], "can_stop": True})
+            for jid, rec in sorted(q.BG_JOBS.items(), key=lambda kv: kv[1]["started"]):
+                rc = rec["proc"].poll()
+                items.append({"kind": "shell", "id": jid, "title": rec.get("command", "")[:160],
+                              "status": "running" if rc is None else f"exited {rc}",
+                              "since": rec.get("started"), "can_stop": rc is None})
+            return self._send(200, jdump({"items": items, "now": now}))
         if p.startswith("/api/claude/config"):
             # your Claude setup, as Claude keeps it: settings, skills
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
@@ -590,14 +616,24 @@ class H(http.server.BaseHTTPRequestHandler):
             lv["queue_n"] = len(st.queue)
             return self._send(200, jdump(lv))
         if p == "/api/status":
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            want = (qs.get("sid") or [""])[0]
+            cst = get_state(want) if want and (want in STATES or os.path.exists(q.session_path(want))) else S
             st = q.server_status()
-            st["context"] = q.context_state(S.msgs, S.sid)
+            st["context"] = q.context_state(cst.msgs, cst.sid)
             return self._send(200, jdump(st))
         if p == "/api/health":   return self._send(200, jdump(q.health_check()))
         if p == "/api/default_prompt":
             return self._send(200, jdump({"text": q.BASE_SYSTEM}))
         if p == "/api/context":
-            return self._send(200, jdump(q.context_state(S.msgs, S.sid)))
+            # ?sid= the chat on screen (a phone asks about its own chat), and
+            # ?full=1 for the breakdown behind /context
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            want = (qs.get("sid") or [""])[0]
+            st = get_state(want) if want and (want in STATES or os.path.exists(q.session_path(want))) else S
+            if (qs.get("full") or [""])[0]:
+                return self._send(200, jdump(q.context_breakdown(st.msgs, st.sid, st.agent, st.project)))
+            return self._send(200, jdump(q.context_state(st.msgs, st.sid)))
         if p == "/api/sessions":
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
             off = int((qs.get("offset") or [0])[0]); lim = int((qs.get("limit") or [80])[0])
@@ -1034,6 +1070,55 @@ class H(http.server.BaseHTTPRequestHandler):
             else:
                 ok, why = FL.run_in_terminal(cmd, roots[0] if roots else None)
             return self._send(200, jdump({"ok": ok, "why": why, "error": None if ok else why}))
+        if p == "/api/tasks/stop":
+            kind, tid = d.get("kind"), str(d.get("id") or "")
+            if kind == "shell":
+                return self._send(200, jdump({"ok": True, "msg": q.t_stop_background(tid)}))
+            # answers stop through /api/cancel and queued messages through /api/queue,
+            # which already do the rest (a scheduled run, pausing the queue)
+            return self._send(400, jdump({"error": "stop what?"}))
+        if p == "/api/bang":
+            # Claude Code's "!" mode: you run a shell command yourself, in the chat's
+            # folder (on its SSH host when it has one), and what it printed joins the
+            # conversation so the model sees it with your next message.
+            st = get_state(d.get("sid")) if d.get("sid") else S
+            cmd = str(d.get("command") or "").strip()
+            if not cmd: return self._send(400, jdump({"error": "which command?"}))
+            if st.lock.locked(): return self._send(409, jdump({"error": "that chat is answering — run it after"}))
+            level, why = q.risk_check("run_shell", {"command": cmd})
+            if level == "block":
+                return self._send(403, jdump({"error": f"refused: {why}"}))
+            if level == "confirm" and not d.get("confirmed"):
+                return self._send(200, jdump({"ok": False, "confirm": why or "this could change or remove things"}))
+            bad = q._interactive(cmd)
+            if bad: return self._send(400, jdump({"error": bad}))
+            host, roots, _ = _chat_files_ctx(st.sid)
+            t0 = time.time()
+            try:
+                if host:
+                    import ssh_remote, shlex
+                    rc, out, err = ssh_remote.run(host, f"cd {shlex.quote(roots[0]) if roots and roots[0] != '~' else '~'} 2>/dev/null; {cmd}", timeout=120)
+                else:
+                    cwd = roots[0] if roots and os.path.isdir(os.path.expanduser(roots[0])) else q.WORKSPACE
+                    r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120,
+                                       cwd=os.path.expanduser(cwd), env=q._batch_env(), stdin=subprocess.DEVNULL)
+                    rc, out, err = r.returncode, r.stdout, r.stderr
+            except subprocess.TimeoutExpired:
+                rc, out, err = 124, "", "timed out after 120 s"
+            secs = round(time.time() - t0, 1)
+            text = (out or "") + (("\n" if out and err else "") + err if err else "")
+            cap = 20000
+            shown = text if len(text) <= cap else text[:cap] + f"\n… ({len(text) - cap} more characters)"
+            where = f" on {host}" if host else ""
+            body = (f"I ran this myself{where}:\n```bash\n$ {cmd}\n```\nExit {rc} after {secs}s. Output:\n"
+                    f"```\n{shown.rstrip() or '(no output)'}\n```")
+            with LOCK:
+                st.msgs.append({"role": "user", "content": body, "t": time.time(),
+                                "bang": {"cmd": cmd, "rc": rc, "secs": secs, "host": host,
+                                         "out": shown[-6000:]}})
+                save_session(st)
+            return self._send(200, jdump({"ok": True, "rc": rc, "output": shown, "secs": secs,
+                                          "host": host, "cwd": roots[0] if roots else None}))
         if p == "/api/folders/bookmark":
             where, path = str(d.get("host") or ""), str(d.get("path") or "").strip()
             if not path: return self._send(400, jdump({"error": "which folder?"}))
@@ -1318,6 +1403,33 @@ class H(http.server.BaseHTTPRequestHandler):
                 S.msgs = keep
                 save_session()
             return self._send(200, jdump({"ok": True, "n": len(S.msgs)}))
+        if p == "/api/rewind":
+            # Claude Code's /rewind: put the chat back to just before one of your
+            # messages, and optionally put the files back the way they were then.
+            st = get_state(d.get("sid")) if d.get("sid") else S
+            if st.lock.locked():
+                return self._send(409, jdump({"error": "that chat is still answering"}))
+            idx, want_files = int(d.get("index", 0)), bool(d.get("files"))
+            with LOCK:
+                keep, seen, cut = [], 0, None
+                for i, m in enumerate(st.msgs):
+                    if m.get("role") == "user" and not m.get("nudge"):
+                        if seen == idx: cut = i; break
+                        seen += 1
+                    keep.append(m)
+                if cut is None:
+                    return self._send(404, jdump({"error": "that message is no longer there"}))
+                undone = []
+                if want_files:
+                    for m in reversed(st.msgs[cut:]):
+                        if m.get("role") == "assistant" and m.get("changes") and not m.get("changes_undone"):
+                            undone += q.undo_changes(m["changes"])
+                            m["changes_undone"] = True
+                dropped = len(st.msgs) - len(keep)
+                st.msgs = keep
+                save_session(st)
+            return self._send(200, jdump({"ok": True, "n": len(st.msgs), "dropped": dropped,
+                                          "undone": undone}))
         if p == "/api/files/delete":
             return self._send(200, jdump({"ok": q.delete_file(d.get("rel",""))}))
         if p == "/api/skills/save":
@@ -2624,6 +2736,7 @@ def render(msgs):
                         "thinking_marks": m.get("reasoning_marks") if m["role"] == "assistant" else None,
                         # a note sent while it was working, so a reopened chat can say so
                         "note": bool(m.get("interjection")),
+                        "bang": m.get("bang") if m["role"] == "user" else None,
                         # when it was written; None for messages from before this was kept
                         "t": m.get("t"),
                         # how long the answer took, what it cost, and each tool it ran
