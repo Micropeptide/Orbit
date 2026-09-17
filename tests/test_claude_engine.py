@@ -29,8 +29,10 @@ class TestClaudeEngine(unittest.TestCase):
         os.environ["ORBIT_CLAUDE_CONFIG_DIR"] = cls.cfgdir     # nothing lands in ~/.claude
         cls.work = os.path.join(cls.tmp, "work")
         os.makedirs(cls.work)
-        cls.saved = {k: getattr(q, k) for k in ("WORKSPACE",)}
+        cls.saved = {k: getattr(q, k) for k in ("WORKSPACE", "SESSIONS")}
         q.WORKSPACE = cls.work
+        q.SESSIONS = os.path.join(cls.tmp, "sessions")           # nor into your chats
+        os.makedirs(q.SESSIONS)
         cls.saved_endpoint, cls.saved_wake = CE.model_endpoint, CE._wake_model
         cls.saved_settings = dict(q.S)
         CE._wake_model = lambda emit: None

@@ -292,6 +292,13 @@ code.pathlink.pathcode{color:var(--acc);text-decoration:underline dotted;text-un
 .schedpop .row2{display:flex;gap:6px;align-items:center;margin-top:8px}
 .schedpop input,.schedpop select{font:inherit;font-size:12.5px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:4px 6px}
 .sitem .schedmark{font-size:10px;color:var(--acc)}
+.opbadge{font:inherit;font-size:11.5px;padding:2px 9px;border-radius:11px;border:1px solid var(--line);background:var(--card);color:var(--mut);cursor:pointer;white-space:nowrap}
+.opbadge.on{border-color:#2d9d5a;color:#1f7a44;background:color-mix(in srgb,#2d9d5a 13%,transparent)}
+.opbadge.later{border-color:#c98a1b;color:#9a6508;background:color-mix(in srgb,#c98a1b 11%,transparent)}
+@media(prefers-color-scheme:dark){.opbadge.on{color:#5fd08f}.opbadge.later{color:#e2ad4f}}
+.optable td,.optable th{font-size:12.5px}
+.opdot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;vertical-align:middle}
+.opdot.on{background:#2d9d5a}.opdot.later{background:#d69a2a}
 #tasks .qwhen{font-size:12px;color:var(--acc);white-space:nowrap;cursor:pointer;border:1px solid color-mix(in srgb,var(--acc) 35%,transparent);border-radius:6px;padding:0 6px}
 #tasks .qwhen.missed{color:var(--warn);border-color:var(--warn)}
 #tasks .chatlink{font-weight:600;font-size:13.5px;color:var(--fg);text-decoration:none}
@@ -664,6 +671,7 @@ table.stbl{border-collapse:collapse;width:100%;font-size:13px;margin:2px 0 6px}
       <button class=ghost id=hrefresh title="refresh this provider's model list" style="padding:2px 7px">↻</button></span>
     <select id=modelsel class=ghost style="max-width:190px" title="model for this chat"></select>
     <select id=agentsel class=ghost style="max-width:150px"><option value="">no agent</option></select>
+    <button id=opbadge class=opbadge style="display:none" title="cheaper hours for this model — click for details"></button>
     <span class=ctx id=ctxbox style="display:none">
       <span class=bar><i id=ctxbar></i></span><span id=ctxtxt></span></span>
     <span style="margin-left:auto;display:flex;gap:7px">
@@ -1607,7 +1615,7 @@ function addAssistant(who,ts){
  sk.onclick=async()=>{const n=prompt('Skill name','captured-'+Date.now().toString().slice(-4));
   if(!n)return;toast('capturing...');
   const r=await (await fetch('/api/skill/capture',{method:'POST',
-   headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n})})).json();
+   headers:{'Content-Type':'application/json'},body:JSON.stringify({name:n,sid})})).json();
   toast(r.ok?('saved skill: '+r.name):'capture failed')};
  acts.appendChild(sk);
  const hard=el('<button>retry deeper</button>');
@@ -1615,7 +1623,7 @@ function addAssistant(who,ts){
  hard.onclick=async()=>{
   if(busy)return;
   const r=await (await fetch('/api/retry_harder',{method:'POST',
-   headers:{'Content-Type':'application/json'},body:'{}'})).json();
+   headers:{'Content-Type':'application/json'},body:JSON.stringify({sid})})).json();
   if(!r.ok)return toast('nothing to retry');
   const msgs=[...wrap.querySelectorAll('.msg')];
   for(let i=msgs.length-1;i>=0;i--){msgs[i].remove();if(msgs[i].classList.contains('u'))break}
@@ -1920,6 +1928,7 @@ function drawModelPicker(){
   drawHarnessPicker()}
  else if(tl&&tl.dataset.orbit&&/Codex harness/.test(tl.textContent)){tl.textContent=tl.dataset.orbit}
  if(MODELS.harness_mode)drawHarnessPicker();
+ drawOffpeak();
  const sel=$('#modelsel'); if(!sel)return;
  const cur=MODELS.current||MODELS.default||'';
  sel.innerHTML='';
@@ -1930,7 +1939,7 @@ function drawModelPicker(){
   list.forEach(m=>{
    const o=document.createElement('option');
    o.value=m.id;
-   o.textContent=(m.label||m.model)+(m.ready?'':' — needs a key');
+   o.textContent=(m.label||m.model)+(m.ready?'':' — needs a key')+opSuffix(m.offpeak);
    o.selected=(m.id===cur);
    g.appendChild(o)});
   sel.appendChild(g)});
@@ -1948,7 +1957,7 @@ $('#modelsel').onchange=async()=>{setTimeout(drawClaudeBar,400);
   if(res&&res.serving)toast('now serving '+res.serving);
   await loadModels();refreshStatus();return}
  if(d.error){toast(d.error);drawModelPicker();return}
- MODELS.current=id;
+ MODELS.current=id;drawOffpeak();
  const m=MODELS.models.find(x=>x.id===id);
  if(m&&!m.ready)sysline('This model needs an API key — add one in Settings → Models.');
  else if(m)sysline('this chat now uses '+(m.label||m.model));
@@ -2178,7 +2187,7 @@ async function newChat(){
  try{await switching}finally{switching=null}}
 async function doCompact(){
  sysline('compacting...');
- const d=await (await fetch('/api/compact',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
+ const d=await (await fetch('/api/compact',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sid})})).json();
  sysline(`compacted ${d.before} to ${d.after} messages`);
  if(d.summary){const a=addAssistant();a.think.style.display='';
   a.think.querySelector('summary').textContent='compacted summary';
@@ -2186,7 +2195,7 @@ async function doCompact(){
  refreshStatus()}
 async function regenerate(text){
  if(busy)return;
- const r=await (await fetch('/api/regenerate',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
+ const r=await (await fetch('/api/regenerate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sid})})).json();
  const msgs=[...wrap.querySelectorAll('.msg')];
  for(let i=msgs.length-1;i>=0;i--){msgs[i].remove();if(msgs[i].classList.contains('u'))break}
  q.value=text;go()}
@@ -2409,7 +2418,7 @@ async function fillHarnessModels(pid,cur,refresh){
   const recent=(MODELS.codex_recent||[]).filter(r=>r.id!==cur&&!d.models.some(m=>m.id===r.id)).slice(0,5);
   ms.innerHTML=(d.models.some(m=>m.id===cur)?'':'<option value="">— pick a model —</option>')+
    (recent.length?`<optgroup label="Recent">${recent.map(r=>`<option value="${esc(r.id)}">${esc(r.label)}</option>`).join('')}</optgroup>`:'')+
-   `<optgroup label="${esc(d.label||pid)}">`+d.models.map(m=>`<option value="${esc(m.id)}"${m.id===cur?' selected':''}>${esc(m.label)}${m.context?' · '+fmtCtx(m.context):''}${m.ready?'':' — not ready'}</option>`).join('')+'</optgroup>';
+   `<optgroup label="${esc(d.label||pid)}">`+d.models.map(m=>`<option value="${esc(m.id)}"${m.id===cur?' selected':''}>${esc(m.label)}${m.context?' · '+fmtCtx(m.context):''}${m.ready?'':' — not ready'}${esc(opSuffix(m.offpeak))}</option>`).join('')+'</optgroup>';
   ms.title=`Codex · ${d.label}: ${d.models.length} models`;return}
  if(refresh||!HPROV_CACHE[pid]){
   if(refresh)await apiPost('/api/harness/refresh',{provider:pid},'refreshing models');
@@ -2421,7 +2430,7 @@ async function fillHarnessModels(pid,cur,refresh){
  ms.innerHTML=(list.some(m=>m.id===cur)?'':'<option value="">— pick a model —</option>')+
   (recent.length?`<optgroup label="Recent">${recent.map(r=>`<option value="${esc(r.id)}">${esc(r.label)}</option>`).join('')}</optgroup>`:'')+
   `<optgroup label="${esc(d.label||pid)}">`+list.map(m=>
-  `<option value="${esc(m.id)}"${m.id===cur?' selected':''}>${esc(m.label)}${m.context?' · '+fmtCtx(m.context):''}${usageShort(m.usage)?' · '+usageShort(m.usage):''}</option>`).join('')+'</optgroup>';
+  `<option value="${esc(m.id)}"${m.id===cur?' selected':''}>${esc(m.label)}${m.context?' · '+fmtCtx(m.context):''}${usageShort(m.usage)?' · '+usageShort(m.usage):''}${esc(opSuffix(m.offpeak))}</option>`).join('')+'</optgroup>';
  ms.title=`${d.label}: ${d.models.length} models${d.fetched_at?' · list from '+new Date(d.fetched_at*1000).toLocaleDateString():''}`+
   (d.live&&!d.live.error?` · ${d.live.account}: ${liveLong(d.live)} (shared by all models)`:'')+
   (d.ready?'':' — add a key in Settings → Models & keys')}
@@ -2450,7 +2459,7 @@ function usageLong(u){
 async function chooseHarnessModel(id){
  if(!id)return;
  const d=await apiPost('/api/model/select',{id,sid},'model');if(!d)return;
- MODELS.current=id;drawClaudeBar();refreshStatus();
+ MODELS.current=id;drawClaudeBar();refreshStatus();drawOffpeak();
  const m=Object.values(HPROV_CACHE).flatMap(x=>x.models||[]).find(x=>x.id===id);
  if(codexMode()&&id.startsWith('codex:'))MODELS.codex_recent=[{id,label:(m&&m.label)||id}].concat((MODELS.codex_recent||[]).filter(r=>r.id!==id)).slice(0,6);
  if(m)toast(`this chat uses ${m.label}${m.context?' · '+fmtCtx(m.context)+' context':''}`)}
@@ -3086,6 +3095,7 @@ async function scheduleSend(at,repeat){
 // a file card dropped on the message box is attached
 q.addEventListener('drop',e=>{const d=e.dataTransfer&&e.dataTransfer.getData('text/orbit-file');
  if(!d)return;e.preventDefault();e.stopPropagation();try{attachExisting(JSON.parse(d))}catch(err){}});
+$('#opbadge').onclick=()=>showOffpeak();
 $('#later').onclick=e=>{e.stopPropagation();schedPopover($('#later'),{onPick:(at,repeat)=>scheduleSend(at,repeat)})};
 // right-click (or long-press) Send: send later
 $('#send').addEventListener('contextmenu',e=>{e.preventDefault();schedPopover($('#send'),{onPick:(at,repeat)=>scheduleSend(at,repeat)})});
@@ -3693,6 +3703,8 @@ async function openSettings(tab){
      <small>— for Claude Code mode and Orbit alike · keys are stored in config/secrets.json on this Mac and sent only to their provider</small></div>
     <div id=hm_box class=note>loading…</div>
     <div id=fb_box style="margin-top:18px"></div>
+    <div class=sec style="margin-top:18px">Cheaper hours <small>— providers that charge less at some times of day</small></div>
+    <div class=note>Models in the pickers are marked 🟢 while their provider's discount is on, 🟠 when it applies at other hours. <button class=ghost id=op_show>Show the policies</button></div>
     <div class=sec style="margin-top:18px">More models for Orbit's own chat
      <small>— the local server, coding CLIs you are signed into, OpenAI-compatible servers</small></div>
     ${rows||'<div class=note>None yet.</div>'}
@@ -3733,6 +3745,7 @@ async function openSettings(tab){
       base_url:$('#np_base').value.trim(), key:$('#np_key').value.trim()}},'adding the provider');
     toast('provider added'); render('models')};
    renderHarnessModels($('#hm_box'));renderFallback($('#fb_box'));
+   $('#op_show').onclick=()=>{closeModal();showOffpeak()};
   }
   if(name==='model'){
    const sv=draft.server||{};
@@ -4719,7 +4732,64 @@ function modelOptions(cur,emptyLabel,only){
  const groups={};(MODELS.models||[]).filter(m=>!m.switch&&(!only||only(m.id))).forEach(m=>{(groups[m.provider_label]=groups[m.provider_label]||[]).push(m)});
  const known=(MODELS.models||[]).some(m=>m.id===cur);
  return `<option value="">${esc(emptyLabel||'default model')}</option>`+(cur&&!known?`<option value="${esc(cur)}" selected>${esc(cur)}</option>`:'')+Object.entries(groups).map(([g,list])=>
-  `<optgroup label="${esc(g)}">${list.map(m=>`<option value="${esc(m.id)}"${m.id===cur?' selected':''}>${esc(m.label||m.model)}${m.ready===false?' — needs a key':''}</option>`).join('')}</optgroup>`).join('')}
+  `<optgroup label="${esc(g)}">${list.map(m=>`<option value="${esc(m.id)}"${m.id===cur?' selected':''}>${esc(m.label||m.model)}${m.ready===false?' — needs a key':''}${esc(opSuffix(m.offpeak))}</option>`).join('')}</optgroup>`).join('')}
+// Cheaper hours (bin/offpeak.py): a model's discount window, as a coloured mark in menus
+function opLive(op){
+ // the server's state may be minutes old: flip it by the window's own times
+ if(!op)return null;const now=Date.now()/1000;
+ if(op.active&&op.ends_at&&now>=op.ends_at)return {...op,active:false,stale:true};
+ if(!op.active&&op.starts_at&&typeof op.starts_at==='number'&&now>=op.starts_at)return {...op,active:true,stale:true};
+ return op}
+function opTime(ts){return new Date(ts*1000).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'})}
+// "3:00 AM", or "Mon 3:00 AM" when it is not today
+function opWhen(ts){const d=new Date(ts*1000);return (d.toDateString()===new Date().toDateString()?'':d.toLocaleDateString([], {weekday:'short'})+' ')+opTime(ts)}
+function opSuffix(op){op=opLive(op);if(!op)return '';
+ return op.active?` · 🟢 ${op.what} now`:` · 🟠 ${op.what}${op.starts_at&&typeof op.starts_at==='number'?' from '+opWhen(op.starts_at):' at set hours'}`}
+function drawOffpeak(){
+ const b=$('#opbadge');if(!b)return;
+ const cur=MODELS.current||MODELS.default||'';
+ const m=(MODELS.models||[]).find(x=>x.id===cur);
+ const op=opLive(m&&m.offpeak);
+ if(!op){b.style.display='none';return}
+ b.style.display='';b.className='opbadge '+(op.active?'on':'later');
+ b.textContent=op.active?`🟢 ${op.what}${op.ends_at?' · until '+opWhen(op.ends_at):''}`:`🟠 ${op.quota?'full rate':'peak price'}${op.starts_at&&typeof op.starts_at==='number'?' · '+op.what+' from '+opWhen(op.starts_at):''}`;
+ b.title=`Cheaper hours for ${m.label||m.model}: ${(op.windows_local||[]).join(', ')} your time (${(op.windows||[]).join(', ')}) — click for details`;
+ if(op.stale&&!drawOffpeak._reloading){drawOffpeak._reloading=true;setTimeout(async()=>{await loadModels();drawOffpeak._reloading=false},1500)}}
+setInterval(drawOffpeak,60000);
+async function showOffpeak(){
+ let d;try{d=await (await fetch('/api/offpeak')).json()}catch(e){return}
+ const cur=MODELS.current||MODELS.default||'';const m=(MODELS.models||[]).find(x=>x.id===cur);
+ openSheet('Cheaper hours',body=>{
+  const pols=d.policies||[];
+  const frac=v=>typeof v==='number'?`${Math.round((1-v)*100)}% off`:'';
+  const parts=disc=>Object.entries(disc||{}).map(([k,v])=>k==='quota_multiplier'?`requests count ${v}× against the plan`:`${k.replace(/_/g,' ')}: ${frac(v)}`).join(' · ');
+  body.innerHTML=`<div class=note style="margin-bottom:8px">Some providers charge less at certain hours, and some plans count less of your allowance then. It depends on <b>where</b> you use a model: DeepSeek through its own API or through OpenCode Go follows DeepSeek's hours, while the same model elsewhere may not. Models in the pickers are marked 🟢 while it is cheaper and 🟠 when it is cheaper at other hours. Times are shown in the provider's time zone and in yours.${m&&m.offpeak?'':' The model this chat uses has no cheaper hours.'}</div>`+
+   (pols.length?'':'<div class=note>No provider in Orbit\'s list has time-based pricing on record.</div>');
+  pols.forEach(p=>{const st=p.status||{};
+   const box=el(`<details class=jobrow ${m&&m.id&&m.id.includes(':'+p.provider+'/')?'open':''}><summary style="cursor:pointer;display:flex;gap:8px;align-items:center"><span class="opdot ${st.active?'on':'later'}"></span><b></b><span class=sub style="margin-left:auto"></span></summary><div class=grid style="margin-top:8px"></div></details>`);
+   box.querySelector('b').textContent=p.provider+(p.applies_to?' · '+p.applies_to:'');
+   box.querySelector('.sub').textContent=st.label||'';
+   // the next 24 hours: green while it is cheaper, with a countdown to the next change
+   {const now=Date.now()/1000,H=86400;
+    const bar=el('<div style="position:relative;height:14px;border-radius:7px;background:color-mix(in srgb,#d69a2a 30%,transparent);margin:8px 0 2px;overflow:hidden"></div>');
+    (st.spans||[]).forEach(([a,b])=>{const seg=document.createElement('div');
+     seg.style.cssText=`position:absolute;top:0;bottom:0;left:${Math.max(0,(a-now)/H*100)}%;width:${Math.max(0.5,(b-a)/H*100)}%;background:#2d9d5a`;bar.appendChild(seg)});
+    const ticks=el('<div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--dim)"></div>');
+    [0,6,12,18,24].forEach(h=>{const t=document.createElement('span');t.textContent=h===0?'now':opTime(now+h*3600);ticks.appendChild(t)});
+    const next=st.active?st.ends_at:st.starts_at;
+    const cd=el('<div class=note style="font-size:12px"></div>');
+    if(typeof next==='number'){const mins=Math.max(0,Math.round((next-now)/60));
+     cd.textContent=(st.active?'cheaper for another ':'full rate for another ')+(mins>=60?Math.floor(mins/60)+' h ':'')+(mins%60)+' min — '+(st.active?'until ':'cheaper from ')+opWhen(next)}
+    box.insertBefore(cd,box.querySelector('.grid'));box.insertBefore(ticks,cd);box.insertBefore(bar,ticks)}
+   const g=box.querySelector('.grid');
+   const row=(k,v)=>{if(!v)return;const l=el('<label></label>');l.textContent=k;const x=el('<div></div>');x.textContent=v;g.appendChild(l);g.appendChild(x)};
+   row('Peak',(st.peak||'').replace(/^peak:\s*/,''));row('Cheaper hours (provider)',(st.windows||[]).join(', '));row('Cheaper hours (your time, this week)',(st.windows_local||[]).join(', '));
+   row('What you pay then',parts(p.discount));row('Models',(p.models||['*']).map(x=>x==='*'?'all':x.replace(/\*$/,'…')).join(', ')+((p.exclude||[]).length?' — except '+p.exclude.join(', '):''));
+   row('In force',[p.effective?'from '+p.effective:'',p.ends?'until '+p.ends:''].filter(Boolean).join(' ')||'no end date announced');
+   row('Notes',p.note);row('Their words',p.quote?'“'+p.quote+'”':'');row('Checked',p.checked_at);
+   if((p.sources||[]).length){const l=el('<label>Source</label>');const x=el('<div></div>');
+    p.sources.forEach(u=>{const a=document.createElement('a');a.href=u;a.target='_blank';a.rel='noopener noreferrer';a.textContent=u;a.style.display='block';x.appendChild(a)});g.appendChild(l);g.appendChild(x)}
+   body.appendChild(box)})},{sub:'what providers charge by the hour'})}
 function modelName(id){if(!id)return '';const m=(MODELS.models||[]).find(x=>x.id===id);return m?(m.label||m.model):id}
 const WD=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 function jobWhen(j){
@@ -5529,7 +5599,7 @@ async function chatPromptDlg(){
  const t=prompt('Extra system prompt for THIS chat only (blank to clear):',st.sys_override||'');
  if(t===null)return;
  await fetch('/api/sysprompt',{method:'POST',headers:{'Content-Type':'application/json'},
-  body:JSON.stringify({text:t})});
+  body:JSON.stringify({text:t,sid})});
  sysline(t.trim()?'chat prompt set':'chat prompt cleared')}
 async function showLedger(){
  const d=await (await fetch('/api/ledger')).json();
@@ -5645,7 +5715,7 @@ async function loadAgents(){
   o.value=n;o.textContent=n;if(n===d.active)o.selected=true;sel.appendChild(o)})}
 $('#agentsel').onchange=async e=>{
  const r=await (await fetch('/api/agent/select',{method:'POST',
-  headers:{'Content-Type':'application/json'},body:JSON.stringify({name:e.target.value})})).json();
+  headers:{'Content-Type':'application/json'},body:JSON.stringify({name:e.target.value,sid})})).json();
  INFO.tools=r.tools;$('#tools').dataset.orbit=r.tools.length+' tools ready';if(!MODELS.harness_mode)$('#tools').textContent=r.tools.length+' tools ready';
  toast(e.target.value?('agent: '+e.target.value):'agent cleared')};
 loadAgents();

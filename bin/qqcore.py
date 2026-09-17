@@ -6200,3 +6200,33 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
     except Exception:
         pass
     return _stream_call_before_codex(messages, tools, think=think, emit=emit, cancel=cancel, model=model, interrupt=interrupt)
+
+
+# ==================================================================== CHEAPER HOURS
+# Providers that charge less at some hours (bin/offpeak.py): each model in the lists
+# carries whether it is in such a window now.
+import offpeak as OFFPEAK
+
+def model_provider_and_name(m):
+    """(provider id, model name) of a catalogue entry, whichever list it came from."""
+    mid = str(m.get("id") or "")
+    for pre in ("harness:", "harness-direct:", "codex:"):
+        if mid.startswith(pre):
+            pid, _, name = mid[len(pre):].partition("/")
+            return pid, name
+    return m.get("provider"), m.get("model")
+
+def offpeak_for(m, now=None):
+    try:
+        pid, name = model_provider_and_name(m)
+        return OFFPEAK.for_model(pid, name, ROOT, now) if pid and name else None
+    except Exception:
+        return None
+
+_model_catalogue_before_offpeak = model_catalogue
+def model_catalogue():
+    cat = _model_catalogue_before_offpeak()
+    for m in cat:
+        op = offpeak_for(m)
+        if op: m["offpeak"] = {k: op.get(k) for k in ("active", "what", "label", "ends_at", "starts_at", "fraction", "quota", "windows", "windows_local", "peak")}
+    return cat
