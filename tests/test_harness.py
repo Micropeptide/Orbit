@@ -11,6 +11,9 @@ class TestRegistry(unittest.TestCase):
         self.root = tempfile.mkdtemp(prefix="orbit-harness-")
         os.makedirs(os.path.join(self.root, "config"))
         self.addCleanup(shutil.rmtree, self.root, True)
+        # keys saved on this Mac reach os.environ once Orbit's core is imported: not here
+        saved = {k: os.environ.pop(k) for k in list(os.environ) if k.endswith("_API_KEY") or "_API_KEY_" in k}
+        self.addCleanup(os.environ.update, saved)
 
     def test_opencode_go_is_there_with_each_models_api(self):
         go = H.PRESETS["opencode-go"]
@@ -142,6 +145,12 @@ class TestRegistry(unittest.TestCase):
         self.assertFalse(U.is_quota_error(429, "Too many requests, slow down"))
         self.assertFalse(U.is_quota_error(400, "bad request"))
         self.assertEqual(U._dollars("$15 $60 4x · Ends Sep 20", min), 15.0)
+        go = json.dumps({"type": "error", "error": {"type": "GoUsageLimitError", "message": "Subscription quota exceeded."},
+                         "metadata": {"workspace": "w", "limitName": "weekly"}})
+        self.assertEqual(U.quota_block(429, go, "3600"), 3600.0)            # retry-after wins
+        self.assertEqual(U.quota_block(429, go), 7 * 86400)                   # else the window it names
+        self.assertEqual(U.quota_block(429, json.dumps({"error": {"type": "RateLimitError", "message": "Rate limit exceeded"}}), "20"), 20.0)
+        self.assertIsNone(U.quota_block(500, "upstream exploded"))
 
     def test_claude_subscription_needs_no_key(self):
         spec = H.resolve(self.root, "harness:claude/opus", {}, "m")
