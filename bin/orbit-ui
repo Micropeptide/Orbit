@@ -453,6 +453,9 @@ class H(http.server.BaseHTTPRequestHandler):
                                                         "argumentHint": c.get("argumentHint")}
                                                        for c in cat.get("commands") or []],
                                           "agents": cat.get("agents") or []}))
+        if p == "/api/offpeak":
+            # cheaper hours: every provider policy and its state now (Settings → Models & keys)
+            return self._send(200, jdump({"policies": q.OFFPEAK.summary(q.ROOT), "now": time.time()}))
         if p == "/api/codex/config":
             return self._send(200, jdump(q.CX.config_view()))
         if p == "/api/codex/info":
@@ -463,7 +466,7 @@ class H(http.server.BaseHTTPRequestHandler):
             pid = (qs.get("provider") or [""])[0]
             cat = [m for m in q.model_catalogue() if m["id"].startswith("codex:")]
             models = [{"id": m["id"], "label": m.get("label") or m["model"], "context": m.get("context"),
-                       "ready": m.get("ready")} for m in cat if m["model"].split("/")[0] == pid]
+                       "ready": m.get("ready"), "offpeak": m.get("offpeak")} for m in cat if m["model"].split("/")[0] == pid]
             label = "Your ChatGPT account (Codex)" if pid == "chatgpt" else next(
                 (m.get("provider_label") for m in cat if m["model"].split("/")[0] == pid), pid)
             return self._send(200, jdump({"provider": pid, "label": label, "models": models,
@@ -486,7 +489,8 @@ class H(http.server.BaseHTTPRequestHandler):
                        "model": m["id"], "label": m.get("label") or m["id"], "context": m.get("context"),
                        "output": m.get("output"), "format": m.get("format"), "reasoning": m.get("reasoning"),
                        "hidden": f"harness:{pid}/{m['id']}" in hidden,
-                       "usage": _usage_brief(pid, m["id"])} for m in pr["models"]]
+                       "usage": _usage_brief(pid, m["id"]),
+                       "offpeak": q.OFFPEAK.for_model(pid, m["id"], q.ROOT)} for m in pr["models"]]
             live = None
             if pid == "opencode-go":
                 keys_ = q.HARN.account_keys(pr, secrets_, q.ROOT, pid)
@@ -659,8 +663,12 @@ class H(http.server.BaseHTTPRequestHandler):
             term = (qs.get("q") or [""])[0]
             return self._send(200, jdump(q.search_chats(term)))
         if p == "/api/state":
-            return self._send(200, jdump({"sid": S.sid, "title": S.title, "temp": S.temp,
-                                          "agent": S.agent, "sys_override": S.sys_override, "project": S.project}))
+            # ?sid= a chat's own state (a phone asks about the chat on its screen, not the Mac's)
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            want = (qs.get("sid") or [""])[0]
+            st = get_state(want) if want and os.path.exists(q.session_path(want)) else S
+            return self._send(200, jdump({"sid": st.sid, "title": st.title, "temp": st.temp,
+                                          "agent": st.agent, "sys_override": st.sys_override, "project": st.project}))
         if p == "/api/files":
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
             off = int((qs.get("offset") or [0])[0]); lim = int((qs.get("limit") or [60])[0])
@@ -851,11 +859,13 @@ class H(http.server.BaseHTTPRequestHandler):
                     S.msgs[0]["content"] = q.system_prompt_for(S.agent, S.project)
             return self._send(200, jdump({"sid": S.sid, "project": S.project}))
         if p == "/api/compact":
+            st = get_state(d.get("sid")) if d.get("sid") else S
+            if st.lock.locked(): return self._send(409, jdump({"error": "that chat is answering — compact it after"}))
             with LOCK:
-                before = len(S.msgs)
-                S.msgs, summary = q.compact(S.msgs)
-                save_session()
-            return self._send(200, jdump({"before": before, "after": len(S.msgs), "summary": summary}))
+                before = len(st.msgs)
+                st.msgs, summary = q.compact(st.msgs)
+                save_session(st)
+            return self._send(200, jdump({"before": before, "after": len(st.msgs), "summary": summary}))
         if p == "/api/delete":
             did = d.get("id", "")
             q.CE.hide_history(did)          # a deleted Claude-Qwen chat stays out of the sidebar
@@ -1279,7 +1289,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 return self._send(404, jdump({"error": str(e)}))
         if p == "/api/memory/suggest":
             try:
-                with LOCK: items = q.suggest_memories(S.msgs)
+                st_ = get_state(d.get("sid")) if d.get("sid") else S     # the chat named, not whichever is open
+                with LOCK: items = q.suggest_memories(st_.msgs)
                 return self._send(200, jdump({"items": items}))
             except Exception as e:
                 return self._send(200, jdump({"items": [], "error": str(e)}))
@@ -1333,13 +1344,14 @@ class H(http.server.BaseHTTPRequestHandler):
             if S.agent == d.get("name"): S.agent = None
             return self._send(200, jdump({"ok": True, "agents": ag}))
         if p == "/api/agent/select":
+            st = get_state(d.get("sid")) if d.get("sid") else S
             with LOCK:
-                S.agent = d.get("name") or None
-                S.refresh_tools()
-                if S.msgs and S.msgs[0]["role"] == "system":
-                    S.msgs[0]["content"] = q.system_prompt_for(S.agent, S.project)
-            return self._send(200, jdump({"active": S.agent,
-                "tools": sorted(t["function"]["name"] for t in S.tools)}))
+                st.agent = d.get("name") or None
+                st.refresh_tools()
+                if st.msgs and st.msgs[0]["role"] == "system":
+                    st.msgs[0]["content"] = q.system_prompt_for(st.agent, st.project)
+            return self._send(200, jdump({"active": st.agent,
+                "tools": sorted(t["function"]["name"] for t in st.tools)}))
         if p == "/api/session/flag":
             sid = d.get("id") or S.sid
             if not os.path.exists(q.session_path(sid)):
@@ -1565,13 +1577,15 @@ class H(http.server.BaseHTTPRequestHandler):
             fresh_state(temp=True)
             return self._send(200, jdump({"ok": True, "erased": was, "sid": S.sid}))
         if p == "/api/sysprompt":
+            st = get_state(d.get("sid")) if d.get("sid") else S
             with LOCK:
-                S.sys_override = (d.get("text") or "").strip() or None
-                q.CE.set_chat_pref(S.sid, instructions=S.sys_override)   # a Claude Code chat's own instructions
-                base = q.system_prompt_for(S.agent)
-                S.msgs[0]["content"] = (base + "\n\n## This chat\n" + S.sys_override
-                                        if S.sys_override else base)
-                save_session()
+                st.sys_override = (d.get("text") or "").strip() or None
+                q.CE.set_chat_pref(st.sid, instructions=st.sys_override)   # a Claude Code chat's own instructions
+                base = q.system_prompt_for(st.agent)
+                if st.msgs and st.msgs[0].get("role") == "system":
+                    st.msgs[0]["content"] = (base + "\n\n## This chat\n" + st.sys_override
+                                             if st.sys_override else base)
+                save_session(st)
             return self._send(200, jdump({"ok": True}))
         if p == "/api/branch":
             new = q.session_branch(d.get("id") or S.sid, int(d.get("index", 0)), d.get("title"))
@@ -1616,8 +1630,9 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._send(200, jdump({"started": jid}))
         if p == "/api/skill/capture":
             # a Claude Code chat's procedure becomes a Claude skill (~/.claude/skills)
-            writer = q.CE.write_claude_skill if q.CE.is_engine(q.current_model(S.model)) else None
-            with LOCK: name = q.capture_skill(S.msgs, d.get("name") or "captured-skill", writer)
+            st = get_state(d.get("sid")) if d.get("sid") else S
+            writer = q.CE.write_claude_skill if q.CE.is_engine(q.current_model(st.model)) else None
+            with LOCK: name = q.capture_skill(st.msgs, d.get("name") or "captured-skill", writer)
             return self._send(200, jdump({"ok": bool(name), "name": name}))
         if p == "/api/support":
             return self._send(200, jdump({"rows": q.support_check(d.get("answer",""),
@@ -1774,20 +1789,27 @@ class H(http.server.BaseHTTPRequestHandler):
                 "message": "Continue from where you stopped. Check `plan` for outstanding "
                            "steps and finish them. Do not restate what you already did."}))
         if p == "/api/retry_harder":
+            # the chat named (a phone or another window may be looking at a different one)
+            st = get_state(d.get("sid")) if d.get("sid") else S
+            if st.lock.locked(): return self._send(409, jdump({"error": "that chat is answering — stop it first"}))
             with LOCK:
-                while S.msgs and S.msgs[-1].get("role") != "user":
-                    S.msgs.pop()
-                last = S.msgs.pop() if S.msgs and S.msgs[-1].get("role") == "user" else None
+                while st.msgs and st.msgs[-1].get("role") != "user":
+                    st.msgs.pop()
+                last = st.msgs.pop() if st.msgs and st.msgs[-1].get("role") == "user" else None
+                if last and d.get("sid"): save_session(st)
             if not last: return self._send(200, jdump({"ok": False}))
             c = last.get("content")
             text = c if isinstance(c, str) else " ".join(
                 x.get("text","") for x in c if isinstance(x, dict))
             return self._send(200, jdump({"ok": True, "content": text}))
         if p == "/api/regenerate":
+            st = get_state(d.get("sid")) if d.get("sid") else S
+            if st.lock.locked(): return self._send(409, jdump({"error": "that chat is answering — stop it first"}))
             with LOCK:
-                while S.msgs and S.msgs[-1]["role"] != "user":
-                    S.msgs.pop()
-                last = S.msgs.pop() if S.msgs and S.msgs[-1]["role"] == "user" else None
+                while st.msgs and st.msgs[-1]["role"] != "user":
+                    st.msgs.pop()
+                last = st.msgs.pop() if st.msgs and st.msgs[-1]["role"] == "user" else None
+                if last and d.get("sid"): save_session(st)
             return self._send(200, jdump({"ok": bool(last),
                 "content": last.get("content") if last else None}))
         if p == "/api/server/start":

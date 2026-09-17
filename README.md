@@ -39,6 +39,7 @@ each answer names the model that wrote it.*
 - [Many chats at once, and the message queue](#many-chats-at-once-and-the-message-queue)
 - [Scheduled messages](#scheduled-messages)
 - [When a model keeps failing](#when-a-model-keeps-failing)
+- [Cheaper hours](#cheaper-hours)
 - [Answers, files and previews](#answers-files-and-previews)
 - [Orbit's own agent](#orbits-own-agent)
 - [The interface](#the-interface)
@@ -363,6 +364,30 @@ Go is down), then down your fallback list. A chat stays in its harness — a Cla
 chat falls back to Claude Code models, a Codex chat to Codex ones. The answer says what
 happened and which model finished it; the chat keeps its own model for the next message.
 A bad request or a conversation too long for the window never falls back.
+
+---
+
+## Cheaper hours
+
+Some providers charge less at certain hours, and some subscription plans count less of
+your allowance then. Orbit knows these policies (`bin/offpeak_policies.json`, each with
+its sources and the date it was checked) and marks models everywhere you pick one:
+🟢 while it is cheaper now, 🟠 when it is cheaper at other hours. The badge next to the
+model shows the current state ("full price now · 50% off from 03:00"); click it for a
+24-hour timeline, a countdown, the hours in the provider's time zone and in yours, and
+the provider's own wording.
+
+* **DeepSeek API**: peak is weekdays 09:00–12:00 and 14:00–18:00 Beijing time; every
+  other hour, and all weekend, is half price.
+* **OpenCode Go**: its DeepSeek models follow the same hours, counting half of your usage.
+* Other plans with time-of-day pricing (GLM Coding Plan, Alibaba Model Studio, Qianfan,
+  TokenHub, MiMo) are listed for reference; they apply once you add that provider under
+  the same id.
+
+A policy is a provider id, the models it covers, time windows in the provider's time
+zone, and a price fraction (or `quota_multiplier` for plans). Add or override policies
+in `config/offpeak.json` with the same shape. Settings → Models & keys → *Cheaper hours*
+lists them all and can hide the markers.
 
 ---
 
