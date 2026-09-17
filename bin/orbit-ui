@@ -1601,7 +1601,9 @@ def _gateway_route(provider, model):
     if pc.get("local"):
         base = q.CE.model_endpoint()[0] + "/v1"
     return {"base": base, "format": pc["format"], "api_key": pc["api_key"], "proxy": pc.get("proxy"),
-            "key_required": not pc.get("local")}
+            "key_required": not pc.get("local"),
+            # Anthropic itself takes every field Claude Code sends; other vendors may not
+            "strict": provider not in ("anthropic",) and not str(model).startswith("claude")}
 
 def _start_gateway():
     """Orbit's translating gateway for harness models (loopback only)."""
@@ -1800,7 +1802,8 @@ def run_job(job):
                 st.live = {"thinking": "", "content": "", "tools": [],
                            "status": "", "done": False, "seq": 0}
                 q.ACTIVE_PROJECT["id"] = st.project
-                q.ACTIVE_MODEL["id"] = st.model or job.get("model")
+                # the task's own model first: "run this in this chat on deepseek" means deepseek
+                q.ACTIVE_MODEL["id"] = job.get("model") or st.model
                 _refresh_system(st)
                 st.msgs, _did, _pct = q.maybe_autocompact(st.msgs, sid=st.sid)
                 n0 = len(st.msgs)
@@ -1844,6 +1847,10 @@ def run_job(job):
                 # filed under its project, so a project's scheduled runs sit with its chats
                 q.session_save(result_sid, msgs, f"[scheduled] {label}", {"project": pid} if pid else None)
         result, ok = (out or "")[:400], True
+        if not str(out or "").strip():
+            # a run that ends with no answer is a failure, not a quiet success
+            # (two overnight runs ended so and were recorded as "ok")
+            result, ok = "The run ended without an answer — the model returned nothing. Open the chat to see how far it got.", False
     except Exception as e:
         import traceback
         _sched_log(f"job {job.get('id')} failed:\n{traceback.format_exc()}")

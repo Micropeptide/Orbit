@@ -156,7 +156,9 @@ class _Blocks:
 
     def __init__(self, model):
         self.model, self.idx, self.open = model, -1, None
-        self.tools = {}              # upstream tool index -> our block index
+        self.tools = {}              # upstream call key -> our block index
+        self.ids = {}                # upstream tool index -> the call id it carries now
+        self.keys = {}               # upstream tool index -> the call key it maps to now
 
     def start(self):
         yield _sse("message_start", {"type": "message_start", "message": {
@@ -190,7 +192,14 @@ class _Blocks:
         yield _sse("content_block_delta", {"type": "content_block_delta", "index": self.idx,
                                            "delta": {"type": "text_delta", "text": text}})
 
-    def tool(self, key, cid=None, name=None, args=""):
+    def tool(self, index, cid=None, name=None, args=""):
+        key = self.keys.get(index, index)
+        if cid and index in self.ids and self.ids[index] != cid:
+            # some providers number every parallel call 0: a new call id at a used
+            # index is a new call, not more arguments for the previous one
+            key = (index, cid)
+        if cid:
+            self.ids[index], self.keys[index] = cid, key
         if key not in self.tools:
             yield from self.begin("tool", {"type": "tool_use", "id": cid or ("toolu_" + uuid.uuid4().hex[:20]),
                                            "name": name or "", "input": {}})
@@ -306,6 +315,24 @@ def responses_complete_to_anthropic(obj, model):
 
 def estimate_tokens(body):
     return max(1, len(json.dumps({k: body.get(k) for k in ("system", "messages", "tools")})) // 4)
+
+
+# Fields every Anthropic-compatible vendor accepts. Claude Code also sends
+# Anthropic-only ones (context_management, output_config, adaptive thinking…)
+# that other vendors may reject.
+PASSTHROUGH_KEYS = ("model", "messages", "system", "max_tokens", "metadata", "stop_sequences", "stream",
+                    "temperature", "top_k", "top_p", "tools", "tool_choice", "thinking")
+
+
+def passthrough_body(body, strict=True):
+    if not strict: return body
+    out = {k: v for k, v in body.items() if k in PASSTHROUGH_KEYS}
+    th = out.get("thinking")
+    if isinstance(th, dict) and th.get("type") not in ("enabled", "disabled"):
+        mt = int(out.get("max_tokens") or 32000)
+        out["thinking"] = {"type": "enabled", "budget_tokens": max(1024, min(16000, mt - 1024))} \
+            if mt > 2048 else {"type": "disabled"}
+    return out
 
 
 # ------------------------------------------------------------------ the server
@@ -430,7 +457,7 @@ def make_handler(resolver, log=None, token=None):
                 if self.headers.get(h): extra[h] = self.headers[h]
             extra.setdefault("anthropic-version", "2023-06-01")
             try:
-                r = self._upstream(route, "/messages", body, extra)
+                r = self._upstream(route, "/messages", passthrough_body(body, route.get("strict", True)), extra)
             except urllib.error.HTTPError as e:
                 return self._relay_error(e)
             self.send_response(r.status)
@@ -473,6 +500,12 @@ def make_handler(resolver, log=None, token=None):
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        import sys
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            return                       # a client that hung up: not an error worth a traceback
+        super().handle_error(request, client_address)
 
 
 def _same(a, b):

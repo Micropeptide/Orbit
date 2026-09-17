@@ -103,6 +103,26 @@ class TestTranslate(unittest.TestCase):
         # every started block is stopped
         self.assertEqual(kinds.count("content_block_start"), kinds.count("content_block_stop"))
 
+    def test_parallel_calls_that_all_say_index_0(self):
+        chunks = [delta(tool_calls=[{"index": 0, "id": "a", "function": {"name": "Read", "arguments": "{\"x\": 1}"}}]),
+                  delta(tool_calls=[{"index": 0, "id": "b", "function": {"name": "Bash", "arguments": "{\"c\":"}}]),
+                  delta(tool_calls=[{"index": 0, "function": {"arguments": " 2}"}}]),
+                  {"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}]
+        evs = sse_events(b"".join(G.stream_to_anthropic(iter([f"data: {json.dumps(c)}".encode() for c in chunks]), "m")))
+        starts = [(d["index"], d["content_block"]["name"]) for e, d in evs if e == "content_block_start"]
+        self.assertEqual(starts, [(0, "Read"), (1, "Bash")])
+        args = {i: "".join(d["delta"]["partial_json"] for e, d in evs if e == "content_block_delta" and d["index"] == i)
+                for i in (0, 1)}
+        self.assertEqual((json.loads(args[0]), json.loads(args[1])), ({"x": 1}, {"c": 2}))
+
+    def test_anthropic_only_fields_are_dropped_for_other_vendors(self):
+        body = {"model": "qwen3.8-max", "max_tokens": 32000, "messages": [], "context_management": {"x": 1},
+                "output_config": {"effort": "high"}, "thinking": {"type": "adaptive"}, "stream": True}
+        out = G.passthrough_body(body)
+        self.assertNotIn("context_management", out); self.assertNotIn("output_config", out)
+        self.assertEqual(out["thinking"]["type"], "enabled")
+        self.assertIs(G.passthrough_body(body, strict=False), body)
+
     def test_whole_completion(self):
         obj = {"id": "x", "choices": [{"message": {"content": "hi", "reasoning_content": "hm",
                                                    "tool_calls": [{"id": "c", "function": {"name": "Read", "arguments": "{\"a\":1}"}}]},
