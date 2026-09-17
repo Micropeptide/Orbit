@@ -67,6 +67,19 @@ aside.hide{display:none}
 .slist{padding:0 0 6px}
 .sitem{padding:5px 8px 5px 10px;border-radius:7px;cursor:pointer;font-size:13px;display:flex;gap:6px;
  align-items:center;min-height:29px;position:relative}
+.sitem .stc{flex:0 0 14px;width:14px;display:inline-flex;align-items:center;justify-content:center;font-size:10.5px;font-weight:700}
+.sitem.st-wait .stc{color:#fff;background:var(--warn,#d97706);border-radius:50%;height:14px}
+.sitem.st-queue .stc{color:var(--acc);border:1px solid var(--acc);border-radius:7px;height:14px;font-size:9.5px}
+.sitem .dotnew{width:7px;height:7px;border-radius:50%;background:var(--acc)}
+.sitem.st-wait .t{font-weight:600}
+#sidestatus{display:flex;flex-wrap:wrap;gap:4px;padding:2px 2px 4px}
+#sidestatus:empty{display:none}
+.stchip{border:1px solid var(--line);background:var(--card);color:var(--mut);border-radius:12px;font:inherit;font-size:11px;
+ padding:1px 8px;cursor:pointer;display:inline-flex;gap:5px;align-items:center}
+.stchip.wait{color:var(--warn,#d97706);border-color:var(--warn,#d97706)}
+.stchip.run{color:var(--acc)}
+#sidestatus.on .stchip{background:color-mix(in srgb,var(--acc) 14%,var(--card))}
+.stchip .spin{width:9px;height:9px;border-radius:50%;border:2px solid var(--acc);border-top-color:transparent;animation:sp .8s linear infinite}
 .sitem .ago{color:var(--dim);font-size:10.5px;font-variant-numeric:tabular-nums;flex:0 0 auto}
 .sitem .more{display:none;border:0;background:none;color:var(--mut);cursor:pointer;padding:0 4px;font-size:14px;line-height:1}
 .sitem:hover .more{display:inline}.sitem:hover .ago{display:none}
@@ -421,7 +434,7 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .sitem .spin{width:9px;height:9px;border-radius:50%;border:2px solid var(--acc);
  border-top-color:transparent;animation:sp .8s linear infinite;flex:0 0 9px}
 @keyframes sp{to{transform:rotate(360deg)}}
-.sitem.running{box-shadow:inset 2px 0 0 var(--acc)}
+.sitem.st-run .t{color:var(--fg)}
 .staleBar{position:fixed;top:0;left:0;right:0;z-index:120;background:var(--warn);color:#1a1a1a;
  padding:7px 14px;font-size:13px;display:flex;gap:12px;align-items:center;justify-content:center}
 .staleBar button{background:#1a1a1a;color:#fff;border:0;border-radius:7px;padding:4px 12px;
@@ -489,7 +502,7 @@ table.stbl{border-collapse:collapse;width:100%;font-size:13px;margin:2px 0 6px}
     <button id=nav_trash>Trash</button>
   </div>
   <div class=sidescroll id=sidescroll>
-   <div id=activebox></div>
+   <div id=sidestatus></div>
    <div class=sechead data-sec=projects><span class=caret>▾</span><span class=lbl>Projects</span>
     <span class=ct id=projct></span><button class=secbtn id=addproj title="New project">+</button></div>
    <div class=secbody data-sec=projects><div id=projwrap></div></div>
@@ -497,7 +510,7 @@ table.stbl{border-collapse:collapse;width:100%;font-size:13px;margin:2px 0 6px}
     <span class=ct id=chatct></span>
     <select class=filtersel id=filtersel title="Which chats">
      <option value=active>Active</option><option value=pinned>Pinned</option><option value=archived>Archived</option>
-     <option value=all>All</option></select></div>
+     <option value=all>All</option><option value=attention>Needs attention</option></select></div>
    <div class=secbody data-sec=chats>
     <input class=search id=search placeholder="Filter by title  (⌘F)">
     <div class=tagrow id=tagrow></div>
@@ -930,47 +943,36 @@ function agoShort(ts){
  if(s<86400*7)return Math.floor(s/86400)+'d';if(s<86400*60)return Math.floor(s/604800)+'w';
  return new Date(ts*1000).toLocaleDateString(undefined,{month:'short',day:'numeric'})}
 function sideOpenSec(name,def){return PREF.get('sec_'+name,def?'1':'0')==='1'}
+// ---------------- the chat list ----------------
+// Like Claude Code's session list: one row per chat, in a stable order (the last
+// message you sent), with its state on the left -- answering, waiting for you,
+// queued, or new since you looked. A chat keeps its place while it answers, and the
+// list is only redrawn when something in it changed, keeping your scroll position.
+let WAITING=new Set(), PENDING_ROWS={}, LIST_SIG='';
+function rowState(s){
+ if(WAITING.has(s.id))return {cls:'wait',icon:'!',tip:'waiting for you — an approval or a question'};
+ if(RUNNING.has(s.id))return {cls:'run',icon:'<span class=spin></span>',tip:'answering'};
+ if(s.queued)return {cls:'queue',icon:String(s.queued),tip:s.queued+' queued message'+(s.queued>1?'s':'')};
+ if(UNSEEN[s.id])return {cls:'new',icon:'<span class=dotnew></span>',tip:'new since you last looked'};
+ return {cls:'',icon:'',tip:''}}
 function chatRow(s,box){
- const d=el(`<div class="sitem${s.id===sid?' on':''}"><span class=t></span>${
-  UNSEEN[s.id]?'<span class=unseen title="new since you last looked"></span>':''}${
-  s.queued?`<span class=qn title="${s.queued} message${s.queued>1?'s':''} queued">${s.queued} queued</span>`:''}${
-  s.source==='claude-qwen'?`<span class=cqmark title="${s.external?'a Claude-Qwen session from a terminal — opens here, and continues in the same Claude session':'Claude Code'}">CC</span>`:''}${
-  s.pinned?'<span class=pinmark>★</span>':''}<span class=ago title="${esc(new Date((s.mtime||0)*1000).toLocaleString())} · ${s.n} messages">${agoShort(s.mtime)}</span><button class=more title="Actions">⋯</button></div>`);
+ const st=rowState(s);
+ const src=extSource(s);
+ const d=el(`<div class="sitem${s.id===sid?' on':''}${st.cls?' st-'+st.cls:''}${s.external?' external':''}" title="${esc(s.title||'')}">
+   <span class=stc title="${esc(st.tip)}">${st.icon}</span><span class=t></span>${
+   s.pinned?'<span class=pinmark title="pinned">★</span>':''}<span class=ago title="${esc(new Date((s.mtime||0)*1000).toLocaleString())} · ${s.n||0} messages">${agoShort(s.mtime)}</span><button class=more title="Actions">⋯</button></div>`);
  d.querySelector('.t').textContent=s.title||'(untitled)';
- d.title=s.title||'';
- if(s.external)d.classList.add('external');
+ d.dataset.sid=s.id; d.dataset.pinned=s.pinned?'1':'';
  d.onclick=ev=>{
-  if(ev.target.closest('.pinmark'))return;
   if(ev.target.closest('.more')){ev.stopPropagation();const r=ev.target.getBoundingClientRect();
    chatMenu({clientX:r.left,clientY:r.bottom},s);return}
   showPane('log');openSession(s.id)};
- d.style.userSelect='none';
  d.oncontextmenu=e=>{e.preventDefault();chatMenu(e,s)};
- d.draggable=true;
- d.ondragstart=e=>{e.dataTransfer.setData('sid',s.id);d.classList.add('dragging')};
- d.ondragend=()=>{d.classList.remove('dragging');document.querySelectorAll('.sitem')
-  .forEach(x=>x.classList.remove('drop'))};
- d.ondragover=e=>{e.preventDefault();d.style.borderTop='2px solid var(--acc)'};
- d.ondragleave=()=>{d.style.borderTop=''};
- d.ondrop=async e=>{
-  e.preventDefault();d.style.borderTop='';
-  const from=e.dataTransfer.getData('sid'); if(!from||from===s.id)return;
-  const ids=[...$('#slist').querySelectorAll('.sitem')].map(x=>x.dataset.sid);
-  if(!ids.includes(from))return;
-  const cur=ids.filter(x=>x!==from);
-  // index must be computed in the array WITHOUT the dragged item, otherwise a
-  // downward drag lands one slot too far and shuffles everything in between
-  const at=cur.indexOf(s.id);
-  if(at<0)return;
-  cur.splice(at,0,from);
-  await fetch('/api/session/reorder',{method:'POST',headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({order:cur})});
-  loadSessions()};
- d.dataset.sid=s.id; d.dataset.pinned=s.pinned?'1':'';
- if(RUNNING.has(s.id)){d.classList.add('running');
-  d.insertBefore(el('<span class=spin></span>'),d.firstChild)}
+ // drag a chat onto a project to move it there
+ if(!s.external){d.draggable=true;
+  d.ondragstart=e=>{e.dataTransfer.setData('sid',s.id);d.classList.add('dragging')};
+  d.ondragend=()=>d.classList.remove('dragging')}
  box.appendChild(d);return d}
-// conversations that began outside Orbit, each agent in its own section
 const EXT_SOURCES=[
  {key:'claude',label:'From Claude Code',tip:"Sessions from the Claude CLI and Claude's desktop app — open one to continue it here, in the same Claude session"},
  {key:'codex',label:'From Codex',tip:'Codex sessions — open one to continue it here; Orbit runs Codex resuming that same session'},
@@ -997,63 +999,83 @@ function groupedRows(list,box,prefix,term){
     h.classList.toggle('closed',!now);PREF.set(prefix+g,now?'1':'0')};
    box.appendChild(h);box.appendChild(groupBody)}
   chatRow(s,groupBody);
-  const c=groupBody.previousSibling.querySelector('.gct');c.textContent=groupBody.children.length})}
-function renderSessions(){
- const term=($('#search').value||'').toLowerCase(), box=$('#slist');box.innerHTML='';
- // what needs you, or is working, first: answering, queued, or with news (as Claude's
- // desktop app keeps running sessions at the top, instead of lost among the dates)
- const act=$('#activebox');act.innerHTML='';
- const live=SESSIONS.filter(s=>RUNNING.has(s.id)||s.queued||UNSEEN[s.id]);
- RUNNING.forEach(id=>{if(!live.some(s=>s.id===id)&&id.startsWith&&!id.startsWith('sched-'))
-  live.push({id,title:id===sid?($('#title').textContent||'New chat'):'(starting…)',n:0,mtime:Date.now()/1000})});
- if(live.length){
-  act.appendChild(el(`<div class=sechead style="cursor:default"><span class=lbl>Active now</span><span class=ct>${live.length}</span></div>`));
-  live.forEach(s=>chatRow(s,act))}
- const liveIds=new Set(live.map(s=>s.id));
+  groupBody.previousSibling.querySelector('.gct').textContent=groupBody.children.length})}
+function listRows(){
+ // chats you have just started, before the server lists them
+ const have=new Set(SESSIONS.map(s=>s.id));
+ Object.keys(PENDING_ROWS).forEach(k=>{if(have.has(k))delete PENDING_ROWS[k]});
+ return Object.values(PENDING_ROWS).concat(SESSIONS)}
+function renderSessions(force){
+ const term=($('#search').value||'').trim().toLowerCase();
+ const rows=listRows();
+ const sig=JSON.stringify([filterMode,term,projFilter,tagFilter,sid,[...RUNNING],[...WAITING],Object.keys(UNSEEN),
+  rows.map(s=>[s.id,s.title,s.mtime,s.pinned,s.archived,s.queued,s.n,s.project]),PREF.get('sec_ext_claude','0')]);
+ if(!force&&sig===LIST_SIG)return;
+ LIST_SIG=sig;
+ const sc=$('#sidescroll'), keep=sc?sc.scrollTop:0;
+ const box=$('#slist');box.innerHTML='';
+ // what is going on, at a glance: answering, waiting for you, queued
+ const runN=rows.filter(s=>RUNNING.has(s.id)).length, waitN=rows.filter(s=>WAITING.has(s.id)).length,
+       queueN=rows.filter(s=>s.queued).length;
+ const bar=$('#sidestatus');
+ bar.innerHTML=(runN||waitN||queueN)?[
+   waitN?`<button class="stchip wait" data-f=attention>! ${waitN} waiting for you</button>`:'',
+   runN?`<button class="stchip run" data-f=attention><span class=spin></span> ${runN} answering</button>`:'',
+   queueN?`<button class="stchip queue" data-f=attention>${queueN} with queued messages</button>`:''].join(''):'';
+ bar.querySelectorAll('button').forEach(b=>b.onclick=()=>{
+  const on=filterMode!=='attention';filterMode=on?'attention':'active';$('#filtersel').value=filterMode;renderSessions(true)});
+ bar.classList.toggle('on',filterMode==='attention');
  const pass=s=>{
-  // an empty chat you left is not worth a row -- but one that is generating is
-  if(!s.n && s.id!==sid && !RUNNING.has(s.id)) return false;
-  if(filterMode==='active')  return !s.archived;
-  if(filterMode==='pinned')  return !!s.pinned;
-  if(filterMode==='archived')return !!s.archived;
-  if(filterMode==='claude')  return s.source==='claude-qwen';
+  // an empty chat you left is not worth a row -- but one that is answering is
+  if(!s.n && s.id!==sid && !RUNNING.has(s.id) && !PENDING_ROWS[s.id]) return false;
+  if(filterMode==='active')   return !s.archived;
+  if(filterMode==='pinned')   return !!s.pinned;
+  if(filterMode==='archived') return !!s.archived;
+  if(filterMode==='attention')return RUNNING.has(s.id)||WAITING.has(s.id)||!!s.queued||!!UNSEEN[s.id];
   return true};
- const all_=SESSIONS.filter(s=>pass(s)&&(!projFilter||s.project===projFilter)
+ const all_=rows.filter(s=>pass(s)&&(!projFilter||s.project===projFilter)
    &&(!tagFilter||(s.tags||[]).includes(tagFilter))
-   &&(!term||(s.title||'').toLowerCase().includes(term))
-   &&(term||!liveIds.has(s.id)));
- // sessions that began outside Orbit (the Claude CLI, Claude's desktop app) are listed
- // on their own, below Orbit's chats; one opened here stays with them
- const list=all_.filter(s=>!extSource(s));
+   &&(!term||(s.title||'').toLowerCase().includes(term)));
+ const list=all_.filter(s=>!extSource(s)||(!s.external&&RUNNING.has(s.id)));
+ const inList=new Set(list.map(s=>s.id));
+ $('#chatct').textContent=list.length||'';
+ $('#chatslbl').textContent=projFilter&&PROJECTS[projFilter]?PROJECTS[projFilter].name:(filterMode==='attention'?'Needs attention':'Chats');
+ if(!list.length)box.innerHTML=`<div class=note style="padding:10px 8px;font-size:12.5px">${
+   term?'No titles match — ⌘P searches inside chats too.':filterMode==='archived'?'No archived chats.':
+   filterMode==='attention'?'Nothing is answering or waiting for you.':'No chats here yet.'}</div>`;
+ else groupedRows(list,box,'grp_',term);
+ // conversations that began outside Orbit: each agent in its own section, folded until opened
  const ext=$('#extsecs');ext.innerHTML='';
  EXT_SOURCES.forEach(src=>{
-  const rows=all_.filter(s=>extSource(s)===src.key);if(!rows.length)return;
-  const open=PREF.get('sec_ext_'+src.key,'1')==='1';
-  const h=el(`<div class="sechead${open?'':' closed'}" title="${esc(src.tip)}"><span class=caret>▾</span><span class=lbl>${esc(src.label)}</span><span class=ct>${rows.length}</span></div>`);
+  const rs=all_.filter(s=>extSource(s)===src.key&&!inList.has(s.id));if(!rs.length)return;
+  const open=term?true:PREF.get('sec_ext_'+src.key,'0')==='1';
+  const h=el(`<div class="sechead${open?'':' closed'}" title="${esc(src.tip)}"><span class=caret>▾</span><span class=lbl>${esc(src.label)}</span><span class=ct>${rs.length}</span></div>`);
   const body=el(`<div class="secbody${open?'':' closed'}"><div class=slist></div></div>`);
-  h.onclick=()=>{const now=h.classList.contains('closed');h.classList.toggle('closed',!now);body.classList.toggle('closed',!now);
-   PREF.set('sec_ext_'+src.key,now?'1':'0')};
+  h.onclick=()=>{const now=h.classList.contains('closed');PREF.set('sec_ext_'+src.key,now?'1':'0');renderSessions(true)};
   ext.appendChild(h);ext.appendChild(body);
-  groupedRows(rows,body.firstChild,src.key+'_',term)});
- $('#chatct').textContent=list.length+(sessTotal>SESSIONS.length?'+':'');
- $('#chatslbl').textContent=projFilter&&PROJECTS[projFilter]?PROJECTS[projFilter].name:'Chats';
- if(!list.length){box.innerHTML=`<div class=note style="padding:10px 8px;font-size:12.5px">${
-   term?'No titles match — ⌘P searches inside chats too.':filterMode==='archived'?'No archived chats.':'No chats here yet.'}</div>`;return}
- groupedRows(list,box,'grp_',term);
- if(sessTotal>SESSIONS.length){
-  const more=el(`<div class=daygroup style="cursor:pointer;color:var(--acc)">load ${sessTotal-SESSIONS.length} more</div>`);
-  more.onclick=()=>{sessLimit+=120;loadSessions()};box.appendChild(more)}}
+  if(open)groupedRows(rs,body.firstChild,src.key+'_',term)});
+ if(sc)sc.scrollTop=keep}
 let sessTotal=0, sessLimit=500;
 let tagFilter=null;
 async function loadTags(){
  const t=await (await fetch('/api/tags')).json();const row=$('#tagrow');row.innerHTML='';
- Object.entries(t).slice(0,12).forEach(([name,n])=>{
+ // the other agents' own tags are their sidebar sections already
+ Object.entries(t).filter(([name])=>!['claude-qwen','codex','opencode'].includes(name)).slice(0,12).forEach(([name,n])=>{
   const b=el(`<button class="tag${tagFilter===name?' on':''}">${esc(name)} ${n}</button>`);
   b.onclick=()=>{tagFilter=tagFilter===name?null:name;loadTags();renderSessions()};
   row.appendChild(b)})}
+let SRC_SHORT={};
 async function loadSessions(){
- const d=await (await fetch(`/api/sessions?limit=${sessLimit}`)).json();
- SESSIONS=d.items||d; sessTotal=d.total??SESSIONS.length; renderSessions(); loadTags(); loadProjects()}
+ let d;try{d=await (await fetch(`/api/sessions?limit=${sessLimit}`)).json()}catch(e){return}
+ let items=d.items||d||[];
+ // the other agents' sessions are scanned in the background on the Mac: a refresh that
+ // comes back with a whole source missing keeps the rows it had, once, rather than
+ // making a section vanish and reappear
+ ['claude','codex','opencode'].forEach(k=>{
+  const had=SESSIONS.filter(s=>s.external&&extSource(s)===k), got=items.filter(s=>s.external&&extSource(s)===k);
+  if(!got.length&&had.length&&!SRC_SHORT[k]){SRC_SHORT[k]=true;items=items.concat(had)}
+  else if(got.length)SRC_SHORT[k]=false});
+ SESSIONS=items; sessTotal=d.total??SESSIONS.length; renderSessions(); loadTags(); loadProjects()}
 $('#search').oninput=renderSessions;
 
 // Send is disabled per chat, not globally: another chat generating must not
@@ -1978,6 +2000,11 @@ async function go(opts){
  const sendSid=sid;                       // this answer belongs to THIS chat
  if(stoppedSid===sendSid)stoppedSid=null;  // a Stop applies to the answer it stopped, not the next
  if(!/^continue\b/i.test(t)&&PLANS[sendSid]){delete PLANS[sendSid];drawPlanDock()}  // the server starts a new plan too
+ // the chat moves to the top now (it is the one you used last), and a new chat has a
+ // row at once, before the server has saved it
+ {const row=SESSIONS.find(s=>s.id===sendSid);const now=Date.now()/1000;
+  if(row){row.mtime=now;row.n=(row.n||0)+1;SESSIONS.sort((a,b)=>(!!b.pinned-!!a.pinned)||(b.mtime-a.mtime))}
+  else PENDING_ROWS[sendSid]={id:sendSid,title:($('#title').textContent&&$('#title').textContent!=='New chat')?$('#title').textContent:t.replace(/\s+/g,' ').slice(0,60),mtime:now,n:1}}
  RUNNING.add(sendSid); SENDING.add(sendSid); renderSessions(); syncBusy();
  let a=addAssistant(modelLabel());       // replaced at each new step, and when it reads a note
  // Each model step gets its own block -- its thinking, what it said, then the
@@ -3060,9 +3087,10 @@ async function openSettings(tab){
 async function refreshRunning(){
  if(document.hidden&&!RUNNING.size)return;          // a hidden tab with nothing running has nothing to learn
  try{const r=await (await fetch('/api/running')).json();
-  const now=new Set(r.running||[]);
-  let changed = now.size!==RUNNING.size || [...now].some(x=>!RUNNING.has(x));
-  RUNNING=now;
+  const now=new Set(r.running||[]), wait=new Set(r.waiting||[]);
+  let changed = now.size!==RUNNING.size || [...now].some(x=>!RUNNING.has(x))
+             || wait.size!==WAITING.size || [...wait].some(x=>!WAITING.has(x));
+  RUNNING=now; WAITING=wait;
   if(changed){renderSessions();syncBusy()}   // a chat may have finished elsewhere
   // a chat that started generating is on disk but not yet in our list -- fetch it,
   // otherwise there is no row in the sidebar to click back to
@@ -4193,7 +4221,7 @@ async function suggestMem(){
   sk.onclick=()=>r.remove();
   box.appendChild(r)});
  wrap.appendChild(box);bottom()}
-$('#filtersel').onchange=e=>{filterMode=e.target.value;renderSessions()};
+$('#filtersel').onchange=e=>{filterMode=e.target.value;renderSessions(true)};
 $('#filtersel').onclick=e=>e.stopPropagation();
 // sections fold, and stay folded next time
 document.querySelectorAll('.sechead[data-sec]').forEach(h=>{
