@@ -1633,6 +1633,18 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                     if msg: emit("notice", {"msg": msg, "kind": st})
                 continue
 
+            if t == "rate_limit_event":
+                # Claude's plan allowance: a refused request says which window and when it resets,
+                # so the chat can carry on by itself then (orbit-ui _LimitWatch)
+                info = ev.get("rate_limit_info") or {}
+                if info.get("status") == "rejected" and info.get("resetsAt"):
+                    kind = {"five_hour": "5-hour", "seven_day": "weekly", "seven_day_opus": "weekly Opus",
+                            "seven_day_sonnet": "weekly Sonnet"}.get(info.get("rateLimitType"), "usage")
+                    when = time.strftime("%a %H:%M", time.localtime(float(info["resetsAt"])))
+                    emit("notice", {"msg": f"Claude's {kind} limit reached — it resets {when}",
+                                    "kind": "limit", "resets_at": float(info["resetsAt"])})
+                continue
+
             if t == "result":
                 pending -= 1
                 if ev.get("is_error") and ev.get("subtype") not in ("success",):

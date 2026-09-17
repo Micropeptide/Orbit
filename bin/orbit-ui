@@ -2171,7 +2171,9 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                     rec = PENDING.pop(rid, {})
                     return rec.get("answer") if ok else None
 
+                limits = _LimitWatch()
                 def _emit(k, p):
+                    limits.see(k, p)
                     _live_record(st, k, p)            # keep a copy so you can rejoin later
                     if k == "tool_result" and q.LAST_IMAGES:
                         p = dict(p or {})
@@ -2257,6 +2259,9 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                 except Exception: pass
                 st.running = False
                 save_session(st)
+                if not st.temp:
+                    job = limits.check(st, n0, cancelled=st.cancel.is_set())
+                    if job: Q.put(("notice", {"msg": _limit_note(job), "kind": "limit"}))
                 if not _is_engine_chat(st): _learn_later(st, n0)     # Claude keeps its own memory
             if first and not st.cancel.is_set():
                 # the title is written alongside, not before the chat is free: a queued
@@ -2662,6 +2667,53 @@ def _live_view(st):
     """st.live as sent to a browser: without the private bookkeeping."""
     return {k: v for k, v in st.live.items() if not k.startswith("_")}
 
+class _LimitWatch:
+    """Listens to an answer's events for a used-up plan allowance, so the chat can carry on
+    by itself when it resets (q.schedule_limit_resume)."""
+    KINDS = ("error", "notice", "retry", "stream_error", "fallback")
+
+    def __init__(self):
+        self.texts, self.errored, self.limited = [], False, False
+
+    def see(self, k, p):
+        if k not in self.KINDS: return
+        if k == "fallback":
+            # another model took over: what failed before it no longer ends the answer
+            self.errored = self.limited = False
+            return
+        if k == "error": self.errored = True
+        if isinstance(p, dict):
+            if p.get("resets_at"):          # the engine read the reset time itself: it wins
+                self.texts.insert(0, f"usage limit reached|{int(float(p['resets_at']))}")
+                self.limited = True
+            elif p.get("kind") == "limit":
+                self.limited = True
+            self.texts += [str(p.get(x)) for x in ("msg", "error", "why") if p.get(x)]
+        elif p:
+            self.texts.append(str(p))
+
+    def check(self, st, n0, model=None, attempt=0, cancelled=False, sid=None, title=None, msgs=None):
+        """The scheduled run, when the answer ended on a used-up allowance; else None."""
+        if cancelled: return None
+        msgs = msgs if msgs is not None else st.msgs
+        # a short answer that is only the limit message (Claude Code writes it as its reply)
+        short = [str(m.get("content") or "") for m in msgs[n0:]
+                 if m.get("role") == "assistant" and isinstance(m.get("content"), str) and len(m["content"]) < 400]
+        said = [t for t in short if q.limit_reset_at([t])]
+        if not (self.errored or self.limited or said): return None   # it got past the limit (another account, a fallback)
+        try:
+            return q.schedule_limit_resume(sid or st.sid, title if title is not None else st.title,
+                                           self.texts + said, model or (st.model if st else None), attempt)
+        except Exception:
+            return None
+
+
+def _limit_note(job):
+    when = time.strftime("%a %H:%M", time.localtime(job["at_ts"]))
+    return (f"Usage limit reached — this chat carries on by itself at {when}, a minute after it resets. "
+            "Change or cancel it in Scheduled.")
+
+
 def _live_emitter(st):
     """What a chat's own stream would record, for a run nobody is streaming —
     so opening that chat mid-run shows it working, like any other answer."""
@@ -2865,6 +2917,11 @@ def _job_prompt(job):
               "Pace the work to finish by then; don't start something you can't complete.)")
     return p
 
+def _limit_attempt(job):
+    """How many times in a row this chat has met a used-up allowance: a run that was
+    itself carrying on after a limit counts one more, so a limit that never lifts stops."""
+    return int(job.get("attempt") or 0) + 1 if job.get("kind") == "limit_resume" else 0
+
 def run_job(job):
     """Execute one scheduled prompt — in the chat it was scheduled from, with
     that chat's history and context, or else in its own throwaway session."""
@@ -2885,6 +2942,7 @@ def run_job(job):
             except RuntimeError: pass
         raise
     result_sid = None
+    limit_job = None
     try:
         label = job.get("name") or job["id"]
         if st is not None:
@@ -2904,13 +2962,19 @@ def run_job(job):
                 prompt = (f"[Scheduled task “{label}”, running unattended at "
                           f"{time.strftime('%H:%M')}]\n{_job_prompt(job)}")
                 st.refresh_tools()
-                out = q.turn(st.msgs, prompt, st.tools, emit=_live_emitter(st),
+                limits = _LimitWatch()
+                live = _live_emitter(st)
+                def _job_emit(k, p, live=live, limits=limits):
+                    limits.see(k, p); live(k, p)
+                out = q.turn(st.msgs, prompt, st.tools, emit=_job_emit,
                              approve=lambda *a: False, cancel=st.cancel,
                              inbox=st.inbox, interrupt=st.interrupt, sid=st.sid,
                              checkpoint=lambda: save_session(st), project=st.project,
                              max_minutes=_job_minutes(job), read_only=st.plan_mode)
                 st.running = False
                 save_session(st)
+                limit_job = limits.check(st, n0, model=job.get("model") or st.model,
+                                         attempt=_limit_attempt(job), cancelled=st.cancel.is_set())
                 if not _is_engine_chat(st): _learn_later(st, n0)     # Claude keeps its own memory
                 result_sid = st.sid
             finally:
@@ -2933,8 +2997,9 @@ def run_job(job):
             tools = q.tools_for(job.get("agent"), specs)
             result_sid = "sched-" + time.strftime("%Y%m%d-%H%M%S")
             stop = JOB_RUNS[result_sid] = threading.Event()
+            limits = _LimitWatch()
             try:
-                out = q.turn(msgs, _job_prompt(job), tools, approve=lambda *a: False, cancel=stop,
+                out = q.turn(msgs, _job_prompt(job), tools, approve=lambda *a: False, cancel=stop, emit=limits.see,
                              sid=result_sid, project=pid, max_minutes=_job_minutes(job),
                              checkpoint=lambda: q.session_save(result_sid, msgs, f"[scheduled] {label}",
                                                                {"project": pid} if pid else None))
@@ -2942,11 +3007,15 @@ def run_job(job):
                 JOB_RUNS.pop(result_sid, None)
                 # filed under its project, so a project's scheduled runs sit with its chats
                 q.session_save(result_sid, msgs, f"[scheduled] {label}", {"project": pid} if pid else None)
+            limit_job = limits.check(None, 1, model=job.get("model"), attempt=_limit_attempt(job),
+                                     cancelled=stop.is_set(), sid=result_sid, title=f"[scheduled] {label}", msgs=msgs)
         result, ok = (out or "")[:400], True
         if not str(out or "").strip():
             # a run that ends with no answer is a failure, not a quiet success
             # (two overnight runs ended so and were recorded as "ok")
             result, ok = "The run ended without an answer — the model returned nothing. Open the chat to see how far it got.", False
+        if limit_job:
+            result, ok = _limit_note(limit_job), False
     except Exception as e:
         import traceback
         _sched_log(f"job {job.get('id')} failed:\n{traceback.format_exc()}")
