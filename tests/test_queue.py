@@ -141,6 +141,41 @@ class TestQueue(unittest.TestCase):
             i = int(e[2][1:])
             self.assertEqual((e[3], e[4]), (f"model-{i}", f"e{i}"), "a chat ran on another chat's model")
 
+    def test_no_limit_on_remote_chats_but_the_local_model_takes_turns(self):
+        ui, q = self.ui, self.q
+        ui._max_parallel = self.saved_ui["_max_parallel"]          # the real default: no limit
+        saved_local, saved_slot = q.model_is_local, (q.slot_enter, q.slot_exit)
+        q.slot_enter, q.slot_exit = self.saved["slot_enter"], self.saved["slot_exit"]
+        q.model_is_local = lambda mid=None: str(mid or q.pinned_model() or "").startswith("local:")
+        live, peak = {"local": 0, "remote": 0}, {"local": 0, "remote": 0}
+        lock = threading.Lock()
+        inner = q.turn
+        def counting_turn(msgs, content, tools, **kw):
+            kind = "local" if str(q.pinned_model()).startswith("local:") else "remote"
+            with lock:
+                live[kind] += 1; peak[kind] = max(peak[kind], live[kind])
+            try: return inner(msgs, content, tools, **kw)
+            finally:
+                with lock: live[kind] -= 1
+        q.turn = counting_turn
+        try:
+            gate = threading.Event()
+            chats = [self.chat(model=f"harness:opencode-go/m{i}") for i in range(12)] + \
+                    [self.chat(model="local:qwen") for _ in range(2)]
+            for i, st in enumerate(chats):
+                self.gates[f"c{i}"] = gate
+                self.assertEqual(self.send(st, f"c{i}"), "started")       # nothing refused or queued
+            self.assertTrue(self.wait(lambda: peak["remote"] == 12))
+            time.sleep(0.3)
+            self.assertEqual(peak["local"], 1)                              # the second local chat waits
+            gate.set()
+            self.assertTrue(self.wait(lambda: len([e for e in self.log if e[0] == "end"]) == 14, 10))
+            self.assertEqual(peak["local"], 1)
+        finally:
+            q.turn, q.model_is_local = inner, saved_local
+            q.slot_enter, q.slot_exit = saved_slot
+            ui._max_parallel = lambda: 3
+
     def test_queue_view_hides_attachment_data(self):
         st = self.chat()
         st.lock.acquire()
