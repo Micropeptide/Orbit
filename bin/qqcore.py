@@ -5786,6 +5786,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None, **
 # provider in bin/harness.py (OpenCode Go/Zen, DeepSeek, Qwen, GLM, MiniMax, Kimi,
 # Anthropic, custom). "harness:<provider>/<model>" ids.
 import harness as HARN
+import harness_usage as USAGE
 HARNESS_PORT = None            # set by orbit-ui when it starts the gateway
 
 _current_model_before_harness = current_model
@@ -5800,6 +5801,9 @@ def current_model(mid=None):
     if want and str(want).startswith("harness-direct:"):
         # a plain request (a title, a memory note) to a harness model's own provider
         spec = HARN.resolve(ROOT, "harness:" + str(want)[len("harness-direct:"):], secrets_load(), local_model_name())
+        if spec and spec["provider_cfg"].get("subscription"):
+            # your Claude subscription has no API to call: a quick one-shot `claude -p`
+            return _current_model_before_harness("claude-cli:haiku")
         if spec:
             pc = spec["provider_cfg"]
             t = CE.harness_target(spec)
@@ -5814,7 +5818,18 @@ def model_catalogue():
     cat = _model_catalogue_before_harness()
     try:
         have = {m["id"] for m in cat}
-        cat += [m for m in HARN.catalogue(ROOT, secrets_load(), local_model_name()) if m["id"] not in have]
+        hcat = HARN.catalogue(ROOT, secrets_load(), local_model_name())
+        cat += [m for m in hcat if m["id"] not in have]
+        # the same providers without Claude Code: Orbit's own chat, straight to the model
+        # (through the gateway where the API needs translating or there are several accounts)
+        for m in hcat:
+            pid = m["model"].split("/")[0]
+            if pid in ("local", "claude", "anthropic"): continue      # Anthropic has its own native entry
+            did = "harness-direct:" + m["model"]
+            if did in have: continue
+            cat.append({**m, "id": did, "provider": "harness-direct", "kind": "anthropic",
+                        "provider_label": m["provider_label"].replace("Claude Code · ", ""),
+                        "label": m["label"], "note": ""})
     except Exception:
         pass
     return cat

@@ -1,4 +1,4 @@
-# Harness mode: 200 further ideas, and what became of them
+# Harness mode: 220 further ideas, and what became of them
 
 Harness mode runs any model through Claude Code: the local Qwen, OpenCode Go and
 Zen, DeepSeek, Qwen (Model Studio), GLM, MiniMax, Kimi, Anthropic and your own
@@ -6,7 +6,7 @@ endpoints. These are the ideas considered while building it (including what
 [bunshin-desktop](https://github.com/frankkk96/bunshin-desktop) offers), marked
 done (✅), partly done (◐) or not yet (·).
 
-Tally: **107 done, 2 partial, 91 not yet.**
+Tally: **131 done, 5 partial, 84 not yet.**
 
 ## A. Providers and models
 
@@ -31,15 +31,15 @@ Tally: **107 done, 2 partial, 91 not yet.**
 19. ✅ Pick models by words: "deepseek v4 pro on opencode go", "kimi k3", "local qwen".
 20. ✅ A test button per model: one short request through the same route a chat uses.
 21. ✅ Model lists fetched live: models.dev (context, output limit, API per model) and the provider's own `/models` with your key; daily and on demand.
-22. · Price per model and a running cost estimate.
+22. ✅ Price per model and a running cost estimate (OpenCode Go's published prices, else models.dev).
 23. · Per-model thinking/effort defaults.
-24. · Automatic fallback to another provider when one is down.
+24. ◐ Automatic fallback: to your next account of the same provider when one is used up; not yet to another provider.
 25. · Model aliases you name yourself.
 26. ✅ Each chat's context window follows its model (1M for DeepSeek V4…); the local Qwen keeps the server's.
 27. · Edit a provider's extra environment in the page (the registry file supports it).
 28. · Import providers from bunshin's database.
 29. · Share a provider list between machines.
-30. · Usage limits of OpenCode Go (5-hour / weekly / monthly) shown against your spend.
+30. ✅ Usage limits of OpenCode Go (5-hour / weekly / monthly) shown against your spend, per model and account.
 
 ## B. The gateway
 
@@ -62,11 +62,11 @@ Tally: **107 done, 2 partial, 91 not yet.**
 47. ✅ Request and error counts per provider, shown in Settings.
 48. ✅ Starts with Orbit; its port is configurable.
 49. ✅ Brief upstream failures (connection errors, 502/503/504) retried twice inside the gateway.
-50. · Request log with timing per model.
+50. ◐ Usage log per account and model (tokens, estimated cost); no timing yet.
 51. ✅ Replies capped at each model's output limit.
 52. · Documents (PDF blocks) converted to text for models that cannot read them.
 53. · Prompt caching hints for providers that support them.
-54. · Rate-limit awareness (wait and resume instead of failing).
+54. ◐ Quota awareness: a used-up account is skipped until its window resets.
 55. · Keep-alive connections to providers.
 56. · Streaming JSON repair for tool arguments some models malform.
 57. · Gateway as its own service, usable when Orbit is closed.
@@ -91,7 +91,7 @@ Tally: **107 done, 2 partial, 91 not yet.**
 73. · Compare two models on the same message.
 74. · Route subagents to a cheaper model.
 75. · Record the provider's request id with each answer.
-76. · Show cost per answer.
+76. · Show cost per answer (costs are recorded per request; not shown per answer yet).
 77. · Remember the last model used per folder.
 78. · Offline detection before starting a remote run.
 79. · Tool-use capability check per model.
@@ -147,7 +147,7 @@ Tally: **107 done, 2 partial, 91 not yet.**
 117. · Search models.
 118. · Mark favourite models.
 119. · Reorder providers.
-120. · Show each model's price and limits.
+120. ✅ Show what is left of each model's allowance.
 
 ## H. Bugs fixed along the way
 
@@ -217,7 +217,7 @@ Tally: **107 done, 2 partial, 91 not yet.**
 175. · Filter the sidebar by model.
 176. ✅ Claude Code mode: provider and model pickers in the header, orange accent, new chats and Settings follow the harness.
 177. · Model chosen per message.
-178. · Show the provider's rate limits.
+178. ✅ Show what is left of the provider's limits in the model picker.
 179. · Per-model colour.
 180. · Onboarding for adding the first key.
 
@@ -246,3 +246,26 @@ Tally: **107 done, 2 partial, 91 not yet.**
 198. · MCP servers per model.
 199. · Voice input for harness chats.
 200. · The iPhone app choosing harness models.
+
+## N. Accounts, usage and one provider page
+
+201. ✅ Several accounts per provider, each with its own key name.
+202. ✅ Choose the account used first.
+203. ✅ A used-up account (402, or a 429 about quota) is marked and the request goes to the next account.
+204. ✅ The mark lasts for the window the provider names (5 hours, week, month), else an hour; it can be cleared.
+205. ✅ Any provider with several accounts goes through the gateway so accounts can change mid-chat.
+206. ✅ Token usage recorded per account and model, as answers stream back.
+207. ✅ OpenCode Go's per-model prices and monthly allowances read from its documentation daily.
+208. ✅ Remaining 5-hour, weekly and monthly allowance per model, for the account in use.
+209. ✅ Usage shown in Settings and in the Claude Code model picker.
+210. ✅ One provider list in Settings → Models & keys, for Claude Code mode and Orbit alike.
+211. ✅ Orbit's own chat can use every provider there directly (through the gateway where needed).
+212. ✅ Claude · your subscription: plain Claude Code on your own login, no API key.
+213. ✅ Its models by alias (Opus, Sonnet, Haiku, and 1M-context Opus and Sonnet), passed as `--model`.
+214. ✅ Nothing of Orbit's gateway, keys or context overrides in a subscription run.
+215. ✅ A `claude` command that is not signed in is explained before a chat runs.
+216. ✅ Titles and notes for subscription chats use a one-shot `claude -p` on Haiku.
+217. ✅ `claude-harness "claude opus"` in a terminal.
+218. ✅ "claude opus" in words means your subscription when it is signed in.
+219. ✅ Fixed: "$15 $60" peak/off-peak allowance cells read as $604.
+220. ✅ Fixed: error messages pointed at a settings section that moved.

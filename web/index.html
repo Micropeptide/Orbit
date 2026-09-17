@@ -1373,7 +1373,7 @@ async function drawHarnessPicker(force){
  const cur=MODELS.current||MODELS.default||'';
  const curProv=providerOf(cur);
  pv.innerHTML=(curProv?'':'<option value="">— pick a provider —</option>')+(view.providers||[]).map(p=>
-  `<option value="${esc(p.id)}"${p.id===curProv?' selected':''}>${esc(p.label)}${p.auth==='local'||p.key_set?'':' — add a key'}</option>`).join('');
+  `<option value="${esc(p.id)}"${p.id===curProv?' selected':''}>${esc(p.label)}${p.ready?'':(p.auth==='subscription'?' — not signed in':' — add a key')}</option>`).join('');
  if(curProv)await fillHarnessModels(curProv,cur,force);else ms.innerHTML='<option>—</option>'}
 async function fillHarnessModels(pid,cur,refresh){
  const ms=$('#hmodel');
@@ -1383,9 +1383,21 @@ async function fillHarnessModels(pid,cur,refresh){
  const d=HPROV_CACHE[pid]||{models:[]};
  const list=d.models.filter(m=>!m.hidden||m.id===cur);
  ms.innerHTML=(list.some(m=>m.id===cur)?'':'<option value="">— pick a model —</option>')+list.map(m=>
-  `<option value="${esc(m.id)}"${m.id===cur?' selected':''}>${esc(m.label)}${m.context?' · '+fmtCtx(m.context):''}</option>`).join('');
+  `<option value="${esc(m.id)}"${m.id===cur?' selected':''}>${esc(m.label)}${m.context?' · '+fmtCtx(m.context):''}${usageShort(m.usage)?' · '+usageShort(m.usage):''}</option>`).join('');
  ms.title=`${d.label}: ${d.models.length} models${d.fetched_at?' · list from '+new Date(d.fetched_at*1000).toLocaleDateString():''}`+
-  (d.ready?'':' — add a key in Settings → Claude Code → Models')}
+  (d.ready?'':' — add a key in Settings → Models & keys')}
+// "5h 80% · wk 95% left": what is left of a model's allowance on the account in use,
+// estimated from what went through Orbit (OpenCode Go publishes allowances, not balances)
+function usageShort(u){
+ if(!u||!u.windows||!u.requests)return '';          // nothing used through Orbit yet
+ const w=u.windows;
+ if(u.monthly&&w['5h']&&w['5h'].left_pct!=null)return `${w['5h'].left_pct}% 5h · ${w.week.left_pct}% wk · ${w.month.left_pct}% mo left`;
+ if(w.month&&w.month.spent)return `$${w.month.spent.toFixed(2)} this month`;
+ return ''}
+function usageLong(u){
+ if(!u||!u.windows)return '';
+ const w=u.windows,row=(n,k)=>w[k]?`${n}: $${w[k].spent.toFixed(2)}${w[k].allowance!=null?` of $${w[k].allowance} (${w[k].left_pct}% left)`:''}`:'';
+ return [row('5 hours','5h'),row('week','week'),row('month','month')].filter(Boolean).join(' · ')+(u.account?` — ${u.account}`:'')}
 async function chooseHarnessModel(id){
  if(!id)return;
  const d=await apiPost('/api/model/select',{id,sid},'model');if(!d)return;
@@ -1401,7 +1413,7 @@ $('#hprov').onchange=async e=>{
  const pid=e.target.value;if(!pid)return;
  await fillHarnessModels(pid,'');
  const d=HPROV_CACHE[pid]||{};
- if(!d.ready){toast(`${d.label} needs a key — add it in Settings → Claude Code → Models`);openSettings('claude');return}
+ if(!d.ready){toast(pid==='claude'?'The claude command is not signed in — run `claude auth login` in a terminal (or it is not installed)':`${d.label} needs a key — add it in Settings → Models & keys`);if(pid!=='claude')openSettings('models');return}
  const first=(d.models||[]).find(m=>!m.hidden);
  if(first){$('#hmodel').value=first.id;chooseHarnessModel(first.id)}};
 $('#hmodel').onchange=e=>chooseHarnessModel(e.target.value);
@@ -1449,41 +1461,74 @@ async function newChatWith(){
   const name=$('#nw_name').value.trim();
   if(name){presets.push({name,...p});await apiPost('/api/claude/settings',{settings:{presets}},'presets')}
   start(p)}}
-// Settings → Claude Code → Models: the providers harness mode can use, their
-// keys (typed by you, stored in Orbit's secrets), region, models and a test.
+// Settings → Models & keys: the providers both Claude Code mode and Orbit's own
+// chat use — accounts and keys (typed by you, stored in Orbit's secrets), region,
+// models with what is left of their allowance, and a test.
 async function renderHarnessModels(box){
  const h=await (await fetch('/api/harness')).json();
  const fmtName={messages:'native',chat:'via gateway',responses:'via gateway (Responses)'};
  box.innerHTML='';box.classList.remove('note');
  const gw=h.gateway||{};
- box.appendChild(el(`<div class=note style="margin-bottom:6px">Pick any of these as a chat's model (or a scheduled task's). Providers that speak Anthropic's API go straight to Claude Code; the rest go through Orbit's gateway on 127.0.0.1:${esc(String(gw.port||'—'))}${gw.error?' — <b style="color:var(--err)">not running: '+esc(gw.error)+'</b>':''}, which adds your key so it never reaches the Claude process.</div>`));
+ box.appendChild(el(`<div class=note style="margin-bottom:6px">One list for both modes: in Claude Code mode each model runs through the Claude Code harness; otherwise Orbit talks to it directly. Providers that speak Anthropic's API go straight to Claude Code; the rest — and any provider with several accounts — go through Orbit's gateway on 127.0.0.1:${esc(String(gw.port||'—'))}${gw.error?' — <b style="color:var(--err)">not running: '+esc(gw.error)+'</b>':''}, which adds your key (so it never reaches the Claude process), moves to your next account when one is used up, and counts usage.</div>`));
  const st=(gw.stats||{});
  if(st.requests)box.appendChild(el(`<div class=note>Gateway since Orbit started: ${st.requests} requests${st.errors?`, ${st.errors} failed`:''} · ${esc(Object.entries(st.by_provider||{}).map(([k,v])=>k+' '+v).join(', '))}</div>`));
  const hidden=new Set();(h.providers||[]).forEach(p=>p.models.forEach(m=>{if(m.hidden)hidden.add('harness:'+p.id+'/'+m.id)}));
  const saveReg=async patch=>apiPost('/api/harness/save',patch,'saving models');
  (h.providers||[]).forEach(p=>{
   const card=el('<details class=memrow style="display:block;margin:6px 0;padding:8px 10px;border:1px solid var(--line);border-radius:9px"></details>');
-  card.open=p.id==='opencode-go'||p.id==='local';
-  card.appendChild(el(`<summary style="cursor:pointer"><b>${esc(p.label)}</b> <span class=note>${p.auth==='local'?'on this Mac':(p.key_set?'✓ key set':'needs a key')} · ${p.models.length} models</span></summary>`));
+  card.open=p.id==='opencode-go'||p.id==='local'||p.id==='claude';
+  const nAcc=(p.accounts||[]).filter(a=>a.key_set).length;
+  const status=p.auth==='local'?'on this Mac':p.auth==='subscription'?(p.ready?'✓ uses your Claude login':p.login==='missing'?'Claude Code not installed':'not signed in — run <code>claude auth login</code> in a terminal')
+   :(p.key_set?(nAcc>1?`✓ ${nAcc} accounts`:'✓ key set'):'needs a key');
+  card.appendChild(el(`<summary style="cursor:pointer"><b>${esc(p.label)}</b> <span class=note>${status} · ${p.models.length} models${p.auth==='subscription'?' · Claude Code mode only':''}</span></summary>`));
   if(p.docs)card.appendChild(el(`<div class=note style="margin:4px 0">${esc(p.docs)}</div>`));
-  if(p.auth!=='local'){
+  if(p.models.some(m=>m.usage&&m.usage.monthly))card.appendChild(el(`<div class=note style="margin:4px 0">Each model has a monthly allowance on an account (at most 20% of it in any 5 hours, 50% in a week). What is left is shown once a model has been used — estimated from requests through Orbit on the account in use; use from other apps is not counted.</div>`));
+  if(p.auth!=='local'&&p.auth!=='subscription'){
    const rf=el(`<div class=note style="margin:2px 0">${p.fetched_at?'model list updated '+new Date(p.fetched_at*1000).toLocaleString():'preset model list'} <button class=ghost style="font-size:11px">refresh model list</button></div>`);
    rf.querySelector('button').onclick=async()=>{rf.querySelector('button').textContent='…';
     const d=await apiPost('/api/harness/refresh',{provider:p.id},'refreshing models');
     const r=d&&d.results&&d.results[p.id];toast(r?`${p.label}: ${r[0]} models${r[1]?' — '+r[1]:''}`:'refresh failed');
     delete HPROV_CACHE[p.id];renderHarnessModels(box)};
    card.appendChild(rf)}
-  if(p.auth!=='local'){
-   const kr=el(`<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0"><span class=note>${esc(p.key)}</span>
-     <input type=password autocomplete=off spellcheck=false placeholder="${p.key_set?'replace the key':'paste your key'}" style="flex:1;min-width:200px">
-     <button class=ghost>save key</button>${p.key_set?'<button class=ghost>remove</button>':''}
+  if(p.auth!=='local'&&p.auth!=='subscription'){
+   // accounts: several keys for one provider (say two OpenCode Go subscriptions)
+   const accs=p.accounts||[];
+   const ab=el('<div style="margin:6px 0"></div>');
+   if(accs.length>1||accs.some(a=>a.exhausted))ab.appendChild(el(`<div class=note>Accounts are tried in order: the one in use first; one that says its quota is used up is skipped until it resets.</div>`));
+   accs.forEach((a,i)=>{
+    const ex=a.exhausted,au=a.usage&&a.usage.windows&&a.usage.windows.month;
+    const r=el(`<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:4px 0;padding:4px 6px;border-radius:7px;${a.active?'background:var(--hover,rgba(127,127,127,.08))':''}">
+      <b style="min-width:90px">${esc(a.label)}</b>
+      <span class=note>${esc(a.key)}${a.key_set?' ✓':''}${a.active&&a.key_set?' · in use':''}${ex?` · <span style="color:var(--warn)">used up until ${new Date(ex.until*1000).toLocaleString()}</span>`:''}${au&&au.spent?` · $${au.spent.toFixed(2)} this month via Orbit`:''}</span>
+      <input type=password autocomplete=off spellcheck=false placeholder="${a.key_set?'replace the key':'paste the key'}" style="flex:1;min-width:180px">
+      <button class=ghost>save key</button>
+      ${a.active?'':'<button class=ghost data-a=use>use this</button>'}
+      ${ex?'<button class=ghost data-a=clear>not used up</button>':''}
+      <button class=ghost data-a=rename>rename</button>
+      ${(accs.length>1||a.key_set)?'<button class=ghost data-a=remove>remove</button>':''}</div>`);
+    const inp=r.querySelector('input');
+    r.querySelector('button').onclick=async()=>{if(!inp.value.trim())return;
+     const d=await apiPost('/api/secrets/save',{secrets:{[a.key]:inp.value.trim()}},'saving the key');
+     inp.value='';if(d){toast('key saved');delete HPROV_CACHE[p.id];loadModels();renderHarnessModels(box)}};
+    r.querySelectorAll('[data-a]').forEach(b=>b.onclick=async()=>{
+     const op=b.dataset.a;
+     if(op==='remove'){
+      if(!confirm(`Remove ${a.label} (${a.key}) from Orbit?`))return;
+      if(accs.length===1){await apiPost('/api/secrets/save',{secrets:{[a.key]:''}},'removing the key')}
+      else await apiPost('/api/harness/account',{provider:p.id,op,id:a.id},'removing the account')}
+     else if(op==='rename'){const label=prompt('Name for this account',a.label);if(!label)return;
+      await apiPost('/api/harness/account',{provider:p.id,op,id:a.id,label},'renaming')}
+     else await apiPost('/api/harness/account',{provider:p.id,op:op==='use'?'activate':'clear',id:a.id},'account');
+     delete HPROV_CACHE[p.id];loadModels();renderHarnessModels(box)});
+    ab.appendChild(r)});
+   const add=el(`<div style="display:flex;gap:6px;align-items:center;margin:4px 0"><button class=ghost style="font-size:11.5px">+ add another account</button>
      ${p.keys_url?`<a href="${esc(p.keys_url)}" target=_blank class=note>get a key</a>`:''}</div>`);
-   const [inp]=kr.querySelectorAll('input'),[sv,rm]=kr.querySelectorAll('button');
-   sv.onclick=async()=>{if(!inp.value.trim())return;const d=await apiPost('/api/secrets/save',{secrets:{[p.key]:inp.value.trim()}},'saving the key');
-    inp.value='';if(d){toast('key saved');loadModels();renderHarnessModels(box)}};
-   if(rm)rm.onclick=async()=>{if(!confirm('Remove the '+p.key+' key from Orbit?'))return;
-    await apiPost('/api/secrets/save',{secrets:{[p.key]:''}},'removing the key');loadModels();renderHarnessModels(box)};
-   card.appendChild(kr);
+   add.querySelector('button').onclick=async()=>{
+    const label=prompt('A name for the new account (e.g. "Work")',`Account ${accs.length+1}`);if(label===null)return;
+    const d=await apiPost('/api/harness/account',{provider:p.id,op:'add',label},'adding the account');
+    if(d){toast('account added — paste its key');renderHarnessModels(box)}};
+   ab.appendChild(add);
+   card.appendChild(ab);
    if((p.alt_bases||[]).length){
     const br=el(`<div style="margin:4px 0"><span class=note>region </span><select>${[p.base,...p.alt_bases].filter((x,i,a)=>a.indexOf(x)===i)
       .map(b=>`<option>${esc(b)}</option>`).join('')}</select></div>`);
@@ -1495,8 +1540,9 @@ async function renderHarnessModels(box){
   p.models.forEach(m=>{
    const mid='harness:'+p.id+'/'+m.id;
    const r=el(`<div style="display:flex;gap:8px;align-items:center;font-size:12.5px;padding:2px 0">
-     <input type=checkbox title="show in the model picker"><span style="flex:1">${esc(m.label)} <span class=note>${esc(m.id)} · ${fmtName[m.format]||m.format} · ${Math.round((m.context||0)/1000)}k</span></span>
+     <input type=checkbox title="show in the model picker"><span style="flex:1">${esc(m.label)} <span class=note>${esc(m.id)} · ${fmtName[m.format]||m.format} · ${Math.round((m.context||0)/1000)}k${usageShort(m.usage)?' · <b>'+esc(usageShort(m.usage))+'</b>':''}</span></span>
      <button class=ghost style="font-size:11px">test</button></div>`);
+   if(m.usage)r.title=usageLong(m.usage)+' — estimated from requests through Orbit; use elsewhere is not counted';
    const cb=r.querySelector('input');cb.checked=!hidden.has(mid);
    cb.onchange=async()=>{cb.checked?hidden.delete(mid):hidden.add(mid);await saveReg({hidden:[...hidden]});loadModels()};
    const tb=r.querySelector('button');
@@ -2101,7 +2147,8 @@ async function openSettings(tab){
   if(name==='models'){
    await loadModels();
    const provs=MODELS.providers||{}, keys=MODELS.keys||{};
-   const rows=MODELS.models.map(m=>`<div class=memrow>
+   // harness providers have their own cards below; this list is the rest
+   const rows=MODELS.models.filter(m=>!/^harness(-direct)?:/.test(m.id)).map(m=>`<div class=memrow>
      <b>${esc(m.label||m.model)}</b>
      <span>${esc(m.provider_label)}${m.context?' · '+(m.context/1000|0)+'k context':''}${
        m.ready?'':' · <span style="color:var(--warn)">needs a key</span>'}${
@@ -2121,11 +2168,13 @@ async function openSettings(tab){
       <button class=ghost data-fetch="${esc(pid)}">fetch models</button>
       ${pv.keys_url?`<a class=note href="${esc(pv.keys_url)}" target=_blank>get a key ↗</a>`:''}
      </div>`}).join('');
-   body.innerHTML=`<div class=sec>Available models
-     <small>— the picker at the top of a chat chooses per conversation</small></div>
+   body.innerHTML=`<div class=sec>Providers
+     <small>— for Claude Code mode and Orbit alike · keys are stored in config/secrets.json on this Mac and sent only to their provider</small></div>
+    <div id=hm_box class=note>loading…</div>
+    <div class=sec style="margin-top:18px">More models for Orbit's own chat
+     <small>— the local server, coding CLIs you are signed into, OpenAI-compatible servers</small></div>
     ${rows||'<div class=note>None yet.</div>'}
-    <div class=sec style="margin-top:18px">Providers
-     <small>— keys are stored in config/secrets.json on this Mac, never sent anywhere else</small></div>
+    <div class=sec style="margin-top:18px">Their providers</div>
     ${provRows}
     <div class=hint2 style="margin-top:10px">Anything speaking the OpenAI API works —
      add your own below (vLLM, SGLang, a colleague's server).</div>
@@ -2161,6 +2210,7 @@ async function openSettings(tab){
       label:$('#np_label').value.trim()||id, kind:$('#np_kind').value,
       base_url:$('#np_base').value.trim(), key:$('#np_key').value.trim()}},'adding the provider');
     toast('provider added'); render('models')};
+   renderHarnessModels($('#hm_box'));
   }
   if(name==='model'){
    const sv=draft.server||{};
@@ -2464,8 +2514,8 @@ async function openSettings(tab){
    const lines=a=>(a||[]).join('\n'), unlines=v=>v.split('\n').map(x=>x.trim()).filter(Boolean);
    body.innerHTML=`<div class=note style="margin-bottom:10px">Claude Code · local Qwen is <b>claude-qwen</b> in a window: the same command, your Claude setup as it is.
      Changes to skills, plugins, MCP servers and permissions below are made to Claude itself (<code>${esc(cc.paths&&cc.paths.user||'')}</code>), so the terminal sees them too.</div>
-    <div class=sec>Models <small>— every model here runs through Claude Code</small></div>
-    <div id=hm_box class=note>loading…</div>
+    <div class=sec>Models</div>
+    <div class=note>Providers, accounts and keys are shared with Orbit's own chat, on one page: <button class=ghost id=cc_tomodels>Settings → Models &amp; keys</button>. Every model there runs through Claude Code in Claude Code mode — including <b>Claude · your subscription</b>, plain Claude Code on your own login with no API key.</div>
     <div class=sec>Permissions <small>— Claude's settings</small></div><div class=grid>
     <label>Default mode</label><select id=cc_mode><option value="">default (ask)</option>${Object.entries(CQ_MODES).filter(([k])=>k!=='default').map(([k,v])=>`<option value=${k}>${v}</option>`).join('')}</select>
     <label>Allow</label><textarea class=ta id=cc_allow style="min-height:60px" placeholder="one rule per line, e.g. Bash(git diff:*)"></textarea>
@@ -2520,7 +2570,7 @@ async function openSettings(tab){
     <label>Extra instructions</label><textarea class=ta id=cq_append style="min-height:50px"></textarea>
     </div></details>
     <button class=primary id=cq_save style="margin-top:8px">Save launcher and Orbit options</button> <span class=note id=cq_note></span>`;
-   renderHarnessModels($('#hm_box'));
+   $('#cc_tomodels').onclick=()=>tabs('models');
    // permissions
    $('#cc_mode').value=perm.defaultMode&&perm.defaultMode!=='default'?perm.defaultMode:'';
    $('#cc_allow').value=lines(perm.allow);$('#cc_ask').value=lines(perm.ask);$('#cc_deny').value=lines(perm.deny);

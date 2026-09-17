@@ -355,7 +355,49 @@ def _opener(proxy):
     return urllib.request.build_opener(*handlers)
 
 
-def make_handler(resolver, log=None, token=None):
+class UpstreamError(Exception):
+    """An error reply from the provider, already read."""
+    def __init__(self, code, raw):
+        super().__init__(f"upstream {code}")
+        self.code, self.raw = code, raw
+
+
+def _error_message(raw):
+    msg = raw
+    try:
+        j = json.loads(raw)
+        err = j.get("error") if isinstance(j, dict) else None
+        msg = (err.get("message") if isinstance(err, dict) else err) or j.get("message") or raw
+    except (ValueError, AttributeError):
+        pass
+    return str(msg)
+
+
+class _UsageTap:
+    """Reads token usage out of the Anthropic-format stream going back to Claude Code."""
+    def __init__(self):
+        self.buf, self.usage = b"", {}
+
+    def _take(self, u):
+        for k, v in (u or {}).items():
+            if isinstance(v, int): self.usage[k] = max(self.usage.get(k, 0), v)
+
+    def feed(self, chunk):
+        self.buf += chunk
+        *lines, self.buf = self.buf.split(b"\n")
+        for line in lines:
+            if not line.startswith(b"data:") or b"usage" not in line: continue
+            try: ev = json.loads(line[5:])
+            except ValueError: continue
+            self._take((ev.get("message") or {}).get("usage") if ev.get("type") == "message_start" else ev.get("usage"))
+
+    def whole(self, obj):
+        self._take((obj or {}).get("usage"))
+
+
+def make_handler(resolver, log=None, token=None, hooks=None):
+    hooks = hooks or {}
+
     class H(http.server.BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -400,10 +442,11 @@ def make_handler(resolver, log=None, token=None):
                 return _error(self, 404, f"Orbit has no harness provider '{provider}' (model {model}).", "not_found_error")
             if not route.get("api_key") and route.get("key_required", True):
                 self.close_connection = True
-                return _error(self, 401, f"No API key for {provider}. Add it in Orbit → Settings → Claude Code → Models.")
+                return _error(self, 401, f"No API key for {provider}. Add it in Orbit → Settings → Models & keys.")
             STATS["requests"] += 1
             STATS["by_provider"][provider] = STATS["by_provider"].get(provider, 0) + 1
             STATS["last"] = {"provider": provider, "model": model, "t": time.time(), "format": route["format"]}
+            self.provider, self.account, self.tap = provider, None, _UsageTap()
             self.close_connection = True
             cap = route.get("max_output")
             if cap and int(body.get("max_tokens") or 0) > int(cap):
@@ -418,17 +461,41 @@ def make_handler(resolver, log=None, token=None):
                 STATS["errors"] += 1
                 try: _error(self, 502, f"Orbit gateway: {type(e).__name__}: {e}")
                 except Exception: pass
+            finally:
+                if self.tap.usage and hooks.get("usage"):
+                    try: hooks["usage"](provider, self.account, model, dict(self.tap.usage))
+                    except Exception: pass
 
         def _upstream(self, route, path, payload, extra_headers=None):
+            """POST to the provider. With several accounts, one whose quota is used up
+            is marked and the next is tried."""
+            accounts = route.get("accounts") or [{"id": route.get("account") or "", "api_key": route.get("api_key") or ""}]
+            data = json.dumps(payload).encode()
+            for n, acct in enumerate(accounts):
+                self.account = acct.get("id") or ""
+                try:
+                    return self._post(route, path, data, acct.get("api_key") or "", extra_headers)
+                except urllib.error.HTTPError as e:
+                    try: raw = e.read().decode("utf-8", "replace")
+                    except Exception: raw = ""
+                    quota = hooks.get("is_quota") or _is_quota
+                    if quota(e.code, _error_message(raw)) and len(accounts) > 1:
+                        if hooks.get("exhausted"):
+                            try: hooks["exhausted"](self.provider, self.account, _error_message(raw))
+                            except Exception: pass
+                        if log: log(f"{self.provider} account {self.account}: used up ({e.code}); "
+                                    + ("trying the next" if n + 1 < len(accounts) else "no accounts left"))
+                        if n + 1 < len(accounts): continue
+                    raise UpstreamError(e.code, raw)
+
+        def _post(self, route, path, data, key, extra_headers=None):
             base = route["base"].rstrip("/")
             headers = {"content-type": "application/json", "accept": "text/event-stream, application/json",
                        "user-agent": "orbit-harness-gateway/1"}
-            key = route.get("api_key") or ""
             if key:
                 headers["authorization"] = "Bearer " + key
                 headers["x-api-key"] = key
             headers.update(extra_headers or {})
-            data = json.dumps(payload).encode()
             for attempt in range(3):
                 req = urllib.request.Request(base + path, data=data, headers=headers, method="POST")
                 try:
@@ -442,17 +509,9 @@ def make_handler(resolver, log=None, token=None):
 
         def _relay_error(self, e):
             STATS["errors"] += 1
-            try: raw = e.read().decode("utf-8", "replace")
-            except Exception: raw = ""
-            msg = raw
-            try:
-                j = json.loads(raw)
-                err = j.get("error") if isinstance(j, dict) else None
-                msg = (err.get("message") if isinstance(err, dict) else err) or j.get("message") or raw
-            except ValueError:
-                pass
-            if log: log(f"upstream {e.code}: {str(msg)[:300]}")
-            return _error(self, e.code, f"upstream {e.code}: {str(msg)[:1500]}")
+            msg = _error_message(e.raw)
+            if log: log(f"upstream {e.code}: {msg[:300]}")
+            return _error(self, e.code, f"upstream {e.code}: {msg[:1500]}")
 
         def _passthrough(self, route, body):
             extra = {}
@@ -461,16 +520,23 @@ def make_handler(resolver, log=None, token=None):
             extra.setdefault("anthropic-version", "2023-06-01")
             try:
                 r = self._upstream(route, "/messages", passthrough_body(body, route.get("strict", True)), extra)
-            except urllib.error.HTTPError as e:
+            except UpstreamError as e:
                 return self._relay_error(e)
             self.send_response(r.status)
             self.send_header("content-type", r.headers.get("content-type") or "application/json")
             self.send_header("connection", "close")
             self.end_headers()
+            sse = "event-stream" in (r.headers.get("content-type") or "")
+            whole = b""
             while True:
                 chunk = r.read1(65536) if hasattr(r, "read1") else r.read(65536)
                 if not chunk: break
+                if sse: self.tap.feed(chunk)
+                elif len(whole) < 4_000_000: whole += chunk
                 self.wfile.write(chunk); self.wfile.flush()
+            if not sse:
+                try: self.tap.whole(json.loads(whole))
+                except ValueError: pass
 
         def _translate(self, route, body):
             responses = route["format"] == "responses"
@@ -478,13 +544,14 @@ def make_handler(resolver, log=None, token=None):
             payload.update(route.get("extra_body") or {})
             try:
                 r = self._upstream(route, "/responses" if responses else "/chat/completions", payload)
-            except urllib.error.HTTPError as e:
+            except UpstreamError as e:
                 return self._relay_error(e)
             model = body.get("model") or ""
             if not body.get("stream"):
                 obj = json.loads(r.read() or b"{}")
-                data = json.dumps(responses_complete_to_anthropic(obj, model) if responses
-                                  else complete_to_anthropic(obj, model)).encode()
+                out = responses_complete_to_anthropic(obj, model) if responses else complete_to_anthropic(obj, model)
+                self.tap.whole(out)
+                data = json.dumps(out).encode()
                 self.send_response(200); self.send_header("content-type", "application/json")
                 self.send_header("content-length", str(len(data))); self.end_headers(); self.wfile.write(data)
                 return
@@ -495,6 +562,7 @@ def make_handler(resolver, log=None, token=None):
             self.end_headers()
             conv = responses_stream_to_anthropic if responses else stream_to_anthropic
             for out in conv(iter(r.readline, b""), model):
+                self.tap.feed(out)
                 self.wfile.write(out); self.wfile.flush()
 
     return H
@@ -516,9 +584,19 @@ def _same(a, b):
     return hmac.compare_digest(str(a or ""), str(b or ""))
 
 
-def serve(port, resolver, log=None, token=None):
+def _is_quota(status, message):
+    try:
+        import harness_usage
+        return harness_usage.is_quota_error(status, message)
+    except ImportError:
+        return status == 402
+
+
+def serve(port, resolver, log=None, token=None, hooks=None):
     """Start the gateway in a background thread on 127.0.0.1:<port> (0 = any free port).
-    With a token, requests must carry it (Authorization: Bearer or x-api-key)."""
-    srv = Server(("127.0.0.1", int(port)), make_handler(resolver, log, token))
+    With a token, requests must carry it (Authorization: Bearer or x-api-key).
+    hooks: "usage"(provider, account, model, usage) after each answer,
+           "exhausted"(provider, account, message) when an account's quota is used up."""
+    srv = Server(("127.0.0.1", int(port)), make_handler(resolver, log, token, hooks))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
