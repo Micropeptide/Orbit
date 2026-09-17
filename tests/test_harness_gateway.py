@@ -115,6 +115,20 @@ class TestTranslate(unittest.TestCase):
                 for i in (0, 1)}
         self.assertEqual((json.loads(args[0]), json.loads(args[1])), ({"x": 1}, {"c": 2}))
 
+    def test_interleaved_and_malformed_tool_arguments_are_mended(self):
+        chunks = [delta(tool_calls=[{"index": 0, "id": "a", "function": {"name": "Bash", "arguments": "{\"command\": "}}]),
+                  delta(tool_calls=[{"index": 1, "id": "b", "function": {"name": "Read", "arguments": "{\"file_path\": \"x\",}"}}]),
+                  delta(tool_calls=[{"index": 0, "function": {"arguments": "\"ls -la"}}]),
+                  {"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}]
+        evs = sse_events(b"".join(G.stream_to_anthropic(iter([f"data: {json.dumps(c)}".encode() for c in chunks]), "m")))
+        starts = [(d["index"], d["content_block"]["name"]) for e, d in evs if e == "content_block_start"]
+        self.assertEqual(starts, [(0, "Bash"), (1, "Read")])
+        args = {i: "".join(d["delta"]["partial_json"] for e, d in evs if e == "content_block_delta" and d["index"] == i)
+                for i in (0, 1)}
+        self.assertEqual((json.loads(args[0]), json.loads(args[1])), ({"command": "ls -la"}, {"file_path": "x"}))
+        kinds = [e for e, _ in evs]
+        self.assertEqual(kinds.count("content_block_start"), kinds.count("content_block_stop"))
+
     def test_anthropic_only_fields_are_dropped_for_other_vendors(self):
         body = {"model": "qwen3.8-max", "max_tokens": 32000, "messages": [], "context_management": {"x": 1},
                 "output_config": {"effort": "high"}, "thinking": {"type": "adaptive"}, "stream": True}
@@ -122,6 +136,16 @@ class TestTranslate(unittest.TestCase):
         self.assertNotIn("context_management", out); self.assertNotIn("output_config", out)
         self.assertEqual(out["thinking"]["type"], "enabled")
         self.assertIs(G.passthrough_body(body, strict=False), body)
+
+    def test_unsigned_thinking_is_dropped_for_anthropic_itself(self):
+        body = {"model": "claude-opus-5", "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": [{"type": "thinking", "thinking": "from deepseek", "signature": ""},
+                                              {"type": "text", "text": "hello"}]},
+            {"role": "assistant", "content": [{"type": "thinking", "thinking": "claude's", "signature": "sig"}]}]}
+        out = G.passthrough_body(body, strict=False)
+        self.assertEqual([b["type"] for b in out["messages"][1]["content"]], ["text"])
+        self.assertEqual(out["messages"][2]["content"][0]["signature"], "sig")
 
     def test_whole_completion(self):
         obj = {"id": "x", "choices": [{"message": {"content": "hi", "reasoning_content": "hm",
@@ -254,6 +278,23 @@ class TestServer(unittest.TestCase):
         time.sleep(0.2)
         prov, acct, model, usage = seen["usage"][0]
         self.assertEqual((prov, acct, model, usage["input_tokens"], usage["output_tokens"]), ("go", "two", "m", 120, 9))
+
+    def test_every_request_carries_a_stable_conversation_id(self):
+        Upstream.seen.clear()
+        done = {"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+        Upstream.script = [{"chunks": [delta(content="a"), done]}, {"chunks": [delta(content="b"), done]},
+                           {"chunks": [delta(content="c"), done]}]
+        convo = [{"role": "user", "content": "first question"}]
+        self.post("/h/p/v1/messages", {"model": "m", "max_tokens": 5, "stream": True, "messages": convo})
+        self.post("/h/p/v1/messages", {"model": "m", "max_tokens": 5, "stream": True,
+                                       "messages": convo + [{"role": "assistant", "content": "a"},
+                                                            {"role": "user", "content": "more"}]})
+        self.post("/h/p/v1/messages", {"model": "m", "max_tokens": 5, "stream": True, "messages": convo},
+                  {"X-Claude-Code-Session-Id": "claude-session-1"})
+        ids = [s["headers"].get("x-opencode-session") or s["headers"].get("X-Opencode-Session") for s in Upstream.seen]
+        self.assertTrue(ids[0] and ids[0] == ids[1])           # same conversation, same id as it grows
+        self.assertEqual(ids[2], "claude-session-1")          # Claude Code's own session id is passed on
+        self.assertNotIn("python", (Upstream.seen[0]["headers"].get("User-Agent") or "").lower())
 
     def test_unknown_provider_and_token_count(self):
         code, raw = self.post("/h/nope/v1/messages", {"model": "x", "messages": []})

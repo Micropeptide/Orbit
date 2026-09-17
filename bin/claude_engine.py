@@ -985,7 +985,7 @@ def _orbit_append(project, c, orbit_tools):
 
 def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None, inbox=None,
              interrupt=None, sid=None, checkpoint=None, project=None, max_minutes=None,
-             read_only=None, **_):
+             read_only=None, _compacting=False, **_):
     """One answer through Claude Code. Same contract as qqcore.turn()."""
     q = Q
     emit = emit or (lambda k, p: None)
@@ -1020,6 +1020,29 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         messages.append({"role": "user", "content": user_content, "t": time.time()})
         emit("error", msg); emit("done", None)
         return msg
+
+    prev = marker_of(messages) or {}
+    used, old_id = int(prev.get("ctx") or 0), prev.get("model")
+    if (not _compacting and old_id and old_id != spec.get("id") and used > 0.8 * target["ctx"]):
+        # moving to a model with a smaller window than this chat now fills: Claude Code
+        # would compact on the new model, sending it the whole chat it cannot hold.
+        # Compact on the model the chat came from instead, which can.
+        old = q.current_model(old_id)
+        if old and is_engine(old) and harness_target(old)["ctx"] >= used:
+            emit("notice", {"msg": f"this chat (~{used // 1000}k tokens) is bigger than {label}'s "
+                                   f"{target['ctx'] // 1000}k window: compacting it on "
+                                   f"{(old.get('label') or old_id)} first"})
+            saved = getattr(q.TURN_CTX, "model", None)
+            q.TURN_CTX.model = old_id
+            try:
+                run_turn(messages, "/compact", tools, emit=lambda k, p: k not in ("done", "model") and emit(k, p),
+                         approve=approve, cancel=cancel, inbox=None, interrupt=interrupt, sid=sid,
+                         project=project, read_only=read_only, _compacting=True)
+            finally:
+                q.TURN_CTX.model = saved
+            if cancel is not None and cancel.is_set():
+                emit("done", None)
+                return ""
 
     mk = dict(marker_of(messages) or {})
     jp = jsonl_path(mk.get("session"), mk.get("cwd")) if mk else None
@@ -1069,6 +1092,9 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         chosen = chosen[:max(int(c.get("max_skills") or 14), len(c.get("core_skills") or []))]
     mk["skills"] = chosen
     mk["owner"] = mk.get("owner") or sid
+    # which model the chat is on and how full its window is, so a later switch to a
+    # smaller model can make room first
+    mk["model"], mk["ctx_max"] = spec.get("id"), target["ctx"]
 
     now = time.time()
     messages.append({"role": "user", "content": user_content, "t": now, "claude": dict(mk)})
@@ -1454,6 +1480,11 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         last["partial"] = True
     rec = {"secs": round(time.time() - t_start, 1), "usage": dict(usage), "tool_runs": tool_runs,
            "rounds": tool_runs}
+    if isinstance(umsg.get("claude"), dict):
+        # after /compact the old size no longer holds; the next answer measures it again
+        umsg["claude"]["ctx"] = 0 if _compacting else int((q.SESSION_TOKENS.get(sid) if sid else 0)
+                                                          or step_prompt[0] or 0)
+    too_long = "prompt is too long" in (str(final_text or "") + " " + str(result_err or "")).lower()
     ch = [dict(x) for x in changes if x.get("path")]
     if last is not None and last.get("t", 0) >= now:
         last.update(secs=rec["secs"], usage=rec["usage"], tool_runs=tool_runs)
@@ -1469,6 +1500,10 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         emit("error", why[:1200])
     elif result_err and not stopped:
         emit("notice", {"msg": f"Claude Code reported: {str(result_err)[:300]}"})
+    if too_long and not stopped:
+        emit("error", f"The chat does not fit {label}'s {target['ctx'] // 1000}k-token window, and Claude Code "
+                      "could not compact it enough (the Claude setup's own prompt counts too). Pick a model with a "
+                      "larger window, run /compact on the previous model, or start a new chat.")
     emit("done", None)
     if checkpoint:
         try: checkpoint()

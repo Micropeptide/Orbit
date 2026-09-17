@@ -44,15 +44,48 @@ sends the same request with the next account, so the chat carries on. **Not used
 up** clears a mark. A provider with several accounts always goes through the
 gateway so this can happen.
 
-## Usage left per model
+## Usage left
 
-OpenCode Go gives each model a monthly allowance in dollars, of which at most
-20% can go in any 5 hours and 50% in a week, and has no API that reports what is
-left. Orbit counts every request through its gateway (tokens per account and
-model), prices it with OpenCode's published prices, and shows what is left of
-each window next to the model — in Settings and in the model picker, once a
-model has been used. The allowances are read from OpenCode's documentation
-daily. It is an estimate: use of the same account from other apps is not counted.
+An OpenCode Go account has one allowance shared by all its models, in 5-hour,
+weekly and monthly windows. Orbit asks OpenCode for each account's figures
+(`/zen/go/v1/usage`, once a minute at most) and shows what is left of each
+window and when it resets — with the account in Settings, and next to OpenCode Go
+in the provider picker. An account OpenCode reports as rate-limited is skipped
+until it resets.
+
+Orbit also counts every request through its gateway per account and model and
+prices it with OpenCode's published prices, so each model shows roughly what it
+has cost through Orbit.
+
+## OpenCode's session header
+
+OpenCode Go routes and caches by conversation and refuses requests without a
+session id. The gateway passes Claude Code's own session id on as
+`x-opencode-session`, and gives Orbit's own calls (titles, tests, Orbit-mode
+chats) a stable id derived from how the conversation starts.
+
+## Each chat keeps its model
+
+A chat remembers the model it last used and keeps it: changing the default, or
+picking a model in another chat, does not move it (and so does not change its
+context window). The model picker lists your recent models first.
+
+When you move a chat to a model with a smaller window than the chat now fills,
+Orbit compacts it first — on the model it came from, which can still hold it —
+then carries on with the new model (Claude Code would otherwise send the whole
+chat to the smaller model to be summarised). If a chat still cannot fit, Orbit
+says so rather than showing "Prompt is too long".
+
+Thinking written by other vendors' models has no Anthropic signature; when a chat
+moves to Claude through the gateway those blocks are dropped (the answers they
+led to stay).
+
+## Tool calls from other models
+
+Some models stream tool arguments that are malformed or cut short, or interleave
+parallel calls. The gateway collects each call whole, mends its JSON (unclosed
+strings and brackets, trailing commas) and sends it once, so the call does not
+fail in Claude Code.
 
 ## Claude · your subscription
 
@@ -122,7 +155,8 @@ same harness, not only the local Qwen:
 ## Working folder
 
 A new chat's Claude session starts in the folder you choose — click the folder
-chip next to the title — as if you had run `claude-qwen` there. Recent session
+chip next to the title, then type a path or **Choose…** for the Mac's folder
+chooser — as if you had run `claude-qwen` there. Recent session
 folders and Orbit's project folders are offered. You can also allow more folders
 (`--add-dir`). A chat that has started stays in its folder; choosing another
 starts a new chat there.

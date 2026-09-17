@@ -10,7 +10,7 @@ same account is not counted.
 Accounts that report their quota is used up are marked, so the gateway moves
 on to the next account until the mark expires.
 """
-import html, json, os, re, threading, time, urllib.request
+import html, json, os, re, threading, time, urllib.error, urllib.request
 
 WINDOWS = (("5h", 5 * 3600, 0.20), ("week", 7 * 86400, 0.50), ("month", 30 * 86400, 1.00))
 _LOCK = threading.Lock()
@@ -184,21 +184,48 @@ def _state(root):
     except (OSError, ValueError): return {}
 
 
-QUOTA_WORDS = ("quota", "limit", "exceeded", "insufficient", "credit", "balance", "exhausted", "usage")
+QUOTA_WORDS = ("quota", "exceeded", "insufficient", "credit", "balance", "exhausted", "usage limit",
+               "subscription limit", "weekly limit", "monthly limit", "hour limit")
+
+
+def quota_block(status, raw, retry_after=None):
+    """How long an account should be skipped after this error reply, in seconds — or
+    None when the error says nothing about the account (a bad request, a brief blip).
+
+    OpenCode Go answers a used-up allowance with 429 {"error": {"type":
+    "GoUsageLimitError", ...}, "metadata": {"limitName": "5 hour"|"weekly"|"monthly"}}
+    and a retry-after header; a plain RateLimitError is only a short wait."""
+    try:
+        j = json.loads(raw) if isinstance(raw, str) and raw.strip().startswith("{") else {}
+    except ValueError:
+        j = {}
+    err = j.get("error") if isinstance(j.get("error"), dict) else {}
+    etype, msg = str(err.get("type") or ""), (str(err.get("message") or "") + " " + str(raw or "")).lower()
+    try: wait = float(retry_after) if retry_after not in (None, "") else None
+    except (TypeError, ValueError): wait = None
+    limit = str((j.get("metadata") or {}).get("limitName") or "").lower()
+    if etype in ("GoUsageLimitError", "FreeUsageLimitError", "BlackUsageLimitError") or status == 402:
+        if wait: return wait
+        return 7 * 86400 if "week" in (limit or msg) else 30 * 86400 if "month" in (limit or msg) else 5 * 3600
+    if etype == "RateLimitError":
+        return min(wait or 60, 3600)
+    if status == 429 and any(w in msg for w in QUOTA_WORDS):
+        if wait: return wait
+        return 7 * 86400 if "week" in msg else 30 * 86400 if "month" in msg else 5 * 3600 if "hour" in msg else 3600
+    if status in (401, 403) and any(w in msg for w in ("quota", "subscription", "insufficient", "balance", "credit")):
+        return wait or 3600
+    return None
 
 
 def is_quota_error(status, message):
     """A reply that means this account cannot be used for now (as opposed to a bad request)."""
-    msg = (message or "").lower()
-    if status in (402,): return True
-    if status == 429 and any(w in msg for w in QUOTA_WORDS): return True
-    if status in (401, 403) and any(w in msg for w in ("quota", "subscription", "insufficient", "balance", "credit")):
-        return True
-    return False
+    return quota_block(status, message) is not None
 
 
-def mark_exhausted(root, provider, account, message="", hours=None):
+def mark_exhausted(root, provider, account, message="", hours=None, seconds=None):
     msg = (message or "").lower()
+    if seconds is not None:
+        hours = float(seconds) / 3600
     if hours is None:
         hours = 24 * 7 if "week" in msg else 24 * 30 if "month" in msg else 5 if ("5" in msg and "hour" in msg) else 1
     with _LOCK:
@@ -224,3 +251,49 @@ def exhausted(root, provider, account, now=None):
     e = (_state(root).get(provider) or {}).get(account)
     if e and e.get("until", 0) > (now or time.time()): return e
     return None
+
+
+# ------------------------------------------------------------------ OpenCode Go: the account's real usage
+
+_GO_LIVE = {}
+
+
+def go_usage(key, account=None, root=None, provider="opencode-go", max_age=60, timeout=15):
+    """OpenCode Go's own account usage: {"rolling"|"weekly"|"monthly": {"status", "percent",
+    "resetsAt"}} (rolling = the 5-hour window), or {"error": ...}. The account shares one
+    allowance across models. Cached for a minute. An account reported rate-limited is
+    marked, so the gateway skips it until it resets."""
+    import hashlib, datetime
+    if not key: return None
+    ck = hashlib.sha256(key.encode()).hexdigest()[:16]
+    hit = _GO_LIVE.get(ck)
+    if hit and time.time() - hit[0] < max_age: return hit[1]
+    req = urllib.request.Request("https://opencode.ai/zen/go/v1/usage",
+                                 headers={"Authorization": "Bearer " + key, "User-Agent": "orbit/1.0",
+                                          "x-opencode-client": "orbit"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            out = (json.load(r) or {}).get("usage") or {}
+    except urllib.error.HTTPError as e:
+        try: body = e.read().decode("utf-8", "replace")
+        except Exception: body = ""
+        msg = body
+        try: msg = json.loads(body)["error"]["message"]
+        except Exception: pass
+        out = {"error": f"{e.code}: {str(msg)[:160]}"}
+    except Exception as e:
+        out = {"error": type(e).__name__}
+    if root and account and "error" not in out:
+        worst = None
+        for w in ("rolling", "weekly", "monthly"):
+            v = out.get(w) or {}
+            if v.get("status") == "rate-limited" and v.get("resetsAt"):
+                try:
+                    t = datetime.datetime.fromisoformat(v["resetsAt"].replace("Z", "+00:00")).timestamp()
+                    worst = max(worst or 0, t)
+                except ValueError:
+                    pass
+        if worst:
+            mark_exhausted(root, provider, account, "OpenCode Go usage limit", seconds=max(60, worst - time.time()))
+    _GO_LIVE[ck] = (time.time(), out)
+    return out

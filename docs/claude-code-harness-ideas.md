@@ -1,4 +1,4 @@
-# Harness mode: 220 further ideas, and what became of them
+# Harness mode: 240 further ideas, and what became of them
 
 Harness mode runs any model through Claude Code: the local Qwen, OpenCode Go and
 Zen, DeepSeek, Qwen (Model Studio), GLM, MiniMax, Kimi, Anthropic and your own
@@ -6,7 +6,7 @@ endpoints. These are the ideas considered while building it (including what
 [bunshin-desktop](https://github.com/frankkk96/bunshin-desktop) offers), marked
 done (✅), partly done (◐) or not yet (·).
 
-Tally: **131 done, 5 partial, 84 not yet.**
+Tally: **143 done, 5 partial, 92 not yet.**
 
 ## A. Providers and models
 
@@ -269,3 +269,29 @@ Tally: **131 done, 5 partial, 84 not yet.**
 218. ✅ "claude opus" in words means your subscription when it is signed in.
 219. ✅ Fixed: "$15 $60" peak/off-peak allowance cells read as $604.
 220. ✅ Fixed: error messages pointed at a settings section that moved.
+
+## O. From Crush and OpenCode
+
+Read in September 2026: [charmbracelet/crush](https://github.com/charmbracelet/crush) and
+[anomalyco/opencode](https://github.com/anomalyco/opencode).
+
+221. ✅ A stable conversation id on every request (`x-opencode-session`; OpenCode Go requires it), Claude Code's own session id passed on.
+222. ✅ Orbit identifies itself (`User-Agent: orbit/1.0`, `x-opencode-client: orbit`) instead of a generic HTTP library.
+223. ✅ OpenCode Go's real account usage (5-hour, weekly, monthly, with reset times) from `/zen/go/v1/usage`.
+224. ✅ `GoUsageLimitError` read exactly: the window it names and `retry-after` decide how long an account is skipped; a plain rate limit is a short wait, not a used-up account.
+225. ✅ An account reported rate-limited is skipped before a request fails.
+226. ✅ Each chat keeps its own model; changing the default does not move it (Crush keeps one global model).
+227. ✅ Compact on the previous model before moving to a smaller window (neither Crush nor Claude Code does).
+228. ✅ "Prompt is too long" explained, with what to do.
+229. ✅ Unsigned thinking from other vendors dropped when a chat moves to Claude.
+230. ✅ Tool calls collected whole and their JSON mended (Crush replaces broken arguments with `{}`).
+231. ✅ Recent models first in the picker.
+232. ✅ The Mac's folder chooser for a chat's working folder.
+233. · Reasoning effort mapped per provider (DeepSeek/GLM `thinking.type`, MiniMax adaptive, Qwen `enable_thinking`).
+234. · Anthropic prompt-cache markers on Messages routes to other vendors (Go's Qwen and MiniMax).
+235. · Favourites and fuzzy search in the model picker.
+236. · Per-model sampling defaults (Kimi, MiniMax, GLM).
+237. · Images replaced with a note for models that cannot read them.
+238. · A read-before-edit guard and whitespace-tolerant edits for Orbit's own tools.
+239. · Loop detection for unattended runs (the same tool call and result over and over).
+240. · A usage dashboard (tokens and cost by day and model).

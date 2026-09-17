@@ -151,12 +151,45 @@ def _usage(u):
             "cache_read_input_tokens": cached, "cache_creation_input_tokens": 0}
 
 
+def repair_json(raw):
+    """Tool arguments as a JSON object string, mended where a model left them broken."""
+    raw = (raw or "").strip()
+    if not raw: return "{}"
+    try:
+        v = json.loads(raw)
+        return raw if isinstance(v, dict) else json.dumps({"value": v})
+    except ValueError:
+        pass
+    s = raw
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-z]*\s*|\s*```$", "", s)
+    s = re.sub(r",\s*([}\]])", r"\1", s)                       # trailing commas
+    # close what was left open (strings, arrays, objects), in order
+    stack, in_str, esc = [], False, False
+    for ch in s:
+        if in_str:
+            if esc: esc = False
+            elif ch == "\\": esc = True
+            elif ch == '"': in_str = False
+        elif ch == '"': in_str = True
+        elif ch in "{[": stack.append("}" if ch == "{" else "]")
+        elif ch in "}]" and stack: stack.pop()
+    s = s + ('"' if in_str else "") + "".join(reversed(stack))
+    s = re.sub(r",\s*([}\]])", r"\1", s)
+    try:
+        v = json.loads(s)
+        return json.dumps(v) if isinstance(v, dict) else json.dumps({"value": v})
+    except ValueError:
+        return "{}"
+
+
 class _Blocks:
     """Keeps the Messages content blocks of one streamed answer in order."""
 
     def __init__(self, model):
         self.model, self.idx, self.open = model, -1, None
-        self.tools = {}              # upstream call key -> our block index
+        self.calls = {}              # upstream call key -> {"id", "name", "args"}, in order of arrival
+        self.had_tools = False
         self.ids = {}                # upstream tool index -> the call id it carries now
         self.keys = {}               # upstream tool index -> the call key it maps to now
 
@@ -180,13 +213,28 @@ class _Blocks:
         self.open = kind
         yield _sse("content_block_start", {"type": "content_block_start", "index": self.idx, "content_block": block})
 
+    def flush_tools(self):
+        """Tool calls go out whole, once their arguments are complete: parallel calls
+        can arrive interleaved, and some models send malformed or truncated JSON,
+        which would fail the call in Claude Code."""
+        calls, self.calls = self.calls, {}
+        self.ids, self.keys = {}, {}
+        for c in calls.values():
+            yield from self.begin("tool", {"type": "tool_use", "id": c["id"], "name": c["name"], "input": {}})
+            yield _sse("content_block_delta", {"type": "content_block_delta", "index": self.idx,
+                                               "delta": {"type": "input_json_delta",
+                                                         "partial_json": repair_json(c["args"])}})
+            yield from self.close()
+
     def thinking(self, text):
+        if self.calls: yield from self.flush_tools()
         if self.open != "thinking":
             yield from self.begin("thinking", {"type": "thinking", "thinking": "", "signature": ""})
         yield _sse("content_block_delta", {"type": "content_block_delta", "index": self.idx,
                                            "delta": {"type": "thinking_delta", "thinking": text}})
 
     def text(self, text):
+        if self.calls: yield from self.flush_tools()
         if self.open != "text":
             yield from self.begin("text", {"type": "text", "text": ""})
         yield _sse("content_block_delta", {"type": "content_block_delta", "index": self.idx,
@@ -200,16 +248,19 @@ class _Blocks:
             key = (index, cid)
         if cid:
             self.ids[index], self.keys[index] = cid, key
-        if key not in self.tools:
-            yield from self.begin("tool", {"type": "tool_use", "id": cid or ("toolu_" + uuid.uuid4().hex[:20]),
-                                           "name": name or "", "input": {}})
-            self.tools[key] = self.idx
-        if args:
-            yield _sse("content_block_delta", {"type": "content_block_delta", "index": self.tools[key],
-                                               "delta": {"type": "input_json_delta", "partial_json": args}})
+        self.had_tools = True
+        if key not in self.calls:
+            yield from self.close()
+            self.calls[key] = {"id": cid or ("toolu_" + uuid.uuid4().hex[:20]), "name": name or "", "args": ""}
+        c = self.calls[key]
+        if name and not c["name"]: c["name"] = name
+        if args: c["args"] += args
+        return
+        yield
 
     def finish(self, stop, usage):
         yield from self.close()
+        if self.calls: yield from self.flush_tools()
         yield _sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": None},
                                      "usage": usage})
         yield _sse("message_stop", {"type": "message_stop"})
@@ -243,7 +294,7 @@ def stream_to_anthropic(lines, model):
                 fn = tc.get("function") or {}
                 yield from b.tool(tc.get("index", 0), tc.get("id"), fn.get("name"), fn.get("arguments") or "")
             if c.get("finish_reason"): stop = STOP.get(c["finish_reason"], "end_turn")
-    if b.tools and stop == "end_turn": stop = "tool_use"
+    if b.had_tools and stop == "end_turn": stop = "tool_use"
     yield from b.finish(stop, usage)
 
 
@@ -270,7 +321,7 @@ def responses_stream_to_anthropic(lines, model):
         elif t in ("response.failed", "error"):
             msg = ((ev.get("response") or {}).get("error") or ev.get("error") or {})
             yield from b.text(f"\n[model error: {msg.get('message') if isinstance(msg, dict) else msg}]")
-    if b.tools and stop == "end_turn": stop = "tool_use"
+    if b.had_tools and stop == "end_turn": stop = "tool_use"
     yield from b.finish(stop, usage)
 
 
@@ -324,8 +375,24 @@ PASSTHROUGH_KEYS = ("model", "messages", "system", "max_tokens", "metadata", "st
                     "temperature", "top_k", "top_p", "tools", "tool_choice", "thinking")
 
 
+def _drop_unsigned_thinking(messages):
+    """Thinking written by another vendor's model carries no Anthropic signature, and
+    Anthropic rejects such blocks: a chat that moved to Claude drops them (the answers
+    and tool calls they led to stay)."""
+    out = []
+    for m in messages or []:
+        c = m.get("content") if isinstance(m, dict) else None
+        if m.get("role") == "assistant" and isinstance(c, list):
+            kept = [b for b in c if not (isinstance(b, dict) and b.get("type") == "thinking" and not b.get("signature"))]
+            if len(kept) != len(c):
+                m = {**m, "content": kept or [{"type": "text", "text": " "}]}
+        out.append(m)
+    return out
+
+
 def passthrough_body(body, strict=True):
-    if not strict: return body
+    if not strict:
+        return {**body, "messages": _drop_unsigned_thinking(body.get("messages"))} if body.get("messages") else body
     out = {k: v for k, v in body.items() if k in PASSTHROUGH_KEYS}
     th = out.get("thinking")
     if isinstance(th, dict) and th.get("type") not in ("enabled", "disabled"):
@@ -447,6 +514,7 @@ def make_handler(resolver, log=None, token=None, hooks=None):
             STATS["by_provider"][provider] = STATS["by_provider"].get(provider, 0) + 1
             STATS["last"] = {"provider": provider, "model": model, "t": time.time(), "format": route["format"]}
             self.provider, self.account, self.tap = provider, None, _UsageTap()
+            self.session = session_id(self.headers, body)
             self.close_connection = True
             cap = route.get("max_output")
             if cap and int(body.get("max_tokens") or 0) > int(cap):
@@ -478,11 +546,13 @@ def make_handler(resolver, log=None, token=None, hooks=None):
                 except urllib.error.HTTPError as e:
                     try: raw = e.read().decode("utf-8", "replace")
                     except Exception: raw = ""
-                    quota = hooks.get("is_quota") or _is_quota
-                    if quota(e.code, _error_message(raw)) and len(accounts) > 1:
+                    block = _quota_block(e.code, raw, e.headers.get("retry-after") if e.headers else None)
+                    if block is not None:
+                        # remembered even with one account, so Settings can say when it resets
                         if hooks.get("exhausted"):
-                            try: hooks["exhausted"](self.provider, self.account, _error_message(raw))
+                            try: hooks["exhausted"](self.provider, self.account, _error_message(raw), block)
                             except Exception: pass
+                    if block is not None and len(accounts) > 1:
                         if log: log(f"{self.provider} account {self.account}: used up ({e.code}); "
                                     + ("trying the next" if n + 1 < len(accounts) else "no accounts left"))
                         if n + 1 < len(accounts): continue
@@ -491,7 +561,11 @@ def make_handler(resolver, log=None, token=None, hooks=None):
         def _post(self, route, path, data, key, extra_headers=None):
             base = route["base"].rstrip("/")
             headers = {"content-type": "application/json", "accept": "text/event-stream, application/json",
-                       "user-agent": "orbit-harness-gateway/1"}
+                       "user-agent": "orbit/1.0",
+                       "x-opencode-client": "orbit",
+                       # one id per conversation, for routing and prompt caching (OpenCode Go requires it)
+                       "x-opencode-session": getattr(self, "session", "") or "orbit",
+                       "x-claude-code-session-id": getattr(self, "session", "") or "orbit"}
             if key:
                 headers["authorization"] = "Bearer " + key
                 headers["x-api-key"] = key
@@ -584,12 +658,30 @@ def _same(a, b):
     return hmac.compare_digest(str(a or ""), str(b or ""))
 
 
-def _is_quota(status, message):
+def session_id(headers, body):
+    """A stable id for the conversation a request belongs to. OpenCode Go refuses
+    requests without one (x-opencode-session); Claude Code sends its own session
+    header, and anything else (Orbit's own calls) gets one derived from how the
+    conversation starts, which stays the same as it grows."""
+    for h in ("x-opencode-session", "x-claude-code-session-id", "x-session-id"):
+        v = (headers.get(h) or "").strip()
+        if v: return v[:128]
+    uid = str(((body or {}).get("metadata") or {}).get("user_id") or "")
+    m = re.search(r"session_([0-9a-f-]{16,})", uid)
+    if m: return m.group(1)
+    import hashlib
+    first = next((x for x in (body or {}).get("messages") or [] if x.get("role") == "user"), {})
+    seed = json.dumps([(body or {}).get("system"), first.get("content")], sort_keys=True, default=str)
+    h = hashlib.sha256(seed.encode("utf-8", "replace")).hexdigest()
+    return f"orbit-{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
+
+
+def _quota_block(status, raw, retry_after=None):
     try:
         import harness_usage
-        return harness_usage.is_quota_error(status, message)
+        return harness_usage.quota_block(status, raw, retry_after)
     except ImportError:
-        return status == 402
+        return 3600 if status == 402 else None
 
 
 def serve(port, resolver, log=None, token=None, hooks=None):
