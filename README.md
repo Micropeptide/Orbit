@@ -182,7 +182,9 @@ speculative decoding depth, fan behaviour).
 
 | | |
 |---|---|
-| **Chats** | Search, pin, tag, archive, drag to reorder, group into projects. Right-click any chat for the lot. |
+| **Chats** | An **Active now** section keeps chats that are answering, have queued messages or news on top; projects and date groups fold (older months start folded); each row shows how long ago it was active, with a ⋯ menu. Search, pin, tag, archive, drag to reorder, group into projects. |
+| **Message queue** | Send while a chat is answering and the message waits its turn: when the answer ends, the next queued message starts by itself (in this window or not, and after a restart). Drag queued messages to reorder, click to edit, **now** puts one into the running answer straight away (⌘Enter does that as you send). Stop pauses the queue. Up to 8 chats answer at once (Settings `max_parallel`); the local model still answers one at a time. |
+| **Files in chats** | File and folder paths in messages and tool calls are links: click to open on the Mac, right-click to show in Finder or copy. Apps and scripts are only ever shown in Finder, never run from a click. |
 | **Files** | Everything Orbit created or you attached, with the chat it came from. Rename, bin, restore, add to Knowledge. |
 | **Library** | Knowledge documents, Skills, Agents, saved prompts (which become `/commands`). |
 | **Tasks** | Scheduled prompts that run on their own, and a live view of cluster jobs if you use one. |

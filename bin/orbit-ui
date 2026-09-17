@@ -13,7 +13,7 @@ import qqcore as q
 
 PORT = int(os.environ.get("ORBIT_UI_PORT") or os.environ.get("QQ_UI_PORT") or 8899)
 import remote as REMOTE
-import collections, subprocess
+import collections, re, subprocess
 
 def remote_mode():
     return (q.S.get("remote_access") or {}).get("mode", "off")
@@ -35,7 +35,10 @@ WEB  = os.path.join(q.ROOT, "web")
 LOCK = threading.Lock()          # guards the registry itself
 PENDING = {}                     # id -> {"event": Event, "allow": bool}
 STATES = {}                      # sid -> State  (chats can run in parallel)
-MAX_PARALLEL = 3
+def _max_parallel():
+    # chats answering at once (remote models truly in parallel; the local model still one at a time)
+    try: return max(1, int(q.S.get("max_parallel") or 8))
+    except (TypeError, ValueError): return 8
 _APPROVE_SEQ = [0]
 
 
@@ -84,6 +87,10 @@ class State:
         self.flags = {}            # pin/archive/tags set before the first save
         self.model = None          # None = whatever the default model is
         self.plan_mode = False     # read-only: look and propose, change nothing
+        # messages sent while it answers wait here, in order, each starting when the
+        # one before it has been answered (unless sent "now", as a note mid-answer)
+        self.queue = []
+        self.queue_paused = False  # Stop pauses what is queued
     def reset(self):
         self.sid   = new_sid()
         self.msgs  = [{"role": "system", "content": q.system_prompt_for(self.agent, self.project)}]
@@ -100,6 +107,8 @@ class State:
                      "status": "", "done": True, "seq": 0}
         self.flags = {}
         self.model = None
+        self.queue = []
+        self.queue_paused = False
     def refresh_tools(self):
         specs, self.tool_errors = q.active_tools(self.project)
         self.tools = q.tools_for(self.agent, specs)
@@ -175,6 +184,8 @@ def get_state(sid=None, create=True):
                     if raw.get("plan") and sid not in q.PLANS: q.PLANS[sid] = raw["plan"]
                     st.plan_mode = bool(raw.get("plan_mode"))
                     st.model = raw.get("model") or None
+                    st.queue = list(raw.get("queue") or [])
+                    st.queue_paused = bool(raw.get("queue_paused"))
             except Exception:
                 pass
             STATES[sid] = st
@@ -210,6 +221,9 @@ def save_session(st=None):
     pl = q.PLANS.get(st.sid)
     if pl and pl.get("steps"): extra["plan"] = pl       # the chat's plan survives a restart
     if getattr(st, "plan_mode", False): extra["plan_mode"] = True
+    if getattr(st, "queue", None):
+        extra["queue"] = st.queue
+        if st.queue_paused: extra["queue_paused"] = True
     q.session_save(st.sid, st.msgs, st.title, extra)
 
 class H(http.server.BaseHTTPRequestHandler):
@@ -350,7 +364,7 @@ class H(http.server.BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError): pass
             return
         if p == "/api/running":
-            return self._send(200, jdump({"running": running_sids(), "max": MAX_PARALLEL}))
+            return self._send(200, jdump({"running": running_sids(), "max": _max_parallel()}))
         if p.startswith("/api/claude/config"):
             # your Claude setup, as Claude keeps it: settings, skills
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
@@ -453,6 +467,7 @@ class H(http.server.BaseHTTPRequestHandler):
             lv = _live_view(st)
             lv["known"] = True
             lv["running"] = st.lock.locked()
+            lv["queue_n"] = len(st.queue)
             return self._send(200, jdump(lv))
         if p == "/api/status":
             st = q.server_status()
@@ -642,6 +657,9 @@ class H(http.server.BaseHTTPRequestHandler):
                             q.PLANS[sid] = raw["plan"]
                         stt.plan_mode = bool(isinstance(raw, dict) and raw.get("plan_mode"))
                         stt.model = raw.get("model") if isinstance(raw, dict) else None
+                        if isinstance(raw, dict):
+                            stt.queue = list(raw.get("queue") or [])
+                            stt.queue_paused = bool(raw.get("queue_paused"))
                     except Exception: stt.project, stt.model = None, None
                 globals()["S"] = stt               # the chat the browser is looking at
                 q.ACTIVE_PROJECT["id"] = stt.project
@@ -657,7 +675,8 @@ class H(http.server.BaseHTTPRequestHandler):
                                               "plan_mode": bool(getattr(stt, "plan_mode", False)),
                                               "messages": render(shown), "n": len(msgs),
                                               "context": q.context_state(msgs, sid),
-                                              "running": running, "live": live}))
+                                              "running": running, "live": live,
+                                              "queue": _queue_view(stt)}))
             except Exception as e:
                 return self._send(404, jdump({"error": str(e)}))
         if p.startswith("/api/ws/"):
@@ -733,6 +752,30 @@ class H(http.server.BaseHTTPRequestHandler):
             st = STATES.get(sid_)
             started = bool(q.CE.marker_of(st.msgs if st else []))
             return self._send(200, jdump({"ok": True, "prefs": prefs, "started": started}))
+        if p == "/api/open_path":
+            # a file or folder named in a chat, opened on this Mac: in its usual app, or
+            # shown in Finder. Anything that would run (an app, a script, a program) is only
+            # shown in Finder, never launched from a click on a chat.
+            raw = str(d.get("path") or "").strip().strip("`'\"")
+            if raw.startswith("file://"): raw = _up.unquote(raw[7:])
+            path = os.path.abspath(os.path.expanduser(raw)) if raw else ""
+            if raw and not os.path.isabs(os.path.expanduser(raw)):
+                path = os.path.abspath(os.path.join(q.WORKSPACE, raw))
+            path = re.sub(r":\d+(?::\d+)?$", "", path) if not os.path.exists(path) else path   # file.py:12
+            if not path or not os.path.exists(path):
+                return self._send(404, jdump({"error": f"not found: {raw[:200]}"}))
+            ext = os.path.splitext(path)[1].lower()
+            runs = ext in (".app", ".command", ".tool", ".terminal", ".scpt", ".applescript", ".workflow",
+                           ".pkg", ".mpkg", ".jar", ".webloc", ".inetloc", ".fileloc", ".action", ".prefpane",
+                           ".shortcut", ".dmg") or (os.path.isfile(path) and os.access(path, os.X_OK) and not ext)
+            reveal = bool(d.get("reveal")) or runs
+            try:
+                subprocess.run(["open", "-R", path] if reveal else ["open", path], timeout=15, check=True,
+                               capture_output=True)
+            except Exception as e:
+                return self._send(200, jdump({"ok": False, "error": f"could not open: {type(e).__name__}"}))
+            return self._send(200, jdump({"ok": True, "path": path, "revealed": reveal,
+                                          "why": "shown in Finder rather than run" if runs and not d.get("reveal") else ""}))
         if p == "/api/pick_folder":
             # the Mac's own folder chooser, on this Mac's screen (a phone gets the text field)
             start = os.path.expanduser(str(d.get("start") or "~"))
@@ -1322,6 +1365,43 @@ class H(http.server.BaseHTTPRequestHandler):
                 try: os.replace(old, new)
                 except OSError: ok = False
             return self._send(200, jdump({"ok": ok}))
+        if p == "/api/queue":
+            st = get_state(d.get("sid")) if d.get("sid") else None
+            if st is None: return self._send(400, jdump({"error": "which chat?"}))
+            op, iid = d.get("op", ""), d.get("id")
+            find = lambda: next((it for it in st.queue if it["id"] == iid), None)
+            if op == "add":
+                _queue_add(st, d.get("text", ""), d.get("attachments"), d.get("effort"))
+            elif op == "edit":
+                it = find()
+                if not it: return self._send(404, jdump({"error": "that message has already started"}))
+                it["text"] = str(d.get("text") or "")
+                _queue_saved(st)
+            elif op == "remove":
+                st.queue = [it for it in st.queue if it["id"] != iid]; _queue_saved(st)
+            elif op == "order":
+                ids = [str(x) for x in d.get("ids") or []]
+                pos = {x: i for i, x in enumerate(ids)}
+                st.queue.sort(key=lambda it: pos.get(it["id"], len(pos)))
+                _queue_saved(st)
+            elif op == "now":
+                # this one goes in right away: into the answer running now, as a note
+                # it reads at its next step -- or, if nothing is running, it starts
+                it = find()
+                if not it: return self._send(404, jdump({"error": "that message has already started"}))
+                if st.lock.locked() and not it.get("attachments"):
+                    st.queue.remove(it); _queue_saved(st)
+                    st.inbox.append({"text": it["text"], "t": time.time()}); st.interrupt.set()
+                    return self._send(200, jdump({"ok": True, "interjected": True, "queue": _queue_view(st)}))
+                st.queue.remove(it); st.queue.insert(0, it); st.queue_paused = False; _queue_saved(st)
+            elif op in ("pause", "resume"):
+                st.queue_paused = op == "pause"; _queue_saved(st)
+            elif op == "clear":
+                st.queue = []; st.queue_paused = False; _queue_saved(st)
+            elif op != "get":
+                return self._send(400, jdump({"error": f"unknown op {op}"}))
+            if op in ("add", "now", "resume"): _drain()
+            return self._send(200, jdump({"ok": True, "queue": _queue_view(st)}))
         if p == "/api/interject":
             # A note for an answer that is still running: queued, and handed to
             # the model at its next step. The interrupt cuts a long generation
@@ -1344,7 +1424,7 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._send(200, jdump({"ok": True, "sid": st.sid}))
         if p == "/api/running":
             return self._send(200, jdump({"running": running_sids(),
-                                          "max": MAX_PARALLEL}))
+                                          "max": _max_parallel()}))
         if p == "/api/prompts/save":
             pr = q.prompts_load(); pr[d.get("name","untitled")] = {"text": d.get("text",""),
                                                                    "desc": d.get("desc","")}
@@ -1438,225 +1518,40 @@ class H(http.server.BaseHTTPRequestHandler):
     def _chat(self):
         d = self._body()
         st = get_state(d.get("sid"))
-        def _refuse(msg):
+        def _stream_once(events):
             self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream"); self.end_headers()
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Connection", "close"); self.end_headers()
+            self.close_connection = True
             try:
-                self.wfile.write(f"data: {jdump({'k':'error','p':msg})}\n\n".encode())
-                self.wfile.write(f"data: {jdump({'k':'end','p':{}})}\n\n".encode())
+                for k, pl in events:
+                    self.wfile.write(f"data: {jdump({'k': k, 'p': pl})}\n\n".encode())
             except Exception: pass
-        if len(running_sids()) >= MAX_PARALLEL and not st.lock.locked():
-            return _refuse(f"{MAX_PARALLEL} chats are already generating. "
-                           "Wait for one to finish, or stop it.")
+        text, atts, effort = d.get("message", ""), d.get("attachments") or [], d.get("effort")
+        busy = st.lock.locked()
+        full = len(running_sids()) >= _max_parallel()
+        if busy or full or st.queue:
+            # it waits its turn: after the answer running now (and anything queued
+            # before it), or for a free slot when many chats are answering
+            if d.get("now") and busy and not atts:
+                st.inbox.append({"text": text, "t": time.time()}); st.interrupt.set()
+                return _stream_once([("interjected", {"text": text}), ("end", {"sid": st.sid, "interjected": True})])
+            item = _queue_add(st, text, atts, effort)
+            _drain()
+            why = ("this chat is answering" if busy else
+                   f"{_max_parallel()} chats are answering" if full else "earlier messages are queued")
+            return _stream_once([("queued_message", {"item": item, "why": why, "queue": _queue_view(st)}),
+                                 ("end", {"sid": st.sid, "queued": True})])
         if not st.lock.acquire(blocking=False):
-            waited = int(time.time() - st.busy_since)
-            return _refuse(f"This chat is already generating (started {waited}s ago). "
-                           "Press Stop to interrupt it.")
-        st.busy_since = time.time()
-        st.cancel.clear()
-        st.live = {"thinking": "", "content": "", "tools": [],
-                   "status": "", "done": False, "seq": 0}
-        text = d.get("message", "")
-        try: text = q.expand_prompt(text)       # '/name words' runs a saved prompt
-        except Exception: pass
-        atts = d.get("attachments") or []
-        effort = d.get("effort")
+            item = _queue_add(st, text, atts, effort)
+            return _stream_once([("queued_message", {"item": item, "why": "this chat is answering",
+                                                     "queue": _queue_view(st)}), ("end", {"sid": st.sid, "queued": True})])
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
-        Q = queue.Queue()
-
-        def work():
-            slotted = [False]
-            try:
-                parts, notes = [], []
-                for a in atts:
-                    if a.get("kind") == "image":
-                        parts.append({"type":"image_url","image_url":{"url":a["data_url"]}})
-                    else:
-                        # a file already in the workspace can be named by its relative
-                        # path; anything that escapes the workspace is ignored
-                        path = a.get("path")
-                        if not path and a.get("rel"):
-                            cand = os.path.abspath(os.path.join(q.WORKSPACE, str(a["rel"])))
-                            if cand.startswith(os.path.abspath(q.WORKSPACE) + os.sep): path = cand
-                        if not path: continue
-                        notes.append(f"[attached file: {a['name']} — read it with read_file at {path}]")
-                body = text + (("\n" + "\n".join(notes)) if notes else "")
-                content = ([{"type":"text","text":body}] + parts) if parts else body
-                first = st.title is None
-                if True:
-                    if first:
-                        st.title = " ".join(str(text).split())[:60] or "(untitled)"
-                    # write immediately: a running chat must be visible in the sidebar
-                    st.msgs.append({"role": "user", "content": content})
-                    st.running = True
-                    save_session(st)
-                    st.msgs.pop()
-                    def _approve(fn, a, reason, info=None):
-                        # info: a prompt raised by Claude Code (claude_engine) -- its
-                        # "always allow" becomes a Claude permission rule, not Orbit's
-                        _APPROVE_SEQ[0] += 1
-                        rid = f"ap{_APPROVE_SEQ[0]}"
-                        ev = threading.Event()
-                        PENDING[rid] = {"event": ev, "allow": False, "fn": fn, "args": a}
-                        req = {"id": rid, "name": (info or {}).get("tool") or fn, "args": a, "reason": reason,
-                               "suggested_pattern": q._rule_pattern_suggestion(fn, a)}
-                        if info:
-                            req.update(claude=True, suggested_pattern=info.get("suggested_pattern") or req["name"],
-                                       suggestions=info.get("suggestions") or [])
-                        if fn in ("write_file", "edit_file"):
-                            # what the change will be, so it can be judged before it's made
-                            dv = q.preview_edit(fn, a)
-                            if dv: req["diff"] = dv
-                        Q.put(("approval_request", req))
-                        # also in the live buffer, so any window that opens this chat
-                        # can see the prompt and answer it — it used to exist only in
-                        # the tab that sent the message, and time out unseen
-                        st.live["approval"] = req
-                        q.notify("Orbit needs your approval", f"{fn}: {reason}")
-                        ok = ev.wait(timeout=900)
-                        st.live.pop("approval", None)
-                        rec = PENDING.pop(rid, {})
-                        if info:
-                            return {"allow": bool(rec.get("allow")) if ok else False,
-                                    "always": bool(ok and rec.get("always")),
-                                    "pattern": rec.get("pattern") or "",
-                                    "note": (rec.get("message") or rec.get("note") or "").strip() if ok else ""}
-                        if ok and rec.get("allow") and rec.get("always"):
-                            q.add_permission_rule("allow", fn,
-                                rec.get("pattern") or q._rule_pattern_suggestion(fn, a),
-                                rec.get("note") or "")
-                        allow = bool(rec.get("allow")) if ok else False
-                        # a reason typed with Deny (or a note with Allow) goes back to
-                        # the model, so it can change course rather than just stop
-                        note = (rec.get("message") or "").strip() if ok else ""
-                        return (allow, note) if note else allow
-
-                    def _ask(question, options, multiple):
-                        _APPROVE_SEQ[0] += 1
-                        rid = f"qa{_APPROVE_SEQ[0]}"
-                        ev = threading.Event()
-                        PENDING[rid] = {"event": ev, "answer": None}
-                        req = {"id": rid, "question": question, "options": options, "multiple": multiple}
-                        Q.put(("question", req))
-                        st.live["question"] = req          # any window can answer it
-                        q.notify("Orbit has a question", question)
-                        ok = ev.wait(timeout=1800)
-                        st.live.pop("question", None)
-                        rec = PENDING.pop(rid, {})
-                        return rec.get("answer") if ok else None
-
-                    def _emit(k, p):
-                        _live_record(st, k, p)            # keep a copy so you can rejoin later
-                        if k == "tool_result" and q.LAST_IMAGES:
-                            p = dict(p or {})
-                            p["images"] = [os.path.relpath(i, q.WORKSPACE) for i in q.LAST_IMAGES]
-                            q.LAST_IMAGES = []
-                        if k == "tool_result" and (p or {}).get("name") in ("write_file", "edit_file") and q.LAST_DIFF:
-                            p = dict(p or {}); p["diff"] = dict(q.LAST_DIFF); q.LAST_DIFF.clear()
-                        Q.put((k, p))
-                    q.CURRENT_SID.update(sid=st.sid, title=st.title)
-                    q.ACTIVE_PROJECT["id"] = st.project
-                    if not st.model:
-                        # a chat keeps the model it started on: changing the default later
-                        # (or picking a model in another chat) must not move it, and its
-                        # context window with it
-                        try:
-                            first = q.current_model(q.MODELS.load(q.ROOT).get("default") or None)
-                            if first and first.get("id") and not str(first["id"]).startswith("local-dir:"):
-                                st.model = first["id"]
-                        except Exception:
-                            pass
-                    q.ACTIVE_MODEL["id"] = st.model
-                    prev_effort = q.S.get("reasoning_effort")
-                    if effort: q.S["reasoning_effort"] = effort
-                    # one answer at a time on the local model: if another chat has
-                    # it, this one waits in line (and says so) rather than running
-                    # alongside -- two at once made both crawl
-                    if not q.slot_enter(_emit, st.cancel, st.sid, st.model):
-                        st.msgs.append({"role": "user", "content": content, "t": time.time()})
-                        st.running = False; save_session(st)
-                        Q.put(("end", {"sid": st.sid, "title": st.title})); return
-                    slotted[0] = True
-                    _refresh_system(st)
-                    st.refresh_tools()     # a project's own tools, and any added since
-                    st.msgs, did, pct = q.maybe_autocompact(st.msgs, emit=lambda k, p: Q.put((k, p)),
-                                                            sid=st.sid)
-                    if did: save_session(st)
-                    _t0 = time.time()
-                    n0 = len(st.msgs)
-                    st.interrupt.clear()
-                    q.TURN_CTX.ask = _ask
-                    q.turn(st.msgs, content, st.tools, emit=_emit, approve=_approve,
-                           cancel=st.cancel, inbox=st.inbox, interrupt=st.interrupt, sid=st.sid,
-                           checkpoint=lambda: save_session(st), project=st.project,
-                           read_only=st.plan_mode)
-                    spent = dict(q.LAST_TURN.get(st.sid) or {})
-                    # a note that landed in the instant between the answer ending
-                    # and this chat being released: answer it now, in this same
-                    # stream, rather than leave it sitting unread
-                    while st.inbox and not st.cancel.is_set():
-                        note = st.inbox.popleft()
-                        _emit("interjection", {"text": note.get("text", "")})
-                        save_session(st)
-                        st.interrupt.clear()
-                        q.turn(st.msgs, note.get("text", ""), st.tools, emit=_emit,
-                               approve=_approve, cancel=st.cancel, inbox=st.inbox,
-                               interrupt=st.interrupt, sid=st.sid,
-                               checkpoint=lambda: save_session(st), project=st.project,
-                               read_only=st.plan_mode)
-                        # one stream, one bill: add the follow-up's time and tokens
-                        more = q.LAST_TURN.get(st.sid) or {}
-                        spent["secs"] = round((spent.get("secs") or 0) + (more.get("secs") or 0), 1)
-                        spent["tool_runs"] = (spent.get("tool_runs") or 0) + (more.get("tool_runs") or 0)
-                        spent["usage"] = {k: (spent.get("usage") or {}).get(k, 0) + (more.get("usage") or {}).get(k, 0)
-                                          for k in ("prompt_tokens", "completion_tokens")}
-                    q.LAST_TURN[st.sid] = spent
-                    try:
-                        u = (q.LAST_TURN.get(st.sid) or {}).get("usage") or {}
-                        stats = u if any(u.values()) else (q.server_status().get("last") or {})
-                        spec = q.current_model(st.model) or {}
-                        q.ledger_add(st.sid, seconds=round(time.time() - _t0, 1),
-                                     prompt_tokens=stats.get("prompt_tokens"),
-                                     completion_tokens=stats.get("completion_tokens"),
-                                     model=spec.get("label") or spec.get("model"))
-                        tot = (stats.get("prompt_tokens") or 0) + (stats.get("completion_tokens") or 0)
-                        if tot: q.SESSION_TOKENS[st.sid] = tot
-                    except Exception: pass
-                    st.running = False
-                    save_session(st)
-                    _learn_later(st, n0)
-                if first and not st.cancel.is_set():
-                    try:
-                        auto = autotitle(st.msgs)
-                        if auto:
-                            st.title = auto
-                            save_session(st)
-                    except Exception:
-                        pass
-                Q.put(("end", {"sid": st.sid, "title": st.title,
-                               **{k: v for k, v in (q.LAST_TURN.get(st.sid) or {}).items()
-                                  if k in ("secs", "usage", "tool_runs", "rounds", "changes", "t")}}))
-            except Exception as e:
-                Q.put(("error", f"{type(e).__name__}: {e}")); Q.put(("end", {}))
-            finally:
-                if slotted[0]: q.slot_exit()
-                st.live["done"] = True
-                if st.running:
-                    # an answer that failed, not one Orbit was stopped during —
-                    # the next start must not treat it as cut off and resume it
-                    st.running = False
-                    try: save_session(st)
-                    except Exception: pass
-                if st.temp:
-                    try: q.redact_server_log()
-                    except Exception: pass
-                try: st.lock.release()
-                except RuntimeError: pass
-        threading.Thread(target=work, daemon=True).start()
+        Q = start_turn(st, text, atts, effort, queue.Queue())
         while True:
             kind, payload = Q.get()
             try:
@@ -1665,6 +1560,286 @@ class H(http.server.BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 return
             if kind == "end": return
+
+def start_turn(st, text, atts=None, effort=None, Q=None):
+    """Run one message in a chat on its own thread. The chat's lock must already be
+    held (it is released when the answer ends). Events go to Q (a browser's stream)
+    and always to the chat's live buffer, so any window can follow it; a message the
+    queue starts has no stream, and its events go only to the live buffer."""
+    Q = Q if Q is not None else _Sink()
+    st.busy_since = time.time()
+    st.cancel.clear()
+    st.live = {"thinking": "", "content": "", "tools": [],
+               "status": "", "done": False, "seq": 0, "user": str(text or "")[:4000]}
+    try: text = q.expand_prompt(text)       # '/name words' runs a saved prompt
+    except Exception: pass
+    atts = atts or []
+
+    def work():
+        slotted = [False]
+        try:
+            parts, notes = [], []
+            for a in atts:
+                if a.get("kind") == "image":
+                    parts.append({"type":"image_url","image_url":{"url":a["data_url"]}})
+                else:
+                    # a file already in the workspace can be named by its relative
+                    # path; anything that escapes the workspace is ignored
+                    path = a.get("path")
+                    if not path and a.get("rel"):
+                        cand = os.path.abspath(os.path.join(q.WORKSPACE, str(a["rel"])))
+                        if cand.startswith(os.path.abspath(q.WORKSPACE) + os.sep): path = cand
+                    if not path: continue
+                    notes.append(f"[attached file: {a['name']} — read it with read_file at {path}]")
+            body = text + (("\n" + "\n".join(notes)) if notes else "")
+            content = ([{"type":"text","text":body}] + parts) if parts else body
+            first = st.title is None
+            if True:
+                if first:
+                    st.title = " ".join(str(text).split())[:60] or "(untitled)"
+                # write immediately: a running chat must be visible in the sidebar
+                st.msgs.append({"role": "user", "content": content})
+                st.running = True
+                save_session(st)
+                st.msgs.pop()
+                def _approve(fn, a, reason, info=None):
+                    # info: a prompt raised by Claude Code (claude_engine) -- its
+                    # "always allow" becomes a Claude permission rule, not Orbit's
+                    _APPROVE_SEQ[0] += 1
+                    rid = f"ap{_APPROVE_SEQ[0]}"
+                    ev = threading.Event()
+                    PENDING[rid] = {"event": ev, "allow": False, "fn": fn, "args": a}
+                    req = {"id": rid, "name": (info or {}).get("tool") or fn, "args": a, "reason": reason,
+                           "suggested_pattern": q._rule_pattern_suggestion(fn, a)}
+                    if info:
+                        req.update(claude=True, suggested_pattern=info.get("suggested_pattern") or req["name"],
+                                   suggestions=info.get("suggestions") or [])
+                    if fn in ("write_file", "edit_file"):
+                        # what the change will be, so it can be judged before it's made
+                        dv = q.preview_edit(fn, a)
+                        if dv: req["diff"] = dv
+                    Q.put(("approval_request", req))
+                    # also in the live buffer, so any window that opens this chat
+                    # can see the prompt and answer it — it used to exist only in
+                    # the tab that sent the message, and time out unseen
+                    st.live["approval"] = req
+                    q.notify("Orbit needs your approval", f"{fn}: {reason}")
+                    ok = ev.wait(timeout=900)
+                    st.live.pop("approval", None)
+                    rec = PENDING.pop(rid, {})
+                    if info:
+                        return {"allow": bool(rec.get("allow")) if ok else False,
+                                "always": bool(ok and rec.get("always")),
+                                "pattern": rec.get("pattern") or "",
+                                "note": (rec.get("message") or rec.get("note") or "").strip() if ok else ""}
+                    if ok and rec.get("allow") and rec.get("always"):
+                        q.add_permission_rule("allow", fn,
+                            rec.get("pattern") or q._rule_pattern_suggestion(fn, a),
+                            rec.get("note") or "")
+                    allow = bool(rec.get("allow")) if ok else False
+                    # a reason typed with Deny (or a note with Allow) goes back to
+                    # the model, so it can change course rather than just stop
+                    note = (rec.get("message") or "").strip() if ok else ""
+                    return (allow, note) if note else allow
+
+                def _ask(question, options, multiple):
+                    _APPROVE_SEQ[0] += 1
+                    rid = f"qa{_APPROVE_SEQ[0]}"
+                    ev = threading.Event()
+                    PENDING[rid] = {"event": ev, "answer": None}
+                    req = {"id": rid, "question": question, "options": options, "multiple": multiple}
+                    Q.put(("question", req))
+                    st.live["question"] = req          # any window can answer it
+                    q.notify("Orbit has a question", question)
+                    ok = ev.wait(timeout=1800)
+                    st.live.pop("question", None)
+                    rec = PENDING.pop(rid, {})
+                    return rec.get("answer") if ok else None
+
+                def _emit(k, p):
+                    _live_record(st, k, p)            # keep a copy so you can rejoin later
+                    if k == "tool_result" and q.LAST_IMAGES:
+                        p = dict(p or {})
+                        p["images"] = [os.path.relpath(i, q.WORKSPACE) for i in q.LAST_IMAGES]
+                        q.LAST_IMAGES = []
+                    if k == "tool_result" and (p or {}).get("name") in ("write_file", "edit_file") and q.LAST_DIFF:
+                        p = dict(p or {}); p["diff"] = dict(q.LAST_DIFF); q.LAST_DIFF.clear()
+                    Q.put((k, p))
+                q.CURRENT_SID.update(sid=st.sid, title=st.title)
+                q.ACTIVE_PROJECT["id"] = st.project
+                if not st.model:
+                    # a chat keeps the model it started on: changing the default later
+                    # (or picking a model in another chat) must not move it, and its
+                    # context window with it
+                    try:
+                        first = q.current_model(q.MODELS.load(q.ROOT).get("default") or None)
+                        if first and first.get("id") and not str(first["id"]).startswith("local-dir:"):
+                            st.model = first["id"]
+                    except Exception:
+                        pass
+                q.ACTIVE_MODEL["id"] = st.model
+                # this thread's own model and effort: other chats answering at the same
+                # time change the shared ACTIVE_MODEL (and "retry with more effort" used
+                # to change the effort setting for every chat, for good)
+                q.TURN_CTX.pin_model = st.model
+                q.TURN_CTX.model = st.model
+                q.TURN_CTX.pin_effort = effort or None
+                # one answer at a time on the local model: if another chat has
+                # it, this one waits in line (and says so) rather than running
+                # alongside -- two at once made both crawl
+                if not q.slot_enter(_emit, st.cancel, st.sid, st.model):
+                    st.msgs.append({"role": "user", "content": content, "t": time.time()})
+                    st.running = False; save_session(st)
+                    Q.put(("end", {"sid": st.sid, "title": st.title})); return
+                slotted[0] = True
+                _refresh_system(st)
+                st.refresh_tools()     # a project's own tools, and any added since
+                st.msgs, did, pct = q.maybe_autocompact(st.msgs, emit=lambda k, p: Q.put((k, p)),
+                                                        sid=st.sid)
+                if did: save_session(st)
+                _t0 = time.time()
+                n0 = len(st.msgs)
+                st.interrupt.clear()
+                q.TURN_CTX.ask = _ask
+                q.turn(st.msgs, content, st.tools, emit=_emit, approve=_approve,
+                       cancel=st.cancel, inbox=st.inbox, interrupt=st.interrupt, sid=st.sid,
+                       checkpoint=lambda: save_session(st), project=st.project,
+                       read_only=st.plan_mode)
+                spent = dict(q.LAST_TURN.get(st.sid) or {})
+                # a note that landed in the instant between the answer ending
+                # and this chat being released: answer it now, in this same
+                # stream, rather than leave it sitting unread
+                while st.inbox and not st.cancel.is_set():
+                    note = st.inbox.popleft()
+                    _emit("interjection", {"text": note.get("text", "")})
+                    save_session(st)
+                    st.interrupt.clear()
+                    q.turn(st.msgs, note.get("text", ""), st.tools, emit=_emit,
+                           approve=_approve, cancel=st.cancel, inbox=st.inbox,
+                           interrupt=st.interrupt, sid=st.sid,
+                           checkpoint=lambda: save_session(st), project=st.project,
+                           read_only=st.plan_mode)
+                    # one stream, one bill: add the follow-up's time and tokens
+                    more = q.LAST_TURN.get(st.sid) or {}
+                    spent["secs"] = round((spent.get("secs") or 0) + (more.get("secs") or 0), 1)
+                    spent["tool_runs"] = (spent.get("tool_runs") or 0) + (more.get("tool_runs") or 0)
+                    spent["usage"] = {k: (spent.get("usage") or {}).get(k, 0) + (more.get("usage") or {}).get(k, 0)
+                                      for k in ("prompt_tokens", "completion_tokens")}
+                q.LAST_TURN[st.sid] = spent
+                try:
+                    u = (q.LAST_TURN.get(st.sid) or {}).get("usage") or {}
+                    stats = u if any(u.values()) else (q.server_status().get("last") or {})
+                    spec = q.current_model(st.model) or {}
+                    q.ledger_add(st.sid, seconds=round(time.time() - _t0, 1),
+                                 prompt_tokens=stats.get("prompt_tokens"),
+                                 completion_tokens=stats.get("completion_tokens"),
+                                 model=spec.get("label") or spec.get("model"))
+                    tot = (stats.get("prompt_tokens") or 0) + (stats.get("completion_tokens") or 0)
+                    if tot: q.SESSION_TOKENS[st.sid] = tot
+                except Exception: pass
+                st.running = False
+                save_session(st)
+                _learn_later(st, n0)
+            if first and not st.cancel.is_set():
+                # the title is written alongside, not before the chat is free: a queued
+                # message used to wait for it (16 s on a reasoning model)
+                def _title(msgs=list(st.msgs), model=st.model):
+                    q.TURN_CTX.pin_model = model        # this chat's model, on this thread too
+                    try:
+                        auto = autotitle(msgs)
+                        if auto:
+                            st.title = auto
+                            save_session(st)
+                    except Exception:
+                        pass
+                threading.Thread(target=_title, daemon=True).start()
+            Q.put(("end", {"sid": st.sid, "title": st.title,
+                           **{k: v for k, v in (q.LAST_TURN.get(st.sid) or {}).items()
+                              if k in ("secs", "usage", "tool_runs", "rounds", "changes", "t")}}))
+        except Exception as e:
+            Q.put(("error", f"{type(e).__name__}: {e}")); Q.put(("end", {}))
+        finally:
+            if slotted[0]: q.slot_exit()
+            st.live["done"] = True
+            if st.running:
+                # an answer that failed, not one Orbit was stopped during —
+                # the next start must not treat it as cut off and resume it
+                st.running = False
+                try: save_session(st)
+                except Exception: pass
+            if st.temp:
+                try: q.redact_server_log()
+                except Exception: pass
+            try: st.lock.release()
+            except RuntimeError: pass
+            # Stop pauses the chat's queue (the rest waits for you); otherwise the next
+            # queued message starts, and chats waiting for a free slot get one
+            if st.cancel.is_set() and st.queue: st.queue_paused = True; _queue_saved(st)
+            threading.Thread(target=_drain, daemon=True).start()
+    threading.Thread(target=work, daemon=True).start()
+    return Q
+
+
+class _Sink:
+    """A stream nobody reads: a message started by the queue."""
+    def put(self, item): pass
+
+
+DRAIN_LOCK = threading.Lock()
+INDEX_LOCK = threading.Lock()
+QUEUE_INDEX = os.path.join(q.ROOT, "config", "queues.json")
+
+def _queue_view(st):
+    return {"items": [{k: v for k, v in it.items() if k != "attachments"} |
+                      {"attachments": [{"name": a.get("name"), "kind": a.get("kind")} for a in it.get("attachments") or []]}
+                      for it in st.queue],
+            "paused": bool(st.queue_paused), "running": st.lock.locked()}
+
+def _queue_saved(st):
+    """The queue lives in the chat's file (so it survives a restart), and chats
+    with one are listed in config/queues.json so a restart can find them."""
+    if st.temp: return
+    try: save_session(st)
+    except Exception: pass
+    try:
+        with INDEX_LOCK:
+            idx = {}
+            try: idx = json.load(open(QUEUE_INDEX))
+            except Exception: pass
+            if st.queue: idx[st.sid] = len(st.queue)
+            else: idx.pop(st.sid, None)
+            tmp = QUEUE_INDEX + ".tmp"
+            json.dump(idx, open(tmp, "w")); os.replace(tmp, QUEUE_INDEX)
+    except Exception: pass
+
+def _queue_add(st, text, atts=None, effort=None):
+    item = {"id": uuid.uuid4().hex[:10], "text": str(text or ""), "attachments": list(atts or []),
+            "effort": effort, "t": time.time()}
+    st.queue.append(item)
+    _queue_saved(st)
+    return {k: v for k, v in item.items() if k != "attachments"}
+
+def _drain():
+    """Start the next queued message in every chat that is free, while there are
+    free slots. Called when an answer ends and when something is queued."""
+    started = []
+    with DRAIN_LOCK:
+        for st in list(STATES.values()):
+            if not st.queue or st.queue_paused: continue
+            if len(running_sids()) >= _max_parallel(): break
+            if not st.lock.acquire(blocking=False): continue
+            if not st.queue:
+                st.lock.release(); continue
+            item = st.queue.pop(0)
+            started.append((st, item))
+    for st, item in started:
+        _queue_saved(st)
+        try:
+            start_turn(st, item["text"], item.get("attachments") or [], item.get("effort"))
+        except Exception as e:
+            print(f"  ! queued message in {st.sid}: {type(e).__name__}: {e}")
+            try: st.lock.release()
+            except RuntimeError: pass
 
 # stream events worth showing to a tab that rejoins an answer mid-way
 _STATUS_KINDS = ("server_starting", "stagnation", "autocompact", "squeezed", "notice", "status",
@@ -1977,6 +2152,7 @@ def run_job(job):
                 q.ACTIVE_PROJECT["id"] = st.project
                 # the task's own model first: "run this in this chat on deepseek" means deepseek
                 q.ACTIVE_MODEL["id"] = job.get("model") or st.model
+                q.TURN_CTX.pin_model = q.TURN_CTX.model = job.get("model") or st.model
                 _refresh_system(st)
                 st.msgs, _did, _pct = q.maybe_autocompact(st.msgs, sid=st.sid)
                 n0 = len(st.msgs)
@@ -2000,11 +2176,13 @@ def run_job(job):
                     except Exception: pass
                 try: st.lock.release()
                 except RuntimeError: pass
+                threading.Thread(target=_drain, daemon=True).start()   # messages queued meanwhile
         else:
             pid = job.get("project") or None
             q.ACTIVE_PROJECT["id"] = pid
             # the job's own model; it used to run on whichever model the last chat had
             q.ACTIVE_MODEL["id"] = job.get("model") or None
+            q.TURN_CTX.pin_model = q.TURN_CTX.model = job.get("model") or None
             msgs = [{"role": "system", "content": q.system_prompt_for(job.get("agent"), pid)}]
             specs, _ = q.active_tools(pid)
             tools = q.tools_for(job.get("agent"), specs)
@@ -2167,6 +2345,15 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"  ! OpenCode Go usage limits: {e}")
     threading.Thread(target=_refresh_lists, daemon=True).start()
+    def _resume_queues():
+        # messages still queued when Orbit stopped: their chats carry on
+        time.sleep(15)
+        try: idx = json.load(open(QUEUE_INDEX))
+        except Exception: idx = {}
+        for qsid in list(idx):
+            if os.path.exists(q.session_path(qsid)): get_state(qsid)
+        _drain()
+    threading.Thread(target=_resume_queues, daemon=True).start()
     threading.Thread(target=q.CE.history_items_cached, daemon=True).start()   # warm the sidebar
     mode = remote_mode()
     addrs = REMOTE.bind_addresses(mode)

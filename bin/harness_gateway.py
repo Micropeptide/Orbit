@@ -100,6 +100,14 @@ def to_openai(body):
         elif tc.get("type") == "tool": out["tool_choice"] = {"type": "function", "function": {"name": tc.get("name")}}
         elif tc.get("type") == "none": out["tool_choice"] = "none"
         else: out["tool_choice"] = "auto"
+    th = body.get("thinking") if isinstance(body.get("thinking"), dict) else {}
+    model = str(body.get("model") or "").lower()
+    if model.startswith("deepseek") and th.get("type") in (None, "disabled"):
+        # DeepSeek V4 reasons by default: a request that asks for no thinking (a title, a
+        # quick note) says so, or it spends hundreds of tokens and ~10 s first. (Measured on
+        # OpenCode Go: reasoning_effort "none" -> 1 s, 5 tokens. GLM there rejects a
+        # "thinking" field, so it is not sent.)
+        out["reasoning_effort"] = "none"
     if out["stream"]: out["stream_options"] = {"include_usage": True}
     return out
 

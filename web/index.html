@@ -64,9 +64,55 @@ aside.hide{display:none}
 .newbtn:hover{border-color:var(--acc)}
 .search{margin:0 12px 6px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;
  background:var(--card);color:var(--fg);font:inherit;font-size:12.5px;width:calc(100% - 24px)}
-.slist{flex:1;overflow-y:auto;padding:2px 8px 12px}
-.sitem{padding:9px 10px;border-radius:8px;cursor:pointer;font-size:13px;display:flex;gap:6px;
- align-items:center;min-height:34px}
+.slist{padding:0 0 6px}
+.sitem{padding:5px 8px 5px 10px;border-radius:7px;cursor:pointer;font-size:13px;display:flex;gap:6px;
+ align-items:center;min-height:29px;position:relative}
+.sitem .ago{color:var(--dim);font-size:10.5px;font-variant-numeric:tabular-nums;flex:0 0 auto}
+.sitem .more{display:none;border:0;background:none;color:var(--mut);cursor:pointer;padding:0 4px;font-size:14px;line-height:1}
+.sitem:hover .more{display:inline}.sitem:hover .ago{display:none}
+.sitem .qn{font-size:10px;padding:0 5px;border-radius:8px;background:color-mix(in srgb,var(--acc) 18%,transparent);color:var(--acc)}
+.pathlink{color:var(--acc);cursor:pointer;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:2px;word-break:break-all}
+.pathlink:hover{text-decoration-style:solid}
+.toolopen{margin-left:8px;font-size:11px;text-decoration:none;opacity:.8}
+.queuebox{border:1px solid var(--line);border-radius:10px;background:var(--card);margin:0 0 8px;padding:5px 6px 2px;
+ max-height:230px;overflow-y:auto}
+.queuebox .qhead{display:flex;gap:8px;align-items:center;font-size:12px;padding:1px 4px 4px}
+.queuebox .qhead .ghost,.queuebox .qitem .ghost{font-size:11.5px;padding:1px 7px}
+.queuebox .qitem{display:flex;gap:6px;align-items:center;font-size:13px;padding:3px 4px;border-radius:7px;border-top:2px solid transparent}
+.queuebox .qitem:hover{background:var(--panel)}
+.queuebox .qitem.dragging{opacity:.4}.queuebox .qitem.dropabove{border-top-color:var(--acc)}
+.queuebox .grip{cursor:grab;color:var(--dim);font-size:11px;letter-spacing:-2px;user-select:none}
+.queuebox .qn{color:var(--dim);font-size:11px;min-width:12px}
+.queuebox .qt{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:text}
+.queuebox .qa{font-size:10.5px;color:var(--mut)}
+.queuebox .qedit{flex:1;font:inherit;font-size:13px;border:1px solid var(--acc);border-radius:7px;background:var(--bg);color:var(--fg);padding:4px 7px;resize:vertical}
+.queuebox .qtail{height:6px}
+.sidetop{display:flex;gap:4px;margin:9px 12px 5px}
+.sidetop .newbtn{margin:0}.sidetop #newchat{flex:1}.sidetop #newwith{width:auto;padding:0 10px}
+.searchbtn{margin:0 12px 6px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;display:flex;
+ align-items:center;background:var(--card);color:var(--mut);font:inherit;font-size:12.5px;cursor:pointer;text-align:left}
+.searchbtn span{flex:1}.searchbtn kbd{font-size:10px;color:var(--dim);border:1px solid var(--line);border-radius:4px;padding:0 4px}
+.searchbtn:hover{border-color:var(--acc);color:var(--fg)}
+.iconbtn2{border:0;background:none;color:var(--mut);cursor:pointer;font-size:13px;padding:2px 5px;border-radius:6px}
+.iconbtn2:hover{color:var(--fg);background:var(--card)}
+.brand #srvmenu{margin-left:auto}
+.sidescroll{flex:1;overflow-y:auto;padding:2px 8px 12px;min-height:0}
+.sechead{display:flex;align-items:center;gap:5px;padding:9px 6px 3px;font-size:11px;letter-spacing:.06em;
+ text-transform:uppercase;color:var(--dim);cursor:pointer;user-select:none;position:sticky;top:0;background:var(--panel);z-index:2}
+.sechead .caret{display:inline-block;width:10px;transition:transform .15s}
+.sechead.closed .caret{transform:rotate(-90deg)}
+.sechead .ct{text-transform:none;letter-spacing:0}
+.sechead .secbtn{margin-left:auto;border:0;background:none;color:var(--mut);cursor:pointer;font-size:14px;padding:0 5px;border-radius:5px}
+.sechead .secbtn:hover{color:var(--acc)}
+.sechead .filtersel{margin-left:auto;font-size:11px;padding:0 3px;border-radius:6px;border:1px solid var(--line);
+ background:var(--card);color:var(--mut);text-transform:none;letter-spacing:0}
+.secbody.closed{display:none}
+.sidescroll .search{margin:3px 2px 5px;width:calc(100% - 4px);padding:4px 9px;font-size:12px}
+.daygroup{cursor:pointer;user-select:none}
+.daygroup .caret{display:inline-block;width:10px;transition:transform .15s}
+.daygroup.closed .caret{transform:rotate(-90deg)}
+#activebox .sechead{color:var(--acc)}
+.footmenu{min-width:190px}
 .sitem:hover{background:var(--card)}.sitem.on{background:var(--card);box-shadow:inset 2px 0 0 var(--acc)}
 .sitem .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sitem .cqmark{font-size:9.5px;font-weight:600;letter-spacing:.3px;padding:0 5px;border-radius:6px;
@@ -82,8 +128,9 @@ aside.hide{display:none}
 .cqpanel .kv{display:grid;grid-template-columns:130px 1fr;gap:4px 10px;font-size:12.5px;margin:6px 0}
 .sitem .n{color:var(--dim);font-size:11px}
 .sitem .pinmark{color:var(--acc);font-size:11px}
-.foot{padding:9px 13px;border-top:1px solid var(--line);font-size:11.5px;color:var(--dim);
- display:flex;flex-direction:column;gap:4px}
+.foot{padding:8px 13px;border-top:1px solid var(--line);font-size:12px;color:var(--dim);
+ display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center}
+.foot #fmodel{flex-basis:100%;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .foot a{color:var(--mut);cursor:pointer;text-decoration:none}.foot a:hover{color:var(--acc)}
 main{flex:1;display:flex;flex-direction:column;height:100vh;min-width:0}
 .top{padding:9px 18px;border-bottom:1px solid var(--line);display:flex;gap:9px;align-items:center;
@@ -229,8 +276,7 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .filters button{padding:3px 9px;font-size:11.5px;border:1px solid var(--line);border-radius:20px;
  background:none;color:var(--mut);cursor:pointer;font-family:inherit}
 .filters button.on{background:var(--acc);color:#fff;border-color:var(--acc)}
-.daygroup{font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--dim);
- padding:10px 10px 3px}
+.daygroup{font-size:10.5px;letter-spacing:.05em;color:var(--dim);padding:8px 6px 2px}
 .fileview{padding:20px 24px;width:100%;flex:1 1 auto}
 .fileinner{max-width:1100px;margin:0 auto}
 .filegrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px}
@@ -278,8 +324,8 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .sel-bar{display:flex;gap:8px;align-items:center;margin-bottom:11px;font-size:12.5px;color:var(--mut)}
 .fcard.picked{outline:2px solid var(--acc)}
 .mermaid{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px;margin:.6em 0}
-.projrow{display:flex;align-items:center;gap:7px;padding:6px 10px;border-radius:8px;
- cursor:pointer;font-size:13px;margin:0 8px}
+.projrow{display:flex;align-items:center;gap:7px;padding:4px 8px 4px 10px;border-radius:7px;
+ cursor:pointer;font-size:13px;margin:0}
 .projrow:hover{background:var(--card)}
 .projrow.on{background:var(--card);box-shadow:inset 2px 0 0 var(--acc)}
 .projrow .sw{width:9px;height:9px;border-radius:3px;flex:0 0 9px}
@@ -424,10 +470,17 @@ table.stbl{border-collapse:collapse;width:100%;font-size:13px;margin:2px 0 6px}
 <aside id=side>
   <div class=brand><img class=mark src="/icons/orbit-64.png" alt="" width=20 height=20>
    <span class=wordmark>Orbit</span><span class="dot" id=dot title="model server"></span>
-   <small id=badge>local</small></div>
-  <div class=srvbar>
+   <small id=badge>local</small>
+   <button class=iconbtn2 id=srvmenu title="Local model server: start, stop, restart">⏻</button>
+   <button class=iconbtn2 id=sidehide title="Hide the sidebar (☰ brings it back)">«</button></div>
+  <div class=srvbar id=srvbar style="display:none">
     <button id=srv_start>Start</button><button id=srv_stop>Stop</button><button id=srv_restart>Restart</button>
   </div>
+  <div class=sidetop>
+   <button class=newbtn id=newchat>+ New chat</button>
+   <button class=newbtn id=newwith title="New chat with a model, folder and permission mode — or a saved preset">▾</button>
+  </div>
+  <button class=searchbtn id=searchbtn title="Search chats, messages, files and commands"><span>⌕ Search</span><kbd>⌘P</kbd></button>
   <div class=navtabs>
     <button id=nav_chats class=on>Chats</button>
     <button id=nav_files>Files</button>
@@ -435,25 +488,27 @@ table.stbl{border-collapse:collapse;width:100%;font-size:13px;margin:2px 0 6px}
     <button id=nav_tasks>Tasks</button>
     <button id=nav_trash>Trash</button>
   </div>
-  <div style="display:flex;gap:4px"><button class=newbtn id=newchat style="flex:1">+ New chat</button>
-   <button class=newbtn id=newwith title="New chat with a model, folder and permission mode — or a saved preset" style="width:auto;padding:0 10px">▾</button></div>
-  <input class=search id=search placeholder="Search chats…  (right-click a chat for actions)">
-  <div id=projwrap></div>
-  <div class=addproj id=addproj>+ New project</div>
-  <div class=tagrow id=tagrow></div>
-  <div class=filters>
-    <button data-f=active class=on>Active</button>
-    <button data-f=pinned>Pinned</button>
-    <button data-f=archived>Archived</button>
-    <button data-f=all>All</button>
-    <button data-f=claude title="chats on Claude Code · local Qwen, and sessions from a terminal">Claude</button>
+  <div class=sidescroll id=sidescroll>
+   <div id=activebox></div>
+   <div class=sechead data-sec=projects><span class=caret>▾</span><span class=lbl>Projects</span>
+    <span class=ct id=projct></span><button class=secbtn id=addproj title="New project">+</button></div>
+   <div class=secbody data-sec=projects><div id=projwrap></div></div>
+   <div class=sechead data-sec=chats><span class=caret>▾</span><span class=lbl id=chatslbl>Chats</span>
+    <span class=ct id=chatct></span>
+    <select class=filtersel id=filtersel title="Which chats">
+     <option value=active>Active</option><option value=pinned>Pinned</option><option value=archived>Archived</option>
+     <option value=all>All</option><option value=claude>Claude Code</option></select></div>
+   <div class=secbody data-sec=chats>
+    <input class=search id=search placeholder="Filter by title  (⌘F)">
+    <div class=tagrow id=tagrow></div>
+    <div class=slist id=slist></div>
+   </div>
   </div>
-  <div class=slist id=slist></div>
   <div class=foot>
-    <a id=opensettings>Settings</a><a id=openmem>Memory &amp; instructions</a>
-    <a id=openprompts>Saved prompts</a><a id=opendoctor>Doctor</a>
-    <a id=openkeys>Shortcuts (?)</a><a id=openabout>About &amp; help</a>
+    <a id=opensettings title="Settings (⌘,)">⚙ Settings</a>
+    <a id=footmore title="Memory, prompts, doctor, shortcuts, help">⋯ More</a>
     <span id=fmodel></span>
+    <span style="display:none"><a id=openmem></a><a id=openprompts></a><a id=opendoctor></a><a id=openkeys></a><a id=openabout></a></span>
   </div>
 </aside>
 
@@ -485,6 +540,7 @@ table.stbl{border-collapse:collapse;width:100%;font-size:13px;margin:2px 0 6px}
   <div id=trash class=fileview style="display:none;overflow-y:auto"></div>
   <div class=composer><div class=cwrap>
     <div class=plandock id=plandock style="display:none"></div>
+    <div class=queuebox id=queuebox style="display:none"></div>
     <div class=chips id=chips></div>
     <div class=row>
       <button class=iconbtn id=attach title="Attach file or image">+</button>
@@ -492,7 +548,7 @@ table.stbl{border-collapse:collapse;width:100%;font-size:13px;margin:2px 0 6px}
       <button class=sendbtn id=send>Send</button>
       <button class=stopbtn id=stopgen style="display:none">Stop</button>
     </div>
-    <div class=hint><span>Enter send · Shift+Enter newline</span><span id=tools></span></div>
+    <div class=hint><span id=keyhint>Enter send · Shift+Enter newline</span><span id=tools></span></div>
   </div></div>
 </main>
 <input type=file id=file multiple hidden>
@@ -619,7 +675,35 @@ function todoify(node){
    cb.onchange=()=>{sp.style.textDecoration=cb.checked?'line-through':'';
     sp.style.color=cb.checked?'var(--dim)':''};
    li.appendChild(cb);li.appendChild(sp);li.style.margin='3px 0'})})}
-function decorate(node){mathify(node);meridify(node);tableTools(node);todoify(node)}
+function decorate(node){mathify(node);meridify(node);tableTools(node);todoify(node);pathify(node)}
+// File and folder paths in a chat open on the Mac when clicked (right-click: show in
+// Finder, copy). Absolute paths and ~/ paths are recognised in text and in code.
+const PATH_RE=/(^|[\s(\[{"'`“‘:=>])((?:~|\/(?:Users|private|tmp|Volumes|opt|Applications|var|etc|Library|System|usr|home))\/[^\s'"`<>()\[\]{},;|]*[^\s'"`<>()\[\]{},;|.:!?])/g;
+function pathify(node){
+ if(!node)return;
+ const walker=document.createTreeWalker(node,NodeFilter.SHOW_TEXT,{acceptNode:t=>
+  t.parentElement&&t.parentElement.closest('a,.pathlink,textarea,.katex')?NodeFilter.FILTER_REJECT:
+  (/(~|\/(Users|private|tmp|Volumes|opt|Applications|var|etc|Library|System|usr|home))\//.test(t.nodeValue)?NodeFilter.FILTER_ACCEPT:NodeFilter.FILTER_REJECT)});
+ const texts=[];while(walker.nextNode())texts.push(walker.currentNode);
+ texts.forEach(t=>{
+  const v=t.nodeValue;let last=0,m,frag=null;PATH_RE.lastIndex=0;
+  while((m=PATH_RE.exec(v))){
+   frag=frag||document.createDocumentFragment();
+   const start=m.index+m[1].length;
+   frag.appendChild(document.createTextNode(v.slice(last,start)));
+   const a=document.createElement('span');a.className='pathlink';a.textContent=m[2];a.title='open '+m[2]+' (right-click for more)';
+   frag.appendChild(a);last=start+m[2].length}
+  if(frag){frag.appendChild(document.createTextNode(v.slice(last)));t.replaceWith(frag)}})}
+async function openPath(path,reveal){
+ const d=await apiPost('/api/open_path',{path,reveal:!!reveal},'open');
+ if(d)toast(d.revealed?(d.why?'shown in Finder ('+d.why+')':'shown in Finder'):'opened '+String(d.path).split('/').pop())}
+document.addEventListener('click',e=>{const p=e.target.closest&&e.target.closest('.pathlink');
+ if(!p)return;e.preventDefault();e.stopPropagation();openPath(p.dataset.path||p.textContent)},true);
+document.addEventListener('contextmenu',e=>{const p=e.target.closest&&e.target.closest('.pathlink');
+ if(!p)return;e.preventDefault();const path=p.dataset.path||p.textContent;
+ ctxMenu(e,[{icon:'\u2197',label:'Open',run:()=>openPath(path)},
+  {icon:'\u{1F50D}',label:'Show in Finder',run:()=>openPath(path,true)},
+  {icon:'\u2398',label:'Copy path',run:()=>copy(path)}])});
 function mathify(node){
  if(!window.renderMathInElement||!node)return;
  try{renderMathInElement(node,{delimiters:[
@@ -663,7 +747,7 @@ function addUser(text,images,ts,raw){
  if(images&&images.length){const b=el('<div class=imgs></div>');
   images.forEach(u=>{const i=document.createElement('img');i.src=u;b.appendChild(i)});m.appendChild(b)}
  const b=el('<div class=bub></div>');
- if(raw&&raw!==text)pasteBubble(b,raw);else b.textContent=text;m.appendChild(b);
+ if(raw&&raw!==text)pasteBubble(b,raw);else{b.textContent=text;pathify(b)}m.appendChild(b);
  stamp(m,ts);wrap.appendChild(m);bottom();return m}
 function modelLabel(id){
  const m=(MODELS.models||[]).find(x=>x.id===(id||MODELS.current||MODELS.default));
@@ -838,8 +922,65 @@ function dayLabel(ts){
  const diff=(now-d)/86400000;
  if(diff<7)return 'Previous 7 days'; if(diff<30)return 'Previous 30 days';
  return d.toLocaleDateString(undefined,{month:'long',year:'numeric'})}
+// "5m", "3h", "2d": how long ago a chat was last active
+function agoShort(ts){
+ const s=Math.max(0,Date.now()/1000-(ts||0));
+ if(s<60)return 'now';if(s<3600)return Math.floor(s/60)+'m';if(s<86400)return Math.floor(s/3600)+'h';
+ if(s<86400*7)return Math.floor(s/86400)+'d';if(s<86400*60)return Math.floor(s/604800)+'w';
+ return new Date(ts*1000).toLocaleDateString(undefined,{month:'short',day:'numeric'})}
+function sideOpenSec(name,def){return PREF.get('sec_'+name,def?'1':'0')==='1'}
+function chatRow(s,box){
+ const d=el(`<div class="sitem${s.id===sid?' on':''}"><span class=t></span>${
+  UNSEEN[s.id]?'<span class=unseen title="new since you last looked"></span>':''}${
+  s.queued?`<span class=qn title="${s.queued} message${s.queued>1?'s':''} queued">${s.queued} queued</span>`:''}${
+  s.source==='claude-qwen'?`<span class=cqmark title="${s.external?'a Claude-Qwen session from a terminal — opens here, and continues in the same Claude session':'Claude Code'}">CC</span>`:''}${
+  s.pinned?'<span class=pinmark>★</span>':''}<span class=ago title="${esc(new Date((s.mtime||0)*1000).toLocaleString())} · ${s.n} messages">${agoShort(s.mtime)}</span><button class=more title="Actions">⋯</button></div>`);
+ d.querySelector('.t').textContent=s.title||'(untitled)';
+ d.title=s.title||'';
+ if(s.external)d.classList.add('external');
+ d.onclick=ev=>{
+  if(ev.target.closest('.pinmark'))return;
+  if(ev.target.closest('.more')){ev.stopPropagation();const r=ev.target.getBoundingClientRect();
+   chatMenu({clientX:r.left,clientY:r.bottom},s);return}
+  showPane('log');openSession(s.id)};
+ d.style.userSelect='none';
+ d.oncontextmenu=e=>{e.preventDefault();chatMenu(e,s)};
+ d.draggable=true;
+ d.ondragstart=e=>{e.dataTransfer.setData('sid',s.id);d.classList.add('dragging')};
+ d.ondragend=()=>{d.classList.remove('dragging');document.querySelectorAll('.sitem')
+  .forEach(x=>x.classList.remove('drop'))};
+ d.ondragover=e=>{e.preventDefault();d.style.borderTop='2px solid var(--acc)'};
+ d.ondragleave=()=>{d.style.borderTop=''};
+ d.ondrop=async e=>{
+  e.preventDefault();d.style.borderTop='';
+  const from=e.dataTransfer.getData('sid'); if(!from||from===s.id)return;
+  const ids=[...$('#slist').querySelectorAll('.sitem')].map(x=>x.dataset.sid);
+  if(!ids.includes(from))return;
+  const cur=ids.filter(x=>x!==from);
+  // index must be computed in the array WITHOUT the dragged item, otherwise a
+  // downward drag lands one slot too far and shuffles everything in between
+  const at=cur.indexOf(s.id);
+  if(at<0)return;
+  cur.splice(at,0,from);
+  await fetch('/api/session/reorder',{method:'POST',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({order:cur})});
+  loadSessions()};
+ d.dataset.sid=s.id; d.dataset.pinned=s.pinned?'1':'';
+ if(RUNNING.has(s.id)){d.classList.add('running');
+  d.insertBefore(el('<span class=spin></span>'),d.firstChild)}
+ box.appendChild(d);return d}
 function renderSessions(){
  const term=($('#search').value||'').toLowerCase(), box=$('#slist');box.innerHTML='';
+ // what needs you, or is working, first: answering, queued, or with news (as Claude's
+ // desktop app keeps running sessions at the top, instead of lost among the dates)
+ const act=$('#activebox');act.innerHTML='';
+ const live=SESSIONS.filter(s=>RUNNING.has(s.id)||s.queued||UNSEEN[s.id]);
+ RUNNING.forEach(id=>{if(!live.some(s=>s.id===id)&&id.startsWith&&!id.startsWith('sched-'))
+  live.push({id,title:id===sid?($('#title').textContent||'New chat'):'(starting…)',n:0,mtime:Date.now()/1000})});
+ if(live.length){
+  act.appendChild(el(`<div class=sechead style="cursor:default"><span class=lbl>Active now</span><span class=ct>${live.length}</span></div>`));
+  live.forEach(s=>chatRow(s,act))}
+ const liveIds=new Set(live.map(s=>s.id));
  const pass=s=>{
   // an empty chat you left is not worth a row -- but one that is generating is
   if(!s.n && s.id!==sid && !RUNNING.has(s.id)) return false;
@@ -850,51 +991,31 @@ function renderSessions(){
   return true};
  const list=SESSIONS.filter(s=>pass(s)&&(!projFilter||s.project===projFilter)
    &&(!tagFilter||(s.tags||[]).includes(tagFilter))
-   &&(!term||(s.title||'').toLowerCase().includes(term)));
- if(!list.length){box.innerHTML=`<div class=note style="padding:14px 10px;font-size:12.5px">${
-   filterMode==='archived'?'No archived chats.':'No chats here yet.'}</div>`;return}
- if(sessTotal>SESSIONS.length){/* more exist */}
- let lastGroup=null;
+   &&(!term||(s.title||'').toLowerCase().includes(term))
+   &&(term||!liveIds.has(s.id)));
+ $('#chatct').textContent=list.length+(sessTotal>SESSIONS.length?'+':'');
+ $('#chatslbl').textContent=projFilter&&PROJECTS[projFilter]?PROJECTS[projFilter].name:'Chats';
+ if(!list.length){box.innerHTML=`<div class=note style="padding:10px 8px;font-size:12.5px">${
+   term?'No titles match — ⌘P searches inside chats too.':filterMode==='archived'?'No archived chats.':'No chats here yet.'}</div>`;return}
+ let lastGroup=null, groupBody=null;
  list.forEach(s=>{
   const g=s.pinned&&filterMode!=='archived'?'Pinned':dayLabel(s.mtime);
-  if(g!==lastGroup){box.appendChild(el(`<div class=daygroup>${g}</div>`));lastGroup=g}
-  const d=el(`<div class="sitem${s.id===sid?' on':''}"><span class=t></span>${
-   UNSEEN[s.id]?'<span class=unseen title="new since you last looked"></span>':''}${
-   s.source==='claude-qwen'?`<span class=cqmark title="${s.external?'a Claude-Qwen session from a terminal — opens here, and continues in the same Claude session':'Claude Code · local Qwen'}">CC</span>`:''}<span class=n>${s.n}</span>${s.pinned?'<span class=pinmark>\u2605</span>':''}</div>`);
-  d.querySelector('.t').textContent=s.title||'(untitled)';
-  if(s.external)d.classList.add('external');
-  d.onclick=ev=>{
-   if(ev.target.closest('.pinmark'))return;
-   openSession(s.id)};
-  d.style.userSelect='none';
-  d.oncontextmenu=e=>{e.preventDefault();chatMenu(e,s)};
-  d.draggable=true;
-  d.ondragstart=e=>{e.dataTransfer.setData('sid',s.id);d.classList.add('dragging')};
-  d.ondragend=()=>{d.classList.remove('dragging');document.querySelectorAll('.sitem')
-   .forEach(x=>x.classList.remove('drop'))};
-  d.ondragover=e=>{e.preventDefault();d.style.borderTop='2px solid var(--acc)'};
-  d.ondragleave=()=>{d.style.borderTop=''};
-  d.ondrop=async e=>{
-   e.preventDefault();d.style.borderTop='';
-   const from=e.dataTransfer.getData('sid'); if(!from||from===s.id)return;
-   const ids=[...box.querySelectorAll('.sitem')].map(x=>x.dataset.sid);
-   if(!ids.includes(from))return;
-   const cur=ids.filter(x=>x!==from);
-   // index must be computed in the array WITHOUT the dragged item, otherwise a
-   // downward drag lands one slot too far and shuffles everything in between
-   const at=cur.indexOf(s.id);
-   if(at<0)return;
-   cur.splice(at,0,from);
-   await fetch('/api/session/reorder',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({order:cur})});
-   loadSessions()};
-  d.dataset.sid=s.id; d.dataset.pinned=s.pinned?'1':'';
-  if(RUNNING.has(s.id)){d.classList.add('running');
-   d.insertBefore(el('<span class=spin></span>'),d.firstChild)}
-  box.appendChild(d)});
+  if(g!==lastGroup){
+   lastGroup=g;
+   // older months start folded, so a long history does not bury recent chats
+   const recent=['Pinned','Today','Yesterday','Previous 7 days','Previous 30 days'].includes(g);
+   const open=term?true:PREF.get('grp_'+g,recent?'1':'0')==='1';
+   const h=el(`<div class="daygroup${open?'':' closed'}"><span class=caret>▾</span> ${esc(g)} <span class=gct></span></div>`);
+   groupBody=el(`<div class=grpbody${open?'':' style="display:none"'}></div>`);
+   const gb=groupBody;
+   h.onclick=()=>{const now=gb.style.display==='none';gb.style.display=now?'':'none';
+    h.classList.toggle('closed',!now);PREF.set('grp_'+g,now?'1':'0')};
+   box.appendChild(h);box.appendChild(groupBody)}
+  chatRow(s,groupBody);
+  const c=groupBody.previousSibling.querySelector('.gct');c.textContent=groupBody.children.length})
  if(sessTotal>SESSIONS.length){
   const more=el(`<div class=daygroup style="cursor:pointer;color:var(--acc)">load ${sessTotal-SESSIONS.length} more</div>`);
-  more.onclick=()=>{sessLimit+=80;loadSessions()};box.appendChild(more)}}
+  more.onclick=()=>{sessLimit+=120;loadSessions()};box.appendChild(more)}}
 let sessTotal=0, sessLimit=80;
 let tagFilter=null;
 async function loadTags(){
@@ -916,10 +1037,12 @@ function syncBusy(){
  // while it works, Send becomes Steer: a note it reads at its next step,
  // without stopping — Stop is still right beside it
  $('#send').disabled=false;
- $('#send').textContent=busy?'Steer':'Send';
- $('#send').title=busy?'Add a note it reads at its next step, without stopping it':'';
- q.placeholder=busy?'Add a note — it reads it at its next step and keeps going':Q_PLACEHOLDER;
+ $('#send').textContent=busy?'Queue':'Send';
+ $('#send').title=busy?'Queue this message: it starts when the answer running now is done. ⌘/Ctrl+Enter puts it in right away instead.':'';
+ q.placeholder=busy?'Queue a message — it starts when this answer is done · ⌘Enter sends it in now':Q_PLACEHOLDER;
+ if(QUEUE_SID!==sid){QUEUE={items:[],paused:false,running:false};drawQueue();if(sid)loadQueue(sid)}
  $('#stopgen').style.display=busy?'':'none';
+ const kh=$('#keyhint');if(kh)kh.textContent=busy?'Enter queue · ⌘Enter send in now · Shift+Enter newline':'Enter send · Shift+Enter newline';
  $('#dot').classList.toggle('busy',RUNNING.size>0);
  drawPlanDock()}                     // every chat switch passes through here
 /* ---------------- model picker ---------------- */
@@ -1029,6 +1152,8 @@ function attachLive(theSid, initial){
     lrows.forEach(r=>{if(r.classList.contains('live'))finishTool(r,{stopped:true})});
     if(lv.content){a.bub.innerHTML=md(lv.content);decorate(a.bub)}
     RUNNING.delete(theSid);renderSessions();loadSessions();
+    if(lv.content)pathify(a.bub);
+    setTimeout(()=>afterTurn(theSid),300);
    }
   }catch(e){stopLive()}
  },800);
@@ -1249,7 +1374,7 @@ q.addEventListener('keydown',e=>{
   if(e.key==='Tab'){e.preventDefault();items[msel].click();return}}
  if((e.key==='ArrowUp'||e.key==='ArrowDown')&&!e.shiftKey&&!e.altKey&&!e.metaKey&&!e.ctrlKey
     &&histWalk(e.key==='ArrowUp'?-1:1)){e.preventDefault();return}
- if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();go()}});
+ if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();go({now:e.metaKey||e.ctrlKey})}});
 
 // An approval prompt — from this tab's own stream, or found waiting in a chat
 // opened from another window, so it can be answered from wherever you are.
@@ -1699,13 +1824,96 @@ async function steer(t){
   RUNNING.delete(sid);syncBusy();q.value=t;go()
  }catch(e){n.tag.textContent='not sent: '+e}}
 
+/* ---------------- message queue ----------------
+   Messages sent while a chat is answering wait their turn on the server, in order:
+   when an answer ends the next one starts, in this window or not. Drag to reorder,
+   click to edit, "now" to put one into the running answer straight away. */
+let QUEUE={items:[],paused:false,running:false}, QUEUE_SID=null;
+function queuedHere(){return QUEUE_SID===sid&&(QUEUE.items||[]).length>0}
+async function queueOp(op,extra,forSid){
+ const s_=forSid||sid;
+ const d=await apiPost('/api/queue',{sid:s_,op,...(extra||{})},'queue');
+ if(d&&d.queue&&s_===sid){QUEUE=d.queue;QUEUE_SID=s_;drawQueue()}
+ return d}
+async function loadQueue(forSid){
+ const s_=forSid||sid;if(!s_)return;
+ try{const d=await (await fetch('/api/queue',{method:'POST',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({sid:s_,op:'get'})})).json();
+  if(d&&d.queue&&s_===sid){QUEUE=d.queue;QUEUE_SID=s_;drawQueue()}return d&&d.queue}catch(e){}}
+async function enqueue(t,raw){
+ const sending=atts;atts=[];$('#chips').innerHTML='';
+ q.value='';q.style.height='auto';closeMenu();closeAt();clearDraft(sid);PASTES={};
+ const d=await queueOp('add',{text:t,attachments:sending});
+ if(d&&d.ok)toast(busy?'queued — it starts when this answer is done (⌘Enter sends it in now)':'queued');
+ else{q.value=raw||t;atts=sending}}
+// after an answer ends: the server may already have started the next queued message
+async function afterTurn(forSid){
+ const qd=await loadQueue(forSid);
+ if(qd&&qd.running&&forSid===sid&&!SENDING.has(forSid)){
+  RUNNING.add(forSid);syncBusy();renderSessions();
+  const lv=await (await fetch('/api/live/'+forSid)).json();
+  if(lv.running&&!livePoll&&sid===forSid){
+   // draw the message it has just taken from the queue, then follow its answer
+   if(lv.user)userNode({text:lv.user,t:Date.now()/1000});
+   attachLive(forSid,lv)}}}
+function drawQueue(){
+ const box=$('#queuebox');if(!box)return;
+ const items=QUEUE_SID===sid?(QUEUE.items||[]):[];
+ if(!items.length){box.style.display='none';box.innerHTML='';return}
+ box.style.display='';box.innerHTML='';
+ const head=el(`<div class=qhead><b>Queued · ${items.length}</b><span class=note>${QUEUE.paused?'paused after Stop':
+   (QUEUE.running?'each starts when the one before it is answered':'starting…')}</span>
+   <span style="margin-left:auto;display:flex;gap:4px">${QUEUE.paused?'<button class=ghost data-q=resume>resume</button>':''}<button class=ghost data-q=clear title="remove every queued message">clear</button></span></div>`);
+ head.querySelectorAll('[data-q]').forEach(b=>b.onclick=async()=>{
+  if(b.dataset.q==='clear'&&!confirm('Remove all queued messages?'))return;
+  await queueOp(b.dataset.q);if(b.dataset.q==='resume')setTimeout(()=>afterTurn(sid),600)});
+ box.appendChild(head);
+ let dragId=null;
+ items.forEach((it,i)=>{
+  const r=el(`<div class=qitem draggable=true data-id="${esc(it.id)}"><span class=grip title="drag to reorder">⋮⋮</span>
+    <span class=qn>${i+1}</span><span class=qt></span>${(it.attachments||[]).length?`<span class=qa title="${esc((it.attachments||[]).map(a=>a.name).join(', '))}">+${it.attachments.length}</span>`:''}
+    <button class=ghost data-a=now title="${busy?'put it into the running answer now — it reads it at its next step':'send it now'}">now</button>
+    <button class=ghost data-a=edit title="edit">✎</button><button class=ghost data-a=remove title="remove">×</button></div>`);
+  r.querySelector('.qt').textContent=it.text;
+  r.querySelector('.qt').onclick=()=>r.querySelector('[data-a=edit]').click();
+  r.querySelector('[data-a=now]').onclick=async()=>{
+   const d=await queueOp('now',{id:it.id});
+   if(d&&d.interjected){noteBubble(it.text,'sent in — it reads this at its next step');bottom()}
+   else if(d&&d.ok&&!busy)setTimeout(()=>afterTurn(sid),500)};
+  r.querySelector('[data-a=remove]').onclick=()=>queueOp('remove',{id:it.id});
+  r.querySelector('[data-a=edit]').onclick=()=>{
+   const ta=el('<textarea class=qedit></textarea>');ta.value=it.text;
+   const qt=r.querySelector('.qt');qt.replaceWith(ta);ta.focus();ta.style.height=Math.min(160,ta.scrollHeight+4)+'px';
+   r.draggable=false;
+   const save=async()=>{const v=ta.value.trim();if(v&&v!==it.text)await queueOp('edit',{id:it.id,text:v});else drawQueue()};
+   ta.onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();ta.onblur=null;save()}
+    if(e.key==='Escape'){ta.onblur=null;drawQueue()}};
+   ta.onblur=save};
+  r.ondragstart=e=>{dragId=it.id;r.classList.add('dragging');e.dataTransfer.effectAllowed='move'};
+  r.ondragend=()=>{r.classList.remove('dragging');box.querySelectorAll('.qitem').forEach(x=>x.classList.remove('dropabove'))};
+  r.ondragover=e=>{e.preventDefault();box.querySelectorAll('.qitem').forEach(x=>x.classList.toggle('dropabove',x===r))};
+  r.ondrop=async e=>{e.preventDefault();if(!dragId||dragId===it.id)return;
+   const ids=items.map(x=>x.id).filter(x=>x!==dragId);ids.splice(ids.indexOf(it.id),0,dragId);
+   await queueOp('order',{ids})};
+  box.appendChild(r)});
+ // dropping below the last one puts it at the end
+ const tail=el('<div class=qtail></div>');
+ tail.ondragover=e=>e.preventDefault();
+ tail.ondrop=async e=>{e.preventDefault();if(!dragId)return;
+  const ids=items.map(x=>x.id).filter(x=>x!==dragId);ids.push(dragId);await queueOp('order',{ids})};
+ box.appendChild(tail)}
 async function go(opts){
  opts=opts||{};
  primeAlerts();                            // before any await: needs the keypress/click
  if(switching)await switching;             // never send into the chat you just left
  const raw=q.value.trim(), t=expandPastes(raw);if(!t&&!atts.length)return;
  if(t)histPush(t);
- if(busy&&!t.startsWith('/'))return steer(t);
+ // while it answers (or has messages waiting), a new message joins the queue and
+ // starts when the ones before it are answered; ⌘/Ctrl+Enter puts it in right away,
+ // as a note the running answer reads at its next step
+ if((busy||queuedHere())&&!t.startsWith('/')){
+  if(opts.now&&busy)return steer(t);
+  return enqueue(t,raw)}
  if(t==='/'){showMenu();return}
  // a Claude Code chat hands commands Orbit doesn't have (skills, /compact, /context…) to Claude
  const orbitCmd=c0=>CMDS.some(x=>x.c===c0)||!!PROMPTS[c0.slice(1)];
@@ -1718,7 +1926,7 @@ async function go(opts){
                    :`unknown command ${c} — type / to see the list`);
   q.value=t;showMenu();return}
  q.value='';q.style.height='auto';closeMenu();clearDraft(sid);
- addUser(t,atts.filter(a=>a.kind==='image').map(a=>a.data_url),undefined,raw);
+ const ubub=addUser(t,atts.filter(a=>a.kind==='image').map(a=>a.data_url),undefined,raw);
  PASTES={};
  const sending=atts;atts=[];$('#chips').innerHTML='';
  if(opts.effort)sysline('retrying with '+opts.effort+' reasoning effort');
@@ -1740,7 +1948,7 @@ async function go(opts){
  a.bub.innerHTML='<span class=working>working<span class=dots></span></span>';
  let thinking='',answer='',lastRender=0,pendingRender=null,thinkPending=null,tmarks=[];
  const t0=performance.now(), trows={};      // trows: live tool rows by call id
- let tThink=0, endP=null, errored=false;
+ let tThink=0, endP=null, errored=false, queuedBy=null;
  const thoughtFor=()=>'thought for '+fmtSecs((performance.now()-tThink)/1000);
  try{
   const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -1757,6 +1965,11 @@ async function go(opts){
    const parts=buf.split('\n\n');buf=parts.pop();
    for(const ln of parts){ if(!ln.startsWith('data: '))continue;
     let m;try{m=JSON.parse(ln.slice(6))}catch(_){continue}
+    if(m.k==='queued_message'){
+     // the server had it wait instead: this chat (or every slot) was busy
+     queuedBy=m.p;if(ubub&&ubub.remove)ubub.remove();a.m.remove();
+     if(m.p.queue){QUEUE=m.p.queue;QUEUE_SID=sendSid;if(sid===sendSid)drawQueue()}
+     toast('queued — '+(m.p.why||'it starts when there is room'));continue}
     if(!away&&(!mine()||!a.m.isConnected))away=true;
     if(away){
      if(m.k==='end')endP=m.p||{};
@@ -1941,6 +2154,7 @@ async function go(opts){
     else if(m.k==='end'){endP=m.p||{};if(m.p&&m.p.title&&sid===sendSid){
      $('#title').textContent=m.p.title; if(m.p.sid)sid=m.p.sid}}
    }}
+  if(queuedBy){SENDING.delete(sendSid);await refreshRunning();syncBusy();renderSessions();return}
   if(pendingRender){clearTimeout(pendingRender);pendingRender=null}
  if(thinkPending){clearTimeout(thinkPending);thinkPending=null;
   renderThink(a.think.querySelector('.body'),thinking,tmarks)}
@@ -1959,7 +2173,8 @@ async function go(opts){
  PENDING_NOTES.filter(x=>!x.done&&x.sid===sendSid).forEach(x=>{x.done=true;
   x.tag.textContent='waiting — it reads this with your next message'});
  if($('#files').style.display!=='none')renderFiles(); refreshFileCache();
- $('#dot').classList.remove('busy');loadSessions();refreshStatus();q.focus()}
+ $('#dot').classList.remove('busy');loadSessions();refreshStatus();q.focus();
+ afterTurn(sendSid)}
 $('#stopgen').onclick=async()=>{
  stoppedSid=sid;
  await fetch('/api/cancel',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -3381,6 +3596,7 @@ let PROJECTS={}, projFilter=null;
 const PCOLORS=['#6b5bd6','#2d7d4f','#a8721c','#c0392b','#2b7a9b','#8e44ad'];
 async function loadProjects(){
  PROJECTS=await (await fetch('/api/projects')).json();
+ const pc=$('#projct');if(pc)pc.textContent=Object.keys(PROJECTS).length||'';
  const wrap=$('#projwrap');wrap.innerHTML='';
  const counts={};SESSIONS.forEach(s=>{if(s.project)counts[s.project]=(counts[s.project]||0)+1});
  const all=el(`<div class="projrow${projFilter===null?' on':''}">
@@ -3581,6 +3797,10 @@ function toolRow(p,done){
  d.querySelector('.tn').textContent=p.name||'tool';
  d.querySelector('.tl').textContent=p.label!=null?p.label:toolLabel(p.args);
  if(p.args)d.querySelector('summary').title=Object.entries(p.args).map(([k,v])=>k+': '+String(v).slice(0,200)).join('\n');
+ const fp=p.args&&(p.args.file_path||p.args.notebook_path||p.args.path);
+ if(fp&&typeof fp==='string'&&/^(~|\/)/.test(fp)){
+  const o=el('<span class="pathlink toolopen">open</span>');o.dataset.path=fp;o.title='open '+fp;
+  d.querySelector('summary').appendChild(o)}
  if(done)finishTool(d,p);
  else{d.classList.add('live');d._t0=Date.now();d.querySelector('.tt').textContent='0.0s';
   if(!toolTick)toolTick=setInterval(tickTools,1000)}
@@ -3863,10 +4083,25 @@ async function suggestMem(){
   sk.onclick=()=>r.remove();
   box.appendChild(r)});
  wrap.appendChild(box);bottom()}
-document.querySelectorAll('.filters button').forEach(b=>b.onclick=()=>{
- filterMode=b.dataset.f;
- document.querySelectorAll('.filters button').forEach(x=>x.classList.toggle('on',x===b));
- renderSessions()});
+$('#filtersel').onchange=e=>{filterMode=e.target.value;renderSessions()};
+$('#filtersel').onclick=e=>e.stopPropagation();
+// sections fold, and stay folded next time
+document.querySelectorAll('.sechead[data-sec]').forEach(h=>{
+ const name=h.dataset.sec,body=document.querySelector(`.secbody[data-sec="${name}"]`);
+ const apply=open=>{h.classList.toggle('closed',!open);body.classList.toggle('closed',!open)};
+ apply(sideOpenSec(name,true));
+ h.onclick=e=>{if(e.target.closest('button,select'))return;
+  const open=h.classList.contains('closed');apply(open);PREF.set('sec_'+name,open?'1':'0')}});
+$('#srvmenu').onclick=e=>{e.stopPropagation();const b=$('#srvbar');b.style.display=b.style.display==='none'?'':'none'};
+$('#sidehide').onclick=()=>sideOpen(false);
+$('#searchbtn').onclick=e=>{e.stopPropagation();openPal()};
+$('#footmore').onclick=e=>{e.stopPropagation();const r=e.target.getBoundingClientRect();
+ ctxMenu({clientX:r.left,clientY:r.top-190},[
+  {icon:'\u{1F9E0}',label:'Memory & instructions',run:()=>openSettings('memory')},
+  {icon:'\u270E',label:'Saved prompts',run:()=>{libTab='prompts';showPane('lib')}},
+  {icon:'\u2695',label:'Doctor',run:()=>showHealth()},
+  {icon:'\u2328',label:'Keyboard shortcuts',run:()=>showShortcuts()},
+  {icon:'\u2139',label:'About & help',run:()=>showAbout()}])};
 function exportHTML(){
  const html=`<!doctype html><meta charset=utf-8><title>${esc($('#title').textContent)}</title>`
   +`<style>body{font:15px/1.6 -apple-system,sans-serif;max-width:800px;margin:40px auto;padding:0 20px}
