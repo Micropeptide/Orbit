@@ -90,6 +90,17 @@ done
 emit claude "$best"
 emit claude_version "$bestv"
 if [ -n "$best" ]; then emit logged_in "$("$best" auth status 2>/dev/null | grep -o '"loggedIn": *[a-z]*' | grep -o '[a-z]*$')"; fi
+cbest=""; cver=""
+for c in "$(command -v codex 2>/dev/null)" "$HOME/.local/bin/codex" "$HOME/bin/codex" $(ls -1d "$HOME"/.npm-global/bin/codex "$HOME"/.nvm/versions/node/*/bin/codex 2>/dev/null); do
+  [ -n "$c" ] && [ -f "$c" ] && [ -x "$c" ] || continue
+  v=$("$c" --version 2>/dev/null | head -1 | awk '{print $NF}')
+  [ -n "$v" ] || continue
+  if [ -z "$cver" ] || [ "$(printf '%s\n%s\n' "$cver" "$v" | sort -V | tail -1)" = "$v" ]; then cbest="$c"; cver="$v"; fi
+done
+emit codex "$cbest"
+emit codex_version "$cver"
+if [ -n "$cbest" ]; then emit codex_login "$("$cbest" login status 2>&1 | head -1)"; fi
+emit arch "$(uname -m)"
 emit procs "$(ps -u "$(id -un)" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
 emit proc_limit "$(ulimit -u)"
 emit setsid "$(command -v setsid)"
@@ -292,3 +303,61 @@ def fetch_file(host, path, cache_root, max_bytes=200 * 1024 * 1024, timeout=300)
         return None, "the copy took too long"
     if r.returncode != 0: return None, (r.stderr.strip().splitlines() or ["scp failed"])[-1][:200]
     return dest, None
+
+
+CODEX_RELEASE = "https://github.com/openai/codex/releases/download/rust-v{version}/codex-{arch}-unknown-linux-musl.tar.gz"
+
+
+def install_codex(host, version, cache_root, arch="x86_64", timeout=900):
+    """Put Codex (the official Linux build of the same version as this Mac's) in
+    ~/.local/bin on the host: downloaded there, or, if the host has no internet,
+    downloaded here and copied over. Returns (path on the host, error)."""
+    if not valid_host(host): return None, "not a host name"
+    arch = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}.get(arch or "x86_64")
+    if not arch: return None, "unsupported processor on the host"
+    if not re.fullmatch(r"\d+\.\d+\.\d+", str(version or "")): return None, f"unknown Codex version {version!r}"
+    url = CODEX_RELEASE.format(version=version, arch=arch)
+    name = f"codex-{arch}-unknown-linux-musl"
+    script = ('set -e\nmkdir -p "$HOME/.local/bin" "$HOME/.cache/orbit-codex"\ncd "$HOME/.cache/orbit-codex"\n'
+              f'if command -v curl >/dev/null 2>&1 && curl -fsSL --max-time 600 -o codex.tgz {shlex.quote(url)}; then\n'
+              f'  tar -xzf codex.tgz && mv -f {name} "$HOME/.local/bin/codex" && chmod +x "$HOME/.local/bin/codex" && rm -f codex.tgz\n'
+              '  echo "OK=$HOME/.local/bin/codex"\nelse echo "NONET=1"; fi\n')
+    rc, out, err = run(host, script, timeout=timeout)
+    ok = next((l[3:] for l in out.splitlines() if l.startswith("OK=")), None)
+    if ok: return ok, None
+    if "NONET=1" not in out:
+        return None, (err.strip().splitlines() or [f"install failed ({rc})"])[-1][:300]
+    # no internet there: fetch here, copy over
+    import tarfile, urllib.request
+    os.makedirs(cache_root, exist_ok=True)
+    tgz = os.path.join(cache_root, name + f"-{version}.tar.gz")
+    try:
+        if not os.path.exists(tgz):
+            urllib.request.urlretrieve(url, tgz + ".part"); os.replace(tgz + ".part", tgz)
+        with tarfile.open(tgz) as t:
+            member = t.getmember(name)
+            t.extract(member, cache_root, filter="data")
+    except Exception as e:
+        return None, f"could not download Codex: {type(e).__name__}: {e}"
+    r = subprocess.run(["scp", "-q", *base_opts(True), os.path.join(cache_root, name), f"{host}:.local/bin/codex"],
+                       capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0: return None, (r.stderr.strip().splitlines() or ["scp failed"])[-1][:300]
+    rc, out, err = run(host, 'chmod +x "$HOME/.local/bin/codex" && "$HOME/.local/bin/codex" --version && echo "OK=$HOME/.local/bin/codex"', timeout=60)
+    ok = next((l[3:] for l in out.splitlines() if l.startswith("OK=")), None)
+    return (ok, None) if ok else (None, (err.strip().splitlines() or ["the copied Codex does not run there"])[-1][:300])
+
+
+def copy_codex_login(host, auth_path):
+    """Your Codex sign-in (this Mac's ~/.codex/auth.json) copied to the host, readable
+    only by you there -- done only when you ask for it."""
+    if not valid_host(host): return False, "not a host name"
+    try: data = open(auth_path, "rb").read()
+    except OSError: return False, "this Mac's Codex is not signed in"
+    script = ('umask 077\nmkdir -p "$HOME/.codex"\nbase64 -d > "$HOME/.codex/auth.json.orbit" && '
+              'mv -f "$HOME/.codex/auth.json.orbit" "$HOME/.codex/auth.json" && chmod 600 "$HOME/.codex/auth.json" && echo OK\n')
+    argv = ["ssh", *base_opts(True), host, "bash -c " + shlex.quote(script)]
+    try:
+        r = subprocess.run(argv, input=base64.b64encode(data), capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        return False, "no answer from the host"
+    return (b"OK" in r.stdout), (r.stderr.decode(errors="replace").strip()[-200:] or "copied")
