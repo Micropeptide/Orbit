@@ -216,6 +216,142 @@ def running_sids():
     # nothing could show them running, stop them, or wait for them
     return [sid for sid, st in list(STATES.items()) if st.lock.locked()] + list(JOB_RUNS)
 
+def background_tasks():
+    """Claude Code's /tasks: everything running in the background, in one list --
+    chats answering (and what each is doing), messages waiting in queues, and
+    shell commands a model started in the background."""
+    items = []
+    now = time.time()
+    for sid_ in running_sids():
+        st_ = STATES.get(sid_)
+        lv = (st_.live if st_ else {}) or {}
+        items.append({"kind": "answer", "id": sid_, "title": (st_.title if st_ else sid_) or sid_,
+                      "status": ("waiting for you" if lv.get("approval") or lv.get("question")
+                                 else lv.get("status") or "answering"),
+                      "since": (st_.busy_since or None) if st_ else None,
+                      "sid": sid_, "can_stop": True})
+    for sid_, st_ in list(STATES.items()):
+        for it in (st_.queue or []):
+            items.append({"kind": "queued", "id": it.get("id"), "sid": sid_,
+                          "title": st_.title or sid_, "status": ("at " + time.strftime("%a %H:%M", time.localtime(it["at"])))
+                          if it.get("at") else ("paused" if st_.queue_paused else "next in line"),
+                          "text": str(it.get("text") or "")[:160], "can_stop": True})
+    for jid, rec in sorted(q.BG_JOBS.items(), key=lambda kv: kv[1]["started"]):
+        rc = rec["proc"].poll()
+        items.append({"kind": "shell", "id": jid, "title": rec.get("command", "")[:160],
+                      "status": "running" if rc is None else f"exited {rc}",
+                      "since": rec.get("started"), "can_stop": rc is None})
+    return items, now
+
+def home_overview():
+    """What a new chat's welcome page shows: how much you have used Orbit lately, what is
+    running or waiting on you, what is coming up, and what is left of each allowance."""
+    now = time.time()
+    # activity: the last 14 days day by day, today, this week against the one before, a streak
+    year = q.usage_stats(365, now)
+    by_day = year.get("by_day") or {}
+    dkey = lambda t: time.strftime("%Y-%m-%d", time.localtime(t))
+    days = []
+    for i in range(13, -1, -1):
+        v = by_day.get(dkey(now - i * 86400)) or {}
+        days.append({"day": dkey(now - i * 86400), "turns": v.get("turns", 0), "tokens": v.get("tokens", 0),
+                     "seconds": v.get("seconds", 0), "tool_runs": v.get("tool_runs", 0)})
+    def span(a, b):
+        out = {"turns": 0, "tokens": 0, "seconds": 0.0, "tool_runs": 0}
+        for i in range(a, b):
+            v = by_day.get(dkey(now - i * 86400)) or {}
+            for k in out: out[k] += v.get(k, 0) or 0
+        out["seconds"] = round(out["seconds"], 1)
+        return out
+    active = lambda t: bool((by_day.get(dkey(t)) or {}).get("turns") or (by_day.get(dkey(t)) or {}).get("tool_runs"))
+    streak, i = 0, (0 if active(now) else 1)
+    while i < 366 and active(now - i * 86400):
+        streak += 1; i += 1
+    week = q.usage_stats(7, now)
+    models = sorted(({"model": k, **v} for k, v in (week.get("models") or {}).items() if k != "(unrecorded)"),
+                    key=lambda m: -(m.get("turns") or 0))[:4]
+    tools = sorted((week.get("tools") or {}).items(), key=lambda kv: -kv[1])[:5]
+    # what is running now, and what is waiting on you
+    try: jobs = q.sched_load().get("jobs", [])
+    except Exception: jobs = []
+    run_titles = {j.get("last_sid"): (j.get("name") or "scheduled task") for j in jobs if j.get("last_sid")}
+    items, _ = background_tasks()
+    for it in items:
+        if it.get("kind") == "answer" and it.get("title") == it.get("sid") and it.get("sid") in run_titles:
+            it["title"] = run_titles[it["sid"]]
+    # coming up: scheduled tasks by their next run, and messages set to go out later
+    upcoming = []
+    for j in jobs:
+        if j.get("enabled") is False: continue
+        try: nxt = q.sched_next_ts(j)
+        except Exception: nxt = None
+        if not nxt: continue
+        upcoming.append({"kind": j.get("kind") or "task", "title": j.get("name") or j.get("id"), "at": nxt,
+                         "id": j.get("id"), "sid": j.get("sid"), "repeat": j.get("every") != "once"})
+    try:
+        for m in scheduled_messages():
+            if m.get("at"):
+                upcoming.append({"kind": "message", "title": m.get("title") or "chat", "at": m.get("at"),
+                                 "text": str(m.get("text") or "")[:120], "sid": m.get("sid"),
+                                 "missed": bool(m.get("missed")), "repeat": bool(m.get("repeat"))})
+    except Exception:
+        pass
+    upcoming.sort(key=lambda u: u["at"])
+    failed = [{"title": j.get("name") or j.get("id"), "at": j.get("last_run"), "sid": j.get("last_sid"),
+               "result": str(j.get("last_result") or "")[:160]}
+              for j in jobs if j.get("last_run") and j.get("last_ok") is False and now - j["last_run"] < 2 * 86400]
+    # allowances: OpenCode Go's own figures, accounts marked used up, and ChatGPT's limits via Codex
+    allow = []
+    try:
+        secrets_ = q.secrets_load()
+        view = q.HARN.public_view(q.ROOT, secrets_, q.local_model_name())
+        for pv in view["providers"]:
+            for a in pv.get("accounts") or []:
+                if not a.get("key_set"): continue
+                row = {"provider": pv["id"], "label": pv["label"], "account": a.get("label"),
+                       "exhausted": q.USAGE.exhausted(q.ROOT, pv["id"], a["id"])}
+                spent = ((q.USAGE.summary(q.ROOT, pv["id"], a["id"]) or {}).get("windows") or {})
+                row["spent"] = {k: (v or {}).get("spent") for k, v in spent.items()}
+                if pv["id"] == "opencode-go":
+                    live = q.USAGE.go_usage(secrets_.get(a["key"]) or os.environ.get(a["key"]), a["id"], q.ROOT)
+                    if live and not live.get("error"):
+                        row["windows"] = [{"name": n, "left": max(0, 100 - int((live.get(w) or {}).get("percent") or 0)),
+                                           "resets": (live.get(w) or {}).get("resetsAt"),
+                                           "limited": (live.get(w) or {}).get("status") == "rate-limited"}
+                                          for n, w in (("5h", "rolling"), ("week", "weekly"), ("month", "monthly"))
+                                          if live.get(w)]
+                    elif live: row["error"] = live.get("error")
+                if row.get("windows") or row.get("exhausted") or any(row["spent"].values()):
+                    allow.append(row)
+    except Exception as e:
+        allow.append({"provider": "?", "label": "allowances", "error": type(e).__name__})
+    try:
+        entry = (getattr(q.CX, "_SERVERS", {}) or {}).get("") or {}
+        rl = getattr(entry.get("srv"), "rate_limits", None) or {}
+        wins = []
+        for key in ("primary", "secondary"):
+            w = rl.get(key)
+            if isinstance(w, dict) and w.get("usedPercent") is not None:
+                mins = w.get("windowDurationMins") or 0
+                wins.append({"name": "5h" if mins and mins <= 600 else "week" if mins else key,
+                             "left": max(0, 100 - int(float(w.get("usedPercent") or 0))),
+                             "resets": w.get("resetsAt"), "limited": float(w.get("usedPercent") or 0) >= 99})
+        if wins: allow.append({"provider": "codex", "label": "ChatGPT (Codex)", "account": "", "windows": wins})
+    except Exception:
+        pass
+    # anything plainly broken, from the same checks as the health window
+    problems = []
+    try:
+        problems = [{"name": c.get("name"), "detail": c.get("detail"), "fix": c.get("fix")}
+                    for c in (q.health_check() or []) if not c.get("ok") and not c.get("info")][:3]
+    except Exception:
+        pass
+    if GATEWAY.get("error"):
+        problems.append({"name": "harness gateway", "detail": str(GATEWAY["error"])[:120], "fix": ""})
+    return {"now": now, "problems": problems, "days": days, "today": span(0, 1), "week": span(0, 7), "last_week": span(7, 14),
+            "streak": streak, "models": models, "tools": [{"tool": k, "calls": v} for k, v in tools],
+            "tasks": items, "upcoming": upcoming[:6], "failed": failed[:3], "allowances": allow}
+
 def jdump(o): return json.dumps(o, default=str)
 
 def save_session(st=None):
@@ -442,31 +578,10 @@ class H(http.server.BaseHTTPRequestHandler):
                        if st_.lock.locked() and (st_.live.get("approval") or st_.live.get("question"))]
             return self._send(200, jdump({"running": running_sids(), "waiting": waiting,
                                           "max": (_max_parallel() if _max_parallel() < 10**6 else None)}))
+        if p == "/api/home":
+            return self._send(200, jdump(home_overview()))
         if p == "/api/tasks":
-            # Claude Code's /tasks: everything running in the background, in one list --
-            # chats answering (and what each is doing), messages waiting in queues, and
-            # shell commands a model started in the background
-            items = []
-            now = time.time()
-            for sid_ in running_sids():
-                st_ = STATES.get(sid_)
-                lv = (st_.live if st_ else {}) or {}
-                items.append({"kind": "answer", "id": sid_, "title": (st_.title if st_ else sid_) or sid_,
-                              "status": ("waiting for you" if lv.get("approval") or lv.get("question")
-                                         else lv.get("status") or "answering"),
-                              "since": (st_.busy_since or None) if st_ else None,
-                              "sid": sid_, "can_stop": True})
-            for sid_, st_ in list(STATES.items()):
-                for it in (st_.queue or []):
-                    items.append({"kind": "queued", "id": it.get("id"), "sid": sid_,
-                                  "title": st_.title or sid_, "status": ("at " + time.strftime("%a %H:%M", time.localtime(it["at"])))
-                                  if it.get("at") else ("paused" if st_.queue_paused else "next in line"),
-                                  "text": str(it.get("text") or "")[:160], "can_stop": True})
-            for jid, rec in sorted(q.BG_JOBS.items(), key=lambda kv: kv[1]["started"]):
-                rc = rec["proc"].poll()
-                items.append({"kind": "shell", "id": jid, "title": rec.get("command", "")[:160],
-                              "status": "running" if rc is None else f"exited {rc}",
-                              "since": rec.get("started"), "can_stop": rc is None})
+            items, now = background_tasks()
             return self._send(200, jdump({"items": items, "now": now}))
         if p.startswith("/api/claude/config"):
             # your Claude setup, as Claude keeps it: settings, skills
