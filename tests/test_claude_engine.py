@@ -414,6 +414,36 @@ class TestHarnessModels(unittest.TestCase):
         self.assertEqual(CE.model_for_session(["model-o"]), "harness:mocko/model-o")
         self.assertEqual(CE.model_for_session(["something-else"]), "claude-qwen-cli:default")
 
+    def test_orbits_own_chat_uses_the_same_provider_directly(self):
+        self.register(1)
+        from test_harness_gateway import delta
+        self.Upstream.script = [{"chunks": [delta(content="Direct from O."),
+                                            {"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}]}]
+        self.assertTrue(any(m["id"] == "harness-direct:mocko/model-o" for m in q.model_catalogue()))
+        spec = q.current_model("harness-direct:mocko/model-o")
+        self.assertFalse(CE.is_engine(spec))
+        out = q.stream_call([{"role": "user", "content": "hi"}], None, think=False, model="harness-direct:mocko/model-o")
+        self.assertEqual(out.get("content"), "Direct from O.")
+
+    def test_claude_subscription_runs_plain_claude_or_explains_the_login(self):
+        spec = q.current_model("harness:claude/opus")
+        t = CE.harness_target(spec)
+        self.assertTrue(t["subscription"])
+        env = CE.target_env(t)
+        for k in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+                  "ANTHROPIC_DEFAULT_SONNET_MODEL"):
+            self.assertNotIn(k, env)
+        argv = CE.build_argv(CE.DEFAULTS, model=t["cli_model"])
+        self.assertEqual(argv[argv.index("--model") + 1], "opus")
+        old = self.H.claude_login
+        self.H.claude_login = lambda max_age=120: "no"
+        try:
+            q.TURN_CTX.model = "harness:claude/opus"
+            out, ev = self.run_turn([{"role": "system", "content": "s"}], "hi")
+        finally:
+            self.H.claude_login = old
+        self.assertIn("claude auth login", out)
+
     def test_missing_key_is_explained_not_run(self):
         self.register(1)
         q.secrets_load, old = (lambda: {}), q.secrets_load

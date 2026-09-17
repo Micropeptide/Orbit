@@ -146,12 +146,23 @@ def gateway_port():
         return 8897
 
 
+def _harness():
+    import harness
+    return harness
+
+
 def harness_target(spec=None):
     """Where a Claude Code run for this model sends its requests: base URL, the
     model ids for Claude's tiers, context window, credentials, extra env, and
     whether it is the local server (which may need waking)."""
     spec = spec or {}
     pc = spec.get("provider_cfg") or {}
+    if spec.get("provider") == "harness" and pc.get("subscription"):
+        # plain Claude Code on your own login: no base URL, no key, Claude's own windows
+        return {"url": None, "model": pc.get("model") or "sonnet", "small": "haiku",
+                "ctx": int(pc.get("context") or 200000), "local": False, "provider": "claude",
+                "auth": {}, "env": {}, "key_missing": False, "subscription": True,
+                "cli_model": pc.get("model") or "sonnet"}
     if spec.get("provider") != "harness" or pc.get("local"):
         url, model, ctx = model_endpoint()
         return {"url": url, "model": model, "small": model, "ctx": ctx, "local": True, "provider": "local",
@@ -200,6 +211,13 @@ def harness_env(url, model, ctx, extra=None, small=None, auth=None):
         d = os.path.expanduser(d)
         if d not in paths: paths.append(d)
     env["PATH"] = ":".join(p for p in paths if p)
+    if url is None:
+        # your Claude subscription: Claude Code signs in as it does in a terminal
+        env.update({"DISABLE_AUTOUPDATER": "1", "MCP_TOOL_TIMEOUT": "3600000", "BASH_DEFAULT_TIMEOUT_MS": "600000"})
+        if os.environ.get("ORBIT_CLAUDE_CONFIG_DIR"):
+            env["CLAUDE_CONFIG_DIR"] = os.environ["ORBIT_CLAUDE_CONFIG_DIR"]
+        env.update(extra or {})
+        return env
     env.update({
         "ANTHROPIC_BASE_URL": url,
         "ANTHROPIC_MODEL": model,
@@ -382,7 +400,7 @@ def route_skills(text, limit=6):
 # ------------------------------------------------------------------ arguments
 
 def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None, mode=None,
-               settings_path=None, mcp_path=None, append=None, sdk=True, add_dirs=None, **_):
+               settings_path=None, mcp_path=None, append=None, sdk=True, add_dirs=None, model=None, **_):
     """The claude command line. The same for the terminal (sdk=False) and for
     Orbit, which only adds the stream transport, the session and a chat's mode."""
     exe = which_claude() or "claude"
@@ -391,7 +409,9 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
         argv += ["--print", "--output-format", "stream-json", "--verbose",
                  "--input-format", "stream-json", "--include-partial-messages",
                  "--include-hook-events", "--permission-prompt-tool", "stdio"]
-    argv += ["--model", "sonnet"]
+    # "sonnet" is mapped to the chosen model by the environment; your Claude
+    # subscription takes the model name itself
+    argv += ["--model", model or "sonnet"]
     prof = c.get("profile") or "standard"
     if prof == "lean":
         argv.append("--safe-mode")
@@ -988,9 +1008,15 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     target = harness_target(spec)
     if target["local"]:
         _wake_model(emit)
+    elif target.get("subscription") and _harness().claude_login(max_age=30) != "yes":
+        msg = ("The `claude` command is not signed in to your Claude account (the Claude desktop app keeps "
+               "its own login). Run `claude auth login` once in a terminal, then send this again.")
+        messages.append({"role": "user", "content": user_content, "t": time.time()})
+        emit("error", msg); emit("done", None)
+        return msg
     elif target["key_missing"]:
         msg = (f"No API key for {spec.get('provider_label') or target['provider']} "
-               f"({target.get('key_name') or 'key'}). Add it in Settings → Claude Code → Models.")
+               f"({target.get('key_name') or 'key'}). Add it in Settings → Models & keys.")
         messages.append({"role": "user", "content": user_content, "t": time.time()})
         emit("error", msg); emit("done", None)
         return msg
@@ -1080,6 +1106,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     if not approve and c.get("unattended_mode"):
         mode = c["unattended_mode"]
     argv = build_argv(c, session_id=mk["session"], resume=resume, read_only=bool(read_only), mode=mode,
+                      model=target.get("cli_model"),
                       effort=getattr(T, "effort", None) or q.S.get("reasoning_effort"),
                       settings_path=settings_path, mcp_path=mcp_path, add_dirs=prefs.get("add_dirs"),
                       append=_orbit_append(project, c, orbit_tools))
@@ -2226,9 +2253,9 @@ def launch_harness(query, args):
             Q.ensure_model(lambda s: print(s, file=sys.stderr, flush=True))
     elif t["key_missing"]:
         print(f"No API key for {spec['provider_label']} ({t.get('key_name')}). Add it in Orbit → Settings → "
-              "Claude Code → Models.", file=sys.stderr)
+              "Models & keys.", file=sys.stderr)
         return 3
-    elif t["url"].startswith("http://127.0.0.1:"):
+    elif (t["url"] or "").startswith("http://127.0.0.1:"):
         import urllib.request
         try:
             urllib.request.urlopen(t["url"].split("/h/")[0] + "/health", timeout=3).read()
@@ -2238,7 +2265,7 @@ def launch_harness(query, args):
     c = cfg()
     settings_path, mcp_path = launcher_files(c, "terminal-harness")
     argv = build_argv(c, settings_path=settings_path, mcp_path=mcp_path, sdk=False,
-                      mode=c.get("permission_mode") or None, append=launcher_append(c))
+                      mode=c.get("permission_mode") or None, append=launcher_append(c), model=t.get("cli_model"))
     env = target_env(t)
     print(f"Claude Code on {spec['label']}", file=sys.stderr)
     if os.environ.get("CLAUDE_QWEN_DRY_RUN") == "1":

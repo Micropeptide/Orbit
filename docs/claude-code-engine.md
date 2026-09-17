@@ -8,8 +8,9 @@ pointed at the model you chose. Orbit shows everything the session does and
 passes on everything you do. It adds nothing of its own unless you turn an
 "Orbit extra" on.
 
-Requires Claude Code (`claude`) installed. The local model needs no key; remote
-providers use the key you add in Settings, and requests go only to that provider.
+Requires Claude Code (`claude`) installed. The local model needs no key, nor does
+your Claude subscription; other providers use the key you add in Settings →
+Models & keys, and requests go only to that provider.
 
 ## Claude Code mode
 
@@ -21,6 +22,46 @@ settings follow the harness:
   its models; each shows its context window;
 - new chats start on the last Claude Code model you picked;
 - Settings opens on the Claude Code tab; the composer says it is talking to Claude Code.
+
+## One provider list for both modes
+
+Settings → **Models & keys** holds every provider once. In Claude Code mode a model
+runs through the harness; with the mode off, Orbit's own chat talks to the same
+model directly (through the gateway where its API needs translating), with the
+same keys and accounts.
+
+## Several accounts per provider
+
+A provider can have more than one account — two OpenCode Go subscriptions, say.
+Under the provider: **+ add another account**, name it and paste its key (each
+account's key has its own name, `OPENCODE_API_KEY_2`…). **Use this** picks the
+account tried first.
+
+When a provider answers that an account's quota is used up (402, or a 429 that
+talks about limits or quota), the gateway marks that account — for the rest of
+the 5-hour window, week or month the message names, otherwise an hour — and
+sends the same request with the next account, so the chat carries on. **Not used
+up** clears a mark. A provider with several accounts always goes through the
+gateway so this can happen.
+
+## Usage left per model
+
+OpenCode Go gives each model a monthly allowance in dollars, of which at most
+20% can go in any 5 hours and 50% in a week, and has no API that reports what is
+left. Orbit counts every request through its gateway (tokens per account and
+model), prices it with OpenCode's published prices, and shows what is left of
+each window next to the model — in Settings and in the model picker, once a
+model has been used. The allowances are read from OpenCode's documentation
+daily. It is an estimate: use of the same account from other apps is not counted.
+
+## Claude · your subscription
+
+The **Claude · your subscription** provider runs plain Claude Code on your own
+Claude login (Pro, Max, Team): no base URL, no key, nothing through the gateway,
+Claude's own context windows. Models: Opus, Sonnet and Haiku (latest), and Opus
+and Sonnet with 1M context. The `claude` command needs to be signed in once
+(`claude auth login` in a terminal — the Claude desktop app keeps a separate
+login); Orbit says so if it is not.
 
 Model lists come from [models.dev](https://models.dev) (the catalogue OpenCode
 uses: every model's context window, output limit and API) and, once a key is
@@ -39,11 +80,12 @@ same harness, not only the local Qwen:
 | Provider | How Claude Code reaches it |
 |---|---|
 | Local (MTPLX on this Mac) | directly |
+| Claude · your subscription | plain Claude Code, your login |
 | OpenCode Go, OpenCode Zen | Orbit's gateway, for every model (DeepSeek, Kimi, GLM, MiMo via OpenAI chat; Qwen, MiniMax via Messages; GPT, Grok via Responses) |
 | DeepSeek, Qwen (Model Studio), GLM (Z.ai / BigModel), MiniMax, Kimi, Anthropic | directly, at their Anthropic-compatible endpoints |
 | Your own provider | directly (Messages API) or through the gateway (OpenAI chat or Responses) |
 
-- **Keys**: Settings → Claude Code → Models. Paste a provider's key there; it is kept
+- **Keys**: Settings → Models & keys. Paste a provider's key there; it is kept
   in Orbit's secrets. Through the gateway the key never reaches the Claude
   process; the gateway listens on loopback and only answers Orbit's own runs.
 - **The gateway** (`bin/harness_gateway.py`) translates Claude Code's Messages API

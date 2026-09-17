@@ -1,5 +1,5 @@
 """The Claude Code harness provider registry (bin/harness.py)."""
-import json, os, shutil, sys, tempfile, unittest
+import json, os, shutil, sys, tempfile, time, unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "bin"))
@@ -97,6 +97,63 @@ class TestRegistry(unittest.TestCase):
             self.assertEqual((spec["provider_cfg"]["context"], spec["provider_cfg"]["max_output"]), (1000000, 384000))
         finally:
             H.models_dev, H._http_json = old_dev, old_http
+
+    def test_several_accounts_are_tried_in_order_and_force_the_gateway(self):
+        import harness_usage as U
+        cfg = H.load(self.root)
+        cfg["providers"]["deepseek"] = {"accounts": [{"id": "main", "label": "Main", "key": "DEEPSEEK_API_KEY"},
+                                                     {"id": "two", "label": "Work", "key": "DEEPSEEK_API_KEY_2"}],
+                                        "active": "two"}
+        H.save(self.root, cfg)
+        secrets = {"DEEPSEEK_API_KEY": "k1", "DEEPSEEK_API_KEY_2": "secret-two-zz"}
+        pc = H.resolve(self.root, "harness:deepseek/deepseek-v4-pro", secrets, "m")["provider_cfg"]
+        self.assertEqual([a["id"] for a in pc["accounts"]], ["two", "main"])
+        self.assertEqual((pc["api_key"], pc["auth"]), ("secret-two-zz", "gateway"))
+        U.mark_exhausted(self.root, "deepseek", "two", "weekly limit reached")
+        pc = H.resolve(self.root, "harness:deepseek/deepseek-v4-pro", secrets, "m")["provider_cfg"]
+        self.assertEqual(pc["account"], "main")
+        self.assertTrue(U.exhausted(self.root, "deepseek", "two")["until"] > time.time() + 6 * 86400)
+        # one account with a key: straight to the provider, as before
+        pc = H.resolve(self.root, "harness:deepseek/deepseek-v4-pro", {"DEEPSEEK_API_KEY": "k1"}, "m")["provider_cfg"]
+        self.assertEqual((pc["auth"], pc["api_key"]), ("api_key", "k1"))
+        view = H.public_view(self.root, secrets)
+        accs = next(p for p in view["providers"] if p["id"] == "deepseek")["accounts"]
+        self.assertEqual([(a["label"], a["active"], bool(a["exhausted"])) for a in accs],
+                         [("Work", True, True), ("Main", False, False)])
+        self.assertNotIn("secret-two-zz", json.dumps(view))
+
+    def test_usage_is_priced_against_the_allowance(self):
+        import harness_usage as U
+        with open(U.limits_path(self.root), "w") as fh:
+            json.dump({"at": 1, "models": {"deepseek-v4-pro": {"price": {"input": 1.0, "output": 4.0, "cache_read": 0.1},
+                                                                "monthly": 15.0}}}, fh)
+        now = time.time()
+        U.record(self.root, "opencode-go", "main", "deepseek-v4-pro",
+                 {"input_tokens": 1_000_000, "output_tokens": 250_000}, t=now - 60)        # $2
+        U.record(self.root, "opencode-go", "main", "deepseek-v4-pro", {"input_tokens": 500_000}, t=now - 3 * 86400)  # $0.5
+        U.record(self.root, "opencode-go", "other", "deepseek-v4-pro", {"input_tokens": 9_000_000}, t=now - 60)
+        u = U.summary(self.root, "opencode-go", "main", "deepseek-v4-pro")
+        self.assertEqual(u["windows"]["5h"]["spent"], 2.0)
+        self.assertEqual(u["windows"]["5h"]["allowance"], 3.0)          # 20% of $15
+        self.assertEqual(u["windows"]["5h"]["left_pct"], 33)
+        self.assertEqual(u["windows"]["week"]["spent"], 2.5)
+        self.assertEqual(u["windows"]["month"]["left_pct"], 83)
+        self.assertTrue(U.is_quota_error(429, "You have exceeded your 5-hour usage limit"))
+        self.assertFalse(U.is_quota_error(429, "Too many requests, slow down"))
+        self.assertFalse(U.is_quota_error(400, "bad request"))
+        self.assertEqual(U._dollars("$15 $60 4x · Ends Sep 20", min), 15.0)
+
+    def test_claude_subscription_needs_no_key(self):
+        spec = H.resolve(self.root, "harness:claude/opus", {}, "m")
+        pc = spec["provider_cfg"]
+        self.assertTrue(pc["subscription"])
+        self.assertEqual((pc["model"], pc["api_key"]), ("opus", ""))
+        self.assertEqual(H.find(self.root, "claude sonnet subscription", {}, "m")["id"], "harness:claude/sonnet")
+        old, H.claude_login = H.claude_login, (lambda max_age=120: "yes")
+        try:
+            self.assertEqual(H.find(self.root, "claude opus", {"OPENCODE_API_KEY": "k"}, "m")["id"], "harness:claude/opus")
+        finally:
+            H.claude_login = old
 
     def test_public_view_has_no_key_values(self):
         view = H.public_view(self.root, {"OPENCODE_API_KEY": "sk-secret-value"})

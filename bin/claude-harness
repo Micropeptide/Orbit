@@ -2,7 +2,7 @@
 # Claude Code on any of Orbit's harness models, in a terminal:
 #   claude-harness "deepseek v4 pro go" [claude options...]
 #   claude-harness "kimi k3"      claude-harness "local qwen"
-# Keys are the ones saved in Orbit (Settings → Claude Code → Models); gateway
+# Keys are the ones saved in Orbit (Settings → Models & keys); gateway
 # models need Orbit running. CLAUDE_QWEN_DRY_RUN=1 prints the command.
 set -eu
 SCRIPT_PATH=$0

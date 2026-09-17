@@ -101,7 +101,7 @@ that wrote it.
 | Kind | What it is | Needs |
 |---|---|---|
 | **Local** | An MLX model served by [MTPLX](https://github.com/Youssofal/MTPLX) on Apple Silicon. Starts on demand, sleeps when idle. | 48 GB comfortably runs a 27B at a 64k window |
-| **Claude Code harness** | The real Claude Code harness — its tools, skills, subagents, todo list and permissions — on any model: the local Qwen, OpenCode Go/Zen, DeepSeek, Qwen, GLM, MiniMax, Kimi, Anthropic or your own endpoint (OpenAI-format models through a translating gateway) | Claude Code installed; a key for remote providers. See [docs/claude-code-engine.md](docs/claude-code-engine.md) |
+| **Claude Code harness** | The real Claude Code harness — its tools, skills, subagents, todo list and permissions — on any model: the local Qwen, your Claude subscription, OpenCode Go/Zen, DeepSeek, Qwen, GLM, MiniMax, Kimi, Anthropic or your own endpoint (OpenAI-format models through a translating gateway); several accounts per provider with automatic switching when one is used up, and usage left per model | Claude Code installed; a key for API providers. See [docs/claude-code-engine.md](docs/claude-code-engine.md) |
 | **CLI agents** | `claude`, `codex`, `opencode`, `qwen` — spawned as subprocesses and read as JSON event streams | The CLI installed and signed in. **No API key.** |
 | **Hosted APIs** | Anthropic (native Messages API), OpenAI, OpenRouter, Ollama, LM Studio, or any OpenAI-compatible endpoint | A key, pasted into Settings |
 

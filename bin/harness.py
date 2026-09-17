@@ -18,6 +18,12 @@ import json, os, re
 # auth:   "api_key" = give Claude Code the key (ANTHROPIC_API_KEY) and the base URL
 #         "gateway" = Claude Code talks to Orbit's gateway, which adds the key
 #         "local"   = the MTPLX server on this Mac, no key
+#         "subscription" = plain Claude Code on your own Claude login, no API at all
+#
+# accounts: a provider can have several keys ("accounts"), say two OpenCode Go
+# subscriptions. The active one is used first; when a provider says an account's
+# quota is used up, the gateway marks it and moves on to the next. A provider
+# with more than one account always goes through the gateway so that can happen.
 
 
 def _m(mid, fmt, context=128000, label=None, **kw):
@@ -57,6 +63,16 @@ PRESETS = {
     "local": {
         "label": "Local (this Mac)", "base": "", "key": "", "auth": "local", "models": [],
         "docs": "The model MTPLX serves on this Mac.",
+    },
+    "claude": {
+        "label": "Claude · your subscription", "base": "", "key": "", "auth": "subscription",
+        "docs": "Claude Code as you use it in a terminal: your own Claude login (Pro, Max, Team), no API key. "
+                "Nothing goes through Orbit's gateway.",
+        "models": [_m("opus", "messages", 200000, "Claude Opus (latest)"),
+                   _m("sonnet", "messages", 200000, "Claude Sonnet (latest)"),
+                   _m("haiku", "messages", 200000, "Claude Haiku (latest)"),
+                   _m("opus[1m]", "messages", 1000000, "Claude Opus · 1M context"),
+                   _m("sonnet[1m]", "messages", 1000000, "Claude Sonnet · 1M context")],
     },
     "opencode-go": {
         "label": "OpenCode Go", "base": "https://opencode.ai/zen/go/v1", "key": "OPENCODE_API_KEY",
@@ -182,7 +198,7 @@ def refresh_models(root, pid, secrets=None, timeout=20):
     """Bring a provider's model list up to date. Returns (count, note)."""
     import time
     base_p = providers(root).get(pid)
-    if not base_p or base_p.get("auth") == "local": return 0, "not a remote provider"
+    if not base_p or base_p.get("auth") in ("local", "subscription"): return 0, "not a remote provider"
     dev = (models_dev(root).get(MODELS_DEV_ID.get(pid, pid)) or {}).get("models") or {}
     live, note = None, ""
     key = _key_value(base_p, secrets)
@@ -258,11 +274,13 @@ def providers(root, local_name=None):
         if over.get("base"): p["base"] = over["base"]
         if over.get("env"): p["env"] = {**(p.get("env") or {}), **over["env"]}
         if over.get("small"): p["small"] = over["small"]
+        if over.get("accounts"): p["accounts"] = over["accounts"]
+        if over.get("active"): p["active"] = over["active"]
         for m in over.get("extra_models") or []:
             if not any(x["id"] == m.get("id") for x in p["models"]):
                 p["models"].append(_m(m["id"], m.get("format") or "messages", m.get("context") or 128000))
         got = (fetched_all.get(pid) or {}).get("models")
-        if got and pid != "local":
+        if got and pid not in ("local", "claude"):
             p["models"] = [dict(m) for m in got]
             p["fetched_at"] = fetched_all[pid].get("at")
         if pid == "local" and local_name:
@@ -276,13 +294,77 @@ def providers(root, local_name=None):
     return out
 
 
+def _secret(name, secrets):
+    return ((secrets or {}).get(name) or os.environ.get(name) or "") if name else ""
+
+
+def accounts(p):
+    """A provider's accounts, the active one first: [{id, label, key}]."""
+    rows = [a for a in (p.get("accounts") or []) if isinstance(a, dict) and a.get("key")]
+    if not rows and p.get("key"):
+        rows = [{"id": "main", "label": "Main", "key": p["key"]}]
+    active = p.get("active")
+    rows.sort(key=lambda a: a.get("id") != active)
+    return [{"id": str(a.get("id") or a["key"]), "label": a.get("label") or a["key"], "key": a["key"]} for a in rows]
+
+
+def account_keys(p, secrets, root=None, pid=None):
+    """Accounts with a key, in the order to try them: the active one, then the rest;
+    accounts marked used up go last (a mark may be stale, so they are still tried)."""
+    out = [{"id": a["id"], "label": a["label"], "key_name": a["key"], "api_key": _secret(a["key"], secrets)}
+           for a in accounts(p)]
+    out = [a for a in out if a["api_key"]]
+    if root and pid:
+        try:
+            import harness_usage
+            for a in out: a["exhausted"] = harness_usage.exhausted(root, pid, a["id"])
+            out.sort(key=lambda a: bool(a.get("exhausted")))
+        except Exception:
+            pass
+    return out
+
+
 def _key_value(p, secrets):
-    name = p.get("key") or ""
-    return (secrets or {}).get(name) or os.environ.get(name) or "" if name else ""
+    got = account_keys(p, secrets)
+    return got[0]["api_key"] if got else ""
+
+
+def claude_installed():
+    import shutil
+    for d in ("", "~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "~/.claude/local"):
+        if (shutil.which("claude") if not d else os.path.exists(os.path.join(os.path.expanduser(d), "claude"))):
+            return True
+    return False
+
+
+_LOGIN = {"at": 0.0, "state": None}
+
+
+def claude_login(max_age=120):
+    """Whether the `claude` command is signed in to a Claude account: "yes", "no" or
+    "missing". (The Claude desktop app keeps its own login; the command needs
+    `claude auth login` once.)"""
+    import subprocess, time
+    if _LOGIN["state"] and time.time() - _LOGIN["at"] < max_age: return _LOGIN["state"]
+    if not claude_installed():
+        state = "missing"
+    else:
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE", "ANTHROPIC"))}
+        env["PATH"] = ":".join([env.get("PATH", "")] + [os.path.expanduser(d) for d in
+                                                        ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")])
+        try:
+            r = subprocess.run(["claude", "auth", "status"], env=env, capture_output=True, text=True, timeout=20)
+            state = "yes" if json.loads(r.stdout or "{}").get("loggedIn") else "no"
+        except Exception:
+            state = "yes"                     # cannot tell: let Claude Code itself say
+    _LOGIN.update(at=time.time(), state=state)
+    return state
 
 
 def _ready(pid, p, secrets):
-    return p.get("auth") == "local" or bool(_key_value(p, secrets))
+    if p.get("auth") == "local": return True
+    if p.get("auth") == "subscription": return claude_login() == "yes"
+    return bool(_key_value(p, secrets))
 
 
 def catalogue(root, secrets=None, local_name=None, include_unready=False):
@@ -316,16 +398,24 @@ def resolve(root, mid, secrets=None, local_name=None):
         m = _m(model, "messages", 131072)
     if m is None: return None
     cfg = load(root)
+    keys = account_keys(p, secrets, root, pid)
+    auth = p.get("auth") or "api_key"
+    if auth == "api_key" and len(keys) > 1:
+        auth = "gateway"               # several accounts: the gateway can move to the next
     return {"id": mid, "provider": "harness", "model": f"{pid}/{model}",
             "label": f"{m['label']} · {p['label']}", "context": m["context"], "kind": "harness",
             "provider_label": "Claude Code · " + p["label"], "ready": _ready(pid, p, secrets),
             "provider_cfg": {"kind": "harness", "provider": pid, "model": model, "base": p.get("base") or "",
-                             "format": m["format"], "auth": p.get("auth") or "api_key",
-                             "key_name": p.get("key") or "", "api_key": _key_value(p, secrets),
+                             "format": m["format"], "auth": auth,
+                             "key_name": (keys[0]["key_name"] if keys else p.get("key") or ""),
+                             "api_key": keys[0]["api_key"] if keys else "",
+                             "accounts": [{"id": a["id"], "api_key": a["api_key"]} for a in keys],
+                             "account": keys[0]["id"] if keys else "",
                              "env": dict(p.get("env") or {}), "small": p.get("small") or model,
                              "context": m["context"], "max_output": m.get("output"),
                              "label": p["label"], "proxy": cfg["proxy"],
-                             "local": p.get("auth") == "local"}}
+                             "local": p.get("auth") == "local",
+                             "subscription": p.get("auth") == "subscription"}}
 
 
 _WORD = re.compile(r"[a-z0-9]+(?:\.[0-9]+)?")
@@ -345,17 +435,27 @@ def find(root, text, secrets=None, local_name=None):
         if pid == "local": hay |= {"local", "mac", "mtplx", "qwen"}
         if pid == "opencode-go": hay |= {"opencode", "go"}
         if pid == "opencode-zen": hay |= {"opencode", "zen"}
-        if pid not in ("opencode-go", "opencode-zen", "local"): hay |= {"direct", "official"}
+        if pid == "claude": hay |= {"claude", "subscription", "login", "anthropic"}
+        if pid not in ("opencode-go", "opencode-zen", "local", "claude"): hay |= {"direct", "official"}
         hit = want & hay
         if not hit: continue
         score = len(hit) - 0.1 * len(hay - want) / max(1, len(hay))
         score -= 0.01 * len(want - hay)
         if not m["ready"]: score -= 0.5
+        if pid == "claude" and "claude" in want: score += 0.2      # "claude opus": your own Claude first
         if score > best_s:
             best, best_s = m, score
     if best is None or best_s < 1: return None
     # every distinctive word must match something
     return resolve(root, best["id"], secrets, local_name)
+
+
+def _exhausted(root, pid, account):
+    try:
+        import harness_usage
+        return harness_usage.exhausted(root, pid, account)
+    except Exception:
+        return None
 
 
 def public_view(root, secrets=None, local_name=None):
@@ -365,6 +465,12 @@ def public_view(root, secrets=None, local_name=None):
     for pid, p in providers(root, local_name).items():
         out.append({"id": pid, "label": p["label"], "base": p.get("base"), "alt_bases": p.get("alt_bases") or [],
                     "key": p.get("key"), "key_set": bool(_key_value(p, secrets)), "auth": p.get("auth"),
+                    "ready": _ready(pid, p, secrets),
+                    "login": claude_login() if p.get("auth") == "subscription" else None,
+                    "accounts": [{"id": a["id"], "label": a["label"], "key": a["key"],
+                                  "key_set": bool(_secret(a["key"], secrets)),
+                                  "active": i == 0, "exhausted": _exhausted(root, pid, a["id"])}
+                                 for i, a in enumerate(accounts(p))],
                     "docs": p.get("docs") or "", "keys_url": p.get("keys_url") or "", "custom": bool(p.get("custom")),
                     "env": p.get("env") or {}, "small": p.get("small") or "", "fetched_at": p.get("fetched_at"),
                     "models": [{**m, "hidden": f"harness:{pid}/{m['id']}" in cfg["hidden"]} for m in p["models"]]})

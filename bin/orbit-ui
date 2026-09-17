@@ -388,12 +388,18 @@ class H(http.server.BaseHTTPRequestHandler):
             models = [{"id": (q.CE.BACKEND + ":default") if pid == "local" else f"harness:{pid}/{m['id']}",
                        "model": m["id"], "label": m.get("label") or m["id"], "context": m.get("context"),
                        "output": m.get("output"), "format": m.get("format"), "reasoning": m.get("reasoning"),
-                       "hidden": f"harness:{pid}/{m['id']}" in hidden} for m in pr["models"]]
+                       "hidden": f"harness:{pid}/{m['id']}" in hidden,
+                       "usage": _usage_brief(pid, m["id"])} for m in pr["models"]]
             return self._send(200, jdump({"provider": pid, "label": pr["label"], "models": models,
                                           "ready": q.HARN._ready(pid, pr, secrets_), "key": pr.get("key"),
                                           "fetched_at": pr.get("fetched_at")}))
         if p == "/api/harness":
             view = q.HARN.public_view(q.ROOT, q.secrets_load(), q.local_model_name())
+            for pv in view["providers"]:
+                for m in pv["models"]: m["usage"] = _usage_brief(pv["id"], m["id"])
+                for a in pv.get("accounts") or []:
+                    a["usage"] = q.USAGE.summary(q.ROOT, pv["id"], a["id"])
+            view["limits_at"] = (q.USAGE.limits_meta(q.ROOT) or {}).get("at")
             view["gateway"] = {"port": q.HARNESS_PORT, "error": GATEWAY["error"]}
             try:
                 import harness_gateway
@@ -751,6 +757,52 @@ class H(http.server.BaseHTTPRequestHandler):
             for k in ("custom", "hidden", "proxy", "gateway_port"):
                 if k in d: cfg[k] = d[k]
             return self._send(200, jdump({"ok": True, "saved": q.HARN.save(q.ROOT, cfg)}))
+        if p == "/api/harness/account":
+            # accounts are key names; their values are saved through /api/secrets/save
+            pid, op = d.get("provider", ""), d.get("op", "")
+            provs = q.HARN.providers(q.ROOT)
+            pr = provs.get(pid)
+            if not pr or pr.get("auth") in ("local", "subscription"):
+                return self._send(404, jdump({"error": "no such provider"}))
+            cfg = q.HARN.load(q.ROOT)
+            over = cfg["providers"].setdefault(pid, {})
+            accts = [dict(a) for a in (over.get("accounts") or q.HARN.accounts(pr))]
+            aid = str(d.get("id") or "")
+            if op == "add":
+                label = str(d.get("label") or "").strip() or f"Account {len(accts) + 1}"
+                base = pr.get("key") or pid.upper().replace("-", "_") + "_API_KEY"
+                n = 2
+                taken = {a["key"] for a in accts}
+                while f"{base}_{n}" in taken: n += 1
+                aid = f"a{int(time.time() * 1000) % 10**9}"
+                accts.append({"id": aid, "label": label[:60], "key": f"{base}_{n}"})
+            elif op == "remove":
+                gone = next((a for a in accts if a["id"] == aid), None)
+                if not gone: return self._send(404, jdump({"error": "no such account"}))
+                accts = [a for a in accts if a["id"] != aid]
+                # a key used by no other account or provider is removed from Orbit's secrets
+                used = {a2["key"] for a2 in accts} | {pv.get("key") for pv in provs.values()}
+                for pv_id, pv in provs.items():
+                    if pv_id != pid: used |= {a2["key"] for a2 in q.HARN.accounts(pv)}
+                if gone["key"] not in used:
+                    merged = dict(q.secrets_load())          # merged: secrets_save writes the whole file
+                    if merged.pop(gone["key"], None) is not None: q.secrets_save(merged)
+                    os.environ.pop(gone["key"], None)
+                if over.get("active") == aid: over.pop("active", None)
+            elif op == "rename":
+                for a in accts:
+                    if a["id"] == aid: a["label"] = str(d.get("label") or a["label"])[:60]
+            elif op == "activate":
+                if not any(a["id"] == aid for a in accts): return self._send(404, jdump({"error": "no such account"}))
+                over["active"] = aid
+                q.USAGE.clear_exhausted(q.ROOT, pid, aid)
+            elif op == "clear":
+                q.USAGE.clear_exhausted(q.ROOT, pid, aid)
+            else:
+                return self._send(400, jdump({"error": f"unknown op {op}"}))
+            over["accounts"] = accts
+            q.HARN.save(q.ROOT, cfg)
+            return self._send(200, jdump({"ok": True, "accounts": accts, "id": aid}))
         if p == "/api/harness/test":
             # one tiny request to a model, through the same route a chat uses
             spec = q.HARN.resolve(q.ROOT, d.get("id", ""), q.secrets_load(), q.local_model_name())
@@ -1645,17 +1697,37 @@ def _gateway_route(provider, model):
         fmt = ("messages" if low.startswith(("claude", "qwen3.", "minimax")) else
                "responses" if low.startswith(("gpt", "grok", "o3", "o4")) else "chat")
         if p.get("auth") == "api_key": fmt = "messages"
-        key = q.secrets_load().get(p.get("key") or "") or os.environ.get(p.get("key") or "") or ""
-        return {"base": p.get("base") or "", "format": fmt, "api_key": key,
+        keys = q.HARN.account_keys(p, q.secrets_load(), q.ROOT, provider)
+        return {"base": p.get("base") or "", "format": fmt, "api_key": keys[0]["api_key"] if keys else "",
+                "accounts": [{"id": a["id"], "api_key": a["api_key"]} for a in keys],
                 "proxy": q.HARN.load(q.ROOT).get("proxy") or ""}
     pc = spec["provider_cfg"]
     base = pc["base"]
     if pc.get("local"):
         base = q.CE.model_endpoint()[0] + "/v1"
     return {"base": base, "format": pc["format"], "api_key": pc["api_key"], "proxy": pc.get("proxy"),
+            "accounts": pc.get("accounts") or [],
             "key_required": not pc.get("local"), "max_output": pc.get("max_output"),
             # Anthropic itself takes every field Claude Code sends; other vendors may not
             "strict": provider not in ("anthropic",) and not str(model).startswith("claude")}
+
+_ACTIVE_ACCT = {}
+
+def _usage_brief(pid, model):
+    """What a model has used through Orbit, and what is left where the provider publishes an allowance."""
+    try:
+        hit = _ACTIVE_ACCT.get(pid)
+        if not hit or time.time() - hit[0] > 3:
+            pr = q.HARN.providers(q.ROOT).get(pid) or {}
+            _ACTIVE_ACCT[pid] = hit = (time.time(), q.HARN.account_keys(pr, q.secrets_load()))
+        keys = hit[1]
+        # an allowance belongs to an account: the one in use now
+        u = q.USAGE.summary(q.ROOT, pid, keys[0]["id"] if keys else None, model)
+        if keys: u["account"] = keys[0]["label"]
+        if not u["requests"] and not u.get("monthly"): return None
+        return u
+    except Exception:
+        return None
 
 def _start_gateway():
     """Orbit's translating gateway for harness models (loopback only)."""
@@ -1664,7 +1736,9 @@ def _start_gateway():
     try:
         GATEWAY["srv"] = harness_gateway.serve(port, _gateway_route,
                                                log=lambda m: print("  gateway: " + m),
-                                               token=q.CE.gateway_token())
+                                               token=q.CE.gateway_token(),
+                                               hooks={"usage": lambda pr, ac, mo, u: q.USAGE.record(q.ROOT, pr, ac, mo, u),
+                                                      "exhausted": lambda pr, ac, msg: q.USAGE.mark_exhausted(q.ROOT, pr, ac, msg)})
         q.HARNESS_PORT = GATEWAY["srv"].server_address[1]
         print(f"  harness gateway on 127.0.0.1:{q.HARNESS_PORT}")
     except OSError as e:
@@ -2040,6 +2114,11 @@ if __name__ == "__main__":
                 if time.time() - at > 86400: q.HARN.refresh_models(q.ROOT, pid, q.secrets_load())
         except Exception as e:
             print(f"  ! model list refresh: {e}")
+        try:
+            if time.time() - float((q.USAGE.limits_meta(q.ROOT) or {}).get("at") or 0) > 86400:
+                q.USAGE.refresh_limits(q.ROOT)
+        except Exception as e:
+            print(f"  ! OpenCode Go usage limits: {e}")
     threading.Thread(target=_refresh_lists, daemon=True).start()
     threading.Thread(target=q.CE.history_items_cached, daemon=True).start()   # warm the sidebar
     mode = remote_mode()

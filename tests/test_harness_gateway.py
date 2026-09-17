@@ -230,6 +230,31 @@ class TestServer(unittest.TestCase):
         self.assertEqual(err["error"]["type"], "rate_limit_error")
         self.assertIn("slow down", err["error"]["message"])
 
+    def test_a_used_up_account_moves_to_the_next_and_usage_is_recorded(self):
+        Upstream.seen.clear()
+        Upstream.script = [{"status": 429, "error": {"error": {"message": "Monthly usage limit exceeded"}}},
+                           {"chunks": [delta(content="ok"),
+                                       {"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                                        "usage": {"prompt_tokens": 120, "completion_tokens": 9}}]}]
+        base = f"http://127.0.0.1:{self.up.server_address[1]}/v1"
+        seen = {"usage": [], "exhausted": []}
+        gw = G.serve(0, lambda p, m: {"base": base, "format": "chat", "api_key": "k1",
+                                      "accounts": [{"id": "main", "api_key": "k1"}, {"id": "two", "api_key": "k2"}]},
+                     hooks={"usage": lambda *a: seen["usage"].append(a),
+                            "exhausted": lambda *a: seen["exhausted"].append(a)})
+        self.addCleanup(gw.shutdown)
+        req = urllib.request.Request(f"http://127.0.0.1:{gw.server_address[1]}/h/go/v1/messages",
+                                     data=json.dumps({"model": "m", "max_tokens": 50, "stream": True,
+                                                      "messages": [{"role": "user", "content": "hi"}]}).encode(),
+                                     headers={"content-type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            self.assertEqual(r.status, 200); r.read()
+        self.assertEqual([s["headers"].get("Authorization") for s in Upstream.seen[-2:]], ["Bearer k1", "Bearer k2"])
+        self.assertEqual(seen["exhausted"][0][:2], ("go", "main"))
+        time.sleep(0.2)
+        prov, acct, model, usage = seen["usage"][0]
+        self.assertEqual((prov, acct, model, usage["input_tokens"], usage["output_tokens"]), ("go", "two", "m", 120, 9))
+
     def test_unknown_provider_and_token_count(self):
         code, raw = self.post("/h/nope/v1/messages", {"model": "x", "messages": []})
         self.assertEqual(code, 404)
