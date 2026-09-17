@@ -127,7 +127,12 @@ LOADED_AT = time.time()
 CODE_FILES = [os.path.join(q.ROOT, "bin", "qqcore.py"),
               os.path.join(q.ROOT, "bin", "claude_engine.py"),
               os.path.join(q.ROOT, "bin", "orbit-ui"),
-              os.path.join(q.ROOT, "web", "index.html")]
+              os.path.join(q.ROOT, "web", "index.html"),
+              # the other engines and helpers the server imports
+              os.path.join(q.ROOT, "bin", "codex_engine.py"),
+              os.path.join(q.ROOT, "bin", "responses_bridge.py"),
+              os.path.join(q.ROOT, "bin", "harness_gateway.py"),
+              os.path.join(q.ROOT, "bin", "file_links.py")]
 
 def code_is_stale():
     newest, who = 0, None
@@ -136,7 +141,7 @@ def code_is_stale():
         except OSError: continue
         if m > newest: newest, who = m, os.path.basename(f)
     # index.html is re-read per request, so only the python files force a restart
-    stale = [os.path.basename(f) for f in CODE_FILES[:2]
+    stale = [os.path.basename(f) for f in CODE_FILES[:2] + CODE_FILES[4:]
              if os.path.exists(f) and os.path.getmtime(f) > LOADED_AT]
     try: page = os.path.getmtime(CODE_FILES[2])
     except OSError: page = 0
@@ -448,6 +453,19 @@ class H(http.server.BaseHTTPRequestHandler):
                                                         "argumentHint": c.get("argumentHint")}
                                                        for c in cat.get("commands") or []],
                                           "agents": cat.get("agents") or []}))
+        if p == "/api/codex/info":
+            return self._send(200, jdump(q.CX.info()))
+        if p.startswith("/api/codex/models"):
+            # the Codex mode picker: your ChatGPT account's models, or a provider's, as codex: ids
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            pid = (qs.get("provider") or [""])[0]
+            cat = [m for m in q.model_catalogue() if m["id"].startswith("codex:")]
+            models = [{"id": m["id"], "label": m.get("label") or m["model"], "context": m.get("context"),
+                       "ready": m.get("ready")} for m in cat if m["model"].split("/")[0] == pid]
+            label = "Your ChatGPT account (Codex)" if pid == "chatgpt" else next(
+                (m.get("provider_label") for m in cat if m["model"].split("/")[0] == pid), pid)
+            return self._send(200, jdump({"provider": pid, "label": label, "models": models,
+                                          "ready": any(m["ready"] for m in models)}))
         if p.startswith("/api/harness/models"):
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
             pid = (qs.get("provider") or [""])[0]
@@ -525,7 +543,9 @@ class H(http.server.BaseHTTPRequestHandler):
             mk = q.CE.marker_of(msgs) or {}
             spec = q.current_model((st.model if st else None) or None) or {}
             return self._send(200, jdump({
-                "engine": q.CE.is_engine(spec), "session": mk.get("session"), "cwd": mk.get("cwd"),
+                "engine": q.CE.is_engine(spec) or q.CX.is_engine(spec), "codex": q.CX.is_engine(spec),
+                "codex_thread": (q.CX.marker_of(msgs) or {}).get("thread") if q.CX.is_engine(spec) else None,
+                "session": mk.get("session"), "cwd": mk.get("cwd") or ((q.CX.marker_of(msgs) or {}).get("cwd") if q.CX.is_engine(spec) else None),
                 "skills": mk.get("skills") or [], "resume": q.CE.resume_command(msgs, spec),
                 "transcript": q.CE.jsonl_path(mk.get("session"), mk.get("cwd")) if mk else None,
                 "installed": bool(q.CE.which_claude()), "settings": q.CE.cfg(),
@@ -602,6 +622,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 "default": q.MODELS.load(q.ROOT).get("default") or "",
                 "providers": q.MODELS.load(q.ROOT)["providers"],
                 "keys": q.secrets_masked(), "harness_mode": bool(q.S.get("harness_mode")),
+                "codex_mode": bool(q.S.get("codex_mode")) and not q.S.get("harness_mode"),
+                "codex_recent": q.S.get("codex_recent") or [],
                 "harness_recent": q.S.get("harness_recent") or []}))
         if p == "/api/projects":  return self._send(200, jdump(q.projects_load()))
         if p == "/api/stats":
@@ -1031,25 +1053,30 @@ class H(http.server.BaseHTTPRequestHandler):
                 except Exception as e: out[pid] = (0, f"{type(e).__name__}: {e}")
             return self._send(200, jdump({"ok": True, "results": out}))
         if p == "/api/harness/mode":
-            # Claude Code mode: new chats, the model picker and Settings follow the harness
-            on = bool(d.get("on"))
+            # the mode: Orbit's own agent, Claude Code, or Codex. New chats, the model picker
+            # and Settings follow it; each mode remembers the model you last used in it.
+            engine = d.get("engine") or ("claude" if d.get("on") else "orbit")
+            if engine not in ("orbit", "claude", "codex"): return self._send(400, jdump({"error": "unknown mode"}))
             with LOCK:
                 cur = q.load_settings()
                 reg = q.MODELS.load(q.ROOT)
                 default = reg.get("default") or ""
-                is_h = default.startswith(("harness:", q.CE.BACKEND))
-                if on:
-                    if not is_h: cur["orbit_default"] = default
+                was = "codex" if default.startswith("codex:") else "claude" if default.startswith(("harness:", q.CE.BACKEND)) else "orbit"
+                cur[{"orbit": "orbit_default", "claude": "harness_default", "codex": "codex_default"}[was]] = default
+                if engine == "claude":
                     reg["default"] = cur.get("harness_default") or q.CE.BACKEND + ":default"
+                elif engine == "codex":
+                    reg["default"] = cur.get("codex_default") or next(
+                        (m["id"] for m in q.CX.catalogue([]) if m.get("ready")), "codex:chatgpt/gpt-5.6-sol")
                 else:
-                    if is_h: cur["harness_default"] = default
                     local = q.local_model_name()
                     reg["default"] = cur.get("orbit_default") or (q.MODELS.model_id("local", local) if local else "")
-                cur["harness_mode"] = on
+                cur["harness_mode"], cur["codex_mode"] = engine == "claude", engine == "codex"
                 q.save_settings(cur); q.reload_settings()
                 q.MODELS.save(q.ROOT, reg)
             q.CE._HIST["at"] = 0          # the sidebar's terminal sessions follow the mode (all of them in Claude Code mode)
-            return self._send(200, jdump({"ok": True, "harness_mode": on, "default": reg["default"]}))
+            return self._send(200, jdump({"ok": True, "harness_mode": engine == "claude", "codex_mode": engine == "codex",
+                                          "engine": engine, "default": reg["default"]}))
         if p == "/api/harness/save":
             # the registry: provider base URLs, custom providers, hidden models, contexts, proxy.
             # Keys are saved through /api/secrets/save, never here.
@@ -1426,15 +1453,17 @@ class H(http.server.BaseHTTPRequestHandler):
                 else: st.flags["model"] = mid
                 if st is S: q.ACTIVE_MODEL["id"] = mid
             spec = q.current_model(mid)
-            if q.S.get("harness_mode") and mid and spec and q.CE.is_engine(spec):
-                # in Claude Code mode the last model chosen is where new chats start
+            codex_on = q.S.get("codex_mode") and mid and spec and q.CX.is_engine(spec)
+            if (q.S.get("harness_mode") and mid and spec and q.CE.is_engine(spec)) or codex_on:
+                # in Claude Code (or Codex) mode the last model chosen is where new chats start
                 reg = q.MODELS.load(q.ROOT)
                 if reg.get("default") != mid:
                     reg["default"] = mid; q.MODELS.save(q.ROOT, reg)
+                key = "codex_recent" if codex_on else "harness_recent"
                 with LOCK:
                     cur = q.load_settings()
-                    recent = [r for r in (cur.get("harness_recent") or []) if r.get("id") != mid]
-                    cur["harness_recent"] = ([{"id": mid, "label": spec.get("label") or mid}] + recent)[:6]
+                    recent = [r for r in (cur.get(key) or []) if r.get("id") != mid]
+                    cur[key] = ([{"id": mid, "label": spec.get("label") or mid}] + recent)[:6]
                     q.save_settings(cur); q.reload_settings()
             return self._send(200, jdump({"ok": True, "id": mid,
                                           "resolved": spec and spec["id"]}))
@@ -1540,18 +1569,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 else: merged.pop(k, None); os.environ.pop(k, None)
             return self._send(200, jdump(q.secrets_save(merged)))
         if p == "/api/schedule/save":
-            cfg = q.sched_load()
-            jobs = {j["id"]: j for j in cfg.get("jobs", [])}
-            job = d.get("job") or {}
-            # A job with no prompt used to be accepted, and then fired a full agent
-            # turn on the next tick because it had never run.
-            if not str(job.get("prompt", "")).strip():
-                return self._send(400, jdump({"error": "a task needs a prompt"}))
-            if not str(job.get("name", "")).strip():
-                job["name"] = str(job["prompt"]).strip()[:40]
-            job.setdefault("id", "job" + os.urandom(3).hex())
-            jobs[job["id"]] = {**jobs.get(job["id"], {}), **job}
-            cfg["jobs"] = list(jobs.values()); q.sched_save(cfg)
+            cfg, err = schedule_save(d.get("job") or {})
+            if err: return self._send(400, jdump({"error": err}))
             return self._send(200, jdump(cfg))
         if p == "/api/schedule/delete":
             cfg = q.sched_load()
@@ -1614,8 +1633,12 @@ class H(http.server.BaseHTTPRequestHandler):
             op, iid = d.get("op", ""), d.get("id")
             find = lambda: next((it for it in st.queue if it["id"] == iid), None)
             if op == "add":
-                try: _queue_add(st, d.get("text", ""), d.get("attachments"), d.get("effort"), at=d.get("at"), repeat=d.get("repeat"))
+                try: _queue_add(st, d.get("text", ""), d.get("attachments"), d.get("effort"), at=d.get("at"),
+                                repeat=d.get("repeat"), model=d.get("model"))
                 except ValueError as e: return self._send(400, jdump({"error": str(e)}))
+            elif op == "update":
+                it, err = queue_update(st, iid, {k: d[k] for k in ("text", "at", "repeat", "model") if k in d})
+                if err: return self._send(404 if "started" in err else 400, jdump({"error": err}))
             elif op == "schedule":
                 # set, change or clear when a waiting message goes out
                 it = find()
@@ -1648,13 +1671,14 @@ class H(http.server.BaseHTTPRequestHandler):
                 # it reads at its next step -- or, if nothing is running, it starts
                 it = find()
                 if not it: return self._send(404, jdump({"error": "that message has already started"}))
+                st.queue = [x for x in st.queue if x["id"] != iid]
+                if it.get("repeat") in REPEATS and it.get("at"):
+                    # sending a repeating one early keeps the series, whichever way it goes in
+                    st.queue.append(dict(it, id=uuid.uuid4().hex[:10], at=_next_time(float(it["at"]), it["repeat"])))
                 if st.lock.locked() and not it.get("attachments"):
-                    st.queue.remove(it); _queue_saved(st)
+                    _queue_saved(st)
                     st.inbox.append({"text": it["text"], "t": time.time()}); st.interrupt.set()
                     return self._send(200, jdump({"ok": True, "interjected": True, "queue": _queue_view(st)}))
-                st.queue.remove(it)
-                if it.get("repeat") in REPEATS:     # sending a repeating one early keeps the series
-                    st.queue.append(dict(it, id=uuid.uuid4().hex[:10], at=_next_time(float(it["at"]), it["repeat"])))
                 it = {k: v for k, v in it.items() if k not in ("at", "repeat", "missed", "skipped")}
                 st.queue.insert(0, it); st.queue_paused = False; _queue_saved(st)
             elif op in ("pause", "resume"):
@@ -1663,8 +1687,13 @@ class H(http.server.BaseHTTPRequestHandler):
                 st.queue = []; st.queue_paused = False; _queue_saved(st)
             elif op != "get":
                 return self._send(400, jdump({"error": f"unknown op {op}"}))
-            if op in ("add", "now", "resume", "schedule"): _drain()
+            if op in ("add", "now", "resume", "schedule", "update"): _drain()
             return self._send(200, jdump({"ok": True, "queue": _queue_view(st)}))
+        if p == "/api/scheduled":
+            # everything scheduled: messages waiting in any chat, and tasks
+            return self._send(200, jdump({"messages": scheduled_messages(), "tasks": [
+                {**j, "next_ts": q.sched_next_ts(j), "next": q.sched_next(j)} for j in q.sched_load().get("jobs", [])],
+                "default_model": (q.MODELS.load(q.ROOT) or {}).get("default")}))
         if p == "/api/scheduled_sends":
             out = []
             try: idx = json.load(open(QUEUE_INDEX))
@@ -1746,7 +1775,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 _restart_when_idle()
                 return self._send(200, jdump({"ok": True, "deferred": True, "running": len(busy),
                     "msg": f"will restart as soon as {len(busy)} running answer(s) finish"}))
-            threading.Timer(0.4, lambda: (q.CE.close_live(), time.sleep(1), os._exit(0))).start()
+            threading.Timer(0.4, lambda: (q.CE.close_live(), q.CX.shutdown(), time.sleep(1), os._exit(0))).start()
             return self._send(200, jdump({"ok": True, "msg": "restarting the interface…"}))
         if p == "/api/server/stop":
             return self._send(200, jdump({"msg": q.stop_server()}))
@@ -2142,7 +2171,53 @@ def _queue_saved(st):
             json.dump(idx, open(tmp, "w")); os.replace(tmp, QUEUE_INDEX)
     except Exception: pass
 
-def _queue_add(st, text, atts=None, effort=None, at=None, repeat=None):
+def scheduled_messages():
+    out = []
+    try: idx = json.load(open(QUEUE_INDEX))
+    except Exception: idx = {}
+    for qsid in set(idx) | {k for k, v in list(STATES.items()) if v.queue}:
+        if qsid not in STATES and not os.path.exists(q.session_path(qsid)): continue
+        stt = get_state(qsid)
+        for it in list(stt.queue):
+            if not it.get("at"): continue
+            out.append({"sid": qsid, "title": stt.title, "id": it["id"], "text": it.get("text", ""),
+                        "at": it["at"], "repeat": it.get("repeat"), "missed": bool(it.get("missed")),
+                        "model": it.get("model"), "chat_model": stt.model,
+                        "attachments": len(it.get("attachments") or []), "project": stt.project})
+    out.sort(key=lambda x: x["at"])
+    return out
+
+def queue_update(st, iid, fields):
+    """Change a waiting message: text, when (at None = back to the plain queue),
+    repeat, model ("" = the chat's own). Returns (item, error)."""
+    it = next((x for x in st.queue if x.get("id") == iid), None)
+    if it is None: return None, "that message has already started"
+    if "text" in fields:
+        t = str(fields.get("text") or "").strip()
+        if not t and not it.get("attachments"): return None, "the message is empty"
+        it["text"] = t
+    rp = fields.get("repeat", it.get("repeat")) or None
+    if rp and rp not in REPEATS: return None, "repeat must be daily, weekdays or weekly"
+    if "at" in fields:
+        if fields["at"]:
+            try: at = float(fields["at"])
+            except (TypeError, ValueError): return None, "when? (a time)"
+            if not rp and at < time.time() - 5: return None, "that time has passed"
+            it["at"] = _next_time(at, rp) if rp and at <= time.time() else at
+            it.pop("missed", None); it.pop("skipped", None)
+        else:
+            for k in ("at", "repeat", "missed", "skipped"): it.pop(k, None)
+            rp = None
+    if it.get("at"):
+        if rp: it["repeat"] = rp
+        else: it.pop("repeat", None)
+    if "model" in fields:
+        if fields["model"]: it["model"] = str(fields["model"])
+        else: it.pop("model", None)
+    _queue_saved(st)
+    return it, None
+
+def _queue_add(st, text, atts=None, effort=None, at=None, repeat=None, model=None):
     item = {"id": uuid.uuid4().hex[:10], "text": str(text or ""), "attachments": list(atts or []),
             "effort": effort, "t": time.time()}
     if at:
@@ -2151,6 +2226,7 @@ def _queue_add(st, text, atts=None, effort=None, at=None, repeat=None):
         if repeat and at <= time.time(): at = _next_time(at, repeat)
         item["at"] = at
         if repeat: item["repeat"] = repeat
+    if model: item["model"] = str(model)
     st.queue.append(item)
     _queue_saved(st)
     return {k: v for k, v in item.items() if k != "attachments"}
@@ -2179,8 +2255,10 @@ def _drain():
                 nxt = dict(item, id=uuid.uuid4().hex[:10], at=_next_time(float(item["at"]), item["repeat"], now))
                 nxt.pop("skipped", None)
                 st.queue.append(nxt)
-            if item.get("at"):
-                item["text"] = str(item.get("text") or "")
+            if item.get("model"):
+                # a message scheduled for a model: the chat moves to it, as if you had
+                # picked it in the model menu and then sent the message
+                st.model = item["model"]
             started.append((st, item))
     for st, item in started:
         _queue_saved(st)
@@ -2194,7 +2272,7 @@ def _drain():
 # stream events worth showing to a tab that rejoins an answer mid-way
 _STATUS_KINDS = ("server_starting", "stagnation", "autocompact", "squeezed", "notice", "status",
                  "long_running", "interjection", "retry", "subtask", "queued", "dequeued",
-                 "plan_nudge", "fail_streak", "ultrathink")
+                 "plan_nudge", "fail_streak", "ultrathink", "fallback")
 
 def _status_text(k, p):
     p = p or {}
@@ -2206,6 +2284,7 @@ def _status_text(k, p):
     if k == "retry":        return (f"model request failed ({p.get('kind')}) — retrying"
                                     + (f" in {p.get('wait')}s" if p.get("wait") else ""))
     if k == "subtask":      return f"helper: {p.get('description')} — {p.get('tool')}"
+    if k == "fallback":     return f"{p.get('from')} kept failing — continuing on {p.get('to')}"
     return p.get("msg") or k.replace("_", " ")
 
 def _live_record(st, k, p):
@@ -2383,7 +2462,9 @@ def _live_emitter(st):
 def _is_engine_chat(st, model=None):
     """Whether a chat runs through Claude Code (which has its own memory, compaction
     and instructions)."""
-    try: return q.CE.is_engine(q.current_model(model or st.model))
+    try:
+        spec = q.current_model(model or st.model)
+        return q.CE.is_engine(spec) or q.CX.is_engine(spec)       # Codex keeps its own context too
     except Exception: return False
 
 def _learn_later(st, n0, min_steps=3):
@@ -2505,6 +2586,64 @@ def _stamp_started(job_id):
                 j["last_run"] = time.time()
     q.sched_update(stamp)
 
+def schedule_save(fields):
+    """Create a task, or change some of an existing one's fields (pausing sends only
+    {id, enabled}). Validated and saved under the schedule lock. (cfg, error)."""
+    fields = {k: v for k, v in dict(fields or {}).items() if k not in ("next", "next_ts")}
+    out = {"err": None}
+    def change(cfg):
+        jobs = cfg.setdefault("jobs", [])
+        cur = next((j for j in jobs if fields.get("id") and j.get("id") == fields["id"]), None)
+        if fields.get("id") and cur is None and len(fields) <= 2 and "prompt" not in fields:
+            out["err"] = "no such task"; return
+        job = {**(cur or {}), **fields}
+        if cur is None:
+            job.setdefault("id", "job" + os.urandom(3).hex())
+            job.setdefault("created", time.time()); job.setdefault("enabled", True)
+            job.setdefault("created_by", "you")
+        if not str(job.get("name", "")).strip(): job["name"] = str(job.get("prompt", "")).strip()[:40]
+        for k in ("model", "agent", "sid", "project", "stop_at"):
+            if k in fields and not fields[k]: job.pop(k, None)
+        job, err = q.sched_validate(job)
+        if err: out["err"] = err; return
+        # a change to when it runs counts from now: a daily task moved to a time
+        # earlier today must not fire at once as "missed"
+        if cur is not None and any(k in fields for k in ("every", "at", "weekday", "n", "at_ts")):
+            job["not_before"] = time.time()
+            if job.get("every") == "once": job.pop("last_run", None)      # a finished one-off, given a new time
+        elif cur is None:
+            job["not_before"] = time.time()
+        if cur is None: jobs.append(job)
+        else: jobs[jobs.index(cur)] = job
+    cfg = q.sched_update(change)
+    if out["err"]:
+        return None, out["err"]
+    return cfg, None
+
+def _job_model(job):
+    if job.get("model"): return job["model"]
+    st = STATES.get(job.get("sid") or "")
+    if st is not None: return st.model
+    if job.get("sid") and os.path.exists(q.session_path(job["sid"])):
+        try: return json.load(open(q.session_path(job["sid"]))).get("model")
+        except Exception: return None
+    return None
+
+def jobs_ready_to_start(now=None):
+    """Due tasks that may start now. A task waits only when its own chat is answering,
+    or when it would use the local model while that is busy -- not whenever any chat
+    is answering (with many chats running at once, tasks used to wait for hours)."""
+    busy = set(running_sids()) | set(JOBS_INFLIGHT)
+    out = []
+    for job in q.sched_load().get("jobs", []):
+        if job.get("id") in busy or not q.sched_due(job, now): continue
+        if job.get("sid") and job["sid"] in busy: continue
+        try: local = q.model_is_local(_job_model(job))
+        except Exception: local = False
+        if local and q.slot_busy(): continue
+        out.append(job)
+    return out
+
 def _job_minutes(job):
     """A job with stop_at ("06:00") must be done by then: its answer gets that
     long, and wraps up with a summary when time runs out."""
@@ -2618,15 +2757,12 @@ def run_job(job):
 
 def scheduler_loop():
     def _due_jobs():
-        # one thing at a time: no job while any answer (or job) is running, and
-        # a gap after the last one finished, so jobs never pile onto a chat
-        if running_sids() or JOBS_INFLIGHT or q.slot_busy(): return
+        # a job waits only for its own chat, or for the local model when it needs it
+        # (jobs_ready_to_start), plus a gap after the last answer; one start a minute
         if time.time() - q.GEN_STATE.get("ended", 0) < float(q.S.get("schedule_gap_min") or 0) * 60:
             return
-        for job in q.sched_load().get("jobs", []):
+        for job in jobs_ready_to_start():
             jid = job.get("id")
-            if jid in JOBS_INFLIGHT or not q.sched_due(job):
-                continue
             # in its own thread: a scheduled job is a full model turn, and running
             # it here stalled every other chore for as long as it took
             JOBS_INFLIGHT.add(jid)
@@ -2686,7 +2822,7 @@ def _restart_when_idle():
     def wait():
         while running_sids() or JOBS_INFLIGHT:
             time.sleep(3)
-        (q.CE.close_live(), time.sleep(1), os._exit(0))
+        (q.CE.close_live(), q.CX.shutdown(), time.sleep(1), os._exit(0))
     threading.Thread(target=wait, daemon=True).start()
 
 def _sched_log(msg):

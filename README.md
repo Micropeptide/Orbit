@@ -33,10 +33,12 @@ each answer names the model that wrote it.*
 - [Two ways to chat](#two-ways-to-chat)
 - [Models, providers and accounts](#models-providers-and-accounts)
 - [Claude Code mode](#claude-code-mode)
+- [Codex mode](#codex-mode)
 - [Chats on another machine (SSH)](#chats-on-another-machine-ssh)
 - [Sessions from other agents](#sessions-from-other-agents)
 - [Many chats at once, and the message queue](#many-chats-at-once-and-the-message-queue)
 - [Scheduled messages](#scheduled-messages)
+- [When a model keeps failing](#when-a-model-keeps-failing)
 - [Answers, files and previews](#answers-files-and-previews)
 - [Orbit's own agent](#orbits-own-agent)
 - [The interface](#the-interface)
@@ -51,6 +53,13 @@ each answer names the model that wrote it.*
 - **Any model, one conversation at a time.** Pick a model per chat; two chats can use
   two different models at once, and a chat can switch model mid-way. Each answer is
   labelled with the model that wrote it.
+- **Codex too.** Codex's own agent — tools, sandbox, skills, plugins — on your ChatGPT
+  account or on any provider in Orbit's list, in a green Codex mode beside Claude Code's
+  orange one. A chat can move between Orbit's agent, Claude Code and Codex and keep its
+  conversation.
+- **When a provider fails, the answer carries on.** After a few failed attempts it moves
+  to the same model on another provider, or the next model on your fallback list, and
+  says so.
 - **Claude Code on any model.** Claude Code's harness driving DeepSeek, Kimi, GLM,
   Qwen or a local MLX model — through a built-in gateway that translates Anthropic's
   Messages API to OpenAI's chat and Responses APIs — or plainly on your own Claude
@@ -211,6 +220,33 @@ sessions show up in Orbit's sidebar.
 
 ---
 
+## Codex mode
+
+Codex's own agent, as the Codex CLI and app run it — its tools, sandbox, `AGENTS.md`,
+skills, plugins and MCP servers — with every step shown in Orbit. Turn it on with
+**Codex** at the top (Orbit takes on Codex's green); pick the provider and model beside it.
+
+- **Your ChatGPT account.** *ChatGPT account (Codex)* uses the account `codex login`
+  signed in on this Mac, with its own models and limits (shown in the chat's Codex panel).
+- **Any other provider.** Every provider in *Models & keys* — OpenCode Go and Zen,
+  DeepSeek, Kimi, GLM, Qwen, OpenRouter, your own — works in Codex too. Codex speaks
+  OpenAI's Responses API; Orbit's gateway answers it in each provider's own format
+  (chat completions, Anthropic messages, or Responses), with your key, which never
+  reaches Codex. MCP tool groups are offered to such models as plain functions and
+  mapped back.
+- **Approvals.** The chat's permission mode maps onto Codex: *Auto* and *Accept edits*
+  work in the folder's sandbox and ask in Orbit before going outside it; *Ask* asks
+  before every command; *Plan* is read-only; *Bypass* has no sandbox. Stop interrupts
+  the answer; a note sent while it works is steered into it.
+- **Shared sessions.** Each chat is a Codex thread in `~/.codex/sessions`, so
+  `codex resume <thread>` continues it in a terminal, and a Codex session started
+  elsewhere can be opened and continued in Orbit.
+- **Moving between harnesses.** Switch a chat's model to Claude Code, to Orbit's own
+  agent, or back to Codex: whoever answers next is given what was said since it last
+  saw the conversation.
+
+---
+
 ## Chats on another machine (SSH)
 
 A Claude Code chat can run on a cluster's login node or a lab server, as Claude Code's
@@ -277,6 +313,11 @@ in between. Deleting one hides it from Orbit; the agent's own history is left al
 
 ## Scheduled messages
 
+- **The Scheduled tab** (in the sidebar) lists everything scheduled: messages waiting in
+  any chat and tasks that run on their own. Edit either in place — a message's text, time,
+  repeat and **model** (it can go out on a different model than the chat's); a task's
+  name, prompt, repeat, time, stop time, model, chat, project and agent — or send, run,
+  pause or remove it.
 - **⏱ beside Send** (or right-click Send): in 30 minutes, this evening, tomorrow morning,
   Monday morning, or any date and time — once, every day, every weekday or every week.
   From the keyboard: `/later 21:30 …`, `/later tomorrow 9am …`, `/later in 2h …`,
@@ -292,6 +333,18 @@ in between. Deleting one hides it from Orbit; the agent's own history is left al
   drop, and a repeating one waits for its next time. `/scheduled` lists everything
   scheduled in every chat. (For prompts that run unattended in a fresh chat, use
   **Tasks**.)
+
+---
+
+## When a model keeps failing
+
+Settings → Models & keys → *When a model keeps failing*. After a few failed attempts
+(3 by default; Claude Code and Codex first retry on their own), the answer moves on:
+first to the same model from another provider (DeepSeek on OpenCode Zen when OpenCode
+Go is down), then down your fallback list. A chat stays in its harness — a Claude Code
+chat falls back to Claude Code models, a Codex chat to Codex ones. The answer says what
+happened and which model finished it; the chat keeps its own model for the next message.
+A bad request or a conversation too long for the window never falls back.
 
 ---
 
@@ -402,7 +455,7 @@ be switched off in Settings → Tools; one Python file in `tools/` adds another
 | **Answers** | Thinking, text and each tool call as its own step with a live timer and ✓/✗; diffs; time and tokens per answer; undo the files an answer changed; fork from any message; files as links and cards with previews ([more](#answers-files-and-previews)); copy as Markdown, formatted or plain. |
 | **Files** | Everything Orbit created or you attached, with the chat it came from. |
 | **Library** | Knowledge documents, skills, agents, saved prompts. |
-| **Tasks** | Scheduled prompts, each on the model you choose, and a live view of cluster jobs. |
+| **Scheduled** | Messages scheduled in any chat and tasks that run on their own — edit text, time, repeat and model in place — and a live view of cluster jobs. |
 | **Trash** | Deleted chats and files, restorable, auto-purged after a retention you set. |
 
 Also: `⌘P` searches chats, messages, files and commands; `⌘G` jumps to any message;
@@ -591,7 +644,9 @@ venv/bin/python -m unittest discover -s tests -p "test_*.py"
 
 Over 300 tests, none needing a model or network: the core agent loop, safety, sessions
 and ordering, the provider registry, the gateway's translations and account failover,
-the message queue, scheduled messages and concurrent chats, finding and previewing the
+the message queue, scheduled messages and tasks (editing, validation, starvation),
+model fallback, Codex mode against a stand-in app-server, the Responses gateway
+translations, concurrent chats, finding and previewing the
 files a chat names (and refusing secrets or paths outside a preview's folder),
 Codex/OpenCode session import and resume, the SSH
 wrapper and its watchdog, and Claude Code end to end — the real `claude` binary against a

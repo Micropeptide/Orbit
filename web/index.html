@@ -30,6 +30,17 @@ body.harness .top{box-shadow:inset 0 -2px 0 var(--acc)}
 #hmode{font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid var(--line);background:transparent;color:var(--mut);cursor:pointer;white-space:nowrap}
 #hmode .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--dim);margin-right:6px;vertical-align:middle}
 body.harness #hmode{border-color:var(--acc);color:var(--acc);background:color-mix(in srgb,var(--acc) 10%,transparent)}
+/* Codex mode: Codex's green, and the same band, so it is plain which harness a chat runs in */
+body.codexmode{--acc:#10a37f}
+@media(prefers-color-scheme:dark){body.codexmode{--acc:#3ccf9f}}
+body.codexmode .top{box-shadow:inset 0 -2px 0 var(--acc)}
+#cmode{font-size:12px;padding:3px 10px;border-radius:12px;border:1px solid var(--line);background:transparent;color:var(--mut);cursor:pointer;white-space:nowrap}
+#cmode .dot{display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--dim);margin-right:6px;vertical-align:middle}
+body.codexmode #cmode{border-color:var(--acc);color:var(--acc);background:color-mix(in srgb,var(--acc) 10%,transparent)}
+body.codexmode #cmode .dot{background:var(--acc)}
+body.codexmode #hpick{display:inline-flex}
+body.codexmode #modelsel,body.codexmode #agentsel{display:none}
+body.codexmode #title{min-width:80px;flex-shrink:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 body.harness #hmode .dot{background:var(--acc)}
 #hpick{display:none;gap:5px;align-items:center}
 body.harness #hpick{display:inline-flex}
@@ -281,6 +292,11 @@ code.pathlink.pathcode{color:var(--acc);text-decoration:underline dotted;text-un
 .schedpop .row2{display:flex;gap:6px;align-items:center;margin-top:8px}
 .schedpop input,.schedpop select{font:inherit;font-size:12.5px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:7px;padding:4px 6px}
 .sitem .schedmark{font-size:10px;color:var(--acc)}
+#tasks .qwhen{font-size:12px;color:var(--acc);white-space:nowrap;cursor:pointer;border:1px solid color-mix(in srgb,var(--acc) 35%,transparent);border-radius:6px;padding:0 6px}
+#tasks .qwhen.missed{color:var(--warn);border-color:var(--warn)}
+#tasks .chatlink{font-weight:600;font-size:13.5px;color:var(--fg);text-decoration:none}
+#tasks .chatlink:hover{color:var(--acc)}
+#tasks .smtext{width:100%;margin-top:7px;min-height:44px;font-size:13.5px}
 .tblwrap.tbllong{max-height:520px;overflow:auto}
 .tblfilter{font:inherit;font-size:12px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);padding:1px 7px;margin-right:auto;width:180px}
 .pvbody .blktools button{opacity:1}
@@ -609,7 +625,7 @@ table.stbl{border-collapse:collapse;width:100%;font-size:13px;margin:2px 0 6px}
     <button id=nav_chats class=on>Chats</button>
     <button id=nav_files>Files</button>
     <button id=nav_lib>Library</button>
-    <button id=nav_tasks>Tasks</button>
+    <button id=nav_tasks title="messages scheduled in any chat, and tasks that run on their own">Scheduled</button>
     <button id=nav_trash>Trash</button>
   </div>
   <div class=sidescroll id=sidescroll>
@@ -643,6 +659,7 @@ table.stbl{border-collapse:collapse;width:100%;font-size:13px;margin:2px 0 6px}
     <b id=title title="click to rename">New chat</b>
     <span id=runbadge class=note style="color:var(--acc)"></span>
     <button id=hmode title="Claude Code mode: every chat runs through the Claude Code harness, on the provider and model you pick"><span class=dot></span>Claude Code</button>
+    <button id=cmode title="Codex mode: every chat runs through Codex's own agent — on your ChatGPT account, or any provider in Orbit's list"><span class=dot></span>Codex</button>
     <span id=hpick><select id=hprov class=ghost title="provider"></select><select id=hmodel class=ghost title="model for this chat"></select>
       <button class=ghost id=hrefresh title="refresh this provider's model list" style="padding:2px 7px">↻</button></span>
     <select id=modelsel class=ghost style="max-width:190px" title="model for this chat"></select>
@@ -723,7 +740,7 @@ const CMDS=[
  {c:'/stop',d:'stop the model server (frees ~15 GB)'},
  {c:'/help',d:'show these commands'}];
 
-function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 /* ---------------- rendering answers ----------------
  Markdown the way models write it: GitHub-flavoured (tables with alignment, task
  lists, strikethrough, nested lists, autolinks), math ($…$, $$…$$, \(…\), \[…\]),
@@ -824,6 +841,12 @@ function md(t){
   if(ids.length)html+='<section class=footnotes><ol>'+ids.map(id=>
    `<li data-fn="${attr(id)}">${marked.parseInline(mdProtectInline(P.notes[id],P))}</li>`).join('')+'</ol></section>'}
  html=DOMPurify.sanitize(html,PURIFY);
+ if(html.includes('\u2063')&&/=["'][^"']*\u2063/.test(html)){
+  // a formula inside an attribute (a link title, an image's alt text) stays plain text
+  const tpl=document.createElement('template');tpl.innerHTML=html;
+  tpl.content.querySelectorAll('*').forEach(n=>[...n.attributes].forEach(a=>{if(a.value.includes('\u2063'))
+   n.setAttribute(a.name,a.value.replace(/\u2063M(\d+)\u2063/g,(m,i)=>(P.maths[+i]||{}).raw||'').replace(/\u2063F([^\u2063]{1,40})\u2063/g,'[$1]'))}));
+  html=tpl.innerHTML}
  html=html.replace(/\u2063M(\d+)\u2063/g,(m,i)=>{const x=P.maths[+i];if(!x)return '';
   const h=katexHtml(x.tex,x.disp);return h!==null?(x.disp?`<span class=mathblock>${h}</span>`:h):esc(x.raw)});
  html=html.replace(/\u2063F([^\u2063]{1,40})\u2063/g,(m,id)=>{
@@ -1391,12 +1414,12 @@ function notebookView(nb){
  (nb.cells||[]).forEach((c,i)=>{
   const cell=el(`<div class="nbcell ${c.cell_type}"><div class=nbin></div></div>`);
   if(c.cell_type==='markdown'){cell.querySelector('.nbin').innerHTML=md(src(c.source))}
-  else if(c.cell_type==='code'){cell.querySelector('.nbin').innerHTML=`<div class=nbnum>[${c.execution_count??' '}]</div>`+codeHtml(src(c.source),lang);
+  else if(c.cell_type==='code'){cell.querySelector('.nbin').innerHTML=`<div class=nbnum>[${esc(c.execution_count??' ')}]</div>`+codeHtml(src(c.source),lang);
    (c.outputs||[]).forEach(o=>{const out=el('<div class=nbout></div>');
     const data=o.data||{};
-    if(data['image/png'])out.innerHTML=`<img class=mdimg src="data:image/png;base64,${src(data['image/png']).replace(/\s/g,'')}">`;
-    else if(data['image/jpeg'])out.innerHTML=`<img class=mdimg src="data:image/jpeg;base64,${src(data['image/jpeg']).replace(/\s/g,'')}">`;
-    else if(data['image/svg+xml'])out.innerHTML=`<img class=mdimg src="data:image/svg+xml;charset=utf-8,${encodeURIComponent(src(data['image/svg+xml']))}">`;
+    if(data['image/png']||data['image/jpeg']){const i=document.createElement('img');i.className='mdimg';
+     const kind=data['image/png']?'png':'jpeg';i.src=`data:image/${kind};base64,`+src(data['image/'+kind]).replace(/[^A-Za-z0-9+/=]/g,'');out.appendChild(i)}
+    else if(data['image/svg+xml']){const i=document.createElement('img');i.className='mdimg';i.src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(src(data['image/svg+xml']));out.appendChild(i)}
     else if(data['text/markdown'])out.innerHTML=md(src(data['text/markdown']));
     else if(data['text/html'])out.innerHTML=DOMPurify.sanitize(src(data['text/html']),PURIFY);
     else if(data['text/plain']!=null||o.text!=null){const pre=document.createElement('pre');pre.textContent=src(data['text/plain']??o.text);out.appendChild(pre)}
@@ -1884,12 +1907,18 @@ async function loadModels(){
  drawModelPicker()}
 function drawModelPicker(){
  document.body.classList.toggle('harness',!!MODELS.harness_mode);
+ document.body.classList.toggle('codexmode',!!MODELS.codex_mode&&!MODELS.harness_mode);
  // the composer says which harness it is talking to
  q.placeholder=MODELS.harness_mode?'Ask Claude Code — / for commands and skills, drop to attach'
   :'Ask anything — / for commands, @ for files, drop to attach';
  const tl=$('#tools');
  if(tl&&MODELS.harness_mode){tl.dataset.orbit=tl.dataset.orbit||tl.textContent;tl.textContent='Claude Code harness · its own tools, skills and MCP servers'}
  else if(tl&&tl.dataset.orbit&&/Claude Code harness/.test(tl.textContent)){tl.textContent=tl.dataset.orbit}
+ if(MODELS.codex_mode&&!MODELS.harness_mode){
+  q.placeholder='Ask Codex — / for commands, drop to attach';
+  if(tl){tl.dataset.orbit=tl.dataset.orbit||tl.textContent;tl.textContent='Codex harness · its own tools, sandbox, skills and MCP servers'}
+  drawHarnessPicker()}
+ else if(tl&&tl.dataset.orbit&&/Codex harness/.test(tl.textContent)){tl.textContent=tl.dataset.orbit}
  if(MODELS.harness_mode)drawHarnessPicker();
  const sel=$('#modelsel'); if(!sel)return;
  const cur=MODELS.current||MODELS.default||'';
@@ -2094,7 +2123,7 @@ async function runCmd(cmd,rest){
  if(cmd==='/hidetools'){const on=!log.classList.contains('hidedone');log.classList.toggle('hidedone',on);
   PREF.set('hidetools',on?'1':'0');toast(on?'finished tool rows hidden':'tool rows shown');return true}
  if(cmd==='/clear'){wrap.innerHTML='';return true}
- if(cmd==='/scheduled'){showScheduled();return true}
+ if(cmd==='/scheduled'){showPane('tasks');return true}
  if(cmd==='/files'){showChatFiles();return true}
  if(cmd==='/later'){const p=parseLater(rest);
   if(!p||!p.text){q.value='/later '+rest;toast('usage: /later 21:30 <message> · /later tomorrow 9am <message> · /later in 2h <message> · /later daily 8:00 <message>');return true}
@@ -2303,9 +2332,10 @@ const CQ_MODES={default:'Ask',acceptEdits:'Accept edits',plan:'Plan',auto:'Auto'
 let CQ_INFO=null, CQ_CMDS=[];
 function isClaudeModelId(m){m=m||MODELS.default||'';return m.startsWith('claude-qwen-cli')||m.startsWith('harness:')}
 function isClaudeChat(){const m=MODELS.current||MODELS.default||'';return m.startsWith('claude-qwen-cli')||m.startsWith('harness:')}
+function isCodexChat(){return (MODELS.current||MODELS.default||'').startsWith('codex:')}
 async function drawClaudeBar(){
  let b=$('#cqbar');
- if(!isClaudeChat()||!sid){if(b)b.style.display='none';return}
+ if(!(isClaudeChat()||isCodexChat())||!sid){if(b)b.style.display='none';return}
  if(!b){b=el(`<span id=cqbar><select title="Claude Code permission mode for this chat — changes a running answer too">${
    Object.entries(CQ_MODES).map(([k,v])=>`<option value=${k}>${v}</option>`).join('')}</select><span class=cqdir title="the folder this chat's Claude session works in"></span><span class=cqi title="Claude Code session">Claude Code</span></span>`);
   (($('#planmode'))||$('#title')).after(b);
@@ -2314,9 +2344,10 @@ async function drawClaudeBar(){
     e.target.value=(CQ_INFO&&CQ_INFO.prefs||{}).permission_mode||'default';return}
    const d=await apiPost('/api/claude/mode',{sid,mode:e.target.value},'permission mode');
    if(d)toast('permission mode: '+CQ_MODES[d.mode]+(d.live?' — applied to the running answer':''))};
-  b.querySelector('.cqi').onclick=()=>claudePanel();
+  b.querySelector('.cqi').onclick=()=>isCodexChat()?codexPanel():claudePanel();
   b.querySelector('.cqdir').onclick=()=>folderDialog()}
  b.style.display='';
+ {const cx=isCodexChat();const ci=b.querySelector('.cqi');ci.textContent=cx?'Codex':'Claude Code';ci.title=cx?'Codex thread — click for details':'Claude Code session'}
  try{CQ_INFO=await (await fetch('/api/claude/info?sid='+encodeURIComponent(sid))).json();CQ_INFO.sid_for=sid}catch(e){return}
  b.querySelector('select').value=(CQ_INFO.prefs||{}).permission_mode||(CQ_INFO.settings||{}).permission_mode||CQ_INFO.claude_default_mode||'default';
  const dir=CQ_INFO.cwd||CQ_INFO.cwd_pref||CQ_INFO.cwd_default;const chip=b.querySelector('.cqdir');
@@ -2327,21 +2358,51 @@ async function drawClaudeBar(){
  CQ_CMDS=(CQ_INFO.commands||[]).map(c=>({c:'/'+c.name,d:(c.description||'Claude Code').slice(0,120),cc:1}));
  if(!CQ_CMDS.length)fetch('/api/claude/commands').then(r=>r.json()).then(d=>{     // before its first answer too
   CQ_CMDS=(d.commands||[]).map(c=>({c:'/'+c.name,d:(c.description||'Claude Code').slice(0,120),cc:1}))}).catch(()=>{})}
+async function codexPanel(){
+ const i=await (await fetch('/api/codex/info')).json();
+ openSheet('Codex',body=>{
+  const rl=i.rate_limits||{};const pct=w=>w&&w.usedPercent!=null?`${Math.max(0,100-w.usedPercent)}% left`+(w.resetsAt?`, resets ${new Date(w.resetsAt*1000).toLocaleString([], {weekday:'short',hour:'numeric',minute:'2-digit'})}`:''):'';
+  body.innerHTML=`<div class=grid>
+   <label>Installed</label><div>${i.installed?esc(i.version||'yes'):'no — <code>brew install codex</code>'}</div>
+   <label>Your account</label><div>${i.login==='chatgpt'?'signed in with ChatGPT':i.login==='api_key'?'an API key':'not signed in — run <code>codex login</code> in a terminal'}</div>
+   <label>This chat</label><div>${CQ_INFO&&CQ_INFO.codex_thread?'Codex thread <code>'+esc(CQ_INFO.codex_thread)+'</code> — also in the Codex CLI and app (<code>codex resume '+esc(CQ_INFO.codex_thread)+'</code>)':'starts a Codex thread with its first message'}</div>
+   <label>Folder</label><div>${esc((CQ_INFO&&(CQ_INFO.cwd||CQ_INFO.cwd_pref||CQ_INFO.cwd_default))||'Orbit workspace')}</div>
+   ${rl.primary||rl.secondary?`<label>ChatGPT limits</label><div>${[pct(rl.primary)&&'5 hours: '+pct(rl.primary),pct(rl.secondary)&&'week: '+pct(rl.secondary)].filter(Boolean).join(' · ')}</div>`:''}
+   <label>Permissions</label><div class=note>Auto and Accept edits: Codex works in the folder's sandbox and asks here before going outside it. Ask: every command is asked. Plan: read-only. Bypass: no sandbox, no questions.</div>
+   <label>Models</label><div class=note>Your ChatGPT account's models use Codex's own sign-in. Every other provider in Settings → Models & keys runs through Orbit's gateway, with your key kept in Orbit.</div>
+  </div>`},{sub:i.running?'Codex is running':'starts with the first Codex message'})}
 // Claude Code mode: provider and model pickers in place of Orbit's model list.
 let HPROV_CACHE={};
 function fmtCtx(n){n=+n||0;return n>=1e6?(Math.round(n/1e5)/10+'M'):n>=1000?Math.round(n/1000)+'k':String(n||'')}
 function providerOf(id){id=id||'';if(id.startsWith('claude-qwen-cli'))return 'local';
- const m=id.match(/^harness:([^/]+)\//);return m?m[1]:''}
+ const m=id.match(/^(?:harness|codex):([^/]+)\//);return m?m[1]:''}
+const codexMode=()=>!!MODELS.codex_mode&&!MODELS.harness_mode;
 async function drawHarnessPicker(force){
  const pv=$('#hprov'),ms=$('#hmodel');if(!pv)return;
  let view;try{view=await (await fetch('/api/harness')).json()}catch(e){return}
  const cur=MODELS.current||MODELS.default||'';
  const curProv=providerOf(cur);
+ if(codexMode()){
+  // Codex: your ChatGPT account first, then every provider with an API
+  const provs=[{id:'chatgpt',label:'ChatGPT account (Codex)',ready:true}].concat((view.providers||[]).filter(p=>p.id!=='claude'));
+  pv.innerHTML=((curProv&&cur.startsWith('codex:'))?'':'<option value="">— pick a provider —</option>')+provs.map(p=>
+   `<option value="${esc(p.id)}"${p.id===curProv&&cur.startsWith('codex:')?' selected':''}>${esc(p.label)}${p.ready?'':' — add a key'}</option>`).join('');
+  if(curProv&&cur.startsWith('codex:'))await fillHarnessModels(curProv,cur,force);else ms.innerHTML='<option>—</option>';
+  return}
  pv.innerHTML=(curProv?'':'<option value="">— pick a provider —</option>')+(view.providers||[]).map(p=>
   `<option value="${esc(p.id)}"${p.id===curProv?' selected':''}>${esc(p.label)}${p.ready?'':(p.auth==='subscription'?' — not signed in':' — add a key')}${liveShort(((p.accounts||[]).find(a=>a.key_set&&!a.exhausted)||(p.accounts||[])[0]||{}).live)}</option>`).join('');
  if(curProv)await fillHarnessModels(curProv,cur,force);else ms.innerHTML='<option>—</option>'}
 async function fillHarnessModels(pid,cur,refresh){
  const ms=$('#hmodel');
+ if(codexMode()){
+  const key='codex:'+pid;
+  if(refresh||!HPROV_CACHE[key])HPROV_CACHE[key]=await (await fetch('/api/codex/models?provider='+encodeURIComponent(pid))).json();
+  const d=HPROV_CACHE[key]||{models:[]};
+  const recent=(MODELS.codex_recent||[]).filter(r=>r.id!==cur&&!d.models.some(m=>m.id===r.id)).slice(0,5);
+  ms.innerHTML=(d.models.some(m=>m.id===cur)?'':'<option value="">— pick a model —</option>')+
+   (recent.length?`<optgroup label="Recent">${recent.map(r=>`<option value="${esc(r.id)}">${esc(r.label)}</option>`).join('')}</optgroup>`:'')+
+   `<optgroup label="${esc(d.label||pid)}">`+d.models.map(m=>`<option value="${esc(m.id)}"${m.id===cur?' selected':''}>${esc(m.label)}${m.context?' · '+fmtCtx(m.context):''}${m.ready?'':' — not ready'}</option>`).join('')+'</optgroup>';
+  ms.title=`Codex · ${d.label}: ${d.models.length} models`;return}
  if(refresh||!HPROV_CACHE[pid]){
   if(refresh)await apiPost('/api/harness/refresh',{provider:pid},'refreshing models');
   HPROV_CACHE[pid]=await (await fetch('/api/harness/models?provider='+encodeURIComponent(pid))).json()}
@@ -2383,15 +2444,24 @@ async function chooseHarnessModel(id){
  const d=await apiPost('/api/model/select',{id,sid},'model');if(!d)return;
  MODELS.current=id;drawClaudeBar();refreshStatus();
  const m=Object.values(HPROV_CACHE).flatMap(x=>x.models||[]).find(x=>x.id===id);
+ if(codexMode()&&id.startsWith('codex:'))MODELS.codex_recent=[{id,label:(m&&m.label)||id}].concat((MODELS.codex_recent||[]).filter(r=>r.id!==id)).slice(0,6);
  if(m)toast(`this chat uses ${m.label}${m.context?' · '+fmtCtx(m.context)+' context':''}`)}
 $('#hmode').onclick=async()=>{
  const on=!MODELS.harness_mode;
- const d=await apiPost('/api/harness/mode',{on},'Claude Code mode');if(!d)return;
- await loadModels();
+ const d=await apiPost('/api/harness/mode',{engine:on?'claude':'orbit'},'Claude Code mode');if(!d)return;
+ HPROV_CACHE={};await loadModels();drawClaudeBar();
  toast(on?'Claude Code mode: new chats run through the Claude Code harness':'Claude Code mode off')};
+$('#cmode').onclick=async()=>{
+ const on=!codexMode();
+ const d=await apiPost('/api/harness/mode',{engine:on?'codex':'orbit'},'Codex mode');if(!d)return;
+ HPROV_CACHE={};await loadModels();drawClaudeBar();
+ toast(on?'Codex mode: new chats run through Codex — pick the provider and model at the top':'Codex mode off')};
 $('#hprov').onchange=async e=>{
  const pid=e.target.value;if(!pid)return;
  await fillHarnessModels(pid,'');
+ if(codexMode()){const d=HPROV_CACHE['codex:'+pid]||{};const first=(d.models||[]).find(m=>m.ready)||(d.models||[])[0];
+  if(!d.ready){toast(pid==='chatgpt'?'Codex is not signed in — run `codex login` in a terminal':`${d.label} needs a key — add it in Settings → Models & keys`);return}
+  if(first){$('#hmodel').value=first.id;chooseHarnessModel(first.id)}return}
  const d=HPROV_CACHE[pid]||{};
  if(!d.ready){toast(pid==='claude'?'The claude command is not signed in — run `claude auth login` in a terminal (or it is not installed)':`${d.label} needs a key — add it in Settings → Models & keys`);if(pid!=='claude')openSettings('models');return}
  const first=(d.models||[]).find(m=>!m.hidden);
@@ -2468,6 +2538,32 @@ async function newChatWith(){
 // Settings → Models & keys: the providers both Claude Code mode and Orbit's own
 // chat use — accounts and keys (typed by you, stored in Orbit's secrets), region,
 // models with what is left of their allowance, and a test.
+// When a model keeps failing: the next model to carry on with (qqcore.fallback_candidates)
+async function renderFallback(box){
+ const r=await apiPost('/api/settings',{settings:{}},'settings');if(!r)return;
+ const S_=r.settings||{};
+ let list=[...(S_.fallback_models||[])];
+ box.innerHTML=`<div class=sec>When a model keeps failing</div>
+  <div class=grid>
+   <label>Fall back</label><div><label style="display:flex;gap:7px;align-items:center"><input type=checkbox id=fb_on> carry on with another model instead of stopping</label></div>
+   <label>After</label><div style="display:flex;gap:7px;align-items:center"><input type=number id=fb_after min=1 max=10 style="width:70px"> failed attempts <span class=note>(Claude Code and Codex retry on their own first)</span></div>
+   <label>Same model first</label><div><label style="display:flex;gap:7px;align-items:center"><input type=checkbox id=fb_same> try the same model from another provider first (e.g. DeepSeek on OpenCode Zen when OpenCode Go is down)</label></div>
+   <label>Then, in order</label><div><div id=fb_list></div><div style="display:flex;gap:6px;margin-top:6px"><select id=fb_add style="max-width:360px"></select><button class=ghost id=fb_addbtn>add</button></div>
+   <div class=hint2 style="margin-top:4px">Each chat stays in its own harness: a Claude Code chat uses the Claude Code version of a model, a Codex chat the Codex one, an Orbit chat Orbit's. The answer says when it moves; the chat keeps its own model for the next message.</div></div>
+  </div>`;
+ $('#fb_on').checked=S_.fallback_enabled!==false;$('#fb_after').value=S_.fallback_after||3;$('#fb_same').checked=S_.fallback_same_model!==false;
+ const save=async()=>{const x=await apiPost('/api/settings',{settings:{fallback_enabled:$('#fb_on').checked,fallback_after:Math.max(1,+$('#fb_after').value||3),
+  fallback_same_model:$('#fb_same').checked,fallback_models:list}},'save');if(x)toast('saved')};
+ const draw=()=>{const L=$('#fb_list');L.innerHTML=list.length?'':'<div class=note>none — only the same model elsewhere</div>';
+  list.forEach((id,i)=>{const row=el(`<div class=memrow style="align-items:center"><span style="flex:1"></span><button class=ghost data-a=up>↑</button><button class=ghost data-a=dn>↓</button><button class=ghost data-a=rm>×</button></div>`);
+   row.querySelector('span').textContent=(i+1)+'. '+modelName(id);
+   row.onclick=ev=>{const a=ev.target.dataset.a;if(!a)return;
+    if(a==='rm')list.splice(i,1);if(a==='up'&&i>0)[list[i-1],list[i]]=[list[i],list[i-1]];if(a==='dn'&&i<list.length-1)[list[i+1],list[i]]=[list[i],list[i+1]];
+    draw();save()};L.appendChild(row)})};
+ $('#fb_add').innerHTML=modelOptions('','choose a model…');
+ $('#fb_addbtn').onclick=()=>{const v=$('#fb_add').value;if(!v||list.includes(v))return;list.push(v);draw();save()};
+ ['fb_on','fb_after','fb_same'].forEach(id=>$('#'+id).onchange=save);
+ draw()}
 async function renderHarnessModels(box){
  const h=await (await fetch('/api/harness')).json();
  const fmtName={messages:'native',chat:'via gateway',responses:'via gateway (Responses)'};
@@ -2877,7 +2973,7 @@ function drawQueue(){
  box.appendChild(head)}
  const row=(it,i,isSched)=>{
   const r=el(`<div class="qitem${isSched?' sched':''}" ${isSched?'':'draggable=true'} data-id="${esc(it.id)}">${isSched?'':'<span class=grip title="drag to reorder">⋮⋮</span>'}
-    <span class=qn>${isSched?'⏱':i+1}</span>${isSched?`<span class="qwhen${it.missed?' missed':''}" title="change when it goes out">${it.missed?'missed · was '+esc(whenLabel(it.at)):esc(whenLabel(it.at,it.repeat))}</span>`:''}<span class=qt></span>${(it.attachments||[]).length?`<span class=qa title="${esc((it.attachments||[]).map(a=>a.name).join(', '))}">+${it.attachments.length}</span>`:''}
+    <span class=qn>${isSched?'⏱':i+1}</span>${isSched?`<span class="qwhen${it.missed?' missed':''}" title="change when it goes out">${it.missed?'missed · was '+esc(whenLabel(it.at)):esc(whenLabel(it.at,it.repeat))}</span>`:''}${it.model?`<span class=qa title="sends on this model">${esc(modelName(it.model))}</span>`:''}<span class=qt></span>${(it.attachments||[]).length?`<span class=qa title="${esc((it.attachments||[]).map(a=>a.name).join(', '))}">+${it.attachments.length}</span>`:''}
     <button class=ghost data-a=now title="${busy?'put it into the running answer now — it reads it at its next step':'send it now'}">now</button>
     ${isSched?'':'<button class=ghost data-a=when title="send it at a time you choose">⏱</button>'}
     <button class=ghost data-a=edit title="edit">✎</button><button class=ghost data-a=remove title="remove">×</button></div>`);
@@ -3240,6 +3336,12 @@ async function go(opts){
      b.textContent=`still working — ${m.p.minutes} min, ${m.p.rounds} steps so far`+
       ((m.p.pending||[]).length?' · next: '+m.p.pending.slice(0,2).join(' · '):'')+' · no action needed';
      a.tools.appendChild(b);bottom()}
+    else if(m.k==='fallback'){
+     a.m.querySelectorAll('.retrynote').forEach(x=>x.remove());
+     const w=el('<div class="injwarn fallbacknote"></div>');
+     w.textContent=`${modelName(m.p.from)} kept failing${+m.p.after>1?' ('+m.p.after+'×)':''} — continuing on ${modelName(m.p.to)}`;
+     if(m.p.why)w.title=String(m.p.why);
+     a.tools.appendChild(w);a.m.querySelector('.byline').textContent=modelName(m.p.to);bottom()}
     else if(m.k==='retry'){
      a.m.querySelectorAll('.retrynote').forEach(x=>x.remove());   // one per answer, the latest
      const w=el('<div class="injwarn retrynote"></div>');
@@ -3582,6 +3684,7 @@ async function openSettings(tab){
    body.innerHTML=`<div class=sec>Providers
      <small>— for Claude Code mode and Orbit alike · keys are stored in config/secrets.json on this Mac and sent only to their provider</small></div>
     <div id=hm_box class=note>loading…</div>
+    <div id=fb_box style="margin-top:18px"></div>
     <div class=sec style="margin-top:18px">More models for Orbit's own chat
      <small>— the local server, coding CLIs you are signed into, OpenAI-compatible servers</small></div>
     ${rows||'<div class=note>None yet.</div>'}
@@ -3621,7 +3724,7 @@ async function openSettings(tab){
       label:$('#np_label').value.trim()||id, kind:$('#np_kind').value,
       base_url:$('#np_base').value.trim(), key:$('#np_key').value.trim()}},'adding the provider');
     toast('provider added'); render('models')};
-   renderHarnessModels($('#hm_box'));
+   renderHarnessModels($('#hm_box'));renderFallback($('#fb_box'));
   }
   if(name==='model'){
    const sv=draft.server||{};
@@ -4494,112 +4597,165 @@ async function renderLibrary(){
 
 /* ---------------- scheduler ---------------- */
 // the model picker's choices, grouped, for a scheduled task ("" = the chat's / the default)
-function modelOptions(cur){
+function modelOptions(cur,emptyLabel){
  const groups={};(MODELS.models||[]).filter(m=>!m.switch).forEach(m=>{(groups[m.provider_label]=groups[m.provider_label]||[]).push(m)});
- return `<option value="">${esc('default model')}</option>`+Object.entries(groups).map(([g,list])=>
+ const known=(MODELS.models||[]).some(m=>m.id===cur);
+ return `<option value="">${esc(emptyLabel||'default model')}</option>`+(cur&&!known?`<option value="${esc(cur)}" selected>${esc(cur)}</option>`:'')+Object.entries(groups).map(([g,list])=>
   `<optgroup label="${esc(g)}">${list.map(m=>`<option value="${esc(m.id)}"${m.id===cur?' selected':''}>${esc(m.label||m.model)}${m.ready===false?' — needs a key':''}</option>`).join('')}</optgroup>`).join('')}
+function modelName(id){if(!id)return '';const m=(MODELS.models||[]).find(x=>x.id===id);return m?(m.label||m.model):id}
+const WD=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+function jobWhen(j){
+ if(j.every==='once')return 'once, '+(j.at_ts?new Date(j.at_ts*1000).toLocaleString([], {weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'?');
+ if(j.every==='daily')return 'every day at '+(j.at||'09:00');
+ if(j.every==='weekly')return 'every '+WD[j.weekday||0]+' at '+(j.at||'09:00');
+ return 'every '+(+j.n||'?')+' '+(j.every==='hours'?'hours':'minutes')}
+// The Scheduled tab: messages waiting to be sent in any chat, and tasks that run on
+// their own — all of it editable in place (text, time, repeat, model…).
 async function renderTasks(){
  const box=$('#tasks');
- if(!(MODELS.models||[]).length)await loadModels();   // or every task's model would read "default"
- const d=await (await fetch('/api/schedule')).json();
- const agents=Object.keys((INFO.agents)||{});
+ if(!(MODELS.models||[]).length)await loadModels();
+ let d;try{d=await (await fetch('/api/scheduled',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json()}
+ catch(e){box.innerHTML='<div class=pane><div class=note>could not load the schedule</div></div>';return}
+ const keepOpen=box._open||{};
  box.innerHTML=`<div class=pane>
-  <div class=sec>the cluster jobs <small>— live from qstat</small></div>
-  <div id=h2box><div class=note>checking…</div></div>
-  <div class=sec>Scheduled tasks <small>— run on their own, results land in a chat</small></div>
-  <div id=joblist></div>
-  <div class=sec>New task</div>
-  <div class=grid>
-   <label>Name</label><input type=text id=j_name placeholder="daily RdDM literature check">
-   <label>Repeat</label><select id=j_every><option value=daily>daily</option>
-     <option value=weekly>weekly</option><option value=hours>every N hours</option>
-     <option value=minutes>every N minutes</option></select>
-   <label>At / N</label><div style="display:flex;gap:8px">
-     <input type=text id=j_at placeholder="08:30" style="max-width:110px">
-     <input type=number id=j_n placeholder="N" style="max-width:90px">
-     <select id=j_wd style="max-width:130px">${['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
-       .map((w,i)=>`<option value=${i}>${w}</option>`).join('')}</select></div>
-   <label>Agent</label><select id=j_agent><option value="">none</option>${
-     agents.map(a=>`<option>${a}</option>`).join('')}</select>
-   <label>Model</label><select id=j_model>${modelOptions('')}</select>
-  </div>
-  <textarea class=ta id=j_prompt style="min-height:110px;margin-top:9px"
-    placeholder="What should it do? e.g. Search PubMed for new CLSY/RdDM papers from the last 7 days and summarise the top 3 with DOIs."></textarea>
-  <button class=ghost id=j_add style="margin-top:9px">Add task</button>
- </div>`;
+  <div class=sec style="display:flex;align-items:center;gap:8px">Scheduled messages <small>— sent in their chat at the time set, as if you sent them</small></div>
+  <div id=smlist></div>
+  <div class=sec style="display:flex;align-items:center;gap:8px">Scheduled tasks <small>— prompts that run on their own; each result lands in a chat</small><button class=ghost id=j_new style="margin-left:auto">＋ New task</button></div>
+  <div id=jobnew></div><div id=joblist></div>
+  <div class=sec>Cluster jobs <small>— live from qstat</small></div>
+  <div id=h2box><div class=note>checking…</div></div></div>`;
+ // ---- messages
+ const sm=$('#smlist');
+ if(!(d.messages||[]).length)sm.innerHTML='<div class=note>Nothing scheduled. In any chat, write a message and press ⏱ beside Send (or type /later 9am …).</div>';
+ (d.messages||[]).forEach(it=>{
+  const r=el(`<div class=jobrow><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+    <span class="qwhen${it.missed?' missed':''}" title="change when it goes out"></span>
+    <a class=chatlink href="#" title="open the chat"></a>${it.attachments?`<span class=sub>+${it.attachments} attached</span>`:''}
+    <span style="margin-left:auto;display:flex;gap:5px"><button class=ghost data-a=now>send now</button><button class=ghost data-a=rm>remove</button></span></div>
+   <textarea class="ta smtext" rows=2></textarea>
+   <div class=row2 style="align-items:center"><span class=sub>model</span><select class=smmodel style="max-width:340px"></select><span class="sub smsaved"></span></div></div>`);
+  const when=r.querySelector('.qwhen');when.textContent=it.missed?'missed · was '+whenLabel(it.at):whenLabel(it.at,it.repeat);
+  const link=r.querySelector('.chatlink');link.textContent=it.title||'(untitled chat)';
+  link.onclick=e=>{e.preventDefault();showPane('log');openSession(it.sid)};
+  const upd=async(fields,msg)=>{const res=await apiPost('/api/queue',{sid:it.sid,op:'update',id:it.id,...fields},'save');
+   if(res){const x=r.querySelector('.smsaved');x.textContent=msg||'saved';setTimeout(()=>x.textContent='',1800);if(fields.at!==undefined||fields.repeat!==undefined)renderTasks()}
+   return res};
+  when.onclick=e=>{e.stopPropagation();schedPopover(when,{at:it.at,repeat:it.repeat,title:'When it goes out',
+   onPick:(at,repeat)=>upd({at,repeat})})};
+  const ta=r.querySelector('.smtext');ta.value=it.text;ta.style.height=Math.min(200,Math.max(44,ta.scrollHeight+2))+'px';
+  ta.onchange=()=>{const v=ta.value.trim();if(!v){ta.value=it.text;return toast('a message cannot be empty — remove it instead')}upd({text:v}).then(x=>{if(x)it.text=v})};
+  const ms=r.querySelector('.smmodel');ms.innerHTML=modelOptions(it.model||'',"the chat's model — "+(modelName(it.chat_model)||'default'));
+  ms.onchange=()=>upd({model:ms.value},ms.value?'will send on '+modelName(ms.value):"will use the chat's model");
+  r.querySelector('[data-a=now]').onclick=async()=>{const x=await apiPost('/api/queue',{sid:it.sid,op:'now',id:it.id},'send');if(x){toast('sending in '+(it.title||'the chat'));renderTasks();loadSessions()}};
+  r.querySelector('[data-a=rm]').onclick=async()=>{if(it.repeat&&!confirm('Stop this repeating message?'))return;
+   if(await apiPost('/api/queue',{sid:it.sid,op:'remove',id:it.id},'remove')){renderTasks();loadSessions()}};
+  sm.appendChild(r)});
+ // ---- tasks
+ const jl=$('#joblist');
+ const jobs=(d.tasks||[]);
+ if(!jobs.length)jl.innerHTML='<div class=note>No scheduled tasks yet.</div>';
+ jobs.forEach(j=>{
+  const r=el('<div class=jobrow></div>');
+  const head=el(`<div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap"><h4 style="margin:0"></h4><span class=sub></span></div>`);
+  head.querySelector('h4').textContent=j.name||j.id;
+  const nxt=j.next_ts?new Date(j.next_ts*1000):null;
+  head.querySelector('.sub').textContent=[jobWhen(j),j.enabled===false?'paused':(nxt?'next '+whenLabel(j.next_ts):'finished'),
+   j.stop_at?'stops by '+j.stop_at:'','on '+(modelName(j.model)||(j.sid?"its chat's model":'the default model')),
+   j.sid?'in its chat':'new chat each run',j.agent?'agent '+j.agent:''].filter(Boolean).join(' · ');
+  r.appendChild(head);
+  const pr=el('<div class=sub style="margin-top:4px;white-space:pre-wrap;max-height:3.2em;overflow:hidden"></div>');pr.textContent=j.prompt||'';r.appendChild(pr);
+  if(j.last_run){const res=el(`<div class=res><b>${j.last_ok?'ok':'failed'}</b> ${esc(new Date(j.last_run*1000).toLocaleString())} · </div>`);
+   res.appendChild(document.createTextNode(String(j.last_result||'').slice(0,220)));r.appendChild(res)}
+  const row=el('<div class=row2></div>');
+  const b=(label,fn)=>{const x=el(`<button class=ghost>${label}</button>`);x.onclick=fn;row.appendChild(x);return x};
+  const form=el('<div></div>');
+  b('edit',()=>{if(form.firstChild){form.innerHTML='';delete box._open[j.id];return}box._open=box._open||{};box._open[j.id]=1;form.appendChild(jobForm(j))});
+  b('run now',async()=>{if(!confirm('Run “'+(j.name||j.id)+'” now?'))return;toast('running…');
+   await apiPost('/api/schedule/run',{id:j.id},'run');setTimeout(renderTasks,3000)});
+  b(j.enabled===false?'enable':'pause',async()=>{if(await apiPost('/api/schedule/save',{job:{id:j.id,enabled:j.enabled===false}},'pause'))renderTasks()});
+  b('open result',()=>{if(j.last_sid){showPane('log');openSession(j.last_sid)}else toast('no run yet')});
+  b('delete',async()=>{if(!confirm('Delete the task “'+(j.name||j.id)+'”?'))return;
+   await apiPost('/api/schedule/delete',{id:j.id},'delete');renderTasks()});
+  r.appendChild(row);r.appendChild(form);
+  if(keepOpen[j.id]){box._open=keepOpen;form.appendChild(jobForm(j))}
+  jl.appendChild(r)});
+ $('#j_new').onclick=()=>{const nb=$('#jobnew');if(nb.firstChild){nb.innerHTML='';return}
+  nb.appendChild(el('<div class=jobrow></div>')).appendChild(jobForm(null))};
  (async()=>{
    const hb=$('#h2box'); if(!hb)return;
    try{
-    const r=await (await fetch('/api/h2/jobs',{method:'POST',
-      headers:{'Content-Type':'application/json'},body:'{}'})).json();
+    const r=await (await fetch('/api/h2/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
     if(r.error){hb.innerHTML=`<div class=note style="color:var(--err)">${esc(r.error.slice(0,140))}</div>`;return}
     if(!r.jobs.length){hb.innerHTML='<div class=note>No jobs queued or running.</div>';return}
     hb.innerHTML='';
     r.jobs.forEach(j=>{
      const row=el('<div class=jobrow></div>');
      const state={r:'running',qw:'queued',Eqw:'error'}[j.state]||j.state;
-     row.appendChild(el(`<h4>${esc(j.name)} <span class=sub>#${j.id}</span></h4>`));
-     row.appendChild(el(`<div class=sub>${state} · ${esc(j.since)} · ${j.slots||'?'} slots</div>`));
+     row.appendChild(el(`<h4>${esc(j.name)} <span class=sub>#${esc(j.id)}</span></h4>`));
+     row.appendChild(el(`<div class=sub>${esc(state)} · ${esc(j.since)} · ${esc(j.slots||'?')} slots</div>`));
      const r2=el('<div class=row2></div>');
      const lg=el('<button class=ghost>tail log</button>');
      lg.onclick=async()=>{lg.textContent='loading…';
-      const d=await (await fetch('/api/h2/log',{method:'POST',
-        headers:{'Content-Type':'application/json'},body:JSON.stringify({id:j.id})})).json();
+      const d=await (await fetch('/api/h2/log',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:j.id})})).json();
       lg.textContent='tail log';
       const pre=row.querySelector('pre')||el('<pre style="background:var(--panel);padding:9px;border-radius:8px;font-size:11.5px;max-height:240px;overflow:auto;margin-top:8px"></pre>');
       pre.textContent=d.log||'(no log found)';row.appendChild(pre)};
      const est=el('<button class=ghost>estimate</button>');
-     est.onclick=async()=>{const d=await (await fetch('/api/h2/estimate',{method:'POST',
-       headers:{'Content-Type':'application/json'},
+     est.onclick=async()=>{const d=await (await fetch('/api/h2/estimate',{method:'POST',headers:{'Content-Type':'application/json'},
        body:JSON.stringify({name:j.name.slice(0,8)})})).json();
       toast(d.runs?`median ${d.median_min} min over ${d.runs} past runs`:'no history for this job name')};
      r2.appendChild(lg);r2.appendChild(est);row.appendChild(r2);hb.appendChild(row)});
    }catch(e){hb.innerHTML='<div class=note>cluster unreachable</div>'}
   })();
- const jl=$('#joblist');
- if(!(d.jobs||[]).length)jl.innerHTML='<div class=note>No scheduled tasks yet.</div>';
- (d.jobs||[]).forEach(j=>{
-  const r=el('<div class=jobrow></div>');
-  r.appendChild(el(`<h4>${esc(j.name||j.id)}</h4>`));
-  const when=j.every==='daily'?`daily at ${j.at||'09:00'}`
-    :j.every==='weekly'?`weekly ${['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][j.weekday||0]} ${j.at||'09:00'}`
-    :`every ${j.n} ${j.every}`;
-  r.appendChild(el(`<div class=sub>${when} · next ${esc(j.next||'-')} · ${
-    j.enabled===false?'paused':'active'}${j.agent?' · agent '+esc(j.agent):''}</div>`));
-  // which model runs it: change it here, or ask the chat ("run it on deepseek")
-  const ms=el(`<select style="max-width:320px;margin:4px 0">${modelOptions(j.model||'')}</select>`);
-  ms.onchange=async()=>{await apiPost('/api/schedule/save',{job:{id:j.id,prompt:j.prompt,model:ms.value||null}},'task model');
-   toast('this task now runs on '+(ms.selectedOptions[0]||{}).textContent)};
-  r.appendChild(ms);
-  if(j.last_run){
-   const ago=new Date(j.last_run*1000).toLocaleString();
-   r.appendChild(el(`<div class=res><b>${j.last_ok?'ok':'failed'}</b> ${ago} · ${
-     esc(String(j.last_result||'').slice(0,220))}</div>`))}
-  const row=el('<div class=row2></div>');
-  const run=el('<button class=ghost>run now</button>');
-  run.onclick=async()=>{toast('running...');await fetch('/api/schedule/run',{method:'POST',
-    headers:{'Content-Type':'application/json'},body:JSON.stringify({id:j.id})});
-   setTimeout(renderTasks,3000)};
-  const tog=el(`<button class=ghost>${j.enabled===false?'enable':'pause'}</button>`);
-  tog.onclick=async()=>{await fetch('/api/schedule/save',{method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({job:{id:j.id,enabled:j.enabled===false}})});renderTasks()};
-  const open=el('<button class=ghost>open result</button>');
-  open.onclick=()=>{if(j.last_sid){showPane('log');openSession(j.last_sid)}else toast('no run yet')};
-  const del=el('<button class=ghost>delete</button>');
-  del.onclick=async()=>{await fetch('/api/schedule/delete',{method:'POST',
-    headers:{'Content-Type':'application/json'},body:JSON.stringify({id:j.id})});renderTasks()};
-  [run,tog,open,del].forEach(b=>row.appendChild(b));
-  r.appendChild(row);jl.appendChild(r)});
- $('#j_add').onclick=async()=>{
-  const job={name:$('#j_name').value.trim(),every:$('#j_every').value,
-   at:$('#j_at').value.trim()||'09:00',n:Number($('#j_n').value)||30,
-   weekday:Number($('#j_wd').value)||0,agent:$('#j_agent').value||null,model:$('#j_model').value||null,
-   prompt:$('#j_prompt').value.trim(),enabled:true};
-  if(!job.name||!job.prompt)return toast('name and prompt required');
-  await fetch('/api/schedule/save',{method:'POST',headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({job})});renderTasks()};
 }
+// the edit form for a task (j = null: a new one)
+function jobForm(j){
+ const isNew=!j;j=j||{every:'daily',at:'09:00',enabled:true};
+ const agents=Object.keys((INFO.agents)||{});
+ const pad=n=>String(n).padStart(2,'0');
+ const dtl=ts=>{const x=ts?new Date(ts*1000):new Date(Date.now()+36e5);return `${x.getFullYear()}-${pad(x.getMonth()+1)}-${pad(x.getDate())}T${pad(x.getHours())}:${pad(x.getMinutes())}`};
+ const chats=SESSIONS.filter(s=>!s.external&&s.n).slice(0,60);
+ if(j.sid&&!chats.some(s=>s.id===j.sid))chats.unshift({id:j.sid,title:'(this task’s chat)'});
+ const f=el(`<div class=grid style="margin-top:10px">
+   <label>Name</label><input type=text data-f=name>
+   <label>Prompt</label><textarea class=ta data-f=prompt style="min-height:110px"></textarea>
+   <label>Repeat</label><select data-f=every><option value=once>once</option><option value=daily>every day</option><option value=weekly>every week</option><option value=hours>every N hours</option><option value=minutes>every N minutes</option></select>
+   <label class=fx-time>Time</label><input class=fx-time type=time data-f=at>
+   <label class=fx-wd>Day</label><select class=fx-wd data-f=weekday>${WD.map((w,i)=>`<option value=${i}>${w}</option>`).join('')}</select>
+   <label class=fx-n>Every N</label><input class=fx-n type=number min=1 data-f=n>
+   <label class=fx-once>Date and time</label><input class=fx-once type=datetime-local data-f=at_ts>
+   <label>Stop by</label><input type=time data-f=stop_at><div class=hint2>optional: the run paces itself to finish by then</div>
+   <label>Model</label><select data-f=model>${modelOptions(j.model||'',j.sid?"the chat's model":'the default model')}</select>
+   <label>Runs in</label><select data-f=sid><option value="">a new chat each time</option>${chats.map(c=>`<option value="${esc(c.id)}">${esc((c.title||'(untitled)').slice(0,70))}</option>`).join('')}</select>
+   <label>Project</label><select data-f=project><option value="">none</option>${Object.entries(PROJECTS||{}).map(([pid,p])=>`<option value="${esc(pid)}">${esc(p.name)}</option>`).join('')}</select>
+   <label>Agent</label><select data-f=agent><option value="">none</option>${agents.map(a=>`<option>${esc(a)}</option>`).join('')}</select>
+   <label>Enabled</label><input type=checkbox data-f=enabled style="justify-self:start">
+   <div></div><div style="display:flex;gap:7px"><button class=sendbtn style="height:32px;padding:0 14px" data-a=save>${isNew?'Add task':'Save'}</button><button class=ghost data-a=cancel>Cancel</button><span class="sub fsaved"></span></div></div>`);
+ const F=k=>f.querySelector(`[data-f=${k}]`);
+ F('name').value=j.name||'';F('prompt').value=j.prompt||'';F('every').value=j.every||'daily';F('at').value=j.at||'09:00';
+ F('weekday').value=String(j.weekday||0);F('n').value=j.n||(j.every==='hours'?6:30);F('at_ts').value=dtl(j.at_ts);
+ F('stop_at').value=j.stop_at||'';F('sid').value=j.sid||'';F('project').value=j.project||'';F('agent').value=j.agent||'';F('enabled').checked=j.enabled!==false;
+ const show=()=>{const e=F('every').value;
+  f.querySelectorAll('.fx-time').forEach(x=>x.style.display=['daily','weekly'].includes(e)?'':'none');
+  f.querySelectorAll('.fx-wd').forEach(x=>x.style.display=e==='weekly'?'':'none');
+  f.querySelectorAll('.fx-n').forEach(x=>x.style.display=['hours','minutes'].includes(e)?'':'none');
+  f.querySelectorAll('.fx-once').forEach(x=>x.style.display=e==='once'?'':'none')};
+ F('every').onchange=show;show();
+ f.querySelector('[data-a=cancel]').onclick=()=>{if(isNew)f.closest('.jobrow').remove();else{f.remove();if($('#tasks')._open)delete $('#tasks')._open[j.id]}};
+ f.querySelector('[data-a=save]').onclick=async()=>{
+  const e=F('every').value;
+  const job={name:F('name').value.trim(),prompt:F('prompt').value.trim(),every:e,model:F('model').value||null,
+   sid:F('sid').value||null,project:F('project').value||null,agent:F('agent').value||null,stop_at:F('stop_at').value||null,enabled:F('enabled').checked};
+  if(!isNew)job.id=j.id;
+  if(e==='daily'||e==='weekly')job.at=F('at').value;
+  if(e==='weekly')job.weekday=+F('weekday').value;
+  if(e==='hours'||e==='minutes')job.n=+F('n').value;
+  if(e==='once'){const v=F('at_ts').value;if(!v)return toast('choose the date and time');job.at_ts=new Date(v).getTime()/1000;
+   if(job.at_ts<Date.now()/1000&&(isNew||job.at_ts!==j.at_ts))return toast('that time has passed')}
+  if(!job.prompt)return toast('a task needs a prompt — what should it do each time?');
+  const res=await apiPost('/api/schedule/save',{job},'save task');
+  if(res){toast(isNew?'task added':'task saved');if($('#tasks')._open)delete $('#tasks')._open[j.id];renderTasks()}};
+ return f}
 
 /* ---------------- trash ---------------- */
 async function renderTrash(){
@@ -4907,7 +5063,7 @@ async function showAbout(){
     <b>Memory</b><span>Durable facts about you and your work, injected into every chat. <code>/remember</code> or the "save memories" button.</span>
     <b>Skills</b><span>Written procedures it loads on demand. Turn any good conversation into one with "save as skill".</span>
     <b>Agents</b><span>A preset instruction set plus a restricted tool list — fewer tools means fewer mistakes.</span>
-    <b>Tasks</b><span>Scheduled prompts that run on their own and drop the answer into a chat.</span>
+    <b>Scheduled</b><span>Messages scheduled in any chat, and prompts that run on their own — all editable, with their models.</span>
     <b>Temp chat</b><span>The <code>temp</code> button starts a chat that is never written to disk. <code>burn</code> erases it instantly.</span>
    </div>
    <div class=sec>Safety</div>

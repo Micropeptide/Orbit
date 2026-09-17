@@ -480,6 +480,12 @@ def make_handler(resolver, log=None, token=None, hooks=None):
             pass
 
         def do_GET(self):
+            if re.match(r"^/h/[A-Za-z0-9_.-]+/v1/models(\?.*)?$", self.path):
+                # Codex asks for model metadata; with none it uses its defaults
+                data = b'{"models": []}'
+                self.send_response(200); self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(data))); self.end_headers(); self.wfile.write(data)
+                return
             if self.path.rstrip("/") in ("", "/health"):
                 data = json.dumps({"ok": True, "stats": STATS}).encode()
                 self.send_response(200); self.send_header("content-type", "application/json")
@@ -488,11 +494,12 @@ def make_handler(resolver, log=None, token=None, hooks=None):
             _error(self, 404, "not found")
 
         def do_POST(self):
-            m = re.match(r"^/h/([A-Za-z0-9_.-]+)/v1/messages(/count_tokens)?(\?.*)?$", self.path)
+            m = re.match(r"^/h/([A-Za-z0-9_.-]+)/v1/(messages(/count_tokens)?|responses)(\?.*)?$", self.path)
             if not m:
                 self.close_connection = True
                 return _error(self, 404, f"unknown path {self.path}")
-            provider, counting = m.group(1), bool(m.group(2))
+            provider, counting = m.group(1), bool(m.group(3))
+            self.inbound = "responses" if m.group(2) == "responses" else "messages"
             if token:
                 # only Orbit's own Claude runs may spend your keys: they carry this token
                 got = (self.headers.get("authorization") or "").removeprefix("Bearer ").strip() \
@@ -527,7 +534,11 @@ def make_handler(resolver, log=None, token=None, hooks=None):
             cap = route.get("max_output")
             if cap and int(body.get("max_tokens") or 0) > int(cap):
                 body["max_tokens"] = int(cap)            # a model's own output limit, not Claude's default
+            if self.inbound == "responses" and cap and int(body.get("max_output_tokens") or 0) > int(cap):
+                body["max_output_tokens"] = int(cap)
             try:
+                if self.inbound == "responses":
+                    return self._responses(route, body)
                 if route["format"] == "messages":
                     return self._passthrough(route, body)
                 return self._translate(route, body)
@@ -620,6 +631,67 @@ def make_handler(resolver, log=None, token=None, hooks=None):
                 try: self.tap.whole(json.loads(whole))
                 except ValueError: pass
 
+        def _responses(self, route, body):
+            """Codex's Responses request, answered by this provider in its own format."""
+            import responses_bridge as RB
+            fmt, model = route["format"], body.get("model") or ""
+            if fmt == "chat":
+                payload, names = RB.responses_to_chat(body)
+                path, conv = "/chat/completions", RB.chat_stream_to_responses
+                extra = None
+            elif fmt == "messages":
+                payload, names = RB.responses_to_messages(body, int(route.get("max_output") or 32000))
+                payload = passthrough_body(payload, route.get("strict", True))
+                path, conv = "/messages", RB.messages_stream_to_responses
+                extra = {"anthropic-version": "2023-06-01"}
+            else:
+                openai = "api.openai.com" in (route.get("base") or "")
+                payload, names = RB.responses_for_provider(body, openai=openai)
+                payload["stream"] = True
+                path, conv, extra = "/responses", None, None
+            payload.update(route.get("extra_body") or {})
+            try:
+                r = self._upstream(route, path, payload, extra)
+            except UpstreamError as e:
+                STATS["errors"] += 1
+                msg = _error_message(e.raw)
+                if log: log(f"upstream {e.code}: {msg[:300]}")
+                data = json.dumps({"error": {"message": f"upstream {e.code}: {msg[:1500]}",
+                                             "type": ERROR_TYPES.get(e.code, "api_error"), "code": e.code}}).encode()
+                self.send_response(e.code); self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(data)))
+                if e.code == 429: self.send_header("retry-after", "20")
+                self.end_headers(); self.wfile.write(data)
+                return
+            lines = iter(r.readline, b"")
+            stream = conv(lines, model, names) if conv else RB.responses_stream_restore(lines, names)
+            if not body.get("stream", True):
+                obj = RB.collect(stream)
+                self._tap_responses(obj)
+                data = json.dumps(obj).encode()
+                self.send_response(200); self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(data))); self.end_headers(); self.wfile.write(data)
+                return
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("cache-control", "no-cache")
+            self.send_header("connection", "close")
+            self.end_headers()
+            for out in stream:
+                if b"response.completed" in out or b"response.incomplete" in out:
+                    for line in out.decode("utf-8", "replace").splitlines():
+                        if line.startswith("data:"):
+                            try: self._tap_responses(json.loads(line[5:]).get("response"))
+                            except ValueError: pass
+                self.wfile.write(out); self.wfile.flush()
+
+        def _tap_responses(self, resp):
+            u = (resp or {}).get("usage") or {}
+            cached = (u.get("input_tokens_details") or {}).get("cached_tokens") or 0
+            self.tap.whole({"usage": {"input_tokens": max(0, (u.get("input_tokens") or 0) - cached),
+                                      "output_tokens": u.get("output_tokens") or 0,
+                                      "cache_read_input_tokens": cached}})
+
         def _translate(self, route, body):
             responses = route["format"] == "responses"
             payload = to_responses(body) if responses else to_openai(body)
@@ -671,15 +743,19 @@ def session_id(headers, body):
     requests without one (x-opencode-session); Claude Code sends its own session
     header, and anything else (Orbit's own calls) gets one derived from how the
     conversation starts, which stays the same as it grows."""
-    for h in ("x-opencode-session", "x-claude-code-session-id", "x-session-id"):
+    for h in ("x-opencode-session", "x-claude-code-session-id", "x-session-id", "session-id", "session_id",
+              "thread-id", "conversation_id", "conversation-id"):
         v = (headers.get(h) or "").strip()
         if v: return v[:128]
     uid = str(((body or {}).get("metadata") or {}).get("user_id") or "")
     m = re.search(r"session_([0-9a-f-]{16,})", uid)
     if m: return m.group(1)
     import hashlib
-    first = next((x for x in (body or {}).get("messages") or [] if x.get("role") == "user"), {})
-    seed = json.dumps([(body or {}).get("system"), first.get("content")], sort_keys=True, default=str)
+    if (body or {}).get("prompt_cache_key"): return str(body["prompt_cache_key"])[:128]
+    first = next((x for x in (body or {}).get("messages") or (body or {}).get("input") or []
+                  if isinstance(x, dict) and x.get("role") == "user"), {})
+    seed = json.dumps([(body or {}).get("system") or (body or {}).get("instructions"), first.get("content")],
+                      sort_keys=True, default=str)
     h = hashlib.sha256(seed.encode("utf-8", "replace")).hexdigest()
     return f"orbit-{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
 

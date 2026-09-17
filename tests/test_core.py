@@ -1557,6 +1557,112 @@ class TestSurvivesARestart(Sandbox):
         self.assertEqual(q.recover_interrupted_sessions(), [])
 
 
+
+class TestFallback(TestLongAnswers):
+    """A provider that keeps failing: the answer moves to another model and says so."""
+    CAT = [
+        {"id": "harness:opencode-go/deepseek-v4-flash", "provider": "harness", "model": "opencode-go/deepseek-v4-flash", "ready": True},
+        {"id": "harness:opencode-zen/deepseek-v4-flash", "provider": "harness", "model": "opencode-zen/deepseek-v4-flash", "ready": True},
+        {"id": "harness:opencode-go/kimi-k2.6", "provider": "harness", "model": "opencode-go/kimi-k2.6", "ready": True},
+        {"id": "harness:deepseek/deepseek-v4-flash", "provider": "harness", "model": "deepseek/deepseek-v4-flash", "ready": False},
+        {"id": "harness-direct:opencode-go/deepseek-v4-flash", "provider": "harness-direct", "model": "opencode-go/deepseek-v4-flash", "ready": True},
+        {"id": "harness-direct:opencode-zen/deepseek-v4-flash", "provider": "harness-direct", "model": "opencode-zen/deepseek-v4-flash", "ready": True},
+        {"id": "harness-direct:opencode-go/kimi-k2.6", "provider": "harness-direct", "model": "opencode-go/kimi-k2.6", "ready": True},
+        {"id": "local:qwen", "provider": "local", "model": "qwen", "ready": True},
+        {"id": "codex:chatgpt/gpt-5.6-sol", "provider": "codex", "model": "chatgpt/gpt-5.6-sol", "ready": True},
+        {"id": "codex:opencode-go/kimi-k2.6", "provider": "codex", "model": "opencode-go/kimi-k2.6", "ready": True},
+    ]
+
+    def setUp(self):
+        super().setUp()
+        for k in ("model_catalogue", "_backoff", "uses_claude_engine"):
+            self._saved[k] = getattr(q, k)
+        self._saved_settings = {k: q.S.get(k) for k in ("fallback_enabled", "fallback_after", "fallback_models", "fallback_same_model")}
+        q.model_catalogue = lambda: [dict(m) for m in self.CAT]
+        q._backoff = lambda attempt: 0
+        q.S.update(fallback_enabled=True, fallback_after=3, fallback_same_model=True,
+                   fallback_models=["harness:opencode-go/kimi-k2.6", "local:qwen"])
+
+    def tearDown(self):
+        for k, v in self._saved_settings.items():
+            if v is None: q.S.pop(k, None)
+            else: q.S[k] = v
+        super().tearDown()
+
+    def test_candidates_same_model_elsewhere_first_then_your_list_in_the_chats_engine(self):
+        self.assertEqual(q.fallback_candidates("harness:opencode-go/deepseek-v4-flash"),
+                         ["harness:opencode-zen/deepseek-v4-flash", "harness:opencode-go/kimi-k2.6"])
+        # an Orbit chat gets the same providers without Claude Code, and the local model last
+        self.assertEqual(q.fallback_candidates("harness-direct:opencode-go/deepseek-v4-flash"),
+                         ["harness-direct:opencode-zen/deepseek-v4-flash", "harness-direct:opencode-go/kimi-k2.6", "local:qwen"])
+        self.assertEqual(q.fallback_candidates("codex:chatgpt/gpt-5.6-sol"), ["codex:opencode-go/kimi-k2.6"])
+        q.S["fallback_enabled"] = False
+        self.assertEqual(q.fallback_candidates("harness:opencode-go/deepseek-v4-flash"), [])
+
+    def test_orbits_own_loop_moves_to_the_next_model_after_three_failures(self):
+        q.TURN_CTX.pin_model = q.TURN_CTX.model = "harness-direct:opencode-go/deepseek-v4-flash"
+        seen = []
+        def fake(messages, tools, **kw):
+            if tools is None: return {"role": "assistant", "content": "SUMMARY"}
+            mid = q.TURN_CTX.model
+            seen.append(mid)
+            if mid.endswith("go/deepseek-v4-flash"): raise q.ModelError("HTTP 503: upstream unavailable", 503)
+            return {"role": "assistant", "content": "answered by " + mid}
+        q.stream_call = fake
+        out = q.turn(self.chat(), "hi", [], emit=self.emit)
+        self.assertEqual(out, "answered by harness-direct:opencode-zen/deepseek-v4-flash")
+        self.assertEqual(seen.count("harness-direct:opencode-go/deepseek-v4-flash"), 3)
+        fb = [p for k, p in self.events if k == "fallback"]
+        self.assertEqual((fb[0]["from"], fb[0]["to"], fb[0]["after"]),
+                         ("harness-direct:opencode-go/deepseek-v4-flash", "harness-direct:opencode-zen/deepseek-v4-flash", 3))
+
+    def test_a_too_long_chat_never_falls_back_and_disabled_means_the_old_behaviour(self):
+        q.TURN_CTX.pin_model = q.TURN_CTX.model = "harness-direct:opencode-go/deepseek-v4-flash"
+        def bad_request(messages, tools, **kw):
+            if tools is None: return {"role": "assistant", "content": "SUMMARY"}
+            raise q.ModelError("HTTP 400: invalid tool schema", 400)
+        q.stream_call = bad_request
+        q.turn(self.chat(), "hi", [], emit=self.emit)
+        self.assertNotIn("fallback", self.kinds())
+        q.S["fallback_enabled"] = False
+        calls = []
+        def down(messages, tools, **kw):
+            calls.append(1); raise q.ModelError("HTTP 503", 503)
+        q.stream_call = down
+        self.events.clear()
+        out = q.turn(self.chat(), "hi", [], emit=self.emit)
+        self.assertEqual(len(calls), 5)
+        self.assertIn("failed", out)
+        self.assertNotIn("fallback", self.kinds())
+
+    def test_a_claude_code_answer_that_failed_runs_again_on_the_next_model(self):
+        q.TURN_CTX.pin_model = "harness:opencode-go/deepseek-v4-flash"
+        q.uses_claude_engine = lambda mid=None: True
+        saved_run, saved_slot = q.CE.run_turn, (q.slot_enter, q.slot_exit)
+        q.slot_enter = lambda *a, **k: True; q.slot_exit = lambda *a, **k: None
+        runs = []
+        def fake_run(messages, user_content, tools, emit=None, **kw):
+            mid = q.TURN_CTX.model
+            runs.append(mid)
+            messages.append({"role": "user", "content": user_content})
+            if mid.endswith("go/deepseek-v4-flash"):
+                emit("error", "API Error: 529 overloaded"); emit("done", None)
+                return ""
+            messages.append({"role": "assistant", "content": "ok from " + mid})
+            emit("done", None)
+            return "ok from " + mid
+        q.CE.run_turn = fake_run
+        try:
+            msgs = self.chat()
+            out = q.turn(msgs, "hello", [], emit=self.emit)
+        finally:
+            q.CE.run_turn = saved_run; q.slot_enter, q.slot_exit = saved_slot
+        self.assertEqual(out, "ok from harness:opencode-zen/deepseek-v4-flash")
+        self.assertEqual([m["content"] for m in msgs if m["role"] == "user"], ["hello"])     # not twice
+        self.assertIn("fallback", self.kinds())
+        self.assertNotIn("error", self.kinds())                                        # the failed attempt's error is not shown
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
@@ -2469,10 +2575,14 @@ class TestRound1Server(Sandbox):
         self.assertIn("never leave the chat locked", block)
         self.assertIn("q.sched_update(", src)
 
-    def test_the_scheduler_starts_nothing_while_anything_runs(self):
+    def test_the_scheduler_waits_only_for_the_jobs_own_chat_or_the_local_model(self):
+        # with many chats answering at once, "nothing while anything runs" starved tasks for hours
         src = open(os.path.join(ROOT, "bin", "orbit-ui")).read()
         block = src[src.index("    def _due_jobs():"):][:2500]
-        self.assertIn("if running_sids() or JOBS_INFLIGHT or q.slot_busy(): return", block)
+        self.assertIn("for job in jobs_ready_to_start():", block)
+        gate = src[src.index("def jobs_ready_to_start("):][:1400]
+        self.assertIn("q.slot_busy()", gate)
+        self.assertIn('job["sid"] in busy', gate)
         self.assertIn("schedule_gap_min", block)
         self.assertIn("one job per minute at most", block)
 
@@ -2488,7 +2598,8 @@ class TestRound1Server(Sandbox):
 
     def test_the_right_files_are_watched_for_changes(self):
         names = [os.path.basename(f) for f in self.ui.CODE_FILES]
-        self.assertEqual(names, ["qqcore.py", "claude_engine.py", "orbit-ui", "index.html"])
+        self.assertEqual(names, ["qqcore.py", "claude_engine.py", "orbit-ui", "index.html", "codex_engine.py",
+                                 "responses_bridge.py", "harness_gateway.py", "file_links.py"])
         self.assertIn("page_mtime", self.ui.code_is_stale())
         page = open(os.path.join(ROOT, "web", "index.html")).read()
         self.assertIn(".think.live .body{max-height", page)
