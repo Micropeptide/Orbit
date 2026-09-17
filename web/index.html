@@ -775,6 +775,7 @@ textarea.memmode{outline:2px solid var(--think)!important}
 .htools{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
 .htools span{font-family:var(--mono);font-size:11px;color:var(--mut);background:var(--panel);border-radius:5px;padding:1px 6px}
 .herorecent .hrow .hrm{font-size:11px;color:var(--dim);border:1px solid var(--line);border-radius:5px;padding:0 5px;flex:none;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hfoot{font-size:11.5px;color:var(--dim);margin-top:8px;padding-top:7px;border-top:1px solid var(--line)}
 .hkbd{font-family:var(--mono);font-size:10.5px;color:var(--dim);border:1px solid var(--line);border-radius:4px;padding:0 4px;flex:none}
 .hskel{height:12px;border-radius:5px;background:linear-gradient(90deg,var(--panel),var(--line),var(--panel));background-size:200% 100%;animation:hsk 1.3s infinite;margin:6px 0}
 @keyframes hsk{to{background-position:-200% 0}}
@@ -6463,7 +6464,12 @@ function drawHero(fromData){
     if(x.model){const m=el('<span class=hrm></span>');m.textContent=modelLabel(x.model).replace(/ · .*$/,'');m.title=modelLabel(x.model);r.insertBefore(m,r.querySelector('.hrs'))}
     if(x.queued){const qd=el('<span class=hrm></span>');qd.textContent=x.queued+' queued';r.insertBefore(qd,r.querySelector('.hrs'))}
     list.appendChild(r)});
-   c.appendChild(list);grid.appendChild(c)}}
+   const n=pool.length+(pool.some(x=>x.id===sid)?0:1);
+   const pj=Object.keys(PROJECTS.projects||PROJECTS||{}).length;
+   const foot=el('<div class=hfoot></div>');
+   foot.textContent=[n+' chat'+(n===1?'':'s'),pj?pj+' project'+(pj===1?'':'s'):'',
+    d&&d.week.tool_runs?d.week.tool_runs+' tool calls this week':''].filter(Boolean).join(' · ');
+   c.appendChild(list);c.appendChild(foot);grid.appendChild(c)}}
  h.appendChild(grid);
  h.style.display='';
  // opening an empty chat should start at the greeting, not where the last chat was scrolled to
