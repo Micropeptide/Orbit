@@ -367,7 +367,11 @@ class H(http.server.BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError): pass
             return
         if p == "/api/running":
-            return self._send(200, jdump({"running": running_sids(), "max": (_max_parallel() if _max_parallel() < 10**6 else None)}))
+            # chats answering now, and those waiting on you (an approval or a question)
+            waiting = [sid_ for sid_, st_ in list(STATES.items())
+                       if st_.lock.locked() and (st_.live.get("approval") or st_.live.get("question"))]
+            return self._send(200, jdump({"running": running_sids(), "waiting": waiting,
+                                          "max": (_max_parallel() if _max_parallel() < 10**6 else None)}))
         if p.startswith("/api/claude/config"):
             # your Claude setup, as Claude keeps it: settings, skills
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}

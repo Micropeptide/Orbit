@@ -2212,50 +2212,60 @@ def session_path(sid): return os.path.join(SESSIONS, f"{sid}.json")
 
 _SESS_CACHE = {"key": None, "val": []}
 
+_SESS_ROWS = {}       # file name -> ((mtime, size), row): only changed chat files are read again
+
+def _activity(meta, msgs, name, path):
+    """When a chat was last used, for ordering: the last message you sent. Saves made
+    while it answers (every few seconds) or edits to its pins and tags do not move
+    it, so the list does not reshuffle under you."""
+    ts = [m.get("t") for m in (msgs or []) if isinstance(m, dict) and m.get("role") == "user"
+          and isinstance(m.get("t"), (int, float))]
+    if ts: return max(ts)
+    ts = [m.get("t") for m in (msgs or []) if isinstance(m, dict) and isinstance(m.get("t"), (int, float))]
+    if ts: return min(ts)
+    try: return time.mktime(time.strptime(name[:15], "%Y%m%d-%H%M%S"))
+    except (ValueError, IndexError): pass
+    return meta.get("saved") or os.path.getmtime(path)
+
 def session_list():
+    """Every saved chat, pinned first, then most recently used first."""
     # Key on the files themselves — a directory's mtime does NOT change when a
     # file inside it is modified, so pin/archive/tag edits were served stale.
     try:
         names = [f for f in os.listdir(SESSIONS) if f.endswith(".json")]
-        key = (len(names), round(sum(os.path.getmtime(os.path.join(SESSIONS, f))
-                                     for f in names), 3))
-    except OSError: key = None
+        stats = {}
+        for f in names:
+            try:
+                st = os.stat(os.path.join(SESSIONS, f)); stats[f] = (st.st_mtime, st.st_size)
+            except OSError:
+                pass
+        key = (len(stats), round(sum(v[0] for v in stats.values()), 3), sum(v[1] for v in stats.values()))
+    except OSError:
+        names, stats, key = [], {}, None
     if key and _SESS_CACHE["key"] == key:
         return list(_SESS_CACHE["val"])
     out = []
-    for f in os.listdir(SESSIONS):
-        if not f.endswith(".json"): continue
-        p = os.path.join(SESSIONS, f)
-        try: d = json.load(open(p))
-        except Exception: continue
-        msgs = d.get("messages") if isinstance(d, dict) else d
-        title = (d.get("title") if isinstance(d, dict) else None) or "(untitled)"
-        meta = d if isinstance(d, dict) else {}
-        # File mtime is unreliable: migrations, pin/tag edits and maintenance all
-        # touch it. Prefer the explicit `saved` stamp written on a real turn, then
-        # the timestamp encoded in the session id, then mtime.
-        act = meta.get("saved")
-        if not act:
-            try:
-                act = time.mktime(time.strptime(f[:15], "%Y%m%d-%H%M%S"))
-            except (ValueError, IndexError):
-                act = os.path.getmtime(p)
-        out.append({"id": f[:-5], "title": title, "mtime": act,
-                    "pinned": bool(meta.get("pinned")), "archived": bool(meta.get("archived")),
-                    "tags": meta.get("tags") or [],
-                    "project": meta.get("project"), "order": meta.get("order"),
-                    "queued": len(meta.get("queue") or []),
-                    "n": len([m for m in (msgs or []) if m.get("role") in ("user","assistant")])})
-    # Manual order wins only when it is complete for the unpinned set; a partial
-    # order used to push a few chats above everything else and hide new ones.
-    unpinned = [x for x in out if not x["pinned"]]
-    manual_ok = bool(unpinned) and all(x.get("order") is not None for x in unpinned)
-    out = sorted(out, key=lambda x: (
-        not x["pinned"],
-        x.get("order", 0) if (x["pinned"] or manual_ok) and x.get("order") is not None else 0,
-        -x["mtime"] if not manual_ok or x["pinned"] else 0))
-    if manual_ok:
-        out = sorted(out, key=lambda x: (not x["pinned"], x.get("order", 1e9)))
+    for f, k in stats.items():
+        hit = _SESS_ROWS.get(f)
+        if not hit or hit[0] != k:
+            p = os.path.join(SESSIONS, f)
+            try: d = json.load(open(p))
+            except Exception: continue
+            msgs = d.get("messages") if isinstance(d, dict) else d
+            meta = d if isinstance(d, dict) else {}
+            row = {"id": f[:-5], "title": (meta.get("title") if meta else None) or "(untitled)",
+                   "mtime": _activity(meta, msgs, f, p),
+                   "pinned": bool(meta.get("pinned")), "archived": bool(meta.get("archived")),
+                   "tags": meta.get("tags") or [], "project": meta.get("project"), "order": meta.get("order"),
+                   "queued": len(meta.get("queue") or []), "model": meta.get("model"),
+                   "n": len([m for m in (msgs or []) if isinstance(m, dict) and m.get("role") in ("user", "assistant")])}
+            hit = (k, row)
+            _SESS_ROWS[f] = hit
+        out.append(dict(hit[1]))
+    for f in [f for f in _SESS_ROWS if f not in stats]: _SESS_ROWS.pop(f, None)
+    out.sort(key=lambda x: (not x["pinned"],
+                            (x.get("order") if x.get("order") is not None else 1e12) if x["pinned"] else 0,
+                            -(x["mtime"] or 0)))
     _SESS_CACHE.update(key=key, val=list(out))
     return out
 
@@ -3487,7 +3497,6 @@ def secrets_load():
         if isinstance(v, str) and k.endswith(("_KEY", "_TOKEN")) and _re.search(r"\s", v):
             d[k] = _re.sub(r"\s+", "", v)
     return d
-
 
 def secrets_save(d):
     snapshot_config(SECRETS)
@@ -5928,10 +5937,7 @@ def session_list():
     extra = [x for x in extra if x["id"] not in have]
     pinned = [r for r in rows if r.get("pinned")]
     rest = [r for r in rows if not r.get("pinned")]
-    if rest and all(r.get("order") is not None for r in rest):
-        return pinned + rest + extra              # your own order stays; new ones go last
-    merged = sorted(rest + extra, key=lambda r: -(r.get("mtime") or 0))
-    return pinned + merged
+    return pinned + sorted(rest + extra, key=lambda r: -(r.get("mtime") or 0))
 
 
 
