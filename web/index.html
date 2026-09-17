@@ -3463,7 +3463,7 @@ async function renderClaudeMemory(body,toOrbit,cwd){
   if(x){toast(x.new?'memory added (and listed in MEMORY.md)':'saved');renderClaudeMemory(body,toOrbit,d.cwd)}}}
 async function openSettings(tab){
  MEM_ORBIT=false;
- tab=tab||(MODELS.harness_mode?'claude':'general');   // Claude Code mode: its settings first
+ tab=tab||(MODELS.harness_mode?'claude':(MODELS.codex_mode?'codex':'general'));   // Claude Code mode: its settings first
  const info=await (await fetch('/api/info')).json();INFO=info;
  const st=info.settings;
  const mem=await (await fetch('/api/memory')).json();
@@ -3478,7 +3478,7 @@ async function openSettings(tab){
    <button data-t=model>Local server</button>
    <button data-t=tools>Tools</button><button data-t=memory>Memory</button>
    <button data-t=mcp>MCP</button><button data-t=library>Library →</button>
-   <button data-t=claude>Claude Code</button>
+   <button data-t=claude>Claude Code</button><button data-t=codex>Codex</button>
    <button data-t=status>Status</button>
   </div><button class=ghost style="margin-left:auto" id=closex>close</button></header>
   <div class=body id=sbody></div>
@@ -3884,7 +3884,7 @@ async function openSettings(tab){
   }
   else if(name==='memory'){
    MEM_ORBIT=false;
-   body.innerHTML=`${MODELS.harness_mode?`<div class=note style="margin-bottom:8px">Orbit's own instructions and memory: used by chats that do not run through Claude Code. <a style="cursor:pointer;color:var(--acc)" id=m_toclaude>Claude Code's →</a></div>`:''}
+   body.innerHTML=`${MODELS.harness_mode?`<div class=note style="margin-bottom:8px">Orbit's own instructions and memory: used by chats that do not run through Claude Code. <a style="cursor:pointer;color:var(--acc)" id=m_toclaude>Claude Code's →</a></div>`:''}${MODELS.codex_mode&&!MODELS.harness_mode?`<div class=note style="margin-bottom:8px">Orbit's own instructions and memory. Codex chats read Codex's AGENTS.md (and, if you keep it on, Orbit's standing instructions below): <a style="cursor:pointer;color:var(--acc)" id=m_tocodex>Codex's instructions →</a></div>`:''}
     <div class=sec>General instructions <small>— always prepended, like a CLAUDE.md</small></div>
     <textarea class=ta id=m_ins placeholder="e.g. I'm a biology grad student. Prefer concise answers with citations. Always give exact gene IDs."></textarea>
     <div class=sec>Memories <small>— durable facts, injected into every chat</small></div>
@@ -3895,6 +3895,7 @@ async function openSettings(tab){
     <button class=ghost id=m_add style="margin-top:8px">Add memory</button>`;
    $('#m_ins').value=ins;
    if($('#m_toclaude'))$('#m_toclaude').onclick=()=>render('memory');
+   if($('#m_tocodex'))$('#m_tocodex').onclick=()=>tabs('codex');
    const ml=$('#memlist');
    if(!mem.length)ml.innerHTML='<div class=note>No memories yet.</div>';
    mem.forEach(m=>{const r=el('<div class=memrow><b></b><span></span><button class=ghost>edit</button><button class=ghost>delete</button></div>');
@@ -4034,6 +4035,115 @@ async function openSettings(tab){
    $('#mcp_json').value=JSON.stringify(mcp,null,2);
    $('#mcperr').textContent=Object.entries(info.tool_errors||{}).map(([k,v])=>k+': '+v).join(' | ');
   }
+  if(name==='codex'){
+   body.innerHTML='<div class=note>loading Codex…</div>';
+   const cx=await (await fetch('/api/codex/config')).json();
+   const c=cx.settings||{},i=cx.info||{},toml=cx.config_toml||{};
+   const hostsList=await remoteHosts();
+   const rl=i.rate_limits||{};const pct=w=>w&&w.usedPercent!=null?`${Math.max(0,100-w.usedPercent)}% left`:'';
+   body.innerHTML=`<div class=note style="margin-bottom:10px">Codex mode runs chats through Codex's own agent — its tools, sandbox, skills, plugins and MCP servers — on your ChatGPT account or any provider in Models &amp; keys. Skills, plugins, MCP servers and AGENTS.md below are Codex's own (<code>~/.codex</code>), so the Codex CLI and app see the same.</div>
+    <div class=sec>Codex on this Mac</div><div class=grid>
+     <label>Installed</label><div>${i.installed?esc(i.version||'yes'):'no — <code>brew install codex</code>'}</div>
+     <label>Your account</label><div>${i.login==='chatgpt'?'signed in with ChatGPT':i.login==='api_key'?'an API key':'not signed in'} <button class=ghost id=cx_login>${i.login?'Sign in again':'Sign in'}…</button></div>
+     ${rl.primary||rl.secondary?`<label>ChatGPT limits</label><div>${[pct(rl.primary)&&'5 hours: '+pct(rl.primary),pct(rl.secondary)&&'week: '+pct(rl.secondary)].filter(Boolean).join(' · ')}</div>`:''}
+     <label>Codex's own defaults</label><div class=note>${toml.model?'model '+esc(toml.model):''}${toml.model_reasoning_effort?' · effort '+esc(toml.model_reasoning_effort):''} <span>(~/.codex/config.toml — used by the Codex CLI; Orbit chats use the model you pick)</span></div>
+    </div>
+    <div class=sec>Models</div>
+    <div class=note>Your ChatGPT account's models come from Codex's sign-in. Every other provider, key and account is shared with Orbit and Claude Code: <button class=ghost id=cx_tomodels>Settings → Models &amp; keys</button>.</div>
+    <div class=sec>Defaults for new Codex chats <small>— each chat can still change its own (model picker, folder chip, mode)</small></div><div class=grid>
+     <label>Model</label><select id=cx_dmodel>${modelOptions(MODELS.codex_mode?MODELS.default:'','Codex mode\'s last model',id=>id.startsWith('codex:'))}</select>
+     <label>Permission mode</label><select id=cx_mode>${Object.entries(CQ_MODES).map(([k,v])=>`<option value=${k}>${v}</option>`).join('')}</select>
+     <div class=hint2>Auto: everyday commands and edits inside the chat's folder run; Orbit's safety check puts anything risky to you and refuses the unrecoverable. Accept edits: commands ask. Plan: read-only. Bypass: no sandbox, no questions.</div>
+     <label>Reasoning effort</label><select id=cx_effort><option value="">Codex's own</option><option>minimal</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option></select>
+     <label>Runs on</label><select id=cx_host><option value="">This Mac</option>${(hostsList||[]).map(h=>`<option value="${esc(h.host)}">${esc(h.host)}</option>`).join('')}</select>
+     <label>Folder on this Mac</label><div style="display:flex;gap:6px"><input type=text id=cx_dir placeholder="Orbit workspace" style="flex:1"><button class=ghost id=cx_dirpick>Choose…</button></div>
+     <label>Scheduled runs</label><select id=cx_unatt><option value=auto>Auto — Orbit's safety check decides</option><option value=deny>refuse anything that needs approval</option><option value=allow>allow everything (careful)</option></select>
+    </div>
+    <div class=sec>Instructions</div><div class=grid>
+     <label>Orbit's context</label><div class=sw><input type=checkbox id=cx_octx><span class=note>the project's rules and your standing instructions, as Codex developer instructions</span></div>
+     <label>Extra instructions</label><textarea class=ta id=cx_dev style="min-height:50px" placeholder="for every Codex chat Orbit starts"></textarea>
+    </div>
+    <button class=primary id=cx_save style="margin-top:6px">Save Codex defaults</button> <span class=note id=cx_note></span>
+    <div class=sec>AGENTS.md <small>— ${esc(cx.agents_md_path||'~/.codex/AGENTS.md')}, read by Codex everywhere (a folder's own AGENTS.md adds to it)</small></div>
+    <textarea class=ta id=cx_agents style="min-height:120px;font-family:var(--mono);font-size:12.5px"></textarea>
+    <button class=ghost id=cx_agentsave>Save AGENTS.md</button> <span class=note id=cx_agentnote></span>
+    <div class=sec>Machines over SSH <small>— Codex chats can run on them too</small></div><div id=cx_hosts></div>
+    <div class=grid style="margin-top:6px">
+     <label>Install there</label><div class=sw><input type=checkbox id=cx_rinst><span class=note>install (or upgrade) Codex on a machine when a chat needs it — the official Linux build of this Mac's version, in ~/.local/bin</span></div>
+     <label>Keep running</label><div style="display:flex;gap:6px;align-items:center"><input type=number id=cx_keep min=1 max=1440 style="width:80px"><span class=note>minutes idle, then Codex there is closed (login nodes limit processes)</span></div>
+    </div>
+    <div class=sec>Skills <small>— ~/.codex/skills</small></div>
+    <div style="display:flex;gap:8px;margin-bottom:6px"><input type=text id=cxs_src placeholder="install from git URL, owner/repo or folder" style="flex:1"><button class=ghost id=cxs_inst>Install</button></div>
+    <div id=cxs_list class=cqskills></div><div class=note id=cxs_note></div>
+    <div class=sec>Plugins <small>— codex plugin</small></div><div id=cxp_list></div>
+    <div style="display:flex;gap:8px;margin-top:6px"><input type=text id=cxp_name placeholder="plugin@marketplace" style="flex:1"><button class=ghost id=cxp_add>Install</button>
+     <input type=text id=cxm_src placeholder="add marketplace (URL / owner/repo)" style="flex:1"><button class=ghost id=cxm_add>Add</button></div><div class=note id=cxp_note></div>
+    <div class=sec>MCP servers <small>— codex mcp</small></div><div id=cxmcp_list></div>
+    <div style="display:flex;gap:8px;margin-top:6px"><input type=text id=cxmcp_name placeholder="name" style="width:140px"><input type=text id=cxmcp_cmd placeholder="command and arguments, e.g. npx -y @modelcontextprotocol/server-filesystem ~/data" style="flex:1"><button class=ghost id=cxmcp_add>Add</button></div><div class=note id=cxmcp_note></div>`;
+   $('#cx_tomodels').onclick=()=>tabs('models');
+   $('#cx_login').onclick=async()=>{const r=await apiPost('/api/codex/login',{},'sign in');if(r)toast('Terminal opened — finish signing in there, then reopen this tab')};
+   $('#cx_mode').value=c.permission_mode||'auto';$('#cx_effort').value=c.default_effort||'';$('#cx_host').value=c.default_host||'';
+   $('#cx_dir').value=c.default_dir||'';$('#cx_unatt').value=c.unattended||'auto';$('#cx_octx').checked=c.orbit_context!==false;
+   $('#cx_dev').value=c.developer_instructions||'';$('#cx_rinst').checked=c.remote_install!==false;$('#cx_keep').value=c.remote_keep_alive_min||30;
+   $('#cx_dirpick').onclick=async()=>{const r=await apiPost('/api/pick_folder',{start:$('#cx_dir').value||'~',prompt:'Folder for new Codex chats'},'folder');if(r&&r.path)$('#cx_dir').value=r.path};
+   const saveCx=async(extra)=>{const r=await apiPost('/api/codex/settings',{settings:{permission_mode:$('#cx_mode').value,default_effort:$('#cx_effort').value,
+     default_host:$('#cx_host').value,default_dir:$('#cx_dir').value.trim(),unattended:$('#cx_unatt').value,orbit_context:$('#cx_octx').checked,
+     developer_instructions:$('#cx_dev').value,remote_install:$('#cx_rinst').checked,remote_keep_alive_min:+$('#cx_keep').value||30,...(extra||{})}},'Codex settings');
+    if(r)$('#cx_note').textContent='saved';return r};
+   $('#cx_save').onclick=async()=>{await saveCx();const m=$('#cx_dmodel').value;
+    if(m&&MODELS.codex_mode){await apiPost('/api/model/default',{id:m},'default model');MODELS.default=m}
+    else if(m){await apiPost('/api/settings',{settings:{codex_default:m}},'default model')}};
+   ['cx_rinst','cx_keep'].forEach(id=>$('#'+id).onchange=()=>saveCx());
+   $('#cx_agents').value=cx.agents_md||'';
+   $('#cx_agentsave').onclick=async()=>{const r=await apiPost('/api/codex/agents_md',{text:$('#cx_agents').value},'AGENTS.md');if(r)$('#cx_agentnote').textContent='saved (the previous version is backed up)'};
+   // hosts
+   const hb=$('#cx_hosts');
+   if(!(hostsList||[]).length)hb.innerHTML='<div class=note>No hosts in ~/.ssh/config.</div>';
+   (hostsList||[]).forEach(h=>{const pr=h.probe||{};
+    const r=el(`<div class=memrow style="align-items:center;gap:8px"><b style="min-width:120px"></b><span class=note style="flex:1"></span><button class=ghost data-a=inst>Install or check Codex</button><button class=ghost data-a=login>Copy this Mac's sign-in</button></div>`);
+    r.querySelector('b').textContent=h.host;
+    r.querySelector('.note').textContent=pr.ok?(pr.codex?`Codex ${pr.codex_version||''} · ${pr.codex_login||'not signed in'}`:'no Codex there yet'):(pr.error?'unreachable last time':'not checked yet');
+    r.onclick=async ev=>{const a=ev.target.dataset.a;if(!a)return;
+     if(a==='inst'){ev.target.textContent='checking…';const x=await apiPost('/api/codex/install',{host:h.host},'install');ev.target.textContent='Install or check Codex';
+      if(x)r.querySelector('.note').textContent=`Codex ${x.version||''} at ${x.path}`}
+     if(a==='login'){if(!confirm(`Copy your Codex sign-in (this Mac's ~/.codex/auth.json) to ${h.host}? Saved there readable only by your account; administrators of that machine could still read it. Only needed for your ChatGPT account's models.`))return;
+      const x=await apiPost('/api/codex/copy_login',{host:h.host},'copy sign-in');if(x)toast('signed in on '+h.host)}};
+    hb.appendChild(r)});
+   // skills
+   const drawSk=list=>{const b=$('#cxs_list');b.innerHTML=list.length?'':'<div class=note>No skills in ~/.codex/skills.</div>';
+    list.forEach(x=>{const r=el('<div class=r><div style="flex:1"><b></b><small></small></div><button class=ghost style="font-size:11px">remove</button></div>');
+     r.querySelector('b').textContent=x.name;r.querySelector('small').textContent=x.description||'';
+     r.querySelector('button').onclick=async()=>{if(!confirm('Move the Codex skill '+x.name+' to the Trash?'))return;
+      const d=await apiPost('/api/codex/manage',{kind:'skills',op:'remove',name:x.dir},'remove skill');if(d)r.remove()};b.appendChild(r)})};
+   drawSk(cx.skills||[]);
+   $('#cxs_inst').onclick=async()=>{const src=$('#cxs_src').value.trim();if(!src)return;$('#cxs_note').textContent='installing…';
+    const d=await apiPost('/api/codex/manage',{kind:'skills',op:'install',source:src},'install skill');
+    if(d){$('#cxs_note').textContent='installed: '+(d.installed||[]).join(', ');drawSk((await (await fetch('/api/codex/config')).json()).skills||[])}};
+   // plugins
+   const pl=(cx.plugins&&cx.plugins.installed)||[];
+   $('#cxp_list').innerHTML=cx.plugins_error?`<div class=note>${esc(cx.plugins_error)}</div>`:(pl.length?'':'<div class=note>No plugins installed.</div>');
+   pl.forEach(x=>{const r=el(`<div class=memrow style="align-items:center"><b style="flex:1"></b><span class=note></span><button class=ghost>remove</button></div>`);
+    r.querySelector('b').textContent=x.pluginId||x.name;r.querySelector('.note').textContent=(x.enabled?'on':'off')+(x.version?' · '+x.version:'');
+    r.querySelector('button').onclick=async()=>{if(!confirm('Remove the Codex plugin '+(x.pluginId||x.name)+'?'))return;
+     const d=await apiPost('/api/codex/manage',{kind:'plugins',op:'remove',name:x.pluginId||x.name},'remove plugin');if(d)r.remove()};
+    $('#cxp_list').appendChild(r)});
+   $('#cxp_add').onclick=async()=>{const n=$('#cxp_name').value.trim();if(!n)return;$('#cxp_note').textContent='installing…';
+    const d=await apiPost('/api/codex/manage',{kind:'plugins',op:'add',name:n},'install plugin');$('#cxp_note').textContent=d?'installed — reopen the tab to see it':''};
+   $('#cxm_add').onclick=async()=>{const n=$('#cxm_src').value.trim();if(!n)return;
+    const d=await apiPost('/api/codex/manage',{kind:'plugins',op:'marketplace',name:n},'add marketplace');$('#cxp_note').textContent=d?'marketplace added':''};
+   // MCP
+   const ml=Array.isArray(cx.mcp)?cx.mcp:[];
+   $('#cxmcp_list').innerHTML=cx.mcp_error?`<div class=note>${esc(cx.mcp_error)}</div>`:(ml.length?'':'<div class=note>No MCP servers.</div>');
+   ml.forEach(x=>{const r=el(`<div class=memrow style="align-items:center"><b style="min-width:140px"></b><span class=note style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span><button class=ghost>remove</button></div>`);
+    r.querySelector('b').textContent=x.name;const t=x.transport||{};
+    r.querySelector('.note').textContent=(x.enabled===false?'off · ':'')+(t.command?[t.command,...(t.args||[])].join(' '):(t.url||t.type||''));
+    r.querySelector('button').onclick=async()=>{if(!confirm('Remove the Codex MCP server '+x.name+'?'))return;
+     const d=await apiPost('/api/codex/manage',{kind:'mcp',op:'remove',name:x.name},'remove MCP server');if(d)r.remove()};
+    $('#cxmcp_list').appendChild(r)});
+   $('#cxmcp_add').onclick=async()=>{const n=$('#cxmcp_name').value.trim(),cmd=$('#cxmcp_cmd').value.trim();if(!n||!cmd)return;
+    const d=await apiPost('/api/codex/manage',{kind:'mcp',op:'add',name:n,command:cmd.match(/"[^"]*"|\S+/g).map(x=>x.replace(/^"|"$/g,''))},'add MCP server');
+    if(d)$('#cxmcp_note').textContent='added — reopen the tab to see it'};
+   return}
   if(name==='claude'){
    const [d,cc]=await Promise.all([(await fetch('/api/claude/info?sid='+encodeURIComponent(sid||''))).json(),
                                   (await fetch('/api/claude/config')).json()]);
@@ -4068,7 +4178,7 @@ async function openSettings(tab){
     <div class=sec>MCP servers <small>— claude mcp</small></div><div id=mcp_list class=note>checking…</div>
 
     <div class=sec>Defaults for new chats <small>— each chat can still change its own (model picker, folder chip, mode switch)</small></div><div class=grid>
-    <label>Model</label><select id=cq_dmodel>${modelOptions(MODELS.default||'')}</select>
+    <label>Model</label><select id=cq_dmodel>${modelOptions(MODELS.default||'','',id=>id.startsWith('harness:')||id.startsWith('claude-qwen'))}</select>
     <label>Permission mode</label><select id=cq_mode><option value="">Claude's own (its settings' defaultMode)</option>${Object.entries(CQ_MODES).map(([k,v])=>`<option value=${k}>${v}</option>`).join('')}</select>
     <div class=hint2>Auto: Claude decides which actions are safe to run without asking, and asks for the rest.</div>
     <label>Reasoning effort</label><select id=cq_deffort><option value="">Claude's own</option><option>low</option><option>medium</option><option>high</option><option>xhigh</option><option>max</option></select>
@@ -4605,8 +4715,8 @@ async function renderLibrary(){
 
 /* ---------------- scheduler ---------------- */
 // the model picker's choices, grouped, for a scheduled task ("" = the chat's / the default)
-function modelOptions(cur,emptyLabel){
- const groups={};(MODELS.models||[]).filter(m=>!m.switch).forEach(m=>{(groups[m.provider_label]=groups[m.provider_label]||[]).push(m)});
+function modelOptions(cur,emptyLabel,only){
+ const groups={};(MODELS.models||[]).filter(m=>!m.switch&&(!only||only(m.id))).forEach(m=>{(groups[m.provider_label]=groups[m.provider_label]||[]).push(m)});
  const known=(MODELS.models||[]).some(m=>m.id===cur);
  return `<option value="">${esc(emptyLabel||'default model')}</option>`+(cur&&!known?`<option value="${esc(cur)}" selected>${esc(cur)}</option>`:'')+Object.entries(groups).map(([g,list])=>
   `<optgroup label="${esc(g)}">${list.map(m=>`<option value="${esc(m.id)}"${m.id===cur?' selected':''}>${esc(m.label||m.model)}${m.ready===false?' — needs a key':''}</option>`).join('')}</optgroup>`).join('')}

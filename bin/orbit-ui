@@ -453,6 +453,8 @@ class H(http.server.BaseHTTPRequestHandler):
                                                         "argumentHint": c.get("argumentHint")}
                                                        for c in cat.get("commands") or []],
                                           "agents": cat.get("agents") or []}))
+        if p == "/api/codex/config":
+            return self._send(200, jdump(q.CX.config_view()))
         if p == "/api/codex/info":
             return self._send(200, jdump(q.CX.info()))
         if p.startswith("/api/codex/models"):
@@ -927,6 +929,24 @@ class H(http.server.BaseHTTPRequestHandler):
             if host: return self._send(200, jdump({"items": []}))
             paths = FL.find_by_name(FL.clean(d.get("name") or "")[0], roots)
             return self._send(200, jdump({"items": [FL.describe(x) for x in paths]}))
+        if p == "/api/codex/settings":
+            with LOCK: out = q.CX.save_cfg(d.get("settings") or {})
+            return self._send(200, jdump({"ok": True, "settings": out}))
+        if p == "/api/codex/agents_md":
+            return self._send(200, jdump(q.CX.save_agents_md(str(d.get("text") or ""))))
+        if p == "/api/codex/manage":
+            kind, op = str(d.get("kind") or ""), str(d.get("op") or "")
+            out = q.CX.manage(kind, op, **{k: v for k, v in d.items() if k in ("name", "source", "command")})
+            if out.get("error") and not out.get("ok"): return self._send(200, jdump({**out, "ok": False}))
+            return self._send(200, jdump(out))
+        if p == "/api/codex/login":
+            # opens Terminal on this Mac with `codex login` (the sign-in page follows)
+            if not _loopback_ok(self): return self._send(403, jdump({"error": "sign in at the Mac itself"}))
+            exe = q.CX.which_codex()
+            if not exe: return self._send(200, jdump({"ok": False, "error": "Codex is not installed"}))
+            ok, why = FL.run_in_terminal(f"{exe} login" + (" --device-auth" if d.get("device") else ""))
+            q.CX._LOGIN["at"] = 0
+            return self._send(200, jdump({"ok": ok, "why": why}))
         if p in ("/api/codex/install", "/api/codex/copy_login"):
             import ssh_remote
             host = str(d.get("host") or "")
