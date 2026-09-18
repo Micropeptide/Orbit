@@ -41,7 +41,7 @@ actor OrbitServer {
         }
     }
 
-    private func request(_ path: String, method: String = "GET",
+    func request(_ path: String, method: String = "GET",
                          body: [String: Any]? = nil) throws -> URLRequest {
         guard let base = pairing.base,
               let url = URL(string: path, relativeTo: base) else { throw Failure.notPaired }
@@ -57,12 +57,17 @@ actor OrbitServer {
         return r
     }
 
-    private func run(_ req: URLRequest) async throws -> Data {
+    func run(_ req: URLRequest) async throws -> Data {
         do {
             let (data, resp) = try await session.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if code == 401 { throw Failure.unauthorised }
             guard (200..<300).contains(code) else {
+                // the Mac explains a refusal as {"error": "..."}; show just that
+                if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let e = obj["error"] as? String, !e.isEmpty {
+                    throw Failure.server(code, String(e.prefix(200)))
+                }
                 let msg = String(data: data, encoding: .utf8)?
                     .prefix(200).trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 throw Failure.server(code, msg)
@@ -75,14 +80,14 @@ actor OrbitServer {
         }
     }
 
-    private func get<T: Decodable>(_ path: String, as: T.Type) async throws -> T {
+    func get<T: Decodable>(_ path: String, as: T.Type) async throws -> T {
         let data = try await run(try request(path))
         do { return try JSONDecoder().decode(T.self, from: data) }
         catch { throw Failure.decoding("\(error)") }
     }
 
     @discardableResult
-    private func post(_ path: String, _ body: [String: Any] = [:]) async throws -> Data {
+    func post(_ path: String, _ body: [String: Any] = [:]) async throws -> Data {
         try await run(try request(path, method: "POST", body: body))
     }
 
@@ -97,10 +102,10 @@ actor OrbitServer {
 
     /// The addresses the Mac currently answers on, so a paired phone keeps
     /// learning them without rescanning.
-    func alternates() async throws -> (url: String?, alts: [String]) {
-        struct R: Codable { var url: String?; var alts: [String]? }
+    func alternates() async throws -> (url: String?, alts: [String], name: String?) {
+        struct R: Codable { var url: String?; var alts: [String]?; var mac_name: String? }
         let r = try await get("/api/remote", as: R.self)
-        return (r.url, r.alts ?? [])
+        return (r.url, r.alts ?? [], r.mac_name)
     }
 
     func chats(limit: Int = 100) async throws -> [ChatSummary] {
@@ -182,13 +187,15 @@ actor OrbitServer {
 
     /// Live buffer for a chat that is generating — used to rejoin an answer that
     /// started on the Mac or before the app was reopened.
-    func live(_ sid: String) async throws -> (running: Bool, content: String, thinking: String) {
+    /// `step` counts the steps the answer has moved past: the buffer holds only
+    /// the one being written (nil from a Mac that predates this).
+    func live(_ sid: String) async throws -> (running: Bool, content: String, thinking: String, step: Int?) {
         struct L: Codable {
             var known: Bool?; var running: Bool?; var content: String?
-            var thinking: String?; var status: String?
+            var thinking: String?; var status: String?; var step: Int?
         }
         let l = try await get("/api/live/\(sid)", as: L.self)
-        return (l.running ?? false, l.content ?? "", l.thinking ?? "")
+        return (l.running ?? false, l.content ?? "", l.thinking ?? "", l.step)
     }
 
     /// Any authenticated GET returning bytes — images, thumbnails, downloads.
@@ -198,7 +205,7 @@ actor OrbitServer {
 
     /// Search inside every conversation, not just their titles.
     func search(_ q: String) async throws -> [SearchHit] {
-        let escaped = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? q
+        let escaped = OrbitServer.escaped(q)
         return try await get("/api/searchchats?q=\(escaped)", as: [SearchHit].self)
     }
 
@@ -379,12 +386,14 @@ actor OrbitServer {
     /// The server speaks server-sent events; `URLSession.bytes` gives us the body
     /// as it arrives, so this is a plain line reader rather than a dependency.
     func send(sid: String, message: String,
-              attachments: [[String: String]] = []) -> AsyncThrowingStream<StreamEvent, Error> {
+              attachments: [[String: String]] = [],
+              effort: String? = nil) -> AsyncThrowingStream<StreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
                     var body: [String: Any] = ["sid": sid, "message": message]
                     if !attachments.isEmpty { body["attachments"] = attachments }
+                    if let effort { body["effort"] = effort }       // "xhigh" for retry deeper
                     var req = try request("/api/chat", method: "POST", body: body)
                     req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
                     req.timeoutInterval = 3600
@@ -422,6 +431,11 @@ actor OrbitServer {
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let kind = obj["k"] as? String else { return nil }
         let p = obj["p"]
+        // Claude Code's hooks report on every step: they fold into one line per answer
+        if kind == "notice", let msg = (p as? [String: Any])?["msg"] as? String ?? p as? String,
+           msg.range(of: #"^hook\s"#, options: [.regularExpression, .caseInsensitive]) != nil {
+            return .extra(.hook(msg))
+        }
 
         func str(_ key: String) -> String {
             ((p as? [String: Any])?[key] as? String) ?? ""
@@ -431,32 +445,67 @@ actor OrbitServer {
         case "content_delta":  return .content(p as? String ?? "")
         case "thinking_delta": return .thinking(p as? String ?? "")
         case "model":          return .model(str("label").isEmpty ? str("id") : str("label"))
+        // a call and its result pair up by id, so each row can say what came back
         case "tool":
-            let args = ((p as? [String: Any])?["args"] as? [String: Any]) ?? [:]
-            let rendered = args.map { "\($0.key)=\(String(describing: $0.value).prefix(40))" }
-                               .sorted().joined(separator: ", ")
-            return .tool(name: str("name"), args: rendered)
-        case "tool_result":    return .toolResult(name: str("name"), output: str("output"))
+            return .tool(ToolRun(event: (p as? [String: Any]) ?? [:], finished: false))
+        case "tool_result":
+            let d = (p as? [String: Any]) ?? [:]
+            return .toolResult(ToolRun(event: d, finished: true), diff: ShownDiff(d["diff"]))
         case "server_starting":
             let msg = str("msg")
             return .status(msg.isEmpty ? "starting the model" : msg)
         case "server_ready":   return .status("")
-        case "squeezed":       return .status("trimming older tool output")
+        case "squeezed", "autocompact_done", "stagnation", "round_limit", "interjection", "retry",
+             "sources", "weak_claims", "injection", "skill_hint", "long_running",
+             "plan_nudge", "fail_streak", "ultrathink":
+            return TranscriptEvent.parse(kind: kind, p).map { .extra($0) }
         case "autocompact":    return .status("summarising earlier turns")
-        case "autocompact_done", "stagnation": return .status("")
         case "blocked":        return .blocked(reason: str("reason"))
         case "auto_approved":  return .autoApproved(name: str("name"), reason: str("reason"))
         // "approval_request" carries the id /api/approve answers to; the bare
         // "approval" event before it never did, so a prompt on the phone could
         // not actually be answered
         case "approval_request":
+            if let full = ApprovalPrompt(p as? [String: Any]) { return .approvalPrompt(full) }
             return .approval(name: str("name"), reason: str("reason"),
                              id: (p as? [String: Any])?["id"] as? String)
         case "approval":       return nil
-        case "interjection":   return .status("reading your note")
+        // Claude Code and Codex say what they are doing before the first token —
+        // "starting Codex on <host>" can take a while over SSH
+        case "status":         return .status(p as? String ?? str("msg"))
+        case "notice":
+            let msg = p as? String ?? str("msg")
+            // a plan's allowance ran out: its own event, so it can stand out and notify
+            if str("kind") == "limit" { return .usageLimit(msg) }
+            return msg.isEmpty ? nil : .notice(msg)
+        // chat actions: a question mid-answer, and an answer that hit its limit
+        case "question":
+            return AskQuestion(p as? [String: Any]).map { .question($0) }
         case "queued":         return .status("waiting for another chat to finish")
         case "dequeued":       return .status("its turn — starting")
-        case "retry":          return .status("model error — retrying")
+        // the chat was already answering: the Mac queued this message, and starts it
+        // by itself once the answer running now is done
+        case "queued_message":
+            let d = p as? [String: Any]
+            if str("why") == "scheduled" {
+                let item = d?["item"] as? [String: Any]
+                let at = (item?["at"] as? Double) ?? (item?["at"] as? String).flatMap(Double.init)
+                let when = at.map { When.describe(Date(timeIntervalSince1970: $0)) } ?? "later"
+                let rep = Repeat(server: item?["repeat"] as? String)
+                return .content("Scheduled for \(when)" + (rep == .once ? "." : " · \(rep.label.lowercased())."))
+            }
+            return .content("Queued — it starts by itself when the answer running now is done.")
+        // the chosen model failed and another took over
+        case "fallback":
+            let d = p as? [String: Any]
+            let to = [str("to_label"), str("to")].first { !$0.isEmpty } ?? "another model"
+            let after = (d?["after"] as? Int) ?? (d?["after"] as? String).flatMap(Int.init)
+            var line = "switched to \(to)"
+            if let after { line += " after \(after) failure\(after == 1 ? "" : "s")" }
+            let why = str("why")
+            if !why.isEmpty { line += " (\(why.prefix(80)))" }
+            return .notice(line)
+        case "interjected":    return .content("Sent in — it reads this at its next step.")
         case "subtask":
             let d = str("description")
             return .status(d.isEmpty ? "a helper is working" : "helper: \(d)")
@@ -472,5 +521,233 @@ actor OrbitServer {
     /// Answer an approval prompt raised mid-answer.
     func approve(_ id: String, allow: Bool) async throws {
         try await post("/api/approve", ["id": id, "allow": allow])
+    }
+
+    // ------------------------------------------------------------ queue and send later
+
+    /// One chat's waiting messages. Every op answers with the queue as it now is.
+    @discardableResult
+    func queue(sid: String, op: String, _ extra: [String: Any] = [:]) async throws -> QueueState {
+        struct R: Codable { var ok: Bool?; var queue: QueueState?; var error: String? }
+        var body = extra
+        body["sid"] = sid
+        body["op"] = op
+        let data = try await post("/api/queue", body)
+        let r = try? JSONDecoder().decode(R.self, from: data)
+        if let e = r?.error { throw Failure.server(400, e) }
+        return r?.queue ?? .empty
+    }
+
+    /// Put a message in a chat's queue to go out at `at`, optionally repeating.
+    @discardableResult
+    func sendLater(sid: String, text: String, attachments: [[String: String]] = [],
+                   at: Date, repeat rep: Repeat) async throws -> QueueState {
+        try await queue(sid: sid, op: "add", ["text": text, "attachments": attachments,
+                                              "at": at.timeIntervalSince1970, "repeat": rep.server])
+    }
+
+    /// Change a waiting message. `update` does it in one go on a Mac that has
+    /// it; an older Mac gets `schedule` and `edit`, which cannot change the model.
+    func updateQueued(sid: String, id: String, text: String?, at: Date??,
+                      repeat rep: Repeat?, model: String?) async throws {
+        var body: [String: Any] = ["id": id]
+        if let text { body["text"] = text }
+        if let at { body["at"] = at.map { $0.timeIntervalSince1970 } ?? NSNull() }
+        if let rep { body["repeat"] = rep.server }
+        if let model { body["model"] = model }
+        do {
+            try await queue(sid: sid, op: "update", body)
+            return
+        } catch Failure.server(let code, let msg) where code == 400 && msg.contains("unknown op") {
+            // fall through to the older pair
+        }
+        if let text { try await queue(sid: sid, op: "edit", ["id": id, "text": text]) }
+        if at != nil || rep != nil {
+            var b: [String: Any] = ["id": id]
+            if let at { b["at"] = at.map { $0.timeIntervalSince1970 } ?? NSNull() }
+            if let rep { b["repeat"] = rep.server }
+            try await queue(sid: sid, op: "schedule", b)
+        }
+    }
+
+    // ------------------------------------------------------------ scheduled
+
+    /// Everything that happens later: messages waiting for their time in any
+    /// chat, and the Mac's scheduled tasks. Falls back to the two older
+    /// endpoints on a Mac that predates `/api/scheduled`.
+    func scheduled() async throws -> (messages: [ScheduledMessage], tasks: [ScheduledTask]) {
+        struct Both: Codable { var messages: [ScheduledMessage]?; var tasks: [ScheduledTask]? }
+        if let data = try? await post("/api/scheduled", [:]),
+           let r = try? JSONDecoder().decode(Both.self, from: data),
+           let m = r.messages, let t = r.tasks {
+            return (m, t)
+        }
+        struct Sends: Codable { var items: [ScheduledMessage]? }
+        struct Jobs: Codable { var jobs: [ScheduledTask]? }
+        let sendsData = try await post("/api/scheduled_sends", [:])
+        let sends = (try? JSONDecoder().decode(Sends.self, from: sendsData))?.items ?? []
+        let jobs = (try? await get("/api/schedule", as: Jobs.self))?.jobs ?? []
+        return (sends, jobs)
+    }
+
+    /// Create or change a task. A partial `job` is merged into the saved one.
+    func saveTask(_ job: [String: Any]) async throws {
+        struct R: Codable { var error: String? }
+        let data = try await post("/api/schedule/save", ["job": job])
+        if let e = (try? JSONDecoder().decode(R.self, from: data))?.error { throw Failure.server(400, e) }
+    }
+
+    func runTask(_ id: String) async throws {
+        try await post("/api/schedule/run", ["id": id])
+    }
+
+    func deleteTask(_ id: String) async throws {
+        try await post("/api/schedule/delete", ["id": id])
+    }
+
+    // ------------------------------------------------------------ harness and hosts
+
+    /// Which harness new chats use: Orbit's own agent, Claude Code or Codex.
+    func setHarnessMode(_ kind: HarnessKind) async throws -> String? {
+        struct R: Codable { var ok: Bool?; var `default`: String?; var error: String? }
+        let r = try? JSONDecoder().decode(R.self, from: try await post("/api/harness/mode", ["engine": kind.rawValue]))
+        if let e = r?.error { throw Failure.server(400, e) }
+        return r?.default
+    }
+
+    /// The SSH hosts in the Mac's ssh config, with the last check of each if
+    /// the Mac has one. Reading this does not connect to any of them.
+    func remoteHosts() async throws -> [RemoteHost] {
+        struct R: Codable { var hosts: [RemoteHost] }
+        return try await get("/api/remote/hosts", as: R.self).hosts
+    }
+
+    /// Connect to a host and see what it offers. Slow (up to a minute), and a
+    /// cluster may block an address that connects too often — call it only when
+    /// someone asks.
+    func probe(host: String, refresh: Bool = false) async throws -> HostProbe {
+        var body: [String: Any] = ["host": host]
+        if refresh { body["refresh"] = true }
+        var req = try request("/api/remote/probe", method: "POST", body: body)
+        req.timeoutInterval = 120
+        let data = try await run(req)
+        do { return try JSONDecoder().decode(HostProbe.self, from: data) }
+        catch { throw Failure.decoding("\(error)") }
+    }
+
+    /// Folders inside one folder on a host.
+    func listRemote(host: String, path: String) async throws -> RemoteListing {
+        var req = try request("/api/remote/ls", method: "POST", body: ["host": host, "path": path])
+        req.timeoutInterval = 90
+        let r = try JSONDecoder().decode(RemoteListing.self, from: try await run(req))
+        if let e = r.error { throw Failure.server(400, e) }
+        return r
+    }
+
+    /// Bookmarked and recently used folders on a machine ("" = this Mac).
+    func folderPlaces(host: String) async throws -> FolderPlaces {
+        let h = OrbitServer.escaped(host)
+        return try await get("/api/claude/folders?host=\(h)", as: FolderPlaces.self)
+    }
+
+    /// Star or unstar a folder. Answers with the machine's bookmarks as they now are.
+    func bookmark(host: String, path: String, on: Bool) async throws -> [String] {
+        struct R: Codable { var bookmarks: [String]?; var error: String? }
+        let r = try JSONDecoder().decode(R.self, from: try await post("/api/folders/bookmark",
+                                                                      ["host": host, "path": path, "on": on]))
+        if let e = r.error { throw Failure.server(400, e) }
+        return r.bookmarks ?? []
+    }
+
+    /// Where a Claude Code or Codex chat works, and how much it may do unasked.
+    func chatWork(sid: String) async throws -> ChatWork {
+        let s = OrbitServer.escaped(sid)
+        let data = try await run(try request("/api/claude/info?sid=\(s)"))
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { throw Failure.decoding("claude/info") }
+        return ChatWork(json: obj)
+    }
+
+    /// Set the machine ("" = this Mac) and folder a chat works in. The Mac
+    /// checks that a folder on itself exists.
+    func setWork(sid: String, host: String, cwd: String, addDirs: [String]? = nil) async throws {
+        var body: [String: Any] = ["sid": sid, "host": host, "cwd": cwd]
+        if let addDirs { body["add_dirs"] = addDirs }
+        struct R: Codable { var error: String? }
+        let data = try await post("/api/claude/cwd", body)
+        if let e = (try? JSONDecoder().decode(R.self, from: data))?.error { throw Failure.server(400, e) }
+    }
+
+    func setPermissionMode(sid: String, mode: PermissionMode) async throws {
+        struct R: Codable { var error: String? }
+        let data = try await post("/api/claude/mode", ["sid": sid, "mode": mode.rawValue])
+        if let e = (try? JSONDecoder().decode(R.self, from: data))?.error { throw Failure.server(400, e) }
+    }
+
+    // ------------------------------------------------------------ file links
+
+    /// Which of these names in an answer are real files where the chat works.
+    func resolvePaths(sid: String, _ names: [String]) async throws -> [String: ResolvedPath] {
+        struct R: Codable { var items: [String: ResolvedPath]? }
+        let data = try await post("/api/paths/resolve", ["sid": sid, "paths": names])
+        return (try? JSONDecoder().decode(R.self, from: data))?.items ?? [:]
+    }
+
+    /// `preview` gives a page-ready link to a file; `render` turns a document,
+    /// spreadsheet or archive into an image or page first.
+    func fileAction(sid: String, path: String, action: String) async throws -> (url: String, kind: String?) {
+        struct R: Codable { var ok: Bool?; var url: String?; var kind: String?; var error: String? }
+        var req = try request("/api/file/action", method: "POST",
+                              body: ["sid": sid, "path": path, "action": action])
+        req.timeoutInterval = 120          // rendering a document, or fetching over ssh, takes a while
+        let data = try await run(req)
+        let r = try JSONDecoder().decode(R.self, from: data)
+        guard r.ok == true, let url = r.url else {
+            throw Failure.server(400, r.error ?? "the Mac could not show this file")
+        }
+        return (url, r.kind)
+    }
+
+    // ------------------------------------------------------------ for extensions
+
+    /// An authorised request, for endpoints defined in `OrbitServer+*.swift` files.
+    func authorisedRequest(_ path: String, method: String = "GET",
+                           body: [String: Any]? = nil) throws -> URLRequest {
+        try request(path, method: method, body: body)
+    }
+
+    /// Run a request built by `authorisedRequest`, with the usual error mapping.
+    func perform(_ req: URLRequest) async throws -> Data {
+        try await run(req)
+    }
+
+    /// A link the Mac handed out, made absolute. `/fs/` links carry their own permission.
+    func absolute(_ path: String) -> URL? {
+        guard let base = pairing.base else { return nil }
+        return URL(string: path, relativeTo: base)?.absoluteURL
+    }
+
+    /// Bytes behind a preview link, saved under the file's own name for sharing.
+    func downloadPreview(_ path: String, name: String) async throws -> URL {
+        guard let url = absolute(path) else { throw Failure.notPaired }
+        let data = try await run(URLRequest(url: url))
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("orbit-share-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let out = dir.appendingPathComponent(name.isEmpty ? url.lastPathComponent : name)
+        try data.write(to: out, options: .atomic)
+        return out
+    }
+
+    // ------------------------------------------------------------ settings and administration
+
+    /// One authenticated call for OrbitServer+Settings.swift, which lives in its
+    /// own file and so cannot reach the private helpers above.
+    @discardableResult
+    func settingsCall(_ path: String, method: String = "GET", body: [String: Any]? = nil,
+                      timeout: TimeInterval? = nil) async throws -> Data {
+        var req = try request(path, method: method, body: method == "GET" ? nil : (body ?? [:]))
+        if let timeout { req.timeoutInterval = timeout }
+        return try await run(req)
     }
 }

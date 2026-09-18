@@ -43,8 +43,21 @@ final class AppState: ObservableObject {
     // how much it can do without asking first
     @Published var autonomy: OrbitServer.AutonomySettings?
     @Published var autonomyBusy = false
+    // Claude Code and Codex: which harness new chats use, and the SSH hosts
+    @Published var harnessMode: HarnessKind = .orbit
+    @Published var harnessBusy = false
+    @Published var harnessRecent: [RecentModel] = []
+    @Published var codexRecent: [RecentModel] = []
+    @Published var remoteHosts: [RemoteHost] = []
+    /// The last check of each host. Connecting is slow and a cluster may block
+    /// an address that does it often, so a result is reused rather than redone.
+    @Published var hostProbes: [String: HostProbe] = [:]
+    @Published var probeErrors: [String: String] = [:]
+    @Published var probing: Set<String> = []
     /// Whether the app is in the background, so a finished answer can announce itself.
     var backgrounded = false
+    /// Set when the app went to the background, cleared when it is back in front.
+    var wentToBackground = false
     var graceTask: UIBackgroundTaskIdentifier = .invalid
 
     // the answer in flight --------------------------------------------------
@@ -54,11 +67,39 @@ final class AppState: ObservableObject {
     @Published var liveTools: [String] = []
     @Published var liveStatus = ""
     @Published var liveModel = ""
+    /// The current step's tool calls, running and finished. `liveTools` keeps
+    /// the notices (auto-approved, blocked, a switch of model).
+    @Published var liveRuns: [ToolRun] = []
+    /// Steps of this answer already over: each is its thinking, its words and
+    /// the tools it then called, the way the saved chat splits them.
+    @Published var liveSteps: [Message] = []
+    /// For the status line: when the answer began, its word for the work,
+    /// roughly how much has come back, and since when it has been thinking.
+    /// Read by a timer, so they need not publish.
+    var liveStartedAt = Date()
+    var liveVerb = "Working"
+    var liveChars = 0
+    var liveThinkingSince: Date?
+    /// When this step's thinking began, and how long it took once words came.
+    private var stepThinkStart: Date?
+    @Published var liveThoughtSecs: Double?
+    /// Each chat's todo list, from the plan tool.
+    @Published var plans: [String: [PlanStep]] = [:]
+    /// File edits shown while answers ran here, per chat, for /diff.
+    @Published var shownDiffs: [String: [ShownDiff]] = [:]
     @Published var pendingApproval: (name: String, reason: String, id: String)?
+    /// Questions, approvals, plan mode, temporary chat, row status (AppState+Chat.swift).
+    @Published var chatExtras = ChatExtras()
+    /// The list's paging, /tasks and the first-pairing tips (AppState+Work.swift).
+    @Published var work = WorkExtras()
+    /// Allowance, spend and cheaper hours for the model picker (AppState+Usage.swift).
+    @Published var usage = UsageState()
 
     private(set) var server: OrbitServer?
     private var streamTask: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
+    /// Which chat's answer a poll loop is following right now (nil when none is running).
+    private var pollingSid: String?
     /// Watches the open chat for changes made elsewhere — the Mac's browser,
     /// another phone — and pulls them in. The count of raw messages on the
     /// Mac is the thing compared; it moves when anyone sends or answers.
@@ -78,6 +119,7 @@ final class AppState: ObservableObject {
         } else {
             server = nil
         }
+        FileLinks.shared.server = server
     }
 
     var isPaired: Bool { pairing != nil }
@@ -114,13 +156,16 @@ final class AppState: ObservableObject {
 
     func unpair() {
         detachLive()
+        resetComposerExtras()
         watchTask?.cancel(); watchTask = nil
         Keychain.clear()
         Cache.clear()
         pairing = nil
-        chats = []; messages = []; openChat = nil; reachable = nil
+        chats = []; messages = []; openChat = nil; reachable = nil; queue = .empty
         models = []; projects = []; attachments = []
         currentModel = nil; defaultModel = nil; deepLink = nil
+        remoteHosts = []; hostProbes = [:]; probeErrors = [:]; harnessMode = .orbit
+        work = WorkExtras()
         localServer = LocalServer()
     }
 
@@ -196,13 +241,27 @@ final class AppState: ObservableObject {
         if let u = found.url, !u.isEmpty { all.insert(u) }
         all.remove(p.url)
         let list = all.sorted()
-        if list != (p.alts ?? []) { p.alts = list.isEmpty ? nil : list; pairing = p }
+        var changed = false
+        if list != (p.alts ?? []) { p.alts = list.isEmpty ? nil : list; changed = true }
+        // the Mac's own name, which a phone paired from an older QR only knew as a host name
+        if let n = found.name, !n.isEmpty, n != p.name { p.name = n; changed = true }
+        if changed { pairing = p }
+    }
+
+    /// The Mac, the way to name it on screen: its own name, or "your Mac" when all the
+    /// phone has is a network host name ("vpn-10-0-0-1…", an IP address).
+    var macDisplayName: String {
+        guard let raw = pairing?.name, !raw.isEmpty else { return "your Mac" }
+        if raw.range(of: #"^\S*\d+[-.]\d+\S*$"#, options: .regularExpression) != nil { return "your Mac" }
+        return raw
     }
 
     func loadChats() async {
         guard let server else { return }
         do {
-            let list = try await server.chats()
+            let page = try await server.chatPage(limit: work.chatLimit)
+            let list = keepingExternal(page.items)
+            work.chatTotal = page.total
             chats = list
             Cache.saveChats(list)
             lastError = nil
@@ -223,6 +282,12 @@ final class AppState: ObservableObject {
             // than showing a chip that reads "model"
             let chosen = [m.current, m.default].compactMap { $0 }.first { !$0.isEmpty }
             currentModel = chosen ?? m.models.first { $0.provider == "local" && $0.isReady }?.id
+            harnessRecent = m.harness_recent ?? []
+            codexRecent = m.codex_recent ?? []
+            if m.harness_mode == true { harnessMode = .claude }
+            else if m.codex_mode == true { harnessMode = .codex }
+            else if m.harness_mode == false || m.codex_mode == false { harnessMode = .orbit }
+            else { harnessMode = HarnessKind(modelID: m.default) }     // a Mac that predates the flags
         }
     }
 
@@ -230,7 +295,7 @@ final class AppState: ObservableObject {
     /// Reads through `peek`, which does not move what the Mac has open.
     private func prefetch(_ list: [ChatSummary]) async {
         guard let server else { return }
-        for c in list.filter({ $0.archived != true }).prefix(8) {
+        for c in list.filter({ $0.archived != true && $0.external != true }).prefix(8) {
             if let d = Cache.messagesDate(c.id), d.timeIntervalSince1970 >= c.mtime { continue }
             if let detail = try? await server.peek(c.id) {
                 Cache.saveMessages(detail.messages, for: c.id)
@@ -250,7 +315,9 @@ final class AppState: ObservableObject {
         flushTask?.cancel(); flushTask = nil; pendingText = ""
         streaming = false; liveSid = nil
         liveText = ""; liveThinking = ""; liveTools = []; liveStatus = ""
+        liveRuns = []; liveSteps = []; liveThinkingSince = nil; stepThinkStart = nil; liveThoughtSecs = nil
         pendingApproval = nil
+        chatExtras.question = nil; chatExtras.approval = nil
     }
 
     func open(_ id: String) async {
@@ -259,6 +326,8 @@ final class AppState: ObservableObject {
             // leave the old answer running on the Mac; just stop watching it here
             detachLive()
         }
+        if openChat?.sid != id { queue = .empty }
+        markSeen(id)
         // show the cached copy immediately; the network fills it in
         if let cached = Cache.loadMessages(id), !cached.isEmpty {
             messages = cached
@@ -267,7 +336,11 @@ final class AppState: ObservableObject {
         }
         do {
             let d = try await server.chat(id)
+            // you may have moved on while it loaded: this chat is no longer the one on screen
+            guard openChat == nil || openChat?.sid == id else { return }
+            if streaming, let live = liveSid, live != id { detachLive() }
             openChat = d
+            chatExtras.planMode = d.plan_mode ?? false
             var fresh = d.messages
             // Mid-answer the Mac may not have written the question yet (it starts
             // the model server first). Keep the one we showed rather than losing it.
@@ -277,10 +350,12 @@ final class AppState: ObservableObject {
             }
             messages = fresh
             Cache.saveMessages(fresh, for: id)
+            learnPlan(id, from: fresh)
             await loadModels()
             // already attached (SSE or poll) when it is the chat we are watching
-            if d.running == true, liveSid != id { await rejoin(id) }
+            if d.running == true, liveSid != id, openChat?.sid == id { await rejoin(id) }
             watch(id, loaded: d.n)
+            await loadQueue()
         } catch {
             lastError = error.localizedDescription
         }
@@ -297,19 +372,35 @@ final class AppState: ObservableObject {
                 try? await Task.sleep(nanoseconds: 4_000_000_000)
                 guard let self, !Task.isCancelled, self.openChat?.sid == id,
                       !self.backgrounded, let server = self.server else { continue }
-                guard let s = try? await server.stamp(id) else { continue }
-                if self.streaming { self.watchedCount = s.n; continue }   // our own turn moves it
+                guard let s = try? await server.stamp(id), self.openChat?.sid == id else { continue }
+                if self.streaming {
+                    self.watchedCount = s.n                                  // our own turn moves it
+                    // a stream silent for well over a long tool call while the Mac still answers
+                    // has died without saying so: follow the answer by polling instead
+                    if s.running, self.liveSid == id, self.streamTask != nil,
+                       Date().timeIntervalSince(self.lastLiveEvent) > 75 {
+                        await self.resyncLive()
+                    }
+                    // nothing is listening (a poll that gave up) yet the answer is marked live
+                    if !s.running, self.liveSid == id, self.streamTask == nil, self.pollingSid != id {
+                        self.finishLive(sid: id)
+                    }
+                    continue
+                }
                 if s.running, self.liveSid == nil {
                     await self.rejoin(id)                                   // someone else's turn
                 } else if let seen = self.watchedCount, s.n != seen {
                     // changed elsewhere: read it without moving what the Mac has open
                     if let d = try? await server.peek(id) {
                         self.messages = d.messages
+                        self.learnPlan(id, from: d.messages)
                         if let t = d.title { self.openChat?.title = t }
                         Cache.saveMessages(d.messages, for: id)
                     }
                     Task { await self.loadChats() }
                 }
+                // a waiting message may have gone out, or been added on the Mac
+                if s.n != self.watchedCount || !(self.queue.items.isEmpty) { await self.loadQueue() }
                 self.watchedCount = s.n
             }
         }
@@ -317,7 +408,7 @@ final class AppState: ObservableObject {
 
     // ------------------------------------------------------------ sending
 
-    func send(_ text: String) async {
+    func send(_ text: String, effort: String? = nil) async {
         guard let server, let sid = openChat?.sid,
               !(text.isEmpty && attachments.isEmpty) else { return }
         let going = attachments
@@ -326,13 +417,16 @@ final class AppState: ObservableObject {
             : ([text] + going.map { "📎 \($0.name)" })
                 .filter { !$0.isEmpty }.joined(separator: "\n")
         messages.append(Message(role: "user", text: label))
+        // each new request starts a fresh plan on the Mac; "continue" carries the old one on
+        if !text.lowercased().hasPrefix("continue") { plans[sid] = nil }
         beginLive(for: sid)
 
         streamTask = Task {
             var dropped = false
             do {
                 for try await ev in await server.send(sid: sid, message: text,
-                                                      attachments: going.map(\.payload)) {
+                                                      attachments: going.map(\.payload),
+                                                      effort: effort) {
                     if Task.isCancelled { break }
                     // a chat you have since left keeps generating on the Mac;
                     // its tokens must not land in the one you are looking at
@@ -340,6 +434,7 @@ final class AppState: ObservableObject {
                     apply(ev)
                 }
             } catch {
+                if Task.isCancelled { return }       // handed over to polling, stopped, or left
                 // A dropped connection is not a failed answer: the Mac carries on.
                 // Rejoin through the live buffer rather than reporting an error.
                 if liveSid == sid, (try? await server.live(sid).running) == true {
@@ -349,6 +444,7 @@ final class AppState: ObservableObject {
                     liveStatus = ""
                 }
             }
+            if Task.isCancelled { return }
             if dropped { await rejoin(sid) }
             else if liveSid == sid {
                 let failed = lastError != nil
@@ -361,18 +457,51 @@ final class AppState: ObservableObject {
 
     /// Which chat the live buffer belongs to. Events for any other chat are ignored.
     private(set) var liveSid: String?
+    /// When the answer last showed a sign of life (a stream event or a poll), so a stream
+    /// that hangs without failing -- a phone that slept, a network that changed -- is noticed.
+    var lastLiveEvent = Date()
+
+    /// Stop reading the stream and follow the answer by polling the Mac instead: for a
+    /// stream that went quiet while the Mac still answers, and after coming back from the
+    /// background, where the stream has usually died without saying so.
+    func resyncLive() async {
+        guard let server, streaming, let sid = liveSid else { return }
+        // a stream that spoke moments ago is alive: leave it be (it carries what polling cannot --
+        // sources, warnings, notices, alerts)
+        if streamTask != nil, Date().timeIntervalSince(lastLiveEvent) < 10 { return }
+        let running = (try? await server.liveDetail(sid).running) == true
+        guard liveSid == sid, openChat?.sid == sid else { return }     // you moved on meanwhile
+        streamTask?.cancel(); streamTask = nil
+        guard running else {
+            // it finished while we were not listening: show what it wrote
+            finishLive(sid: sid)
+            return
+        }
+        // start the polled view from what the Mac has saved, so steps the stream already
+        // showed are not drawn twice
+        flushText()
+        liveSteps = []; liveText = ""; liveThinking = ""; liveRuns = []; liveTools = []
+        if let d = try? await server.peek(sid), liveSid == sid, openChat?.sid == sid { messages = d.messages }
+        await rejoin(sid)
+    }
     private var pendingText = ""
     private var flushTask: Task<Void, Never>?
 
     private func beginLive(for sid: String) {
         askForNotificationsIfUseful()
+        // one listener per answer: an old stream or poll left over would draw into this one
+        streamTask?.cancel(); pollTask?.cancel(); pollTask = nil
+        lastLiveEvent = Date()
         liveSid = sid
         streaming = true
         flushTask?.cancel(); flushTask = nil
         liveText = ""; liveThinking = ""; liveTools = []; liveStatus = ""
+        liveRuns = []; liveSteps = []
+        startStatusLine()
         pendingText = ""
         liveModel = models.first { $0.id == currentModel }?.display ?? ""
         pendingApproval = nil
+        chatExtras.question = nil; chatExtras.approval = nil; chatExtras.roundLimit = nil
     }
 
     /// Tokens arrive faster than a phone can re-render Markdown. Batch them and
@@ -397,18 +526,54 @@ final class AppState: ObservableObject {
     }
 
     private func apply(_ ev: StreamEvent) {
+        lastLiveEvent = Date()
+        alert(for: ev)          // questions, approvals, errors: tell you if you are elsewhere
         switch ev {
-        case .content(let t):  queueText(t)
-        case .thinking(let t): liveThinking += t
+        case .content(let t):
+            nextStep()
+            liveChars += t.count
+            // words have begun: the thinking before them is over
+            if let s = stepThinkStart, liveThoughtSecs == nil { liveThoughtSecs = Date().timeIntervalSince(s) }
+            liveThinkingSince = nil
+            queueText(t)
+        case .thinking(let t):
+            nextStep()
+            liveChars += t.count
+            if liveThinking.isEmpty { stepThinkStart = Date(); liveThoughtSecs = nil }
+            if liveThinkingSince == nil { liveThinkingSince = Date() }
+            liveThinking += t
         case .model(let m):    liveModel = m
-        case .tool(let n, let a): liveTools.append(a.isEmpty ? n : "\(n)(\(a))")
-        case .toolResult:      break
+        case .tool(let run):
+            flushText()
+            liveRuns.append(run)
+        case .toolResult(let r, let diff):
+            if let i = liveRuns.lastIndex(where: { $0.id == r.id && !$0.done })
+                ?? liveRuns.lastIndex(where: { $0.name == r.name && !$0.done }) {
+                liveRuns[i].complete(with: r)
+            } else {
+                liveRuns.append(r)          // an older Mac: a result with no call before it
+            }
+            if let sid = liveSid {
+                if r.name == "plan", let out = r.output {
+                    let steps = PlanStep.parse(out)
+                    if !steps.isEmpty { plans[sid] = steps }
+                }
+                if let diff { shownDiffs[sid, default: []].append(diff) }
+            }
         case .status(let s):   liveStatus = s
         case .blocked(let r):  liveTools.append("refused: \(r)")
         case .autoApproved(let n, let r): liveTools.append("✓ auto-approved \(n) — \(r)")
         case .approval(let n, let r, let id):
             pendingApproval = (n, r, id ?? "")
+        case .notice(let n):   liveTools.append("↪ " + n)
+        case .question(let q): chatExtras.question = q
+        case .approvalPrompt(let a):
+            chatExtras.approval = a
+            pendingApproval = (a.name, a.reason, a.id)
+        case .roundLimit(let why): chatExtras.roundLimit = why
+        case .usageLimit(let msg): noteUsageLimit(msg)
         case .error(let e):    lastError = e
+        case .extra(let e):    applyExtra(e)
         case .end(_, let title):
             if let title, var c = openChat {
                 c.title = title
@@ -443,49 +608,131 @@ final class AppState: ObservableObject {
         guard !Self.askedForNotifications else { return }
         Self.askedForNotifications = true
         UNUserNotificationCenter.current()
-            .requestAuthorization(options: [.alert, .sound]) { _, _ in }
+            .requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+    }
+
+    // ------------------------------------------------------------ steps and the status line
+
+    private static let statusVerbs = ["Working", "Pondering", "Brewing", "Churning", "Cooking", "Crunching",
+        "Percolating", "Puzzling", "Simmering", "Spelunking", "Synthesising", "Tinkering", "Wrangling",
+        "Orbiting", "Noodling", "Whirring", "Mulling", "Sifting", "Assembling", "Unravelling",
+        "Untangling", "Composing"]
+
+    private func startStatusLine() {
+        liveStartedAt = Date()
+        liveVerb = Self.statusVerbs.randomElement() ?? "Working"
+        liveChars = 0
+        liveThinkingSince = nil
+        stepThinkStart = nil
+        liveThoughtSecs = nil
+    }
+
+    /// The current step as a message: its words, its thinking, then the tools it called.
+    private func currentStep() -> Message? {
+        guard !liveText.isEmpty || !liveThinking.isEmpty || !liveRuns.isEmpty || !liveTools.isEmpty else { return nil }
+        var m = Message(role: "assistant", text: liveText,
+                        tools: liveTools.isEmpty ? nil : liveTools,
+                        model: liveModel.isEmpty ? nil : liveModel,
+                        thinking: liveThinking.isEmpty ? nil : liveThinking)
+        m.tool_runs = liveRuns.isEmpty ? nil : liveRuns.map { r in
+            var r = r
+            r.markStopped()
+            return r
+        }
+        m.thoughtSecs = liveThoughtSecs ?? stepThinkStart.map { Date().timeIntervalSince($0) }
+        return m
+    }
+
+    /// New words or thinking after tool calls begin a new step, so each step's
+    /// text sits with the tools it went on to call.
+    private func nextStep() {
+        guard !liveRuns.isEmpty || !liveTools.isEmpty else { return }
+        flushText()
+        if let step = currentStep() { liveSteps.append(step) }
+        liveText = ""; liveThinking = ""; liveRuns = []; liveTools = []
+        stepThinkStart = nil; liveThoughtSecs = nil
     }
 
     private func finishLive(sid: String) {
         flushText()
-        guard liveSid == sid || liveSid == nil else { return }
+        // only the answer this screen is watching: finishing another chat's answer used to add
+        // its steps to the chat on screen and cache them under the wrong chat
+        guard liveSid == sid else { return }
         liveSid = nil
-        if !liveText.isEmpty || !liveThinking.isEmpty {
-            messages.append(Message(role: "assistant", text: liveText,
-                                    tools: liveTools.isEmpty ? nil : liveTools,
-                                    model: liveModel.isEmpty ? nil : liveModel,
-                                    thinking: liveThinking.isEmpty ? nil : liveThinking))
+        let steps = liveSteps + [currentStep()].compactMap { $0 }
+        if !steps.isEmpty {
+            messages.append(contentsOf: steps)
             Cache.saveMessages(messages, for: sid)
         }
-        let answered = liveText
+        let answered = steps.map(\.text).filter { !$0.isEmpty }.joined(separator: "\n\n")
         streaming = false
         liveText = ""; liveThinking = ""; liveTools = []; liveStatus = ""
+        liveRuns = []; liveSteps = []; liveThinkingSince = nil; stepThinkStart = nil; liveThoughtSecs = nil
+        chatExtras.question = nil; chatExtras.approval = nil; pendingApproval = nil
         if !answered.isEmpty {
             notifyIfBackgrounded(title: openChat?.title ?? "Orbit", body: answered, sid: sid)
         }
-        Task { await loadChats() }
+        // the Mac may have started the next queued message: draw it and follow its answer
+        Task { await loadChats(); await reloadSaved(sid); await followQueue(after: sid) }
     }
 
     /// Reconnect to an answer already running on the Mac.
     func rejoin(_ sid: String) async {
         guard let server else { return }
+        if !streaming { startStatusLine() }
         liveSid = sid
         streaming = true
         liveStatus = "picking up an answer already running"
+        lastLiveEvent = Date()
         pollTask?.cancel()
         pollTask = Task {
+            var step = -1                       // not seen yet; the Mac leaves "step" out for the first
+            var misses = 0
+            var gaveUp = false
+            pollingSid = sid
+            defer { if pollingSid == sid { pollingSid = nil } }
             while !Task.isCancelled, liveSid == sid {
-                guard let s = try? await server.live(sid) else { break }
+                // one failed poll (a phone between networks) is not the end of the answer
+                guard let s = try? await server.liveDetail(sid) else {
+                    misses += 1
+                    if misses >= 8 { gaveUp = true; break }
+                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                    continue
+                }
+                guard !Task.isCancelled, liveSid == sid else { break }
+                misses = 0
+                lastLiveEvent = Date()
+                // The Mac keeps only the step being written. When it moves on,
+                // the finished step is in the saved chat: read that again, or
+                // its text would vanish from the screen until the answer ends.
+                let n = s.step ?? 0
+                if step >= 0, n != step, let d = try? await server.peek(sid), liveSid == sid {
+                    messages = d.messages
+                }
+                step = n
+                await pickUpPrompts(sid)            // a question or approval raised elsewhere
                 liveText = s.content
                 liveThinking = s.thinking
+                // the calls this step has made so far: without them a Claude Code answer
+                // busy running tools looked frozen
+                liveRuns = s.tools.map { ToolRun(event: $0, finished: $0["ok"] != nil && !($0["ok"] is NSNull)) }
+                if s.content.isEmpty, !s.status.isEmpty { liveStatus = s.status }
+                liveChars = max(liveChars, s.content.count + s.thinking.count)
+                if s.content.isEmpty, !s.thinking.isEmpty {
+                    if liveThinkingSince == nil { liveThinkingSince = Date() }
+                } else {
+                    liveThinkingSince = nil
+                }
                 if !s.content.isEmpty { liveStatus = "" }
                 if !s.running {
-                    finishLive(sid: sid)
-                    await open(sid)
+                    finishLive(sid: sid)            // it reloads the saved chat and follows the queue
                     break
                 }
                 try? await Task.sleep(nanoseconds: 700_000_000)
             }
+            // polling gave up (no network for a while): don't leave the chat stuck "answering" --
+            // the watch loop joins the answer again if it is still running when the Mac answers
+            if gaveUp, liveSid == sid { finishLive(sid: sid) }
         }
     }
 
@@ -534,7 +781,8 @@ final class AppState: ObservableObject {
 
     func newChat() async -> String? {
         guard let server else { return nil }
-        guard let sid = try? await server.newChat() else { return nil }
+        // in the project the chat list shows (none from "All"), as the web starts one
+        guard let sid = try? await server.newChat(project: composerExtras.projectFilter) else { return nil }
         openChat = ChatDetail(sid: sid, title: nil, messages: [])
         messages = []
         await loadChats()
@@ -551,6 +799,7 @@ final class AppState: ObservableObject {
     func delete(_ id: String) async {
         guard let server else { return }
         try? await server.delete(id)
+        forgetUnseen(id)
         if liveSid == id { detachLive() }
         chats.removeAll { $0.id == id }
         Cache.saveChats(chats)
@@ -590,6 +839,58 @@ final class AppState: ObservableObject {
         return out.joined(separator: "\n")
     }
 
+    // ------------------------------------------------------------ queue
+
+    /// The open chat's waiting messages: queued behind a running answer, or
+    /// scheduled for later.
+    @Published var queue: QueueState = .empty
+    /// The context gauge, unseen news per chat, the chat list's project (AppState+Queue).
+    @Published var composerExtras = ComposerExtras()
+
+    func loadQueue() async {
+        guard let server, let sid = openChat?.sid else { queue = .empty; return }
+        if let q = try? await server.queue(sid: sid, op: "get"), openChat?.sid == sid { queue = q }
+    }
+
+    /// Send the draft (and anything attached) at a later time.
+    func sendLater(_ text: String, at: Date, repeat rep: Repeat) async -> Bool {
+        guard let server, let sid = openChat?.sid,
+              !(text.isEmpty && attachments.isEmpty) else { return false }
+        do {
+            queue = try await server.sendLater(sid: sid, text: text,
+                                               attachments: attachments.map(\.payload),
+                                               at: at, repeat: rep)
+            attachments = []
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    /// `now`, `remove`, `order` and friends on the open chat's queue.
+    func queueOp(_ op: String, _ extra: [String: Any] = [:]) async {
+        guard let server, let sid = openChat?.sid else { return }
+        do {
+            queue = try await server.queue(sid: sid, op: op, extra)
+            // sending one now may have started an answer: pick it up
+            if op == "now" {
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                if !streaming, (try? await server.live(sid).running) == true { await rejoin(sid) }
+            }
+        } catch { lastError = error.localizedDescription }
+    }
+
+    func updateQueued(_ item: QueueItem, text: String?, at: Date??, repeat rep: Repeat?,
+                      model: String?) async {
+        guard let server, let sid = openChat?.sid else { return }
+        do {
+            try await server.updateQueued(sid: sid, id: item.id, text: text, at: at,
+                                          repeat: rep, model: model)
+        } catch { lastError = error.localizedDescription }
+        await loadQueue()
+    }
+
     /// Text the composer should pick up — set by "edit and resend".
     @Published var draftPrefill: String?
 
@@ -613,6 +914,7 @@ final class AppState: ObservableObject {
     func editAndResend(_ message: Message) async {
         guard let server, let sid = openChat?.sid, message.isUser,
               let ord = userOrdinal(of: message) else { return }
+        forgetExtras(from: message)
         do {
             try await server.truncate(sid, atUserIndex: ord, check: message.text)
             await open(sid)
@@ -624,6 +926,7 @@ final class AppState: ObservableObject {
     func regenerate() async {
         guard let last = messages.last(where: \.isUser) else { return }
         guard let server, let sid = openChat?.sid, let ord = userOrdinal(of: last) else { return }
+        forgetExtras(from: last)
         do {
             try await server.truncate(sid, atUserIndex: ord, check: last.text)
             await open(sid)
@@ -661,11 +964,13 @@ final class AppState: ObservableObject {
 extension AppState {
     /// Drives the app from environment variables so the whole path — open a
     /// chat, send, stream, save — can be exercised without a human tapping.
+    /// `ORBIT_OPEN_CHAT` is a chat id, `first`, or `new`.
     /// Compiled out of release builds.
     func runDebugScript() async {
         let env = ProcessInfo.processInfo.environment
         guard let want = env["ORBIT_OPEN_CHAT"] else { return }
-        let sid = want == "first" ? chats.first?.id : want
+        // "new" opens a fresh chat — its home page — the way the compose button does
+        let sid = want == "new" ? await newChat() : want == "first" ? chats.first?.id : want
         guard let sid, !sid.isEmpty else { return }
         await open(sid)
         deepLink = sid

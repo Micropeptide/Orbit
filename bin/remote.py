@@ -29,7 +29,9 @@ TAILSCALE_BINS = ["/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale",
 def mac_name():
     """The Mac's own name as its owner set it (System Settings → General → About), for the
     phone to show. The network host name changes with the network (a VPN hands out names
-    like vpn-10-0-0-1…), so it is only the fallback."""
+    like vpn-10-0-0-1…), so it is only the fallback. ORBIT_MAC_NAME overrides it (a demo
+    or a second copy that should not show the real name)."""
+    if os.environ.get("ORBIT_MAC_NAME"): return os.environ["ORBIT_MAC_NAME"]
     for key in ("ComputerName", "LocalHostName"):
         try:
             out = subprocess.run(["scutil", "--get", key], capture_output=True, text=True, timeout=3).stdout.strip()

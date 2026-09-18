@@ -30,6 +30,7 @@ struct BackupSection: View {
                 if let list = b.backups, !list.isEmpty {
                     NavigationLink("Backups") { BackupListView(backups: list) }
                 }
+                NavigationLink("Options, export and restore") { BackupOptionsView() }
                 if let note = state.backupNote, !note.isEmpty {
                     Text(note).font(.caption).foregroundStyle(.secondary)
                 }

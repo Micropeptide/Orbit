@@ -15,7 +15,7 @@ struct SettingsView: View {
         return [
             "Orbit iOS \(b?["CFBundleShortVersionString"] as? String ?? "?") (\(b?["CFBundleVersion"] as? String ?? "?"))",
             "iOS \(UIDevice.current.systemVersion) · \(UIDevice.current.model)",
-            "Mac: \(state.pairing?.name ?? "—") at \(state.pairing?.url ?? "—")",
+            "Mac: \(state.macDisplayName) at \(state.pairing?.url ?? "—")",
             "Reachable: \(state.reachable.map { $0 ? "yes" : "no" } ?? "unknown")"
                 + (state.latencyMS.map { " · \($0) ms" } ?? ""),
             "Model server: \(srv.running ? "running" : "stopped")"
@@ -25,6 +25,7 @@ struct SettingsView: View {
             "Chats: \(state.chats.count) · projects: \(state.projects.count)",
             "Backup: " + (state.backup.map { ($0.enabled ? "on" : "off") + " · last " + ($0.last?.name ?? "never") } ?? "unknown"),
             "Autonomy: " + (state.autonomy?.autonomy_mode ?? "unknown"),
+            "Harness: \(state.harnessMode.label) · hosts: \(state.remoteHosts.count)",
             "Last error: \(state.lastError ?? "none")",
         ].joined(separator: "\n")
     }
@@ -33,8 +34,10 @@ struct SettingsView: View {
         NavigationStack {
             List {
                 ServerControlView()
+                HarnessSection()
                 AutonomySection()
                 BackupSection()
+                MacSettingsSection()
 
                 Section {
                     Picker("New chats use", selection: Binding(
@@ -51,7 +54,7 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    LabeledContent("Mac", value: state.pairing?.name ?? "—")
+                    LabeledContent("Mac", value: state.macDisplayName)
                     LabeledContent("Address") {
                         Text(state.pairing?.url ?? "—")
                             .font(.caption.monospaced())

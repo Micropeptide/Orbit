@@ -8,9 +8,24 @@ struct ChatView: View {
     /// and flash it rather than dumping you at the end of a long conversation.
     var highlight: Int? = nil
     @State private var flashed: Int? = nil
+    /// Whether the newest message is on screen, and whether more arrived while it was not.
+    @State private var atBottom = true
+    @State private var newBelow = false
+    /// Whether new text should keep you at the newest message. Only your own finger turns
+    /// it off (dragging back up to read); rows changing height never do -- they used to
+    /// leave the view parked past the end of a finished answer, which looked blank.
+    @State private var following = true
+    @State private var viewportHeight: CGFloat = 800
+    /// Draw lazily only in very long chats. Decided from the saved messages with a gap between
+    /// the two thresholds, so an answer finishing (or streaming) never flips it mid-read --
+    /// flipping rebuilt the whole transcript.
+    @State private var lazyTranscript = false
+    /// Bumped by the "Latest" button, which lives in the composer, away from the scroll proxy.
+    @State private var scrollDownRequest = 0
     @EnvironmentObject var state: AppState
     @State private var draft = ""
     @State private var showModels = false
+    @State private var showLibrary = false      // Library: agent, instructions, memory for this chat
     @State private var renaming = false
     @State private var newTitle = ""
     @State private var confirmBin = false
@@ -23,6 +38,23 @@ struct ChatView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var typing: Bool
+    @ObservedObject private var links = FileLinks.shared
+    /// Per-message and chat-level actions, and the sheets they open (Views/Chat).
+    @StateObject private var actionsModel = ChatActionsModel()
+    @AppStorage("orbit.verboseTools") private var verboseTools = false
+    @AppStorage("orbit.todosHidden") private var todosHidden = false
+    @AppStorage("theme") private var theme = "system"
+    @AppStorage("orbit.hideTools") private var hideTools = false
+    /// `/clear`: the rows before this many messages are hidden until the chat is opened
+    /// again. Only the view: the messages, the chat on the Mac and the cache keep them.
+    @State private var cleared: (sid: String, count: Int)?
+
+    /// "Good morning — what's next?", as the Mac greets a new chat.
+    static func greeting(now: Date = .now) -> String {
+        let h = Calendar.current.component(.hour, from: now)
+        let when = h < 5 ? "Up late" : h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"
+        return "\(when) — what's next?"
+    }
 
     var body: some View {
         // The banner and composer are safe-area insets rather than VStack rows:
@@ -32,6 +64,8 @@ struct ChatView: View {
             .safeAreaInset(edge: .top, spacing: 0) {
                 VStack(spacing: 0) {
                     ConnectionBanner()
+                    WorkBar(sid: sid)
+                    ChatModeChips(sid: sid, model: actionsModel)
                     if finding { findBar }
                 }
             }
@@ -46,9 +80,11 @@ struct ChatView: View {
                             Label("Change model", systemImage: "cpu")
                         }
                         .keyboardShortcut("k", modifiers: .command)
+                        .disabled(state.streaming)
                         Button { renaming = true; newTitle = state.openChat?.title ?? "" } label: {
                             Label("Rename", systemImage: "pencil")
                         }
+                        .disabled(state.streaming)
                         ShareLink(item: state.markdown(for: sid),
                                   preview: SharePreview(state.openChat?.title ?? "Chat")) {
                             Label("Share as Markdown", systemImage: "square.and.arrow.up")
@@ -62,6 +98,9 @@ struct ChatView: View {
                         Button { makePDF() } label: {
                             Label("Share as PDF", systemImage: "doc.richtext")
                         }
+                        Button { showLibrary = true } label: {
+                            Label("Agent, instructions, memory", systemImage: "books.vertical")
+                        }
                         Button { finding = true; findFocused = true } label: {
                             Label("Find in chat", systemImage: "magnifyingglass")
                         }
@@ -71,15 +110,18 @@ struct ChatView: View {
                         } label: {
                             Label("Compact history", systemImage: "arrow.down.right.and.arrow.up.left")
                         }
+                        .disabled(state.streaming)
+                        ChatMenuItems(sid: sid, model: actionsModel)
                         Divider()
                         Button(role: .destructive) { confirmBin = true } label: {
                             Label("Move to bin", systemImage: "trash")
                         }
+                        .disabled(state.streaming)
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
+                    // what only reads (find, share, jump, context) stays open while it answers
                     .accessibilityLabel("Chat options")
-                    .disabled(state.streaming)
                 }
             }
             .alert("Rename chat", isPresented: $renaming) {
@@ -97,78 +139,60 @@ struct ChatView: View {
                 Text("It stays in the bin on your Mac for the retention period.")
             }
             .sheet(isPresented: $showModels) { ModelPickerView() }
+            .sheet(isPresented: $showLibrary) { ChatLibrarySheet(sid: sid) }
+            .sheet(item: $links.presenting) { FilePreviewSheet(target: $0) }
             .sheet(item: $pdfURL) { ActivityView(items: [$0]).ignoresSafeArea() }
             .onChange(of: state.draftPrefill) { _, text in
                 guard let text else { return }
                 draft = text; typing = true; state.draftPrefill = nil
             }
             .onChange(of: draft) { _, text in Drafts.save(sid, text) }
-            .alert("Approve this?", isPresented: approvalBinding) {
-                Button("Allow", role: .destructive) {
-                    Task { await state.answer(approval: true) }
-                }
-                Button("Refuse", role: .cancel) {
-                    Task { await state.answer(approval: false) }
-                }
-            } message: {
-                if let p = state.pendingApproval {
-                    Text("\(p.name)\n\n\(p.reason)")
-                }
+            .onChange(of: actionsModel.helpPick) { _, text in
+                guard let text else { return }
+                draft = text; typing = true; actionsModel.helpPick = nil
             }
-    }
-
-    private var approvalBinding: Binding<Bool> {
-        Binding(get: { state.pendingApproval != nil },
-                set: { if !$0 { state.pendingApproval = nil } })
+            // questions and approvals are cards in the transcript (ChatPromptCards)
+            .modifier(ChatActionsHost(sid: sid, model: actionsModel))
+            .modifier(ToastOverlay())
     }
 
     private var currentModelName: String { state.currentModelName }
+
+    private var transcriptRows: [TranscriptRow] {
+        let rows = TranscriptRow.build(state.messages)
+        guard let c = cleared, c.sid == sid, c.count <= state.messages.count else { return rows }
+        return rows.filter { $0.index >= c.count }
+    }
 
     // ------------------------------------------------------------ transcript
 
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
-                    if state.messages.isEmpty && !state.streaming {
-                        VStack(spacing: 10) {
-                            Image("OrbitMark").resizable().scaledToFit()
-                                .frame(width: 56, height: 56).opacity(0.9)
-                            Text("Ask anything").font(.headline)
-                            Text("It will search the web, read your papers, run Python, "
-                                 + "or query NCBI when it needs to — you don't name the tool.")
-                                .font(.footnote).foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
-                            Text("Answering with \(currentModelName)")
-                                .font(.caption2).foregroundStyle(.tertiary)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 80).padding(.horizontal, 24)
+                // A plain stack for ordinary chats: the lazy one mis-measured tall answers (a long
+                // list, a big table) and parked the view past the end, so the chat looked blank.
+                // Only very long chats, where drawing every row costs too much, stay lazy.
+                Group {
+                    if !lazyTranscript {
+                        VStack(alignment: .leading, spacing: 18) { transcriptContent }
+                    } else {
+                        LazyVStack(alignment: .leading, spacing: 18) { transcriptContent }
                     }
-                    ForEach(Array(state.messages.enumerated()), id: \.element.id) { i, m in
-                        MessageBubble(message: m,
-                                      isLast: i == state.messages.count - 1,
-                                      onEdit: { msg in Task { await state.editAndResend(msg) } },
-                                      onRegenerate: { Task { await state.regenerate() } },
-                                      onQuote: { msg in quote(msg) })
-                            .id(m.id)
-                            .padding(.horizontal, flashed == i ? 8 : 0)
-                            .padding(.vertical, flashed == i ? 6 : 0)
-                            .background(flashed == i ? Color.yellow.opacity(0.18) : .clear,
-                                        in: .rect(cornerRadius: 10))
-                            .id("row-\(i)")
-                    }
-                    if state.streaming { liveBubble.id("live") }
-                    if let e = state.lastError, !state.streaming { errorNote(e) }
-                    Color.clear.frame(height: 8).id("bottom")
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 14)
             }
-            .defaultScrollAnchor(.bottom)          // open at the newest message
+            .coordinateSpace(name: "transcript")
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }
+            // open at the newest message; an empty chat opens at its greeting
+            .defaultScrollAnchor(state.messages.isEmpty && !state.streaming ? .top : .bottom)
             .scrollDismissesKeyboard(.interactively)
-            .onChange(of: state.messages.count) { _, _ in scroll(proxy) }
-            .onChange(of: state.liveText) { _, _ in scroll(proxy) }
+            .apply { followingNewest($0, proxy: proxy) }
+            .onChange(of: actionsModel.jumpRequest) { _, i in
+                guard let i else { return }
+                jumpTo = i
+                actionsModel.jumpRequest = nil
+            }
             .onChange(of: jumpTo) { _, i in
                 guard let i else { return }
                 withAnimation(reduceMotion ? nil : .default) {
@@ -178,11 +202,15 @@ struct ChatView: View {
                 jumpTo = nil
             }
             .onAppear { scroll(proxy, animated: false) }
+            .onDisappear { SeenChats.mark(sid, mtime: state.chats.first { $0.id == sid }?.mtime ?? 0) }
             .modifier(AnswerTextSize())
+            // file names in answers are looked up in this chat
+            .environment(\.fileLinkSid, sid)
             .task(id: sid) {
                 // what you were typing here last time, unless something is being handed in
                 draft = Drafts.load(sid)
                 await state.open(sid)
+                SeenChats.mark(sid, mtime: state.chats.first { $0.id == sid }?.mtime ?? 0)
                 if let text = state.draftPrefill { draft = text; typing = true; state.draftPrefill = nil }
                 // a search hit: land on that message and flash it once the rows exist
                 guard let h = highlight, h < state.messages.count, flashed == nil else { return }
@@ -193,6 +221,76 @@ struct ChatView: View {
                 withAnimation { flashed = nil }
             }
         }
+    }
+
+    /// Every row of the transcript: your messages and answers, the answer being written,
+    /// prompts, errors, and the marker that says you are at the newest message.
+    @ViewBuilder private var transcriptContent: some View {
+                    if state.messages.isEmpty && !state.streaming {
+                        VStack(spacing: 10) {
+                            Image("OrbitMark").resizable().scaledToFit()
+                                .frame(width: 56, height: 56).opacity(0.9)
+                            Text(Self.greeting()).font(.title3.weight(.semibold))
+                            Text("Answering with \(currentModelName)")
+                                .font(.caption2).foregroundStyle(.tertiary)
+                            EmptyChatHero(sid: sid)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 48).padding(.horizontal, 24)
+                        .id("home")
+                    }
+                    let rows = transcriptRows
+                    // /hidetools: steps that are only finished tool calls are left out of the rows
+                    // themselves (an empty conditional row upsets the lazy list's layout)
+                    let shown = hideTools ? rows.filter { !$0.message.onlyToolCalls } : rows
+                    let stamped = TranscriptRow.stamped(shown)
+                    let turns = TranscriptRow.turns(state.messages)
+                    ForEach(shown) { row in
+                        let i = row.index
+                        let m = row.message
+                        let t = i < turns.count && turns[i].ends ? turns[i] : nil
+                        VStack(alignment: .leading, spacing: 3) {
+                            MessageBubble(message: hideTools ? m.hidingTools : m,
+                                          isLast: row.id == rows.last?.id,
+                                          onEdit: { msg in Task { await state.editAndResend(msg) } },
+                                          onRegenerate: { actionsModel.confirmRegenerate = false },
+                                          onQuote: { msg in quote(msg) },
+                                          actions: actionsModel.actions(state),
+                                          showByline: row.showByline,
+                                          turn: t.map { ($0.turn, $0.prompt) })
+                            if stamped.contains(m.id), let at = m.t { MessageTime(t: at, trailing: m.isUser) }
+                        }
+                            .id(m.id)
+                            .padding(.top, row.joinsPrevious ? -12 : 0)
+                            .padding(.horizontal, flashed == i ? 8 : 0)
+                            .padding(.vertical, flashed == i ? 6 : 0)
+                            .background(flashed == i ? Color.yellow.opacity(0.18) : .clear,
+                                        in: .rect(cornerRadius: 10))
+                            .id("row-\(i)")
+                    }
+                    if state.streaming {
+                        // each finished step of the running answer is its own row: packed into one
+                        // tall row, the lazy list lost its layout and the answer went blank mid-way
+                        let continues = state.messages.last.map { !$0.isUser } ?? false
+                        ForEach(Array(state.liveSteps.enumerated()), id: \.element.id) { n, step in
+                            MessageBubble(message: step, showByline: n == 0 && !continues)
+                                .id(step.id)
+                                .environment(\.fileLinkSid, nil)
+                        }
+                        liveStepInHand.id("live").environment(\.fileLinkSid, nil)
+                    }
+                    ChatPromptCards().id("prompts")
+                    if let e = state.lastError, !state.streaming { errorNote(e) }
+                    // seen = you are at the newest message; new text follows you only then
+                    // where the end of the chat is on screen: within a short reach of the bottom
+                    // edge counts as being at the newest message (appear/disappear can't tell --
+                    // an ordinary stack creates every row up front)
+                    Color.clear.frame(height: 8).id("bottom")
+                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named("transcript")).minY } action: { y in
+                            let near = y < viewportHeight + 60
+                            if near != atBottom { atBottom = near }
+                            if near { newBelow = false; following = true }
+                        }
     }
 
     /// Shown in the transcript where the answer would have been, because that
@@ -212,8 +310,57 @@ struct ChatView: View {
         .background(.orange.opacity(0.10), in: .rect(cornerRadius: 10))
     }
 
+    /// How the transcript keeps up with new text: follows while you are at the newest message,
+    /// stays put while you read back, and offers a button to come back down. (Its own function:
+    /// in the long modifier chain above, the compiler gave up type-checking.)
+    private func followingNewest<V: View>(_ content: V, proxy: ScrollViewProxy) -> some View {
+        content
+    // pulling the list down is you reading back: stop following until you come back down
+    .simultaneousGesture(DragGesture(minimumDistance: 12).onChanged { v in
+        if v.translation.height > 16 { following = false }
+    })
+    // the answer's live rows turn into saved rows of another height when it ends, and a
+    // reload replaces them again: settle on the newest message once they have laid out
+    .onChange(of: state.streaming) { _, on in if !on { settle(proxy) } }
+    .onChange(of: state.messages.last?.id) { _, _ in settle(proxy) }
+    .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidShowNotification)) { _ in
+        settle(proxy)
+    }
+    // what you send always brings you down; what arrives only follows you if you are
+    // already at the bottom -- reading further up, you stay where you are
+    .onChange(of: state.messages.count) { _, n in
+        // fewer messages than were cleared (a rewind, a reload): nothing older to hide
+        if let c = cleared, n < c.count { cleared = nil }
+        if state.messages.last?.isUser == true { following = true; scroll(proxy) } else { follow(proxy) }
+    }
+    .onChange(of: state.liveText) { _, _ in follow(proxy, animated: false) }
+    .onChange(of: state.liveRuns.count + state.liveSteps.count) { _, _ in follow(proxy) }
+    .onChange(of: state.chatExtras.question?.id) { _, _ in follow(proxy) }
+    .onChange(of: state.chatExtras.approval?.id) { _, _ in follow(proxy) }
+    .onChange(of: scrollDownRequest) { _, _ in following = true; newBelow = false; scroll(proxy) }
+    .onChange(of: state.messages.count, initial: true) { _, n in
+        if n > 110 { lazyTranscript = true } else if n < 70 { lazyTranscript = false }
+    }
+    }
+
+    /// Keeps up with a growing answer only while you are at the bottom; otherwise marks
+    /// that something new arrived below.
+    private func follow(_ proxy: ScrollViewProxy, animated: Bool = true) {
+        if following { scroll(proxy, animated: animated) } else { newBelow = true }
+    }
+
+    /// Back to the newest message after the rows have been measured -- twice, because a
+    /// lazy list measures rows it has not drawn only as they come on screen.
+    private func settle(_ proxy: ScrollViewProxy) {
+        guard following else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { scroll(proxy, animated: false) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { if following { scroll(proxy, animated: false) } }
+    }
+
     private func scroll(_ proxy: ScrollViewProxy, animated: Bool = true) {
-        let go = { proxy.scrollTo("bottom", anchor: .bottom) }
+        // an empty chat is its home page: start at the greeting, not the bottom of the cards
+        let empty = state.messages.isEmpty && !state.streaming
+        let go = { empty ? proxy.scrollTo("home", anchor: .top) : proxy.scrollTo("bottom", anchor: .bottom) }
         if animated && !reduceMotion { withAnimation(.easeOut(duration: 0.18)) { go() } } else { go() }
     }
 
@@ -266,8 +413,11 @@ struct ChatView: View {
 
     // ------------------------------------------------------------ commands
 
-    /// `/new`, `/model`, `/compact`, `/find` — typed, or tapped from the strip.
+    /// `/new`, `/model`, `/compact`, `/find` and Claude Code's transcript
+    /// commands — typed, or tapped from the menu.
     private func command(_ raw: String) -> Bool {
+        let rest = raw.split(separator: " ", maxSplits: 1).dropFirst().joined()
+            .trimmingCharacters(in: .whitespaces)
         switch raw.lowercased().split(separator: " ").first.map(String.init) ?? "" {
         case "/new":
             Task { if let sid = await state.newChat() { state.deepLink = sid } }
@@ -275,8 +425,41 @@ struct ChatView: View {
         case "/compact": Task { await state.compactCurrent() }
         case "/find":
             finding = true; findFocused = true
-            let rest = raw.split(separator: " ", maxSplits: 1).dropFirst().joined()
             if !rest.isEmpty { findText = rest }
+        case "/rewind":
+            if state.messages.contains(where: \.isUser) { actionsModel.showRewind = true }
+            else { state.toast("Nothing to rewind to yet") }
+        case "/context":     actionsModel.showContext = true
+        case "/copy":        state.copyAnswer(Int(rest) ?? 1)
+        case "/diff":        actionsModel.showDiffs = true
+        case "/files":       actionsModel.showFiles = true
+        case "/verbose":
+            verboseTools.toggle()
+            state.toast(verboseTools ? "Showing every tool call in full" : "Tool calls folded again")
+        case "/todos":
+            todosHidden.toggle()
+            state.toast(todosHidden ? "Todo list hidden" : "Todo list shown")
+        case "/usage":       actionsModel.showStats = true
+        case "/permissions": actionsModel.showPermissions = true
+        case "/theme":
+            let order = ["system", "light", "dark"]
+            theme = order[((order.firstIndex(of: theme) ?? 0) + 1) % order.count]
+            state.toast("Theme: \(theme)")
+        case "/fork":
+            guard let last = state.messages.last(where: \.isUser) else {
+                state.toast("Nothing to fork yet"); return true
+            }
+            Task { await state.fork(from: last) }
+        case "/jump":        actionsModel.showJump = true
+        case "/stats":       actionsModel.showStats = true
+        case "/hidetools":
+            hideTools.toggle()
+            state.toast(hideTools ? "Finished tool rows hidden" : "Tool rows shown")
+        case "/clear":
+            // the screen only, until the chat is opened again: emptying `messages` was
+            // undone by the next reload and could be cached as the whole chat
+            cleared = (sid, state.messages.count)
+        case "/help":        actionsModel.showHelp = true
         default: return false
         }
         return true
@@ -310,39 +493,36 @@ struct ChatView: View {
         typing = true
     }
 
-    private var liveBubble: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(state.liveModel.isEmpty ? currentModelName : state.liveModel)
-                .font(.caption2.smallCaps())
-                .foregroundStyle(.secondary)
-
-            ForEach(state.liveTools, id: \.self) { t in
-                let auto = t.hasPrefix("✓ auto-approved")
-                Text(t)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(auto ? .green : .orange)
-                    .padding(.vertical, 5).padding(.horizontal, 9)
-                    .background((auto ? Color.green : Color.orange).opacity(0.10), in: .rect(cornerRadius: 7))
-            }
-
-            if !state.liveStatus.isEmpty && state.liveText.isEmpty {
-                HStack(spacing: 7) {
-                    ProgressView().controlSize(.mini)
-                    Text(state.liveStatus).font(.footnote).foregroundStyle(.secondary)
+    /// The answer being written: the steps it has finished, then the one in hand.
+    /// It continues the block above when that is already this answer's.
+    /// The step being written now (the finished steps are rows of their own above it).
+    private var liveStepInHand: some View {
+        let continues = state.messages.last.map { !$0.isUser } ?? false
+        return VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 7) {
+                if state.liveSteps.isEmpty && !continues {
+                    Text(state.liveModel.isEmpty ? currentModelName : state.liveModel)
+                        .font(.caption2.smallCaps())
+                        .foregroundStyle(.secondary)
                 }
-            }
 
-            if !state.liveText.isEmpty {
-                MarkdownText(state.liveText)
-            } else if state.liveStatus.isEmpty {
-                HStack(spacing: 7) {
-                    ProgressView().controlSize(.mini)
-                    Text("thinking").font(.footnote).foregroundStyle(.secondary)
+                if !state.liveStatus.isEmpty && state.liveText.isEmpty && state.liveRuns.isEmpty {
+                    HStack(spacing: 7) {
+                        ProgressView().controlSize(.mini)
+                        Text(state.liveStatus).font(.footnote).foregroundStyle(.secondary)
+                    }
                 }
-            }
 
-            if !state.liveThinking.isEmpty {
-                ThinkingBlock(text: state.liveThinking)
+                if !state.liveText.isEmpty { MarkdownText(state.liveText) }
+                ForEach(state.liveTools, id: \.self) { ToolLine(text: $0) }
+                if !state.liveRuns.isEmpty { ToolRunsView(runs: state.liveRuns) }
+                LiveTurnExtras()
+
+                if !state.liveThinking.isEmpty {
+                    ThinkingBlock(text: state.liveThinking,
+                                  live: state.liveThoughtSecs == nil && state.liveText.isEmpty && state.liveRuns.isEmpty,
+                                  secs: state.liveThoughtSecs)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -351,39 +531,33 @@ struct ChatView: View {
     // ------------------------------------------------------------ composer
 
     private var composer: some View {
-        Composer(draft: $draft, typing: $typing, modelName: currentModelName,
-                 onPickModel: { showModels = true },
-                 onCommand: { command($0) })
-    }
-}
-
-/// Reasoning, folded away. Open it when you want to see how it got there.
-struct ThinkingBlock: View {
-    let text: String
-    @State private var open = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button {
-                withAnimation(.easeInOut(duration: 0.15)) { open.toggle() }
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: open ? "chevron.down" : "chevron.right")
-                        .font(.caption2)
-                    Text("thinking").font(.caption)
+        VStack(spacing: 0) {
+            // back to the newest message: sits on top of the box, where the scroll view's own
+            // bottom edge (behind the box) would hide it
+            if !atBottom && (newBelow || state.streaming) {
+                Button {
+                    scrollDownRequest += 1
+                } label: {
+                    Label(newBelow ? "New messages" : "Latest", systemImage: "arrow.down")
+                        .font(.footnote.weight(.semibold))
+                        .padding(.horizontal, 12).padding(.vertical, 7)
+                        .background(.regularMaterial, in: Capsule())
+                        .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
                 }
-                .foregroundStyle(.secondary)
+                .buttonStyle(.plain)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity)
+                .background(Color(uiColor: .systemBackground).opacity(0.001))
+                .transition(.opacity)
+                .accessibilityHint("Scrolls to the newest message")
             }
-            if open {
-                Text(text)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 9))
-            }
+            TodoDock(sid: sid)
+            AnswerStatusLine(sid: sid)
+            Composer(draft: $draft, typing: $typing, modelName: currentModelName,
+                     onPickModel: { showModels = true },
+                     onCommand: { command($0) })
         }
+        .background(.bar)       // one bar behind the todo list, status line and box
     }
 }
 
@@ -415,4 +589,9 @@ struct TranscriptPage: View {
         .background(Color.white)
         .environment(\.colorScheme, .light)
     }
+}
+
+extension View {
+    /// Hands the view to a function mid-chain, so a long chain can be split up.
+    func apply<V: View>(@ViewBuilder _ transform: (Self) -> V) -> V { transform(self) }
 }
