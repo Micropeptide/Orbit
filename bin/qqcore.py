@@ -2301,6 +2301,7 @@ def session_list():
                    "mtime": _activity(meta, msgs, f, p),
                    "pinned": bool(meta.get("pinned")), "archived": bool(meta.get("archived")),
                    "tags": meta.get("tags") or [], "project": meta.get("project"), "order": meta.get("order"),
+                   "project_set": bool(meta.get("project_set")),
                    "queued": len([x for x in (meta.get("queue") or []) if not x.get("at")]),
                    "scheduled": min([x["at"] for x in (meta.get("queue") or []) if x.get("at")] or [0]) or None, "model": meta.get("model"), "host": meta.get("host"),
                    "n": len([m for m in (msgs or []) if isinstance(m, dict) and m.get("role") in ("user", "assistant")])}
@@ -3949,6 +3950,10 @@ def project_upsert(pid, **kw):
     d = projects_load()
     pid = pid or ("p" + os.urandom(4).hex())
     cur = d.get(pid, {"created": time.time(), "order": len(d)})
+    if cur.get("claude_group") and kw.get("name") and kw["name"] != cur.get("name"):
+        cur["name_locked"] = True          # renamed here: no longer follows Claude's name
+    if cur.get("claude_group") and kw.get("folder") is not None and kw["folder"] != cur.get("folder"):
+        cur["folder_locked"] = True        # a folder chosen (or cleared) here is kept
     cur.update({k: v for k, v in kw.items() if v is not None})
     cur.setdefault("name", "Untitled project")
     d[pid] = cur; projects_save(d)
@@ -3956,7 +3961,15 @@ def project_upsert(pid, **kw):
 
 def project_delete(pid, move_chats_to=None):
     d = projects_load()
-    d.pop(pid, None); projects_save(d)
+    gone = d.pop(pid, None); projects_save(d)
+    if isinstance(gone, dict) and gone.get("claude_group"):
+        # deleted here: the Claude group it came from is not turned into a project again
+        try:
+            dis = json.load(open(CLAUDE_DISMISSED))
+        except Exception:
+            dis = []
+        if gone["claude_group"] not in dis:
+            _atomic_write(CLAUDE_DISMISSED, dis + [gone["claude_group"]])
     for s in session_list():
         if s.get("project") == pid:
             session_meta(s["id"], project=move_chats_to)
@@ -5251,7 +5264,10 @@ def project_upsert(pid, **kw):
             raise ValueError("a project folder can't be /, your home folder or a top-level folder")
     elif "folder" in kw and kw["folder"] == "":
         d = projects_load()
-        if pid in d: d[pid].pop("folder", None); projects_save(d)
+        if pid in d:
+            d[pid].pop("folder", None)
+            if d[pid].get("claude_group"): d[pid]["folder_locked"] = True   # cleared on purpose
+            projects_save(d)
         kw.pop("folder")
     return _project_upsert_base(pid, **kw)
 
@@ -6164,12 +6180,161 @@ def session_list():
             extra = list(extra) + [r for r in AGENT_SESSIONS.rows_cached(ROOT) if str(r.get("id", ""))[3:] not in owned]
     except Exception:
         pass
-    if not extra: return rows
-    have = {r["id"] for r in rows}
-    extra = [x for x in extra if x["id"] not in have]
-    pinned = [r for r in rows if r.get("pinned")]
-    rest = [r for r in rows if not r.get("pinned")]
-    return pinned + sorted(rest + extra, key=lambda r: -(r.get("mtime") or 0))
+    if extra:
+        have = {r["id"] for r in rows}
+        extra = [x for x in extra if x["id"] not in have]
+        pinned = [r for r in rows if r.get("pinned")]
+        rest = [r for r in rows if not r.get("pinned")]
+        rows = pinned + sorted(rest + extra, key=lambda r: -(r.get("mtime") or 0))
+    try:
+        claude_projects_apply(rows)
+    except Exception:
+        pass
+    return rows
+
+
+# ==================================================================== CLAUDE'S PROJECTS
+# The groups you make in the Claude desktop app's Code sidebar ("Pipelines",
+# "AppDevelop"…) are Orbit projects too: each becomes a project here, found by
+# itself, and the Claude Code chats filed under it in Claude show in it in Orbit.
+# Orbit only reads Claude's files. Moving a chat to another project in Orbit (or out
+# of every project) is kept, and outranks Claude's filing from then on; renaming a
+# project in Orbit keeps your name; deleting one here stops it coming back.
+CLAUDE_APP_DIR = os.path.expanduser(os.environ.get("ORBIT_CLAUDE_APP_DIR")
+                                    or "~/Library/Application Support/Claude")
+CHAT_PROJECTS = os.path.join(CONFIG, "chat-projects.json")      # chats with no file here yet
+CLAUDE_DISMISSED = os.path.join(CONFIG, "claude-projects-dismissed.json")
+_CLAUDE_GROUPS = {"key": None, "val": ({}, {}), "ids_at": 0.0, "ids": {}}
+_PROJECT_COLORS = ["#c15f3c", "#3f7fbf", "#2d7d4f", "#8e5bd6", "#b8860b", "#d0487a", "#1f9aa3", "#6b6a64"]
+
+def _claude_session_ids(max_age=60):
+    """The Claude app's own session ids ("local_…") mapped to the Claude Code
+    session each one runs (the id of its transcript, and of the Orbit chat cq-…)."""
+    c = _CLAUDE_GROUPS
+    if time.time() - c["ids_at"] < max_age: return c["ids"]
+    ids, cwds = {}, {}
+    import glob
+    for f in glob.glob(os.path.join(CLAUDE_APP_DIR, "claude-code-sessions", "*", "*", "local_*.json")):
+        try: d = json.load(open(f))
+        except Exception: continue
+        sid = str(d.get("sessionId") or os.path.basename(f)[:-5])
+        cli = d.get("cliSessionId") or (sid[6:] if sid.startswith("local_") else None)
+        if not cli: continue
+        ids[sid] = str(cli)
+        if d.get("cwd") and not d.get("sshConfig"):      # a folder on this Mac, not a cluster's
+            cwds["cq-" + str(cli)] = str(d["cwd"])
+    c.update(ids=ids, cwds=cwds, ids_at=time.time())
+    return ids
+
+def _group_folder(chats):
+    """The folder a Claude group works in, when its chats on this Mac mostly agree:
+    the most common one, used by at least two chats (or the only one) and by at least
+    half of them, and not your home folder or a system folder."""
+    cwds = [(_CLAUDE_GROUPS.get("cwds") or {}).get(c) for c in chats]
+    cwds = [os.path.abspath(os.path.expanduser(x)) for x in cwds if x]
+    if not cwds: return None
+    best, n = max(((x, cwds.count(x)) for x in set(cwds)), key=lambda t: (t[1], -len(t[0])))
+    if (n >= 2 or len(cwds) == 1) and n * 2 >= len(cwds) and os.path.isdir(best) and _folder_ok(best):
+        return best
+    return None
+
+def claude_app_groups():
+    """({group id: {"name", "order"}}, {Orbit chat id "cq-…": group id}) from the
+    Claude desktop app's sidebar groups; empty when the app is not installed."""
+    cfg = os.path.join(CLAUDE_APP_DIR, "claude_desktop_config.json")
+    try: key = os.path.getmtime(cfg)
+    except OSError: return {}, {}
+    ids = _claude_session_ids()
+    key = (key, len(ids))
+    if _CLAUDE_GROUPS["key"] == key: return _CLAUDE_GROUPS["val"]
+    groups, assign = {}, {}
+    try:
+        prefs = (json.load(open(cfg)).get("preferences") or {}).get("epitaxyPrefs") or {}
+        for scope in (prefs.get("dframe-group-scopes") or {}).values():
+            if not isinstance(scope, dict): continue
+            # the groups in sidebar order (the scope's own "order" is the chats' order within each)
+            for i, g in enumerate(scope.get("groups") or []):
+                if isinstance(g, dict) and g.get("id"):
+                    groups[g["id"]] = {"name": str(g.get("name") or "Claude group"), "order": len(groups)}
+            for k, gid in (scope.get("assignments") or {}).items():
+                if not (str(k).startswith("code:") and gid in groups): continue
+                local = str(k)[5:]
+                cli = ids.get(local) or (local[6:] if local.startswith("local_") else None)
+                if cli: assign["cq-" + cli] = gid
+    except Exception:
+        return {}, {}
+    for gid, g in groups.items():
+        g["folder"] = _group_folder([c for c, x in assign.items() if x == gid])
+    _CLAUDE_GROUPS.update(key=key, val=(groups, assign))
+    return groups, assign
+
+def _json_file(path, default):
+    try: return json.load(open(path))
+    except Exception: return default
+
+def claude_projects_sync():
+    """Make an Orbit project for each Claude group that has none yet, and follow a
+    group's new name (unless you renamed the project in Orbit). Returns
+    {group id: Orbit project id}."""
+    if not S.get("claude_projects", True): return {}
+    groups, _ = claude_app_groups()
+    d = projects_load()
+    by = {v.get("claude_group"): k for k, v in d.items() if isinstance(v, dict) and v.get("claude_group")}
+    if not groups: return by
+    dismissed = set(_json_file(CLAUDE_DISMISSED, []))
+    changed = False
+    for gid, g in sorted(groups.items(), key=lambda kv: kv[1]["order"]):
+        pid = by.get(gid)
+        if pid is None:
+            if gid in dismissed: continue
+            pid = "pc" + gid.replace("cg-", "")[:8]
+            d[pid] = {"created": time.time(), "order": len(d), "name": g["name"],
+                      "color": _PROJECT_COLORS[sum(map(ord, gid)) % len(_PROJECT_COLORS)],
+                      "description": "From the Claude app's sidebar", "claude_group": gid, "source": "claude"}
+            by[gid] = pid; changed = True
+        elif not d[pid].get("name_locked") and d[pid].get("name") != g["name"]:
+            d[pid]["name"] = g["name"]; changed = True
+        # the folder its chats work in, so a new chat in the project starts there too
+        if g.get("folder") and not d[pid].get("folder") and not d[pid].get("folder_locked"):
+            d[pid]["folder"] = g["folder"]; changed = True
+    if changed: projects_save(d)
+    return by
+
+def claude_projects_apply(rows):
+    """File each chat in the session list under its project: a project set in Orbit
+    first, then the Claude group its Claude Code session is in."""
+    over = _json_file(CHAT_PROJECTS, {})
+    by = claude_projects_sync() if S.get("claude_projects", True) else {}
+    _, assign = claude_app_groups() if by else ({}, {})
+    for r in rows:
+        rid = r.get("id")
+        if rid in over:
+            r["project"] = over[rid] or None
+        elif not r.get("project_set") and rid in assign and by.get(assign[rid]):
+            r["project"] = by[assign[rid]]
+            r["project_from"] = "claude"
+
+def chat_project(sid, stored=None, project_set=False):
+    """The project a chat belongs to, as the session list files it."""
+    over = _json_file(CHAT_PROJECTS, {})
+    if sid in over: return over[sid] or None
+    if not project_set and S.get("claude_projects", True):
+        _, assign = claude_app_groups()
+        if sid in assign:
+            pid = claude_projects_sync().get(assign[sid])
+            if pid: return pid
+    return stored
+
+def session_assign(sid, project):
+    """Move a chat to a project (or none) on purpose. A chat Orbit has not saved yet
+    (a Claude Code session only listed here) keeps the choice on the side."""
+    over = _json_file(CHAT_PROJECTS, {})
+    if session_meta(sid, project=project or None, project_set=True) is None:
+        over[sid] = project or ""
+    else:
+        over.pop(sid, None)
+    _atomic_write(CHAT_PROJECTS, over)
+    _SESS_CACHE["key"] = None
 
 
 

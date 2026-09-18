@@ -496,6 +496,7 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .projrow .sw{width:9px;height:9px;border-radius:3px;flex:0 0 9px}
 .projrow .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .projrow .ct{color:var(--dim);font-size:11px}
+.projrow .pclaude{color:var(--acc);font-size:11px;opacity:.75}
 .projrow.drop{outline:2px dashed var(--acc);outline-offset:-2px}
 .sitem.dragging{opacity:.4}
 .sitem[draggable]{cursor:grab}
@@ -5631,13 +5632,14 @@ async function loadProjects(){
  Object.entries(PROJECTS).sort((a,b)=>(a[1].order||0)-(b[1].order||0)).forEach(([pid,pr])=>{
   const r=el(`<div class="projrow${projFilter===pid?' on':''}">
     <span class=sw style="background:${pr.color||PCOLORS[0]}"></span>
-    <span class=nm></span><span class=ct>${counts[pid]||0}</span>
+    <span class=nm></span>${pr.source==='claude'?'<span class=pclaude title="a group from the Claude app\'s sidebar — its Claude Code chats are filed here by themselves">✻</span>':''}<span class=ct>${counts[pid]||0}</span>
     <span class=a style="opacity:.5">⋮</span></div>`);
   r.querySelector('.nm').textContent=pr.name;
   r.onclick=e=>{if(e.target.classList.contains('a'))return;
    projFilter=projFilter===pid?null:pid;loadProjects();renderSessions()};
   r.querySelector('.a').onclick=e=>{e.stopPropagation();editProject(pid)};
   r.oncontextmenu=e=>{e.preventDefault();ctxMenu(e,[
+   {icon:'＋',label:'New chat in this project',run:()=>{projFilter=pid;loadProjects();renderSessions();newChat()}},
    {icon:'\u270E',label:'Edit project',run:()=>editProject(pid)},
    {icon:'\u{1F50D}',label:'Show only this',run:()=>{projFilter=pid;loadProjects();renderSessions()}},
    '-',
