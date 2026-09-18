@@ -197,7 +197,7 @@ def get_state(sid=None, create=True):
                 st.msgs, st.title = msgs, title
                 raw = json.load(open(q.session_path(sid)))
                 if isinstance(raw, dict):
-                    st.project = raw.get("project")
+                    st.project = q.chat_project(sid, raw.get("project"), bool(raw.get("project_set")))
                     if raw.get("plan") and sid not in q.PLANS: q.PLANS[sid] = raw["plan"]
                     st.plan_mode = bool(raw.get("plan_mode"))
                     st.title_auto = raw.get("title_auto")
@@ -792,7 +792,10 @@ class H(http.server.BaseHTTPRequestHandler):
                 "codex_mode": bool(q.S.get("codex_mode")) and not q.S.get("harness_mode"),
                 "codex_recent": q.S.get("codex_recent") or [],
                 "harness_recent": q.S.get("harness_recent") or []}))
-        if p == "/api/projects":  return self._send(200, jdump(q.projects_load()))
+        if p == "/api/projects":
+            try: q.claude_projects_sync()          # the Claude app's groups, found by themselves
+            except Exception: pass
+            return self._send(200, jdump(q.projects_load()))
         if p == "/api/stats":
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
             try: days = max(1, min(int((qs.get("days") or ["7"])[0]), 36500))
@@ -944,7 +947,8 @@ class H(http.server.BaseHTTPRequestHandler):
                     stt.sid, stt.msgs, stt.title = sid, msgs, title
                     try:
                         raw = json.load(open(q.session_path(sid)))
-                        stt.project = raw.get("project") if isinstance(raw, dict) else None
+                        stt.project = (q.chat_project(sid, raw.get("project"), bool(raw.get("project_set")))
+                                       if isinstance(raw, dict) else None)
                         if isinstance(raw, dict) and raw.get("plan") and sid not in q.PLANS:
                             q.PLANS[sid] = raw["plan"]
                         stt.plan_mode = bool(isinstance(raw, dict) and raw.get("plan_mode"))
@@ -1709,7 +1713,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/projects/delete":
             return self._send(200, jdump({"ok": q.project_delete(d.get("id"))}))
         if p == "/api/session/assign":
-            q.session_meta(d.get("id"), project=d.get("project"))
+            q.session_assign(d.get("id"), d.get("project"))
             with LOCK:
                 other = STATES.get(d.get("id"))
                 if other is not None and other is not S:

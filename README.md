@@ -331,6 +331,15 @@ Programs' one-shot calls (from temporary folders, SDK scripts, single-message ru
 are left out. A chat that moves to another model and back tells the agent what was said
 in between. Deleting one hides it from Orbit; the agent's own history is left alone.
 
+**Claude's projects are Orbit's projects.** The groups you make in the Claude desktop
+app's sidebar ("Pipelines", "Web"…) turn up as Orbit projects by themselves, marked ✻,
+with their Claude Code chats filed under them. When a group's chats on this Mac mostly
+work in one folder, the project gets that folder, so a new chat started in it (right-click
+→ *New chat in this project*) works there too. A rename in Claude carries over, unless you
+renamed the project in Orbit. Moving a chat to another project in Orbit takes precedence
+from then on, and a project you delete here stays deleted. Orbit only reads Claude's files;
+turn it off with `"claude_projects": false` in settings.
+
 ---
 
 ## Many chats at once, and the message queue
