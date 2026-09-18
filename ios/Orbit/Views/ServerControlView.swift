@@ -97,7 +97,7 @@ struct ServerControlView: View {
         var parts: [String] = []
         if let m = srv.model, !m.isEmpty { parts.append(m) }
         if let g = srv.memoryGB, g > 0 { parts.append(String(format: "%.1f GB", g)) }
-        return parts.isEmpty ? "on \(state.pairing?.name ?? "your Mac")"
+        return parts.isEmpty ? "on \(state.macDisplayName)"
                              : parts.joined(separator: " · ")
     }
 

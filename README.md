@@ -20,10 +20,20 @@ It works two ways, and you can switch at any time:
 It is a Python server and one HTML file. No account, no telemetry, no build step,
 no Electron. There is an iPhone app.
 
-![Orbit](docs/screenshots/chat.png)
+![Orbit's home page](docs/screenshots/home.png)
 
-*A local model answering with the Python tool and an inline plot. The byline under
-each answer names the model that wrote it.*
+*A new chat opens on a home page: what is running now (with a stop button), what is
+scheduled next, two weeks of activity, and what is left of each account's 5-hour, weekly
+and monthly allowance. Below it, the chats you were last in.*
+
+<table><tr>
+<td width="50%"><img src="docs/screenshots/chat.png" alt="A Claude Code chat on DeepSeek"><br>
+<sub>Claude Code on DeepSeek V4.1 Flash: look-ups folded into one line, edits and a test
+run shown as Claude Code shows them.</sub></td>
+<td width="50%"><img src="docs/screenshots/plot.png" alt="A local model answering with a plot"><br>
+<sub>The local model fitting a dose–response curve with the Python tool. The plot shows inline,
+and the file it wrote is a card under the answer.</sub></td>
+</tr></table>
 
 ---
 
@@ -52,6 +62,10 @@ each answer names the model that wrote it.*
 
 ## Highlights
 
+- **A home page, not a blank page.** A new chat shows what needs you (an approval, a
+  failed scheduled task, an account running low), what is running and queued, what is
+  coming up, your activity over two weeks, and what is left of every allowance. It stays
+  current while it is open, in light and dark, on the Mac and on the phone.
 - **Any model, one conversation at a time.** Pick a model per chat; two chats can use
   two different models at once, and a chat can switch model mid-way. Each answer is
   labelled with the model that wrote it.
@@ -554,6 +568,7 @@ be switched off in Settings → Tools; one Python file in `tools/` adds another
 
 | | |
 |---|---|
+| **Home** | A new chat's page: things that need you, running now (stop from there), coming up, activity with a 14-day chart and streak, allowances left per account, most-used models, the chats to pick up. |
 | **Chats** | Ordered by last use, with state on each row (answering, waiting for you, queued, unread); folding date groups, projects and other agents' sections; search, pin, tag, archive, drag onto a project, ⋯ menu on every row. |
 | **Composer** | ⏱ send later; `/` for commands and skills (saved prompts take `$ARGUMENTS`, `$1`, `$2`), `@` for files, `!` shell mode, `#` memory, drag-and-drop or paste to attach, ↑/↓ and Ctrl+R for earlier messages, Esc to stop, Esc Esc to rewind, Shift+Tab for the permission mode, a draft kept per chat, the message queue above it. |
 | **Answers** | Thinking, text and tool calls in Claude Code's style (`⏺` call, `⎿` result, look-ups folded, Ctrl+O for everything); line-numbered diffs; time and tokens per answer; undo the files an answer changed; fork from any message; files as links and cards with previews ([more](#answers-files-and-previews)); copy as Markdown, formatted or plain. |
@@ -566,7 +581,10 @@ Also: `⌘P` searches chats, messages, files and commands; `⌘G` jumps to any m
 `⌘K` starts a new chat and `⌘⇧K` *New chat with…* (model, machine, folder, permission
 mode, saved as presets); `?` lists shortcuts; a temporary chat is never written to disk;
 export to Markdown or self-contained HTML; notifications when a chat you are not looking
-at finishes or needs you, answerable from any window.
+at finishes or needs you, answerable from any window. Light and dark themes follow the
+system or your choice.
+
+<p align="center"><img src="docs/screenshots/home-dark.png" width="760" alt="The home page in the dark theme"></p>
 
 ---
 
@@ -604,19 +622,27 @@ Full rules: [docs/safety.md](docs/safety.md).
 The Mac stays the source of truth; the iPhone app is a window onto it — the same chats,
 live, with the same model picker and a Files tab.
 
-- Chats grouped by day; pin, archive, rename, bin; filter by project; search titles and
-  every message and jump to the line.
-- Streaming answers with Markdown, code, collapsible thinking and tool chips;
-  edit-and-resend, ask again, share as PDF or image.
-- Photos, camera and files as attachments; plots render inline.
+- The same home page on a new chat: running now, coming up, activity and allowances.
+- Chats grouped by day, with Claude Code, Codex and OpenCode sessions in their own
+  sections; pin, archive, rename, bin; filter by project; search titles and every
+  message and jump to the line.
+- Answers streamed in Claude Code's style: tool calls as `⏺` lines, look-ups folded,
+  a live status line, approvals and questions answered from the phone. Scroll up while
+  it writes and it leaves you there, with a "New messages" button.
+- The message queue: send while a chat is answering and it waits its turn; reorder,
+  edit, pause, or slip a note into the running answer.
+- The model picker with what is left of each account and the cheaper hours; `/tasks`,
+  scheduled messages and tasks, cluster jobs.
+- Photos, camera and files as attachments; plots, math and diagrams render inline;
+  file cards under answers; share as PDF or image.
 - Start, stop or switch the local model server; set the default model.
-- Messages sent while a chat is answering are queued on the Mac, as on the desktop.
 - If the phone loses the connection mid-answer the Mac carries on and the app rejoins.
 
 Turn it on in **Settings → Phone**, choose Tailscale (anywhere, HTTPS through Tailscale
 Serve) or Local network, and scan the QR.
 
-<p align="center"><img src="docs/screenshots/phone.png" width="260" alt="Orbit for iPhone"></p>
+<p align="center"><img src="docs/screenshots/phone.png" width="260" alt="Orbit for iPhone: the home page">
+&nbsp;&nbsp;<img src="docs/screenshots/phone-chat.png" width="260" alt="Orbit for iPhone: a Claude Code chat"></p>
 
 The app lives at [Micropeptide/Orbit-iOS](https://github.com/Micropeptide/Orbit-iOS), with
 an unsigned IPA in its [releases](https://github.com/Micropeptide/Orbit-iOS/releases/latest)

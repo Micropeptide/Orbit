@@ -70,6 +70,14 @@ final class ImageCache {
 struct MessageImage: View {
     let path: String
     @State private var full = false
+    @State private var share: ShareImage?
+
+    /// Where the picture sits on the Mac, relative to the workspace, when the link says.
+    private var macPath: String? {
+        guard path.hasPrefix("/api/ws/") else { return nil }
+        let rel = String(path.dropFirst("/api/ws/".count)).split(separator: "?").first.map(String.init) ?? ""
+        return rel.removingPercentEncoding ?? rel
+    }
 
     var body: some View {
         RemoteImage(path: path, contentMode: .fit)
@@ -78,6 +86,32 @@ struct MessageImage: View {
             .clipShape(.rect(cornerRadius: 11))
             .overlay(RoundedRectangle(cornerRadius: 11).strokeBorder(.quaternary))
             .onTapGesture { full = true }
+            .contextMenu {
+                // the image is in the cache once it is on screen
+                if let img = ImageCache.shared.image(for: path) {
+                    Button {
+                        UIPasteboard.general.image = img
+                        Haptics.success()
+                    } label: { Label("Copy image", systemImage: "doc.on.doc") }
+                    Button {
+                        UIImageWriteToSavedPhotosAlbum(img, nil, nil, nil)
+                        Haptics.success()
+                    } label: { Label("Save to Photos", systemImage: "square.and.arrow.down") }
+                    Button { share = ShareImage(image: img) } label: { Label("Share…", systemImage: "square.and.arrow.up") }
+                }
+                Button { full = true } label: {
+                    Label("View larger", systemImage: "arrow.up.left.and.arrow.down.right")
+                }
+                if let macPath {
+                    Button {
+                        UIPasteboard.general.string = macPath
+                        Haptics.success()
+                    } label: { Label("Copy path on the Mac", systemImage: "link") }
+                }
+            }
+            .sheet(item: $share) {
+                ActivityView(items: [$0.image]).ignoresSafeArea()
+            }
             .fullScreenCover(isPresented: $full) {
                 ZoomableImage(path: path) { full = false }
             }
