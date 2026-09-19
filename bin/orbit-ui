@@ -787,6 +787,23 @@ class H(http.server.BaseHTTPRequestHandler):
             if (qs.get("full") or [""])[0]:
                 return self._send(200, jdump(q.context_breakdown(st.msgs, st.sid, st.agent, st.project)))
             return self._send(200, jdump(q.context_state(st.msgs, st.sid)))
+        if p == "/api/sessions/stamp":
+            # cheap "has the list changed?": the page asks every few seconds and only
+            # re-reads the whole list when this moves
+            n = at = 0
+            try:
+                with os.scandir(q.SESSIONS) as it:
+                    for e in it:
+                        if not e.name.endswith(".json"): continue
+                        n += 1
+                        try: at = max(at, e.stat().st_mtime)
+                        except OSError: pass
+            except OSError:
+                pass
+            try: ext = len(q.CE.history_items_cached()) + len(q.AGENT_SESSIONS.rows_cached(q.ROOT))
+            except Exception: ext = 0
+            return self._send(200, jdump({"n": n, "at": round(at, 3), "ext": ext,
+                                          "running": len(running_sids())}))
         if p == "/api/sessions":
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
             off = int((qs.get("offset") or [0])[0]); lim = int((qs.get("limit") or [80])[0])
