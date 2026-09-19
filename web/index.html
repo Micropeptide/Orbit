@@ -2284,7 +2284,7 @@ function attachLive(theSid, initial){
  const note=sysline('still generating — reconnected to it');
  let a=addAssistant(modelLabel());
  a.bub.innerHTML='<span class=working>rejoining this answer<span class=dots></span></span>';
- startStatus();let seenChars=0,seenThink=0;
+ startStatus();let seenChars=0,seenThink=0,sinceSet=false;
  // shownTools counts lv.tools already drawn -- not a.tools' children, which
  // also hold approval boxes, so one approval used to swallow the next tool
  let thinkStarted=false, shownApproval=null, shownTools=0, step=null;
@@ -2298,6 +2298,8 @@ function attachLive(theSid, initial){
    if(a.bub.dataset.raw)decorate(a.bub);else a.bub.remove();
    a=addAssistant(modelLabel());thinkStarted=false;shownTools=0;lrows=[];seenChars=0;seenThink=0}
   if(lv.step!=null)step=lv.step;
+  // the status line counts from when the answer began, not from when this window joined
+  if(!sinceSet&&lv.since){sinceSet=true;statusT0=lv.since*1000}
   if(!lv.content&&!lv.thinking&&lv.status)
    a.bub.innerHTML='<span class=working>'+esc(lv.status)+'<span class=dots></span></span>';
   // the status line counts what has come back since you rejoined
@@ -2336,6 +2338,11 @@ function attachLive(theSid, initial){
    const body=a.think.querySelector('.body');
    if(!thinkStarted){thinkStarted=true;body._stick=true;a.think.style.display='';a.think._at=clockTime();
     thinkLabel(a,'thinking');openThink(a)}
+   // while it is written it keeps to a small box (the newest lines), as in a live answer;
+   // once text follows it folds like any finished thinking
+   if(lv.content||(lv.tools||[]).length){if(a.think.classList.contains('live')){a.think.classList.remove('live');
+     thinkLabel(a,'thought')}clampLong(body,lv.thinking,12)}
+   else a.think.classList.add('live');
    renderThink(body,lv.thinking,lv.thinking_marks);
    if(body._stick)body.scrollTop=body.scrollHeight}        // only if you're not reading back
   if(lv.content){a.bub.innerHTML=md(lv.content);a.bub.dataset.raw=lv.content}
@@ -6321,7 +6328,7 @@ async function showTasks(){
    r.querySelector('.tkind').classList.add('k-'+it.kind);
    r.querySelector('.ttitle').textContent=it.title||it.id;
    const sub=[it.status];
-   if(it.since)sub.push('for '+fmtSecs(d.now-it.since));
+   if(it.since)sub.push(it.ended?'took '+fmtSecs(it.ended-it.since):'for '+fmtSecs(d.now-it.since));
    if(it.text)sub.push('“'+it.text+'”');
    if(it.kind==='background'&&it.chat)sub.push('in “'+it.chat+'”');
    r.querySelector('.tsub').textContent=sub.filter(Boolean).join(' · ');
@@ -6348,6 +6355,7 @@ async function showTaskOutput(it){
  const url='/api/tasks/output?sid='+encodeURIComponent(it.sid||'')+'&id='+encodeURIComponent(it.id);
  let timer=null;
  openSheet(it.title||'Background task',async body=>{
+  body.style.padding='12px 18px 16px';
   body.innerHTML='<div class=sheetnote>loading…</div>';
   const draw=async()=>{
    if(!body.isConnected){clearInterval(timer);return}

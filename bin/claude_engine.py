@@ -2023,6 +2023,7 @@ def watch_live():
                 rec = bg_task(k, ev.get("task_id") or ev.get("tool_use_id"), tool_id=ev.get("tool_use_id"),
                               status=str(ev.get("status") or patch.get("status") or "running").lower(),
                               summary=ev.get("summary") if st == "task_notification" else None,
+                              output_file=ev.get("output_file"),
                               tools=u.get("tool_uses"), tokens=u.get("total_tokens"),
                               secs=round(float(u["duration_ms"]) / 1000, 1) if u.get("duration_ms") else None)
                 if st == "task_notification" and rec and rec.get("kind") == "agent" and rec.get("tool_id"):
@@ -2041,6 +2042,14 @@ def bg_output(sid, tid, limit=60000):
     out["steps"] = rec.get("steps") or []
     path = rec.get("output_file")
     if path and not os.path.exists(path): path = path.rstrip(".,;:)'\"")
+    if not path or not os.path.exists(path):
+        # Claude Code keeps every task's output as <its temp folder>/<project>/<session>/tasks/<id>.output
+        import glob
+        tid_ = re.sub(r"[^\w-]", "", str(rec.get("id") or ""))
+        if tid_:
+            hits = glob.glob(f"/private/tmp/claude-*/*/*/tasks/{tid_}.output") or \
+                   glob.glob(f"/tmp/claude-*/*/*/tasks/{tid_}.output")
+            if hits: path = max(hits, key=os.path.getmtime)
     text = ""
     if path:
         real = os.path.realpath(path)

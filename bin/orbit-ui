@@ -766,6 +766,7 @@ class H(http.server.BaseHTTPRequestHandler):
             lv["known"] = True
             lv["running"] = st.lock.locked()
             lv["queue_n"] = len(st.queue)
+            lv["since"] = st.busy_since or None      # so a window that rejoins counts from the start
             return self._send(200, jdump(lv))
         if p == "/api/status":
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
@@ -2704,9 +2705,11 @@ def _live_record(st, k, p):
                             "args": p.get("args")})
     if k == "interjection" and not p.get("late"):
         lv["_newstep"] = True               # what it says after the note is a new block
-    if k in _STATUS_KINDS:
+    if k in _STATUS_KINDS and not (k == "notice" and str(p.get("msg") or "").startswith("hook ")) \
+            and k != "subtask":
         # a tab that rejoins mid-answer needs to see this too,
-        # otherwise a cold start looks like a hung chat
+        # otherwise a cold start looks like a hung chat. Hooks report on every step and
+        # would hide what matters (a subagent at work), so they are not the status.
         lv["status"] = _status_text(k, p)
     lv["seq"] = lv.get("seq", 0) + 1
 
