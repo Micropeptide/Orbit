@@ -2430,13 +2430,23 @@ let dropEl=null;
 const isFileDrag=e=>{
  const t=e.dataTransfer&&e.dataTransfer.types;
  return !!t&&[...t].includes('Files')};      // ignore internal chat/project drags
+// The overlay goes when the drag does. A drag gives no reliable "left the window" event
+// (it only fired at 0,0), so one cancelled with Esc or dragged out elsewhere left it on
+// screen for good: it now also goes once drag events stop coming, and on any mouse move,
+// click or key -- none of which happen while something is being dragged.
+let dropT=null;
+function clearDrop(){clearTimeout(dropT);dropT=null;if(dropEl){dropEl.remove();dropEl=null}}
 addEventListener('dragover',e=>{
  if(!isFileDrag(e))return;                    // let chat reordering work normally
  e.preventDefault();
- if(!dropEl){dropEl=el('<div class=drop>drop to attach</div>');document.body.appendChild(dropEl)}});
-addEventListener('dragleave',e=>{if(e.clientX===0&&e.clientY===0&&dropEl){dropEl.remove();dropEl=null}});
+ if(!dropEl){dropEl=el('<div class=drop>drop to attach</div>');document.body.appendChild(dropEl);
+  dropEl.onclick=clearDrop}
+ clearTimeout(dropT);dropT=setTimeout(clearDrop,400)});   // dragover repeats while it is over the page
+addEventListener('dragleave',e=>{if(e.clientX<=0||e.clientY<=0||e.clientX>=innerWidth||e.clientY>=innerHeight)clearDrop()});
+addEventListener('dragend',clearDrop);
+['mousemove','mousedown','keydown','blur'].forEach(k=>addEventListener(k,()=>{if(dropEl)clearDrop()},true));
 addEventListener('drop',e=>{
- if(dropEl){dropEl.remove();dropEl=null}
+ clearDrop();
  if(!isFileDrag(e))return;
  e.preventDefault();
  [...e.dataTransfer.files].forEach(upload)});
