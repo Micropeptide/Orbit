@@ -255,6 +255,58 @@ class TestClaudeEngine(unittest.TestCase):
         self.assertIn("[ ] Read the data", plans[-1]["output"])
         self.assertEqual(q.PLANS["test-ce"]["steps"][0]["text"], "Read the data")
 
+    def test_a_subagent_shows_its_steps_and_a_done_line(self):
+        self.serve([
+            [{"tool_use": {"name": "Agent", "input": {"description": "Look around", "prompt": "list the files",
+                                                      "subagent_type": "general-purpose"}}}],
+            [{"tool_use": {"name": "Glob", "input": {"pattern": "*.md"}}}],
+            [{"text": "Nothing much here."}],
+            [{"text": "Done."}],
+        ])
+        msgs = [{"role": "system", "content": "s"}]
+        out, ev = self.run_turn(msgs, "look around", approve=lambda *a: True)
+        subs = [p for k, p in ev if k == "subagent"]
+        if not subs:
+            self.skipTest("this Claude Code ran no subagent against the stand-in model")
+        self.assertEqual(subs[0]["description"], "Look around")
+        self.assertEqual(subs[0]["name"], "Glob")
+        # finished in line, or (sent to the background) when its task reports back
+        done = [p["subagent"] for k, p in ev if k == "subagent_done"] or \
+               [p["subagent"] for k, p in ev if k == "tool_result" and p.get("subagent") and not p["subagent"].get("background")]
+        self.assertTrue(done, [k for k, _ in ev])
+        self.assertEqual(done[0]["tools"], 1)
+        self.assertEqual(done[0]["steps"][0]["args"]["pattern"], "*.md")
+        saved = [m for m in msgs if m.get("role") == "tool" and m.get("subagent")]
+        self.assertTrue(saved, "the subagent's steps are kept with the chat")
+        self.assertFalse(saved[0]["subagent"].get("background"), "saved as finished, not still running")
+
+    def test_a_background_shell_is_listed_until_it_ends(self):
+        self.serve([
+            [{"tool_use": {"name": "Bash", "input": {"command": "sleep 20", "run_in_background": True,
+                                                     "description": "Wait a while"}}}],
+            [{"text": "Started it."}],
+        ])
+        CE.BG_TASKS.pop("test-ce", None)
+        _, ev = self.run_turn([{"role": "system", "content": "s"}], "run it in the background",
+                              approve=lambda *a: True)
+        res = [p for k, p in ev if k == "tool_result" and p.get("name") == "Bash"]
+        self.assertTrue(res)
+        if "background" not in str(res[0].get("output")).lower():
+            self.skipTest("this Claude Code ran the command in the foreground")
+        self.assertTrue(res[0].get("background"))
+        rows = CE.bg_tasks("test-ce")
+        self.assertTrue(rows)
+        self.assertEqual(rows[0]["kind"], "shell")
+        self.assertEqual(rows[0]["description"], "Wait a while")
+        # the answer is over but the shell is not: the chat's Claude Code is kept for it
+        self.addCleanup(CE.close_live, "test-ce")
+        self.assertIn("test-ce", CE.LIVE)
+        self.assertIsNone(CE.LIVE["test-ce"]["host"])
+        self.assertTrue(CE.bg_running("test-ce"))
+        CE.close_live("test-ce")                     # closing it ends the work with it
+        self.assertNotIn("test-ce", CE.LIVE)
+        self.assertNotIn(CE.bg_tasks("test-ce")[0]["status"], ("running", "pending"))
+
     def test_stop_mid_answer(self):
         self.serve([[{"text": "Starting a long job"}, {"sleep": 30}, {"text": " never"}]])
         cancel = threading.Event()
@@ -738,3 +790,17 @@ class TestChatPrefsUnderLoad(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBackgroundRegistry(unittest.TestCase):
+    def test_tasks_update_and_end(self):
+        CE.BG_TASKS.pop("reg", None)
+        CE.bg_task("reg", "t1", kind="shell", description="build")
+        CE.bg_task("reg", "t1", status="completed", summary="built")
+        r = CE.bg_tasks("reg")[0]
+        self.assertEqual((r["status"], r["summary"]), ("completed", "built"))
+        self.assertIsNotNone(r["ended"])
+        CE.bg_task("reg", "t2", description="watch")
+        CE.bg_ended("reg")
+        self.assertTrue(all(x["status"] not in ("running", "pending") for x in CE.bg_tasks("reg")))
+        CE.BG_TASKS.pop("reg", None)

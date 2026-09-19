@@ -68,7 +68,7 @@ struct WorkExtras {
 /// One thing running in the background, as `/api/tasks` lists it: a chat
 /// answering, a message waiting in a queue, or a shell command a model left running.
 struct BackgroundTask: Decodable, Identifiable, Hashable {
-    enum Kind: String { case answer, queued, shell, other }
+    enum Kind: String { case answer, queued, shell, background, other }
 
     var kind: Kind
     var rawID: String
@@ -78,6 +78,8 @@ struct BackgroundTask: Decodable, Identifiable, Hashable {
     var text: String?
     var sid: String?
     var canStop: Bool
+    /// A background task still going (Claude Code's; finished ones stay listed a while).
+    var running = true
 
     /// Queue item ids are only unique within their chat.
     var id: String { "\(kind.rawValue)|\(sid ?? "")|\(rawID)" }
@@ -87,6 +89,7 @@ struct BackgroundTask: Decodable, Identifiable, Hashable {
         case .answer: return "answering"
         case .queued: return "queued"
         case .shell: return "shell"
+        case .background: return "background"
         case .other: return "task"
         }
     }
@@ -96,11 +99,12 @@ struct BackgroundTask: Decodable, Identifiable, Hashable {
         case .answer: return "bubble.left.and.text.bubble.right"
         case .queued: return "tray.full"
         case .shell: return "terminal"
+        case .background: return "hourglass"
         case .other: return "gearshape.2"
         }
     }
 
-    enum CodingKeys: String, CodingKey { case kind, id, title, status, since, text, sid, can_stop }
+    enum CodingKeys: String, CodingKey { case kind, id, title, status, since, text, sid, can_stop, running }
 
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
@@ -112,6 +116,7 @@ struct BackgroundTask: Decodable, Identifiable, Hashable {
         text = try? c.decode(String.self, forKey: .text)
         sid = (try? c.decode(String.self, forKey: .sid)).flatMap { $0.isEmpty ? nil : $0 }
         canStop = c.lenientBool(.can_stop) ?? false
+        running = c.lenientBool(.running) ?? true
     }
 
     /// "waiting for the model · for 4 min · “the message”"

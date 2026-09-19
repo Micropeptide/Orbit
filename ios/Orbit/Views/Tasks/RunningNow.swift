@@ -162,6 +162,7 @@ struct RunningNowSection: View {
         case .answer: return .accentColor
         case .queued: return .purple
         case .shell: return .teal
+        case .background: return .indigo
         case .other: return .secondary
         }
     }

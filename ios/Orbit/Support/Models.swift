@@ -319,6 +319,9 @@ enum StreamEvent {
     case content(String)             // answer delta
     case tool(ToolRun)               // a call starting: running until its result
     case toolResult(ToolRun, diff: ShownDiff?)
+    /// A subagent's step under its Agent call, and its finish (Claude Code)
+    case subagentStep(parent: String, step: SubagentInfo.Step, tools: Int, tokens: Int, description: String)
+    case subagentDone(parent: String, info: SubagentInfo)
     case status(String)              // cold start, compaction, trimming
     case blocked(reason: String)
     case autoApproved(name: String, reason: String)

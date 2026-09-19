@@ -818,6 +818,58 @@ def _answer_questions(inp, ctx):
 # ------------------------------------------------------------------ live control
 
 RUNS = {}            # Orbit chat id -> the Claude Code process answering in it
+# Claude Code's background work, per Orbit chat: shells started with run_in_background,
+# subagents sent to the background, and whatever else it reports as a task. Kept here so
+# /tasks, the home page and the phone can list it while it runs.
+BG_TASKS = {}        # orbit sid -> {task id: {"id", "kind", "description", "status", "since", "ended", "summary"}}
+_BG_LOCK = threading.Lock()
+
+def bg_task(sid, tid, **kw):
+    """Record or update one background task of a chat; returns its record."""
+    if not tid: return None
+    with _BG_LOCK:
+        tasks = BG_TASKS.setdefault(sid or "_", {})
+        # one task, two names (the id in the tool's result, the id in Claude's task events):
+        # the call that started it ties them together
+        if kw.get("tool_id") and str(tid) not in tasks:
+            same = next((k for k, v in tasks.items() if v.get("tool_id") == kw["tool_id"]), None)
+            if same: tid = same
+        rec = tasks.setdefault(str(tid), {"id": str(tid), "kind": "task", "description": "",
+                                          "status": "running", "since": time.time(), "ended": None})
+        rec.update({k: v for k, v in kw.items() if v not in (None, "")})
+        if rec["status"] not in ("running", "pending") and not rec.get("ended"):
+            rec["ended"] = time.time()
+        # finished ones are kept a while so the list can say how they ended
+        for k in [k for k, v in tasks.items() if v.get("ended") and time.time() - v["ended"] > 1800]:
+            tasks.pop(k, None)
+        return dict(rec)
+
+def bg_tasks(sid=None):
+    """Background tasks still running (and those ended in the last half hour), newest first."""
+    with _BG_LOCK:
+        rows = [dict(r, sid=s) for s, t in BG_TASKS.items() if sid in (None, s) for r in t.values()]
+    return sorted(rows, key=lambda r: -(r.get("since") or 0))
+
+def bg_running(sid):
+    with _BG_LOCK:
+        return any(r["status"] in ("running", "pending") for r in (BG_TASKS.get(sid) or {}).values())
+
+def bg_ended(sid, why="ended"):
+    """The Claude process of a chat is gone: its background tasks went with it."""
+    with _BG_LOCK:
+        for r in (BG_TASKS.get(sid) or {}).values():
+            if r["status"] in ("running", "pending"):
+                r.update(status=why, ended=time.time())
+
+def _brief_args(inp):
+    """A subagent step's arguments, cut down to what a one-line row shows."""
+    out = {}
+    for k in ("file_path", "notebook_path", "path", "pattern", "command", "url", "query", "description",
+              "prompt", "glob", "subagent_type"):
+        v = (inp or {}).get(k)
+        if v not in (None, ""): out[k] = str(v)[:200]
+    return out
+
 INIT = {}            # what the last run reported: commands, agents, models, tools, skills
 CONTROLS = ("set_permission_mode", "set_model", "set_max_thinking_tokens", "get_context_usage",
             "mcp_status", "mcp_toggle", "mcp_reconnect", "mcp_set_servers", "stop_task",
@@ -1329,12 +1381,17 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     live = None
     keep = bool(remote and sid and float(c.get("remote_keep_alive_min", 30) or 0) > 0)
     sig = None
-    if keep:
-        sig = json.dumps([remote["host"], remote["claude"], cwd, mk["session"], mode,
+    # A chat on this Mac keeps its Claude Code too while background work it started (a shell
+    # run in the background, a background agent) is still going -- as Claude's own app does;
+    # closing it would end that work with the answer.
+    local_kept = bool(not remote and sid and (LIVE.get(sid) or {}).get("host") is None and sid in LIVE)
+    if keep or local_kept or (not remote and sid):
+        sig = json.dumps([(remote or {}).get("host"), (remote or {}).get("claude"), cwd, mk["session"], mode,
                           [a for i, a in enumerate(argv[1:]) if a not in ("--resume", "--session-id")
                            and argv[i] not in ("--resume", "--session-id")],
                           sorted((k, v) for k, v in env.items() if k.startswith(("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT",
                                  "CLAUDE_CODE_MAX_CONTEXT", "CLAUDE_CODE_SUBAGENT")))])
+    if keep or local_kept:
         live = LIVE.get(sid)
         if live and (live["sig"] != sig or live["proc"].poll() is not None or fork or resume_at):
             close_live(sid)
@@ -1342,7 +1399,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     try:
         if live:
             proc = live["proc"]
-            emit("status", {"msg": f"continuing on {remote['host']}"})
+            emit("status", {"msg": f"continuing on {remote['host']}" if remote else "continuing the running session"})
         elif remote:
             import ssh_remote
             renv, forward = remote_target_env(target, env)
@@ -1418,7 +1475,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     every = float(q.S.get("long_run_notice_min") or 0) * 60
     next_notice = t_start + every if every else None
     last_ckpt = 0.0
-    subagents = {}
+    subagents = {}                     # Agent/Task call id -> what its subagent has done
+    done_subs = {}                     # … and how it ended, when that came before the call's result
     streamed = set()                   # message ids whose text arrived as a stream
     step_prompt = [0]                  # prompt size reported at the start of the current message
 
@@ -1529,12 +1587,29 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
             if t == "assistant":
                 msg = ev.get("message") or {}
                 if ev.get("parent_tool_use_id"):
+                    # a subagent at work: its steps go under the Agent row that started it
+                    parent = ev["parent_tool_use_id"]
+                    pinp = (tool_meta.get(parent) or ("", {}))[1] or {}
+                    sa = subagents.setdefault(parent, {"description": pinp.get("description") or "helper",
+                                                       "type": pinp.get("subagent_type") or "",
+                                                       "steps": [], "tools": 0, "out": 0, "ctx": 0,
+                                                       "t0": time.time()})
+                    u = msg.get("usage") or {}
+                    if u:
+                        sa["out"] += int(u.get("output_tokens") or 0)
+                        sa["ctx"] = max(sa["ctx"], int(u.get("input_tokens") or 0)
+                                        + int(u.get("cache_read_input_tokens") or 0)
+                                        + int(u.get("cache_creation_input_tokens") or 0))
                     for b in msg.get("content") or []:
                         if b.get("type") == "tool_use":
-                            parent = ev["parent_tool_use_id"]
-                            subagents[parent] = subagents.get(parent, 0) + 1
-                            emit("subtask", {"description": (tool_meta.get(parent) or ("", {}))[1].get("description", "helper"),
-                                             "tool": b.get("name")})
+                            sa["tools"] += 1
+                            step = {"name": b.get("name") or "tool", "args": _brief_args(b.get("input"))}
+                            sa["steps"].append(step)
+                            del sa["steps"][:-80]
+                            emit("subagent", {"parent": parent, "description": sa["description"], "type": sa["type"],
+                                              "name": step["name"], "args": step["args"], "tools": sa["tools"],
+                                              "tokens": sa["ctx"] + sa["out"], "secs": round(time.time() - sa["t0"], 1)})
+                            emit("subtask", {"description": sa["description"], "tool": step["name"]})
                     continue
                 if msg.get("id") != cur_id or cur is None: new_step(msg.get("id"))
                 if ev.get("uuid"): cur["claude_uuid"] = ev["uuid"]
@@ -1579,11 +1654,46 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                         fp = os.path.abspath(inp.get("file_path") or "") if inp.get("file_path") else None
                         if fp and fp in pending_changes and not any(x.get("path") == fp for x in changes):
                             changes.append(pending_changes[fp])
+                    sub = None
                     if name == "Agent" or name == "Task":
                         p["output"] = text[:4000]
+                        # sent to the background ("Async agent launched"): the row stays open and
+                        # its subagent keeps reporting until task_notification says it is done
+                        low = text.lstrip().lower()
+                        # "Async agent launched…", or a handback whose report comes as its own message:
+                        # either way the subagent's own task event says when it is done
+                        bg = bool(inp.get("run_in_background")) or low.startswith("async agent launched") \
+                            or "delivered to you as a message" in low
+                        if tid in done_subs:          # it reported back already: "Done (…)" straight away
+                            bg = False
+                            p["subagent"] = done_subs.pop(tid)
+                        sa = None if p.get("subagent") else (subagents.get(tid) if bg else subagents.pop(tid, None))
+                        if bg and sa is None:
+                            sa = subagents[tid] = {"description": inp.get("description") or "helper",
+                                                   "type": inp.get("subagent_type") or "", "steps": [], "tools": 0,
+                                                   "out": 0, "ctx": 0, "t0": time.time()}
+                        if p.get("subagent") and not sa:
+                            sub = p["subagent"]
+                        elif sa:
+                            sub = {"description": sa["description"], "type": sa["type"], "tools": sa["tools"],
+                                   "tokens": sa["ctx"] + sa["out"], "secs": secs, "steps": list(sa["steps"]),
+                                   "background": bg}
+                            p["subagent"] = sub
+                    if name == "Bash" and inp.get("run_in_background"):
+                        # "Command running in background with ID: bash_1"
+                        m_ = re.search(r"background with ID:\s*(\S+)", text)
+                        rec = bg_task(sid, m_.group(1) if m_ else tid, kind="shell",
+                                      description=inp.get("description") or str(inp.get("command") or "")[:160],
+                                      command=str(inp.get("command") or "")[:300], tool_id=tid)
+                        p["background"] = True
+                        # the id the task goes by (Claude's own, when its task event came first)
+                        if rec: emit("bgtask", {k: rec.get(k) for k in ("id", "kind", "description", "status")})
                     emit("tool_result", p)
-                    messages.append({"role": "tool", "tool_call_id": tid, "name": name, "t": time.time(),
-                                     "ok": ok, "secs": secs, "content": text[:60000]})
+                    tmsg = {"role": "tool", "tool_call_id": tid, "name": name, "t": time.time(),
+                            "ok": ok, "secs": secs, "content": text[:60000]}
+                    if sub: tmsg["subagent"] = sub
+                    if p.get("background"): tmsg["background"] = True
+                    messages.append(tmsg)
                     if ok and plan.from_tool(name, inp, text):
                         q.PLANS[sid or "_"] = {"steps": plan.steps(), "updated": time.time()}
                         emit("tool_result", {"name": "plan", "output": plan.text()})
@@ -1636,6 +1746,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                            if isinstance(s, dict) and s.get("status") not in ("connected", "pending")]
                     if bad:
                         emit("notice", {"msg": "MCP server not connected: " + ", ".join(bad)})
+                elif st == "background_tasks_changed":
+                    pass                                   # the task events above say it all
                 elif st == "compact_boundary":
                     emit("notice", {"msg": "Claude Code compacted the conversation to make room"})
                 elif st == "api_retry":
@@ -1649,6 +1761,46 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                         emit("notice", {"msg": "compacting failed: " + str(ev.get("compact_error") or "")})
                     elif ev.get("status") == "requesting":
                         emit("status", {"msg": "waiting for the model"})
+                elif st in ("task_started", "task_progress", "task_notification", "task_updated"):
+                    # Claude Code's background work: a shell run in the background, or a subagent
+                    tid_ = ev.get("task_id") or ev.get("id") or ev.get("tool_use_id")
+                    patch = ev.get("patch") or {}
+                    status = str(ev.get("status") or patch.get("status") or "running").lower()
+                    ttype = str(ev.get("task_type") or "").lower()
+                    u_ = ev.get("usage") or {}
+                    rec = bg_task(sid, tid_, status=status,
+                                  kind=("agent" if "agent" in ttype else "shell" if ("bash" in ttype or "shell" in ttype) else None),
+                                  description=ev.get("description"), tool_id=ev.get("tool_use_id"),
+                                  summary=ev.get("summary") if st == "task_notification" else None,
+                                  output_file=ev.get("output_file"), tools=u_.get("tool_uses"),
+                                  tokens=u_.get("total_tokens"),
+                                  secs=round(float(u_["duration_ms"]) / 1000, 1) if u_.get("duration_ms") else None)
+                    if rec:
+                        emit("bgtask", {k: rec.get(k) for k in ("id", "kind", "description", "status", "summary")})
+                    parent = ev.get("tool_use_id") or (rec or {}).get("tool_id")
+                    is_agent = parent in subagents or (tool_meta.get(parent) or ("",))[0] in ("Agent", "Task")
+                    if st == "task_notification" and is_agent:
+                        # a subagent finished: its Agent row now says "Done (…)"
+                        pinp = (tool_meta.get(parent) or ("", {}))[1] or {}
+                        sa = subagents.pop(parent, None) or {
+                            "description": pinp.get("description") or "helper", "type": pinp.get("subagent_type") or "",
+                            "steps": [], "tools": 0, "out": 0, "ctx": 0,
+                            "t0": (tool_meta.get(parent) or ("", {}, time.time()))[2]}
+                        u = ev.get("usage") or {}
+                        sub = {"description": sa["description"], "type": sa["type"],
+                               "tools": int(u.get("tool_uses") or sa["tools"]),
+                               "tokens": int(u.get("total_tokens") or (sa["ctx"] + sa["out"])),
+                               "secs": round(float(u.get("duration_ms") or 0) / 1000, 1) or round(time.time() - sa["t0"], 1),
+                               "steps": list(sa["steps"]), "background": False,
+                               "status": status, "summary": _report(ev.get("summary"))}
+                        done_subs[parent] = sub
+                        emit("subagent_done", {"parent": parent, "subagent": sub})
+                        for m_ in reversed(messages):
+                            if m_.get("role") == "tool" and m_.get("tool_call_id") == parent:
+                                m_["subagent"] = sub; break
+                    elif st == "task_notification" and (rec or {}).get("kind") != "agent":
+                        msg = _system_notice(st, ev)
+                        if msg: emit("notice", {"msg": msg, "kind": st})
                 else:
                     msg = _system_notice(st, ev)
                     if msg: emit("notice", {"msg": msg, "kind": st})
@@ -1675,7 +1827,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                 if pending <= 0 or interrupted_at:
                     if inbox and interrupted_at is None:
                         continue               # a note arrived just as it finished
-                    if keep and proc.poll() is None:
+                    if (keep or (not remote and sid and bg_running(sid))) and proc.poll() is None:
                         kept = True            # the answer is done; the process waits for the next message
                         break
                     try: proc.stdin.close()
@@ -1685,7 +1837,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         try:
             if kept and proc.poll() is None:
                 LIVE[sid] = {"proc": proc, "sig": sig, "lines": lines, "got": got, "err_tail": err_tail,
-                             "wlock": wlock, "host": remote["host"], "used": time.time()}
+                             "wlock": wlock, "host": remote["host"] if remote else None, "used": time.time()}
                 _live_saved()
             elif proc.poll() is None:
                 try: proc.stdin.close()
@@ -1694,6 +1846,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                 except subprocess.TimeoutExpired: _kill(proc)
             if not kept and LIVE.get(sid, {}).get("proc") is proc:
                 LIVE.pop(sid, None); _live_saved()
+            if not kept: bg_ended(sid)             # its background shells and agents ended with it
         except Exception:
             pass
         if token: BRIDGE.pop(token, None)
@@ -1827,6 +1980,7 @@ def close_live(sid=None, why=""):
         ids = [sid] if sid else list(LIVE)
         for k in ids:
             v = LIVE.pop(k, None)
+            bg_ended(k)
             if not v: continue
             try: v["proc"].stdin.close()
             except Exception: pass
@@ -1837,11 +1991,77 @@ def close_live(sid=None, why=""):
         _live_saved()
 
 
+def watch_live():
+    """Between answers, keep the background-task list current from a kept session's
+    output: its task events are read where they wait for the next answer, not taken."""
+    for k, v in list(LIVE.items()):
+        if k in RUNS: continue
+        seen = v.setdefault("seen", set())
+        for raw in list(v["lines"]):
+            if raw is None or id(raw) in seen: continue
+            seen.add(id(raw))
+            try: ev = json.loads(raw)
+            except Exception: continue
+            if ev.get("type") == "assistant" and ev.get("parent_tool_use_id"):
+                # a background subagent's step, taken after its answer ended
+                steps = [{"name": b.get("name") or "tool", "args": _brief_args(b.get("input"))}
+                         for b in (ev.get("message") or {}).get("content") or [] if b.get("type") == "tool_use"]
+                if steps:
+                    with _BG_LOCK:
+                        rec = next((r for r in (BG_TASKS.get(k) or {}).values()
+                                    if r.get("tool_id") == ev["parent_tool_use_id"]), None)
+                        if rec is not None:
+                            rec["steps"] = (rec.get("steps") or [])[-79:] + steps
+                continue
+            if ev.get("type") != "system": continue
+            st = ev.get("subtype")
+            if st in ("task_started", "task_updated", "task_notification"):
+                patch = ev.get("patch") or {}
+                u = ev.get("usage") or {}
+                rec = bg_task(k, ev.get("task_id") or ev.get("tool_use_id"), tool_id=ev.get("tool_use_id"),
+                              status=str(ev.get("status") or patch.get("status") or "running").lower(),
+                              summary=ev.get("summary") if st == "task_notification" else None,
+                              tools=u.get("tool_uses"), tokens=u.get("total_tokens"),
+                              secs=round(float(u["duration_ms"]) / 1000, 1) if u.get("duration_ms") else None)
+                if st == "task_notification" and rec and rec.get("kind") == "agent" and rec.get("tool_id"):
+                    _saved_subagent_done(k, rec)
+
+def _report(text):
+    """What a subagent reported, without Claude Code's note that the report went to the model."""
+    t = str(text or "")
+    return "" if "delivered to you as a message" in t.lower() else t[:2000]
+
+def _saved_subagent_done(sid, rec):
+    """A background subagent finished after its answer was saved: its Agent call in the
+    saved chat now says how it ended."""
+    try:
+        path = Q.session_path(sid)
+        if not os.path.exists(path): return
+        d = json.load(open(path))
+        msgs = d.get("messages") if isinstance(d, dict) else d
+        for m in reversed(msgs or []):
+            if m.get("role") == "tool" and m.get("tool_call_id") == rec["tool_id"]:
+                sub = dict(m.get("subagent") or {})
+                if rec.get("steps"): sub["steps"] = (sub.get("steps") or []) + rec["steps"]
+                sub.update(background=False, status=rec.get("status"), summary=_report(rec.get("summary")),
+                           tools=int(rec.get("tools") or sub.get("tools") or 0),
+                           tokens=int(rec.get("tokens") or sub.get("tokens") or 0),
+                           secs=rec.get("secs") or sub.get("secs"))
+                m["subagent"] = sub
+                Q._atomic_write(path, d)
+                break
+    except Exception:
+        pass
+
 def reap_live(max_idle_min=None):
-    """Close kept remote sessions idle for longer than remote_keep_alive_min."""
+    """Close kept remote sessions idle for longer than remote_keep_alive_min, and a chat
+    on this Mac's session once its background work is over."""
+    try: watch_live()
+    except Exception: pass
     limit = float(max_idle_min if max_idle_min is not None else (cfg().get("remote_keep_alive_min", 30) or 0)) * 60
     for k, v in list(LIVE.items()):
-        if v["proc"].poll() is not None or (limit and time.time() - v["used"] > limit and k not in RUNS):
+        local_done = v.get("host") is None and k not in RUNS and not bg_running(k)
+        if v["proc"].poll() is not None or local_done or (limit and time.time() - v["used"] > limit and k not in RUNS):
             close_live(k)
 
 
@@ -1854,7 +2074,8 @@ def end_leftover_live():
         if not pid: continue
         try:
             out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True).stdout
-            if out.startswith("ssh") and "orbit" in out:
+            # an SSH session to a host, or a chat's own Claude Code kept for its background work
+            if (out.startswith("ssh") and "orbit" in out) or (not (v or {}).get("host") and "claude" in out):
                 os.killpg(os.getpgid(pid), signal.SIGTERM)
         except Exception:
             pass

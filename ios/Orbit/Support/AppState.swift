@@ -525,6 +525,20 @@ final class AppState: ObservableObject {
         if !pendingText.isEmpty { liveText += pendingText; pendingText = "" }
     }
 
+    /// Change one tool call of the running answer, wherever it is shown now: among the
+    /// calls still in progress, or in a step already finished.
+    private func updateRun(_ id: String, _ change: (inout ToolRun) -> Void) {
+        guard !id.isEmpty else { return }
+        if let i = liveRuns.lastIndex(where: { $0.id == id }) {
+            change(&liveRuns[i]); return
+        }
+        for si in liveSteps.indices.reversed() {
+            if let ri = liveSteps[si].tool_runs?.lastIndex(where: { $0.id == id }) {
+                change(&liveSteps[si].tool_runs![ri]); return
+            }
+        }
+    }
+
     private func apply(_ ev: StreamEvent) {
         lastLiveEvent = Date()
         alert(for: ev)          // questions, approvals, errors: tell you if you are elsewhere
@@ -559,6 +573,27 @@ final class AppState: ObservableObject {
                     if !steps.isEmpty { plans[sid] = steps }
                 }
                 if let diff { shownDiffs[sid, default: []].append(diff) }
+            }
+        case .subagentStep(let parent, let step, let tools, let tokens, let description):
+            // under the Agent row it belongs to, whether that call is still running or
+            // (a background agent) has already come back
+            updateRun(parent) { r in
+                var sa = r.subagent ?? SubagentInfo()
+                sa.description = description.isEmpty ? sa.description : description
+                sa.steps.append(step)
+                if sa.steps.count > 80 { sa.steps.removeFirst(sa.steps.count - 80) }
+                sa.tools = max(tools, sa.tools)
+                sa.tokens = max(tokens, sa.tokens)
+                r.subagent = sa
+            }
+            liveStatus = (description.isEmpty ? "subagent" : description) + ": " + step.line
+        case .subagentDone(let parent, let info):
+            updateRun(parent) { r in
+                var sa = info
+                if sa.steps.isEmpty { sa.steps = r.subagent?.steps ?? [] }
+                r.subagent = sa
+                r.background = false
+                if r.done { r.finish() }
             }
         case .status(let s):   liveStatus = s
         case .blocked(let r):  liveTools.append("refused: \(r)")

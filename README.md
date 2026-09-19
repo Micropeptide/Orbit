@@ -440,6 +440,16 @@ Click a line for the arguments and the whole output; **Ctrl+O** (or `/verbose`) 
 every call. Edits show as diffs with line numbers. Hook notices from Claude Code fold into
 "Ran 12 hooks". Thinking reads "✻ Thinking…" and then "✻ Thought for 12s".
 
+**Subagents and background work.** An Agent call lists what its subagent is doing under
+it — `⎿ Read src/app.py`, `+5 more tool uses` — and ends `Done (12 tool uses · 34k tokens ·
+1m 5s)`; open it for every step. A subagent or a shell sent to the background says
+`Running in the background`, is counted under the box ("⧗ 2 background tasks") and listed in
+`/tasks` and on the home page, and keeps running after the answer: the chat's Claude Code
+stays up until that work is done, and the row turns to "Done" when it reports back.
+
+**Long thinking folds.** Finished thinking and long messages show their first lines with
+"Show all"; the phone does the same.
+
 **While it works.** A status line above the box: a spinner, what it is doing, how long,
 roughly how much has come back, and `esc to interrupt`. The todo list shows ☒ done,
 ◼ in hand, ☐ to do (**Ctrl+T** hides it). `/tasks` lists everything running — answers
