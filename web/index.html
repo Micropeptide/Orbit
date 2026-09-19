@@ -4952,7 +4952,8 @@ async function refreshRunning(){
   let changed = now.size!==RUNNING.size || [...now].some(x=>!RUNNING.has(x))
              || wait.size!==WAITING.size || [...wait].some(x=>!WAITING.has(x));
   RUNNING=now; WAITING=wait;
-  if(changed){renderSessions();syncBusy()}   // a chat may have finished elsewhere
+  syncBusy();                                // Send / Queue always says what the Mac is doing
+  if(changed){renderSessions()}              // a chat may have finished elsewhere
   // a chat that started generating is on disk but not yet in our list -- fetch it,
   // otherwise there is no row in the sidebar to click back to
   if([...RUNNING].some(x=>!SESSIONS.find(s=>s.id===x)))loadSessions();
@@ -4983,9 +4984,28 @@ async function watchOpenChat(){
  }catch(e){}
 }
 setInterval(watchOpenChat,3000);
+setInterval(()=>{if(!document.hidden&&sid&&QUEUE_SID===sid&&(QUEUE.items||[]).length&&!busy)loadQueue(sid)},9000);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)watchOpenChat()});
 // and the list itself, so a chat that moved on another device moves here too
-setInterval(()=>{if(!busy&&!document.hidden)loadSessions()},15000);
+// The list used to be re-read only while nothing was answering, so a chat started
+// elsewhere (the phone, a scheduled task, another window) stayed hidden until you
+// reloaded -- and a stale "busy" hid it for good. A cheap stamp is asked for instead,
+// whatever is running, and the list is re-read only when it moves.
+let LIST_STAMP=null;
+async function pollList(force){
+ if(document.hidden&&!force)return;
+ try{
+  const st=await (await fetch('/api/sessions/stamp')).json();
+  const k=JSON.stringify(st);
+  if(k===LIST_STAMP&&!force)return;
+  LIST_STAMP=k;await loadSessions();
+ }catch(e){}}
+setInterval(pollList,4000);
+// back on this window: everything it may have missed while away, at once
+function catchUp(){if(document.hidden)return;
+ refreshRunning();pollList(true);watchOpenChat();pollBg();
+ if(sid&&QUEUE_SID===sid)loadQueue(sid)}
+addEventListener('focus',catchUp);document.addEventListener('visibilitychange',catchUp);
 
 async function refreshStatus(){
  try{const s=await (await fetch('/api/status'+(sid?'?sid='+encodeURIComponent(sid):''))).json();
