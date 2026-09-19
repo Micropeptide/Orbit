@@ -27,7 +27,7 @@ extension AppState {
     func reloadSaved(_ sid: String) async {
         guard let server, openChat?.sid == sid, !streaming else { return }
         guard let d = try? await server.peek(sid), openChat?.sid == sid, !streaming else { return }
-        messages = d.messages
+        messages = withPendingNotes(d.messages, sid: sid)
         Cache.saveMessages(d.messages, for: sid)
         learnPlan(sid, from: d.messages)
     }

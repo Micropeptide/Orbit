@@ -79,7 +79,11 @@ extension AppState {
             let r = try await server.queueNow(sid: sid, id: item.id)
             queue = r.queue
             if r.interjected {
-                messages.append(Message(role: "user", text: item.text, note: true))
+                let note = Message(role: "user", text: item.text, note: true)
+                messages.append(note)
+                // kept on screen until the Mac's saved copy has it: a refresh mid-answer
+                // used to replace the chat with one written before the note went in
+                pendingNotes[sid, default: []].append(note)
                 liveStatus = "sent in — it reads this at its next step"
             } else if !streaming {
                 try? await Task.sleep(nanoseconds: 500_000_000)
@@ -281,5 +285,19 @@ extension AppState {
         for sid in before.subtracting(running) where sid != followed {
             raise("Answer ready", body: chats.first { $0.id == sid }?.displayTitle ?? "", sid: sid)
         }
+    }
+}
+
+
+extension AppState {
+    /// A chat as the Mac sent it, with any note sent in during this answer that its saved
+    /// copy does not have yet put back at the end. A note the Mac has saved is dropped
+    /// from the list, so it is never shown twice.
+    func withPendingNotes(_ fresh: [Message], sid: String) -> [Message] {
+        guard var notes = pendingNotes[sid], !notes.isEmpty else { return fresh }
+        let saved = Set(fresh.suffix(40).filter(\.isUser).map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) })
+        notes.removeAll { saved.contains($0.text.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        pendingNotes[sid] = notes.isEmpty ? nil : notes
+        return fresh + notes
     }
 }

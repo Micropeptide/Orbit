@@ -49,6 +49,14 @@ struct ChatView: View {
     /// again. Only the view: the messages, the chat on the Mac and the cache keep them.
     @State private var cleared: (sid: String, count: Int)?
 
+    /// A chat known to be empty — a new one, or one loaded with nothing in it — opens at
+    /// its greeting. Not merely one with no messages yet: a chat still loading has none for
+    /// a moment, and opening it at the top left an ongoing conversation at its oldest message.
+    private var isHome: Bool {
+        state.messages.isEmpty && !state.streaming && state.openChat?.sid == sid
+            && (state.openChat?.messages.isEmpty ?? true) && (state.openChat?.n ?? 0) == 0
+    }
+
     /// "Good morning — what's next?", as the Mac greets a new chat.
     static func greeting(now: Date = .now) -> String {
         let h = Calendar.current.component(.hour, from: now)
@@ -185,7 +193,7 @@ struct ChatView: View {
             .coordinateSpace(name: "transcript")
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }
             // open at the newest message; an empty chat opens at its greeting
-            .defaultScrollAnchor(state.messages.isEmpty && !state.streaming ? .top : .bottom)
+            .defaultScrollAnchor(isHome ? .top : .bottom)
             .scrollDismissesKeyboard(.interactively)
             .apply { followingNewest($0, proxy: proxy) }
             .onChange(of: actionsModel.jumpRequest) { _, i in
@@ -212,6 +220,7 @@ struct ChatView: View {
                 await state.open(sid)
                 SeenChats.mark(sid, mtime: state.chats.first { $0.id == sid }?.mtime ?? 0)
                 if let text = state.draftPrefill { draft = text; typing = true; state.draftPrefill = nil }
+                if highlight == nil { await pinToNewest(proxy) }
                 // a search hit: land on that message and flash it once the rows exist
                 guard let h = highlight, h < state.messages.count, flashed == nil else { return }
                 try? await Task.sleep(nanoseconds: 250_000_000)
@@ -357,10 +366,30 @@ struct ChatView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { if following { scroll(proxy, animated: false) } }
     }
 
+    /// Opening a chat lands on its newest message. A long chat is drawn lazily from
+    /// estimated row heights, so one jump to the end fell short (it opened partway up); keep
+    /// going to the end while the rows measure themselves, for a couple of seconds, unless
+    /// you start scrolling.
+    private func pinToNewest(_ proxy: ScrollViewProxy) async {
+        following = true
+        for _ in 0..<16 {
+            guard following, !Task.isCancelled else { return }
+            scroll(proxy, animated: false)
+            try? await Task.sleep(nanoseconds: 150_000_000)
+        }
+    }
+
     private func scroll(_ proxy: ScrollViewProxy, animated: Bool = true) {
         // an empty chat is its home page: start at the greeting, not the bottom of the cards
-        let empty = state.messages.isEmpty && !state.streaming
-        let go = { empty ? proxy.scrollTo("home", anchor: .top) : proxy.scrollTo("bottom", anchor: .bottom) }
+        let empty = isHome
+        let last = transcriptRows.last?.index ?? -1
+        let go = {
+            if empty { proxy.scrollTo("home", anchor: .top); return }
+            // the last message's own row first: in a long lazy list the end marker alone
+            // is placed from estimated heights and the jump stopped partway up
+            if last >= 0 { proxy.scrollTo("row-\(last)", anchor: .bottom) }
+            proxy.scrollTo("bottom", anchor: .bottom)
+        }
         if animated && !reduceMotion { withAnimation(.easeOut(duration: 0.18)) { go() } } else { go() }
     }
 
