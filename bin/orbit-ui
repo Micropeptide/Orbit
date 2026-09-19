@@ -251,7 +251,7 @@ def background_tasks():
                           "running": running, "can_stop": False, "subkind": r.get("kind"),
                           "tool_id": r.get("tool_id"), "tools": r.get("tools"), "tokens": r.get("tokens"),
                           "secs": r.get("secs"), "summary": q.CE._report(r.get("summary")),
-                          "steps": (r.get("steps") or [])[-40:]})
+                          "steps": (r.get("steps") or [])[-40:], "has_output": bool(r.get("output_file"))})
     except Exception:
         pass
     for jid, rec in sorted(q.BG_JOBS.items(), key=lambda kv: kv[1]["started"]):
@@ -598,6 +598,15 @@ class H(http.server.BaseHTTPRequestHandler):
                                           "max": (_max_parallel() if _max_parallel() < 10**6 else None)}))
         if p == "/api/home":
             return self._send(200, jdump(home_overview()))
+        if p.split("?")[0] == "/api/tasks/output":
+            # a background task's output so far, for the /tasks window's "output" view
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            got = q.CE.bg_output((qs.get("sid") or [""])[0], (qs.get("id") or [""])[0])
+            if got is None: return self._send(404, jdump({"error": "no such background task"}))
+            st_ = STATES.get((qs.get("sid") or [""])[0])
+            got["chat"] = st_.title if st_ else None
+            got["chat_saved"] = os.path.exists(q.session_path((qs.get("sid") or [""])[0]))
+            return self._send(200, jdump(got))
         if p == "/api/tasks":
             items, now = background_tasks()
             return self._send(200, jdump({"items": items, "now": now}))

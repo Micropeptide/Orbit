@@ -35,6 +35,7 @@ struct HomeDashboard: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var showStats = false
     @State private var stopping: Set<String> = []
+    @State private var showingTask: BackgroundTask?
 
     var body: some View {
         Group {
@@ -60,6 +61,9 @@ struct HomeDashboard: View {
         }
         .task { await model.poll(state) }
         .sheet(isPresented: $showStats) { UsageStatsView(sid: nil) }
+        .sheet(item: $showingTask) { t in
+            TaskOutputSheet(task: t) { sid in state.deepLink = sid }
+        }
     }
 
     private var home: HomeOverview? { model.home }
@@ -189,7 +193,7 @@ struct HomeDashboard: View {
                             sub: t.kind == .background ? t.status : t.kind == .answer && t.status != "answering" ? t.status : nil,
                             side: t.since.map { Self.duration((home?.now ?? 0) - $0) },
                             tint: t.status == "waiting for you" ? .orange : t.kind == .shell ? .secondary : .green,
-                            action: t.sid.map { sid in { state.deepLink = sid } })
+                            action: t.kind == .background ? { showingTask = t } : t.sid.map { sid in { state.deepLink = sid } })
                         if t.canStop {
                             Button(stopping.contains(t.id) ? "Stopped" : "Stop") {
                                 stopping.insert(t.id)

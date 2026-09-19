@@ -1682,9 +1682,11 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                     if name == "Bash" and inp.get("run_in_background"):
                         # "Command running in background with ID: bash_1"
                         m_ = re.search(r"background with ID:\s*(\S+)", text)
+                        of_ = re.search(r"Output is being written to:\s*(\S+)", text)
                         rec = bg_task(sid, m_.group(1) if m_ else tid, kind="shell",
                                       description=inp.get("description") or str(inp.get("command") or "")[:160],
-                                      command=str(inp.get("command") or "")[:300], tool_id=tid)
+                                      command=str(inp.get("command") or "")[:300], tool_id=tid,
+                                      output_file=of_.group(1).rstrip(".,;:)'\"") if of_ else None)
                         p["background"] = True
                         # the id the task goes by (Claude's own, when its task event came first)
                         if rec: emit("bgtask", {k: rec.get(k) for k in ("id", "kind", "description", "status")})
@@ -2025,6 +2027,54 @@ def watch_live():
                               secs=round(float(u["duration_ms"]) / 1000, 1) if u.get("duration_ms") else None)
                 if st == "task_notification" and rec and rec.get("kind") == "agent" and rec.get("tool_id"):
                     _saved_subagent_done(k, rec)
+
+def bg_output(sid, tid, limit=60000):
+    """What a background task has written so far: a shell's output, or a subagent's steps and
+    words from its transcript. Only the file Claude Code named for that task is read."""
+    with _BG_LOCK:
+        tasks = BG_TASKS.get(sid) or {}
+        rec = tasks.get(str(tid)) or next((r for r in tasks.values() if r.get("tool_id") == tid), None)
+        rec = dict(rec or {})
+    if not rec: return None
+    out = {k: rec.get(k) for k in ("id", "kind", "description", "status", "summary", "command",
+                                   "since", "ended", "tools", "tokens", "secs")}
+    out["steps"] = rec.get("steps") or []
+    path = rec.get("output_file")
+    if path and not os.path.exists(path): path = path.rstrip(".,;:)'\"")
+    text = ""
+    if path:
+        real = os.path.realpath(path)
+        ok_dirs = [os.path.realpath(d) for d in ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders",
+                                                    os.path.join(claude_dir(), "projects"))]
+        if any(real == d or real.startswith(d + os.sep) for d in ok_dirs) and os.path.isfile(real):
+            try:
+                size = os.path.getsize(real)
+                with open(real, "rb") as f:
+                    if size > limit: f.seek(size - limit)
+                    raw = f.read().decode("utf-8", "replace")
+                text = _transcript_text(raw) if raw.lstrip().startswith("{") else raw
+                if size > limit: text = "…\n" + text
+            except OSError:
+                pass
+    out["output"] = text
+    return out
+
+def _transcript_text(raw):
+    """A subagent's transcript (JSON lines) as something to read: what it said and did."""
+    lines = []
+    for ln in raw.splitlines():
+        try: ev = json.loads(ln)
+        except ValueError: continue
+        content = (ev.get("message") or {}).get("content")
+        if not isinstance(content, list): continue
+        for b in content:
+            if b.get("type") == "text" and ev.get("type") == "assistant" and b.get("text", "").strip():
+                lines.append(b["text"].strip())
+            elif b.get("type") == "tool_use":
+                args = _brief_args(b.get("input"))
+                first = next(iter(args.values()), "")
+                lines.append(f"⏺ {b.get('name')}({str(first)[:120]})")
+    return "\n\n".join(lines)
 
 def _report(text):
     """What a subagent reported, without Claude Code's note that the report went to the model."""

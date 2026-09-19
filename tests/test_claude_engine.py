@@ -804,3 +804,33 @@ class TestBackgroundRegistry(unittest.TestCase):
         CE.bg_ended("reg")
         self.assertTrue(all(x["status"] not in ("running", "pending") for x in CE.bg_tasks("reg")))
         CE.BG_TASKS.pop("reg", None)
+
+
+class TestBackgroundOutput(unittest.TestCase):
+    def test_output_of_a_shell_and_of_a_subagent(self):
+        CE.BG_TASKS.pop("out", None)
+        self.addCleanup(CE.BG_TASKS.pop, "out", None)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        log = os.path.join(d, "b1.output")
+        open(log, "w").write("building…\nstep 1 done\n")
+        CE.bg_task("out", "b1", kind="shell", description="build", command="make", tool_id="toolu_b1",
+                   output_file=log)
+        got = CE.bg_output("out", "b1")
+        self.assertIn("step 1 done", got["output"])
+        CE.bg_task("out", "b2", kind="shell", output_file=log + ".")    # as written at the end of a sentence
+        self.assertIn("step 1 done", CE.bg_output("out", "b2")["output"])
+        self.assertEqual(CE.bg_output("out", "toolu_b1")["id"], "b1")      # found by the call that started it
+        tr = os.path.join(d, "agent.jsonl")
+        with open(tr, "w") as f:
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Glob", "input": {"pattern": "*.md"}}]}}) + "\n")
+            f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Found 3."}]}}) + "\n")
+        CE.bg_task("out", "a1", kind="agent", description="look", output_file=tr)
+        text = CE.bg_output("out", "a1")["output"]
+        self.assertIn("⏺ Glob(*.md)", text)
+        self.assertIn("Found 3.", text)
+        # a file Claude Code did not name for the task is never read
+        CE.bg_task("out", "x1", output_file=os.path.expanduser("~/.ssh/config"))
+        self.assertEqual(CE.bg_output("out", "x1")["output"], "")
+        self.assertIsNone(CE.bg_output("out", "nope"))

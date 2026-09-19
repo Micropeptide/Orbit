@@ -529,7 +529,8 @@ def make_handler(resolver, log=None, token=None, hooks=None):
             STATS["by_provider"][provider] = STATS["by_provider"].get(provider, 0) + 1
             STATS["last"] = {"provider": provider, "model": model, "t": time.time(), "format": route["format"]}
             self.provider, self.account, self.tap = provider, None, _UsageTap()
-            self.session = session_id(self.headers, body)
+            self.conv = session_id(self.headers, body)
+            self.session = routed_session(self.conv)
             self.close_connection = True
             cap = route.get("max_output")
             if cap and int(body.get("max_tokens") or 0) > int(cap):
@@ -715,9 +716,17 @@ def make_handler(resolver, log=None, token=None, hooks=None):
             self.send_header("connection", "close")
             self.end_headers()
             conv = responses_stream_to_anthropic if responses else stream_to_anthropic
-            for out in conv(iter(r.readline, b""), model):
+            seen = {}
+            lines = iter(r.readline, b"") if responses else _watch_stream(iter(r.readline, b""), seen)
+            for out in conv(lines, model):
                 self.tap.feed(out)
                 self.wfile.write(out); self.wfile.flush()
+            if not responses and pinned_without_reasoning(self.provider, body, seen.get("id"), seen.get("reasoned")):
+                moves = ROUTE_SALT.get(self.conv, 0)
+                if moves < MAX_MOVES:
+                    ROUTE_SALT[self.conv] = moves + 1
+                    if log: log(f"{self.provider}: {model} answered without reasoning from a backend that "
+                                f"never reasons; moving this conversation to a fresh route")
 
     return H
 
@@ -737,6 +746,42 @@ def _same(a, b):
     import hmac
     return hmac.compare_digest(str(a or ""), str(b or ""))
 
+
+# OpenCode Go keeps a conversation on the backend that first served it (by its session id).
+# For DeepSeek one of its backends never reasons and caches nothing ("chatcmpl-…" ids, no
+# reasoning whatever is asked): a long Claude Code chat pinned there loses its thinking and
+# pays for the whole context on every step. A conversation found there is given a fresh
+# routing id, which lands it back on the backend that reasons and caches.
+ROUTE_SALT = {}          # conversation session id -> how many times it was moved
+MAX_MOVES = 4
+
+def routed_session(session):
+    n = ROUTE_SALT.get(session, 0)
+    return f"{session}-r{n}" if n else session
+
+def wants_reasoning(body):
+    th = (body or {}).get("thinking")
+    return str((body or {}).get("model") or "").lower().startswith("deepseek") and \
+        isinstance(th, dict) and th.get("type") not in (None, "disabled")
+
+def pinned_without_reasoning(provider, body, first_id, saw_reasoning):
+    """This answer came from the backend that never reasons, though reasoning was asked for."""
+    return provider == "opencode-go" and wants_reasoning(body) and not saw_reasoning \
+        and str(first_id or "").startswith("chatcmpl-")
+
+def _watch_stream(lines, seen):
+    """Pass a chat-completions stream through, noting its id and whether it reasoned."""
+    for raw in lines:
+        if raw.startswith(b"data:") and (not seen.get("id") or not seen.get("reasoned")):
+            try:
+                ch = json.loads(raw[5:].strip() or b"{}")
+                seen.setdefault("id", ch.get("id"))
+                for c in ch.get("choices") or []:
+                    d = c.get("delta") or {}
+                    if d.get("reasoning_content") or d.get("reasoning"): seen["reasoned"] = True
+            except ValueError:
+                pass
+        yield raw
 
 def session_id(headers, body):
     """A stable id for the conversation a request belongs to. OpenCode Go refuses

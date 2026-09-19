@@ -329,3 +329,32 @@ class TestServer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStuckRoute(unittest.TestCase):
+    """OpenCode Go can keep a conversation on a DeepSeek backend that never reasons; the
+    gateway spots it and gives the conversation a fresh route."""
+    def test_spotting_the_backend_that_never_reasons(self):
+        import harness_gateway as G
+        body = {"model": "deepseek-v4.1-flash", "thinking": {"type": "enabled", "budget_tokens": 2000}}
+        self.assertTrue(G.pinned_without_reasoning("opencode-go", body, "chatcmpl-R2V6zm", False))
+        self.assertFalse(G.pinned_without_reasoning("opencode-go", body, "chatcmpl-R2V6zm", True))    # it reasoned
+        self.assertFalse(G.pinned_without_reasoning("opencode-go", body, "4d7f5af3-5709", False))      # the usual backend
+        self.assertFalse(G.pinned_without_reasoning("opencode-go", {**body, "thinking": {"type": "disabled"}},
+                                                    "chatcmpl-x", False))                               # none asked for
+        self.assertFalse(G.pinned_without_reasoning("deepseek", body, "chatcmpl-x", False))            # another provider
+
+    def test_a_moved_conversation_gets_a_new_route_and_the_stream_is_read(self):
+        import harness_gateway as G
+        G.ROUTE_SALT.pop("s-1", None)
+        self.addCleanup(G.ROUTE_SALT.pop, "s-1", None)
+        self.assertEqual(G.routed_session("s-1"), "s-1")
+        G.ROUTE_SALT["s-1"] = 1
+        self.assertEqual(G.routed_session("s-1"), "s-1-r1")
+        seen = {}
+        lines = [b'data: {"id":"chatcmpl-abc","choices":[{"delta":{"content":"hi"}}]}\n', b"data: [DONE]\n"]
+        self.assertEqual(list(G._watch_stream(iter(lines), seen)), lines)     # passed through unchanged
+        self.assertEqual(seen, {"id": "chatcmpl-abc"})
+        seen = {}
+        list(G._watch_stream(iter([b'data: {"id":"u1","choices":[{"delta":{"reasoning_content":"hm"}}]}\n']), seen))
+        self.assertTrue(seen.get("reasoned"))
