@@ -588,7 +588,7 @@ be switched off in Settings → Tools; one Python file in `tools/` adds another
 | | |
 |---|---|
 | **Home** | A new chat's page: things that need you, running now (stop from there), coming up, activity with a 14-day chart and streak, allowances left per account, most-used models, the chats to pick up. |
-| **Chats** | Ordered by last use, with state on each row (answering, waiting for you, queued, unread); folding date groups, projects and other agents' sections; search, pin, tag, archive, drag onto a project, ⋯ menu on every row. |
+| **Chats** | Ordered by last use or grouped by project (drag a project to put it where you want it, a chat onto one to move it), with state on each row (answering, waiting for you, queued, unread); folding date groups, projects and other agents' sections; search, pin, tag, archive, drag onto a project, ⋯ menu on every row. |
 | **Composer** | ⏱ send later; `/` for commands and skills (saved prompts take `$ARGUMENTS`, `$1`, `$2`), `@` for files, `!` shell mode, `#` memory, drag-and-drop or paste to attach, ↑/↓ and Ctrl+R for earlier messages, Esc to stop, Esc Esc to rewind, Shift+Tab for the permission mode, a draft kept per chat, the message queue above it. |
 | **Answers** | Thinking, text and tool calls in Claude Code's style (`⏺` call, `⎿` result, look-ups folded, Ctrl+O for everything); line-numbered diffs; time and tokens per answer; undo the files an answer changed; fork from any message; files as links and cards with previews ([more](#answers-files-and-previews)); copy as Markdown, formatted or plain. |
 | **Files** | Everything Orbit created or you attached, with the chat it came from. |
