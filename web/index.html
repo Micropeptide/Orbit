@@ -498,6 +498,9 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .projrow .ct{color:var(--dim);font-size:11px}
 .projrow .pclaude{color:var(--acc);font-size:11px;opacity:.75}
 .projrow.drop{outline:2px dashed var(--acc);outline-offset:-2px}
+.projrow.dragging{opacity:.5}
+.projrow[draggable=true]{cursor:grab}
+.daygroup .gsw{width:8px;height:8px;border-radius:2px;display:inline-block;margin-right:2px}
 .sitem.dragging{opacity:.4}
 .sitem[draggable]{cursor:grab}
 .addproj{margin:4px 12px 8px;font-size:12px;color:var(--mut);cursor:pointer;padding:5px 10px;
@@ -898,7 +901,9 @@ table.stbl{border-collapse:collapse;width:100%;font-size:13px;margin:2px 0 6px}
     <span class=ct id=chatct></span>
     <select class=filtersel id=filtersel title="Which chats">
      <option value=active>Active</option><option value=pinned>Pinned</option><option value=archived>Archived</option>
-     <option value=all>All</option><option value=attention>Needs attention</option></select></div>
+     <option value=all>All</option><option value=attention>Needs attention</option></select>
+    <select class=filtersel id=groupsel title="How the chats are grouped">
+     <option value=date>By date</option><option value=project>By project</option></select></div>
    <div class=secbody data-sec=chats>
     <input class=search id=search placeholder="Filter by title  (⌘F)">
     <div class=tagrow id=tagrow></div>
@@ -966,6 +971,7 @@ const $=s=>document.querySelector(s), wrap=$('#wrap'), q=$('#q'), log=$('#log');
 // placeholder wraps when the box is briefly narrow, and used to set a tall height)
 function fitQ(){q.style.height='auto';if(!q.value){q.style.height='';return}
  q.style.height=Math.min(q.scrollHeight,200)+'px'}
+let GROUP_BY='date';            // the chat list by date, or by project
 let atts=[], sid=null, busy=false, stoppedSid=null, RUNNING=new Set(), INFO={tools:[],settings:{}}, SESSIONS=[], PROMPTS={}, filterMode='active';
 // Chats this TAB is actively streaming right now, kept independently of RUNNING —
 // RUNNING is refreshed from the server every couple of seconds and a stale
@@ -2111,15 +2117,31 @@ function extSource(s){
  if(s.external||id.startsWith('cq-'))return 'claude';
  return null}
 // rows under date headings that fold (older months start folded)
+function projectLabel(s){
+ const p=s.project&&PROJECTS[s.project];
+ return p?(p.name||'Project'):'No project'}
+// The list in project order (projects as the sidebar shows them, then chats with none),
+// each project's chats newest first.
+function byProject(list){
+ const order={};Object.entries(PROJECTS).sort((a,b)=>(a[1].order||0)-(b[1].order||0))
+  .forEach(([pid],i)=>order[pid]=i);
+ return [...list].sort((a,b)=>{
+  const oa=a.project&&order[a.project]!=null?order[a.project]:1e6;
+  const ob=b.project&&order[b.project]!=null?order[b.project]:1e6;
+  return oa-ob||(!!b.pinned-!!a.pinned)||(b.mtime||0)-(a.mtime||0)})}
 function groupedRows(list,box,prefix,term){
  let lastGroup=null, groupBody=null;
+ const byProj=GROUP_BY==='project';
+ if(byProj)list=byProject(list);
  list.forEach(s=>{
-  const g=s.pinned&&filterMode!=='archived'?'Pinned':dayLabel(s.mtime);
+  const g=byProj?projectLabel(s):(s.pinned&&filterMode!=='archived'?'Pinned':dayLabel(s.mtime));
   if(g!==lastGroup){
    lastGroup=g;
-   const recent=['Pinned','Today','Yesterday','Previous 7 days','Previous 30 days'].includes(g);
+   const recent=byProj||['Pinned','Today','Yesterday','Previous 7 days','Previous 30 days'].includes(g);
    const open=term?true:PREF.get(prefix+g,recent?'1':'0')==='1';
-   const h=el(`<div class="daygroup${open?'':' closed'}"><span class=caret>▾</span> ${esc(g)} <span class=gct></span></div>`);
+   const h=el(`<div class="daygroup${open?'':' closed'}"><span class=caret>▾</span>${
+     byProj&&s.project&&PROJECTS[s.project]?`<span class=gsw style="background:${esc(PROJECTS[s.project].color||PCOLORS[0])}"></span>`:''
+    } ${esc(g)} <span class=gct></span></div>`);
    groupBody=el(`<div class=grpbody${open?'':' style="display:none"'}></div>`);
    const gb=groupBody;
    h.onclick=()=>{const now=gb.style.display==='none';gb.style.display=now?'':'none';
@@ -2135,7 +2157,7 @@ function listRows(){
 function renderSessions(force){
  const term=($('#search').value||'').trim().toLowerCase();
  const rows=listRows();
- const sig=JSON.stringify([filterMode,term,projFilter,tagFilter,sid,[...RUNNING],[...WAITING],Object.keys(UNSEEN),
+ const sig=JSON.stringify([filterMode,GROUP_BY,term,projFilter,tagFilter,sid,[...RUNNING],[...WAITING],Object.keys(UNSEEN),
   rows.map(s=>[s.id,s.title,s.mtime,s.pinned,s.archived,s.queued,s.n,s.project]),PREF.get('sec_ext_claude','0')]);
  if(!force&&sig===LIST_SIG)return;
  LIST_SIG=sig;
@@ -3415,6 +3437,20 @@ async function steer(t){
    click to edit, "now" to put one into the running answer straight away. */
 let QUEUE={items:[],paused:false,running:false}, QUEUE_SID=null;
 function queuedHere(){return QUEUE_SID===sid&&(QUEUE.items||[]).some(it=>!it.at)}
+// Is this chat really answering, or really holding messages? Asked before a message is
+// queued rather than sent, and it corrects what this window believes either way.
+async function stillBusy(){
+ const s_=sid;
+ let lv;
+ try{lv=await (await fetch('/api/live/'+encodeURIComponent(s_))).json()}
+ catch(e){return true}                       // the Mac is unreachable: keep it safe, queue it
+ if(s_!==sid)return true;                    // you moved to another chat while it asked
+ if(lv.running)RUNNING.add(s_);else RUNNING.delete(s_);
+ syncBusy();
+ if(!(lv.queue_n>0)&&QUEUE_SID===s_&&(QUEUE.items||[]).length){
+  QUEUE={items:[],paused:false,running:false};drawQueue()}
+ else if(lv.queue_n>0)await loadQueue(s_);
+ return !!lv.running||queuedHere()}
 async function queueOp(op,extra,forSid){
  const s_=forSid||sid;
  const d=await apiPost('/api/queue',{sid:s_,op,...(extra||{})},'queue');
@@ -3611,9 +3647,13 @@ async function go(opts){
  // while it answers (or has messages waiting), a new message joins the queue and
  // starts when the ones before it are answered; ⌘/Ctrl+Enter puts it in right away,
  // as a note the running answer reads at its next step
- if((busy||queuedHere())&&!t.startsWith('/')){
+ let toQueue=(busy||queuedHere())&&!t.startsWith('/');
+ if(toQueue){
   if(opts.now&&busy)return steer(t);
-  return enqueue(t,raw)}
+  // ask the Mac first: a "busy" or a queue left over from an answer that has since
+  // finished (one another window or the phone ran) used to swallow the message quietly
+  toQueue=await stillBusy()}
+ if(toQueue)return enqueue(t,raw);
  if(t==='/'){showMenu();return}
  // "! command" runs it yourself; "# note" saves a memory -- Claude Code's two shortcuts
  if(/^!\s*\S/.test(t)&&!atts.length){q.value='';q.style.height='auto';closeMenu();clearDraft(sid);
@@ -5698,7 +5738,8 @@ function stamp(node,ts){
 let PROJECTS={}, projFilter=null;
 const PCOLORS=['#6b5bd6','#2d7d4f','#a8721c','#c0392b','#2b7a9b','#8e44ad'];
 async function loadProjects(){
- PROJECTS=await (await fetch('/api/projects')).json();
+ if(loadProjects._local)loadProjects._local=false;      // just reordered here: draw what we have
+ else PROJECTS=await (await fetch('/api/projects')).json();
  const pc=$('#projct');if(pc)pc.textContent=Object.keys(PROJECTS).length||'';
  const wrap=$('#projwrap');wrap.innerHTML='';
  const counts={};SESSIONS.forEach(s=>{if(s.project)counts[s.project]=(counts[s.project]||0)+1});
@@ -5725,14 +5766,35 @@ async function loadProjects(){
      if(!confirm('Delete project? Chats are kept.'))return;
      await fetch('/api/projects/delete',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({id:pid})});projFilter=null;loadSessions()}}])};
+  // drag a project to put it where you want it; drag a chat onto it to move the chat
+  r.draggable=true;
+  r.ondragstart=e=>{e.dataTransfer.setData('pid',pid);e.dataTransfer.effectAllowed='move';
+   r.classList.add('dragging')};
+  r.ondragend=()=>r.classList.remove('dragging');
   r.ondragover=e=>{e.preventDefault();r.classList.add('drop')};
   r.ondragleave=()=>r.classList.remove('drop');
   r.ondrop=async e=>{e.preventDefault();r.classList.remove('drop');
+   const moved=e.dataTransfer.getData('pid');
+   if(moved&&moved!==pid){await reorderProject(moved,pid);return}
    const sid=e.dataTransfer.getData('sid'); if(!sid)return;
    await fetch('/api/session/assign',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({id:sid,project:pid})});
    toast('moved to '+pr.name);loadSessions()};
   wrap.appendChild(r)})}
+// Put a project where it was dropped, and keep every project's place by saving the new order.
+async function reorderProject(moved,before){
+ const ids=Object.entries(PROJECTS).sort((a,b)=>(a[1].order||0)-(b[1].order||0)).map(([id])=>id);
+ const from=ids.indexOf(moved);if(from<0)return;
+ ids.splice(from,1);
+ const to=ids.indexOf(before);
+ ids.splice(to<0?ids.length:to,0,moved);
+ ids.forEach((id,i)=>{if(PROJECTS[id])PROJECTS[id].order=i});
+ loadProjects._local=true;await loadProjects();       // the new order shows at once
+ for(const [i,id] of ids.entries()){
+  await fetch('/api/projects/save',{method:'POST',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({id,name:PROJECTS[id]&&PROJECTS[id].name,order:i})})}
+ await loadProjects();
+ if(GROUP_BY==='project')renderSessions(true)}
 function editProject(pid){
  const pr=PROJECTS[pid]||{};
  $('#modalhost').innerHTML=`<div class=modal><div class="sheet auto" style="max-width:620px">
@@ -7064,6 +7126,10 @@ async function suggestMem(){
   box.appendChild(r)});
  wrap.appendChild(box);bottom()}
 $('#filtersel').onchange=e=>{filterMode=e.target.value;renderSessions(true)};
+GROUP_BY=PREF.get('groupby','date');
+$('#groupsel').value=GROUP_BY;
+$('#groupsel').onchange=e=>{GROUP_BY=e.target.value;PREF.set('groupby',GROUP_BY);renderSessions(true)};
+$('#groupsel').onclick=e=>e.stopPropagation();
 $('#filtersel').onclick=e=>e.stopPropagation();
 // sections fold, and stay folded next time
 document.querySelectorAll('.sechead[data-sec]').forEach(h=>{
