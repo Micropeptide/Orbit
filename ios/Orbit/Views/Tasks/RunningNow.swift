@@ -45,6 +45,7 @@ struct RunningNowSection: View {
     /// Hide the section's own "nothing running" line.
     var quietWhenEmpty = false
     @State private var confirming: BackgroundTask?
+    @State private var showing: BackgroundTask?
 
     var body: some View {
         Section {
@@ -88,6 +89,9 @@ struct RunningNowSection: View {
                 Text("Running now")
                 if !model.items.isEmpty { Text("\(model.items.count)").foregroundStyle(.secondary) }
             }
+        }
+        .sheet(item: $showing) { t in
+            TaskOutputSheet(task: t) { sid in open(sid) }
         }
         .confirmationDialog(confirmTitle, isPresented: Binding(
             get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
@@ -145,7 +149,15 @@ struct RunningNowSection: View {
                 }
             }
             Spacer(minLength: 0)
-            if let sid = t.sid {
+            if t.kind == .background {
+                // Claude's task list: open one to see what it has written so far
+                Button { showing = t } label: {
+                    Text("Open").font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .accessibilityLabel("Show the output of \(t.title)")
+            } else if let sid = t.sid {
                 Button { open(sid) } label: {
                     Text("Open").font(.caption.weight(.semibold))
                 }

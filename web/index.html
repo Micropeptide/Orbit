@@ -835,6 +835,10 @@ details.hookbox .hl{font-family:var(--mono);font-size:11px;margin:4px 0 0 16px;w
 .taskrow{display:flex;gap:10px;align-items:center;padding:8px 4px;border-bottom:1px solid var(--line)}
 .taskrow .tkind{font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;border-radius:6px;padding:2px 7px;
  background:var(--panel);color:var(--mut);flex:0 0 auto}
+.taskhead{font-size:12px;color:var(--dim);margin-bottom:6px}
+.taskcmd{font-family:var(--mono);font-size:12px;color:var(--fg);margin-bottom:6px;word-break:break-all}
+pre.taskout{background:var(--panel);border-radius:8px;padding:9px 11px;font-family:var(--mono);font-size:11.5px;
+ line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:55vh;overflow:auto;margin:0}
 .taskrow .tkind.k-answer{color:var(--acc)}.taskrow .tkind.k-background{color:var(--think)}.taskrow .tkind.k-shell{color:var(--tool)}
 .taskrow .tmain{flex:1;min-width:0}
 .taskrow .ttitle{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -6125,6 +6129,13 @@ function finishTool(d,p){
  const sub=p.subagent||(d._steps&&d._steps.length?{steps:d._steps,tools:d._steps.length}:null);
  if(sub&&(sub.steps||[]).length)d.appendChild(subStepsBox(sub));
  if(sub&&sub.background)d.classList.add('bgrun');
+ if((sub&&sub.background)||p.background||(d._args&&d._args.run_in_background)){
+  // started in the background: its output is a click away, as in Claude's task list
+  const o=el('<span class="pathlink toolopen">output</span>');o.title='what it has written so far';
+  o.onclick=e=>{e.preventDefault();e.stopPropagation();
+   showTaskOutput({sid:d.closest('.msg')&&d.closest('.msg').dataset.sid||sid,id:d.dataset.id,
+    title:toolTarget(p.name,d._args||{})||'Background task'})};
+  d.querySelector('.thead').insertBefore(o,d.querySelector('.tt'))}
  if(!out)return;
  const pre=document.createElement('pre');pre.textContent=out;d.appendChild(pre);
  const cp=el('<span class=more>copy output</span>');cp.onclick=e=>{e.stopPropagation();copy(out)};
@@ -6315,7 +6326,12 @@ async function showTasks(){
    if(it.kind==='background'&&it.chat)sub.push('in “'+it.chat+'”');
    r.querySelector('.tsub').textContent=sub.filter(Boolean).join(' · ');
    const acts=r.querySelector('.tacts');
-   if(it.sid){const o=el('<button class=ghost>open</button>');
+   if(it.kind==='background'){
+    // Claude desktop's task list: open one to see what it has done so far
+    const o=el('<button class=ghost>open</button>');o.title='what it has written so far';
+    o.onclick=()=>showTaskOutput(it);acts.appendChild(o);
+    r.style.cursor='pointer';r.onclick=e=>{if(!e.target.closest('button'))showTaskOutput(it)}}
+   else if(it.sid){const o=el('<button class=ghost>open</button>');
     o.onclick=()=>{closeModal();showPane('log');openSession(it.sid)};acts.appendChild(o)}
    if(it.can_stop){const x=el(`<button class=ghost>${it.kind==='queued'?'remove':'stop'}</button>`);
     x.onclick=async()=>{
@@ -6326,6 +6342,39 @@ async function showTasks(){
      if(ok){x.disabled=true;x.textContent=it.kind==='queued'?'removed':'stopped';refreshRunning()}};
     acts.appendChild(x)}
    body.appendChild(r)})})}
+// One background task: a shell's output as it grows, or a subagent's steps and words;
+// kept current while it runs, with a way to its chat.
+async function showTaskOutput(it){
+ const url='/api/tasks/output?sid='+encodeURIComponent(it.sid||'')+'&id='+encodeURIComponent(it.id);
+ let timer=null;
+ openSheet(it.title||'Background task',async body=>{
+  body.innerHTML='<div class=sheetnote>loading…</div>';
+  const draw=async()=>{
+   if(!body.isConnected){clearInterval(timer);return}
+   let d;try{const r=await fetch(url);d=await r.json();if(!r.ok)throw new Error(d.error||r.status)}
+   catch(e){body.innerHTML='';const x=el('<div class=sheetnote></div>');x.textContent='Its output is no longer available ('+(e.message||e)+').';body.appendChild(x);clearInterval(timer);return}
+   const running=/^(running|pending)/.test(d.status||'');
+   const stick=!body.querySelector('pre')||body.querySelector('pre').scrollTop+body.querySelector('pre').clientHeight>=body.querySelector('pre').scrollHeight-8;
+   body.innerHTML='';
+   const head=el('<div class=taskhead></div>');
+   head.textContent=[(d.kind==='agent'?'subagent':'shell'),running?'running':(d.status||'ended'),
+    d.since?(running?'for ':'took ')+fmtSecs(((d.ended||Date.now()/1000)-d.since)):'',
+    d.tools?plural(+d.tools,'tool use','tool uses'):'',d.tokens?fmtTok(+d.tokens)+' tokens':''].filter(Boolean).join(' \u00b7 ');
+   body.appendChild(head);
+   if(d.command){const c=el('<div class=taskcmd></div>');c.textContent='$ '+d.command;body.appendChild(c)}
+   if((d.steps||[]).length&&!d.output){const b=subStepsBox({steps:d.steps,tools:d.tools,type:'steps'});body.appendChild(b)}
+   const pre=el('<pre class=taskout></pre>');
+   pre.textContent=d.output||d.summary||(running?'(nothing written yet)':'(no output)');
+   body.appendChild(pre);if(stick)pre.scrollTop=pre.scrollHeight;
+   if(d.summary&&d.output){const sm=el('<div class=sheetnote></div>');sm.textContent='Reported: '+d.summary;body.appendChild(sm)}
+   const acts=el('<div class=row2 style="margin-top:8px"></div>');
+   if(d.output){const cp=el('<button class=ghost>copy output</button>');cp.onclick=()=>copy(d.output);acts.appendChild(cp)}
+   if(it.sid&&d.chat_saved&&it.sid!==sid){const g=el('<button class=ghost>go to its chat</button>');
+    g.onclick=()=>{closeModal();showPane('log');openSession(it.sid)};acts.appendChild(g)}
+   body.appendChild(acts);
+   if(!running&&timer){clearInterval(timer);timer=null}};
+  await draw();
+  timer=setInterval(draw,2000)},{sub:it.chat?'in “'+it.chat+'”':'background task'})}
 $('#runbadge').style.cursor='pointer';$('#runbadge').title='what is running — /tasks';
 $('#runbadge').addEventListener('click',showTasks);
 
@@ -6521,7 +6570,7 @@ function drawHero(fromData){
   else if(!live.length&&!queued.length)list.appendChild(el('<div class=hempty>Nothing running — Orbit is idle.</div>'));
   live.slice(0,4).forEach(t=>{
    const el_=heroRow(t.kind==='shell'?'$':t.kind==='background'?'\u29d7':t.status==='waiting for you'?'⏸':'⏺',t.title,
-    t.since?fmtSecs(d.now-t.since):'',t.sid?()=>openChatFromHome(t.sid):null,
+    t.since?fmtSecs(d.now-t.since):'',t.kind==='background'?()=>showTaskOutput(t):t.sid?()=>openChatFromHome(t.sid):null,
     t.kind==='background'?t.status:t.kind==='answer'&&t.status&&t.status!=='answering'?t.status:'');
    if(t.status==='waiting for you')el_.classList.add('wait');
    if(t.can_stop){const x=el('<button class=hrx>stop</button>');x.title=t.kind==='answer'?'stop this answer':'stop this command';
