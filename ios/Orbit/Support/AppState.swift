@@ -73,6 +73,8 @@ final class AppState: ObservableObject {
     /// Steps of this answer already over: each is its thinking, its words and
     /// the tools it then called, the way the saved chat splits them.
     @Published var liveSteps: [Message] = []
+    /// Notes sent into a running answer, by chat, until the Mac's saved copy shows them.
+    var pendingNotes: [String: [Message]] = [:]
     /// For the status line: when the answer began, its word for the work,
     /// roughly how much has come back, and since when it has been thinking.
     /// Read by a timer, so they need not publish.
@@ -348,7 +350,7 @@ final class AppState: ObservableObject {
                fresh.last?.isUser != true {
                 fresh.append(mine)
             }
-            messages = fresh
+            messages = withPendingNotes(fresh, sid: id)
             Cache.saveMessages(fresh, for: id)
             learnPlan(id, from: fresh)
             await loadModels()
@@ -392,7 +394,7 @@ final class AppState: ObservableObject {
                 } else if let seen = self.watchedCount, s.n != seen {
                     // changed elsewhere: read it without moving what the Mac has open
                     if let d = try? await server.peek(id) {
-                        self.messages = d.messages
+                        self.messages = self.withPendingNotes(d.messages, sid: id)
                         self.learnPlan(id, from: d.messages)
                         if let t = d.title { self.openChat?.title = t }
                         Cache.saveMessages(d.messages, for: id)
@@ -481,7 +483,9 @@ final class AppState: ObservableObject {
         // showed are not drawn twice
         flushText()
         liveSteps = []; liveText = ""; liveThinking = ""; liveRuns = []; liveTools = []
-        if let d = try? await server.peek(sid), liveSid == sid, openChat?.sid == sid { messages = d.messages }
+        if let d = try? await server.peek(sid), liveSid == sid, openChat?.sid == sid {
+            messages = withPendingNotes(d.messages, sid: sid)
+        }
         await rejoin(sid)
     }
     private var pendingText = ""
@@ -742,7 +746,7 @@ final class AppState: ObservableObject {
                 // its text would vanish from the screen until the answer ends.
                 let n = s.step ?? 0
                 if step >= 0, n != step, let d = try? await server.peek(sid), liveSid == sid {
-                    messages = d.messages
+                    messages = withPendingNotes(d.messages, sid: sid)
                 }
                 step = n
                 await pickUpPrompts(sid)            // a question or approval raised elsewhere
