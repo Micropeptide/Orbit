@@ -509,6 +509,16 @@ actor OrbitServer {
         case "subtask":
             let d = str("description")
             return .status(d.isEmpty ? "a helper is working" : "helper: \(d)")
+        case "subagent":
+            let d = (p as? [String: Any]) ?? [:]
+            let args = ToolText.stringify((d["args"] as? [String: Any]) ?? [:])
+            let num = { (k: String) -> Int in (d[k] as? Int) ?? (d[k] as? Double).map { Int($0) } ?? 0 }
+            return .subagentStep(parent: str("parent"), step: .init(name: str("name"), args: args),
+                                 tools: num("tools"), tokens: num("tokens"), description: str("description"))
+        case "subagent_done":
+            let d = (p as? [String: Any]) ?? [:]
+            guard let info = SubagentInfo(any: d["subagent"]) else { return nil }
+            return .subagentDone(parent: str("parent"), info: info)
         case "error", "stream_error":
             return .error(p as? String ?? str("error"))
         case "end":

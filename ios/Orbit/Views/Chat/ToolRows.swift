@@ -53,6 +53,9 @@ struct ToolRunRow: View {
                 Spacer(minLength: 4)
                 ToolClock(run: run)
             }
+            if let sa = run.subagent, !sa.steps.isEmpty, run.running || sa.background || open {
+                SubagentSteps(info: sa, all: open)
+            }
             if run.done {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text("⎿").foregroundStyle(.tertiary)
@@ -213,6 +216,21 @@ struct ThinkingBlock: View {
     var live = false
     var secs: Double? = nil
     @State private var open = false
+    @State private var showAll = false
+
+    /// Long thinking shows its first lines (the latest ones while it is written) and a
+    /// "Show all"; the rest is a tap away.
+    private static let lines = 14
+    private var lineCount: Int { text.split(separator: "\n", omittingEmptySubsequences: false).count }
+    private var long: Bool { lineCount > Self.lines + 2 || text.count > Self.lines * 140 }
+    private var shown: String {
+        guard long, !showAll else { return text }
+        if live {                                   // while it thinks: the newest part
+            let tail = text.split(separator: "\n", omittingEmptySubsequences: false).suffix(Self.lines)
+            return "…\n" + String(tail.joined(separator: "\n").suffix(Self.lines * 140))
+        }
+        return text
+    }
 
     private var label: String {
         if live { return "✻ Thinking…" }
@@ -234,13 +252,20 @@ struct ThinkingBlock: View {
             }
             .buttonStyle(.plain)
             if open {
-                Text(text)
+                Text(shown)
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
+                    .lineLimit(long && !showAll && !live ? Self.lines : nil)
                     .textSelection(.enabled)
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 9))
+                if long {
+                    Button(showAll ? "Show less" : "Show all · \(ToolText.plural(lineCount, "line", "lines"))") {
+                        withAnimation(.easeInOut(duration: 0.15)) { showAll.toggle() }
+                    }
+                    .font(.caption).buttonStyle(.plain).foregroundStyle(.tint)
+                }
             }
         }
     }
@@ -296,5 +321,38 @@ private extension String {
         var s = Substring(self)
         while let last = s.last, last.isWhitespace { s = s.dropLast() }
         return String(s)
+    }
+}
+
+
+/// A subagent's steps under its Agent row: the last three and "+N more tool uses" while
+/// it works, every step (and what it reported) when the row is opened.
+struct SubagentSteps: View {
+    let info: SubagentInfo
+    var all = false
+
+    var body: some View {
+        let shown = all ? info.steps : Array(info.steps.suffix(3))
+        VStack(alignment: .leading, spacing: 1) {
+            ForEach(Array(shown.enumerated()), id: \.offset) { i, st in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(i == 0 ? "⎿" : " ").foregroundStyle(.tertiary).frame(width: 10)
+                    Text(st.line).lineLimit(1).truncationMode(.tail)
+                }
+            }
+            let more = max(info.tools, info.steps.count) - shown.count
+            if more > 0 {
+                HStack(spacing: 6) {
+                    Text(" ").frame(width: 10)
+                    Text("+" + ToolText.plural(more, "more tool use", "more tool uses")).foregroundStyle(.tertiary)
+                }
+            }
+            if all, let s = info.summary, !s.isEmpty {
+                Text(s).font(.caption).foregroundStyle(.secondary).padding(.top, 3).lineLimit(12)
+            }
+        }
+        .font(.caption.monospaced())
+        .foregroundStyle(.secondary)
+        .padding(.leading, 18)
     }
 }

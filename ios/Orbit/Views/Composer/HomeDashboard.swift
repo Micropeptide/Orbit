@@ -172,7 +172,7 @@ struct HomeDashboard: View {
 
     private var runningCard: some View {
         let tasks = home?.tasks ?? []
-        let live = tasks.filter { $0.kind == .answer || ($0.kind == .shell && $0.canStop) }
+        let live = tasks.filter { $0.kind == .answer || ($0.kind == .shell && $0.canStop) || ($0.kind == .background && $0.running) }
         let queued = Dictionary(grouping: tasks.filter { $0.kind == .queued && !($0.status ?? "").hasPrefix("at ") },
                                 by: { $0.sid ?? "" })
         return card("Running now", live: !live.isEmpty, link: tasks.isEmpty ? nil : "All tasks",
@@ -184,9 +184,9 @@ struct HomeDashboard: View {
             } else {
                 ForEach(live.prefix(4)) { t in
                     HStack(spacing: 6) {
-                        row(t.kind == .shell ? "terminal" : t.status == "waiting for you" ? "pause.circle.fill" : "circle.fill",
+                        row(t.kind == .shell ? "terminal" : t.kind == .background ? "hourglass" : t.status == "waiting for you" ? "pause.circle.fill" : "circle.fill",
                             t.title,
-                            sub: t.kind == .answer && t.status != "answering" ? t.status : nil,
+                            sub: t.kind == .background ? t.status : t.kind == .answer && t.status != "answering" ? t.status : nil,
                             side: t.since.map { Self.duration((home?.now ?? 0) - $0) },
                             tint: t.status == "waiting for you" ? .orange : t.kind == .shell ? .secondary : .green,
                             action: t.sid.map { sid in { state.deepLink = sid } })

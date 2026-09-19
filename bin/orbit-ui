@@ -236,6 +236,24 @@ def background_tasks():
                           "title": st_.title or sid_, "status": ("at " + time.strftime("%a %H:%M", time.localtime(it["at"])))
                           if it.get("at") else ("paused" if st_.queue_paused else "next in line"),
                           "text": str(it.get("text") or "")[:160], "can_stop": True})
+    # Claude Code's own background work: shells run in the background, background subagents
+    try:
+        for r in q.CE.bg_tasks():
+            st_ = STATES.get(r.get("sid"))
+            running = r.get("status") in ("running", "pending")
+            items.append({"kind": "background", "id": r["id"], "sid": r.get("sid"),
+                          "title": r.get("description") or r["id"],
+                          "status": ("running" if running else r.get("status") or "ended")
+                                    + (" · " + ("subagent" if r.get("kind") == "agent" else "shell")),
+                          "text": r.get("summary") or r.get("command") or "",
+                          "chat": (st_.title if st_ else None),
+                          "since": r.get("since"), "ended": r.get("ended"),
+                          "running": running, "can_stop": False, "subkind": r.get("kind"),
+                          "tool_id": r.get("tool_id"), "tools": r.get("tools"), "tokens": r.get("tokens"),
+                          "secs": r.get("secs"), "summary": q.CE._report(r.get("summary")),
+                          "steps": (r.get("steps") or [])[-40:]})
+    except Exception:
+        pass
     for jid, rec in sorted(q.BG_JOBS.items(), key=lambda kv: kv[1]["started"]):
         rc = rec["proc"].poll()
         items.append({"kind": "shell", "id": jid, "title": rec.get("command", "")[:160],
@@ -2613,7 +2631,7 @@ def _drain():
 # stream events worth showing to a tab that rejoins an answer mid-way
 _STATUS_KINDS = ("server_starting", "stagnation", "autocompact", "squeezed", "notice", "status",
                  "long_running", "interjection", "retry", "subtask", "queued", "dequeued",
-                 "plan_nudge", "fail_streak", "ultrathink", "fallback")
+                 "plan_nudge", "fail_streak", "ultrathink", "fallback", "subagent")
 
 def _status_text(k, p):
     p = p or {}
@@ -2625,6 +2643,8 @@ def _status_text(k, p):
     if k == "retry":        return (f"model request failed ({p.get('kind')}) — retrying"
                                     + (f" in {p.get('wait')}s" if p.get("wait") else ""))
     if k == "subtask":      return f"helper: {p.get('description')} — {p.get('tool')}"
+    if k == "subagent":     return (f"{p.get('description') or 'subagent'} — {p.get('name')}"
+                                    f" · {p.get('tools')} tool use{'' if p.get('tools') == 1 else 's'}")
     if k == "fallback":     return f"{p.get('from')} kept failing — continuing on {p.get('to')}"
     return p.get("msg") or k.replace("_", " ")
 
@@ -2660,6 +2680,14 @@ def _live_record(st, k, p):
         for x in reversed(lv["tools"]):
             if x.get("id") and x.get("id") == p.get("id"):
                 x.update(ok=p.get("ok"), secs=p.get("secs")); break
+    elif k == "subagent":
+        # a subagent's progress, under the Agent row it belongs to, for a window that rejoins
+        sa = lv.setdefault("subagents", {}).setdefault(p.get("parent") or "?", {})
+        sa.update(description=p.get("description"), tools=p.get("tools"), tokens=p.get("tokens"),
+                  secs=p.get("secs"))
+        sa["last"] = (sa.get("last") or [])[-2:] + [{"name": p.get("name"), "args": p.get("args")}]
+    elif k == "bgtask":
+        lv.setdefault("bgtasks", {})[str(p.get("id"))] = {k2: p.get(k2) for k2 in ("id", "kind", "description", "status")}
     elif k == "auto_approved":
         # so a tab that rejoins mid-answer still sees what ran
         # unattended, not just what is still waiting on it
@@ -2980,7 +3008,9 @@ def render(msgs):
                                        # a chat saved before "ok" was kept: judge it by what came back
                                        "ok": m["ok"] if "ok" in m else q._tool_ok(body),
                                        "secs": m.get("secs"),
-                                       "output": body[:1500]})
+                                       "output": body[:1500],
+                                       **({"subagent": m["subagent"]} if m.get("subagent") else {}),
+                                       **({"background": True} if m.get("background") else {})})
             continue
         calls = m.get("tool_calls") or []
         for tc in calls:
@@ -3329,7 +3359,7 @@ if __name__ == "__main__":
     except Exception as e: print(f"  ! leftover remote sessions: {e}")
     def _reap_remote():
         while True:
-            time.sleep(60)
+            time.sleep(15)                     # background tasks between answers show within seconds
             try: q.CE.reap_live()
             except Exception: pass
     threading.Thread(target=_reap_remote, daemon=True).start()

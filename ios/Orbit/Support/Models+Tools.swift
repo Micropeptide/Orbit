@@ -26,6 +26,10 @@ struct ToolRun: Codable, Hashable, Identifiable {
     var stopped = false
     /// When a live call began, for its running clock. Not saved.
     var startedAt: Date?
+    /// An Agent call: what its subagent did (steps, tool uses, tokens), live and saved.
+    var subagent: SubagentInfo?
+    /// Started in the background (a shell with run_in_background, a background agent).
+    var background = false
     /// Worked out once, not on every redraw: a large JSON result is costly to read.
     private(set) var summary = ""
 
@@ -40,7 +44,7 @@ struct ToolRun: Codable, Hashable, Identifiable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, args, ok, secs, output, added, removed, done, stopped
+        case id, name, args, ok, secs, output, added, removed, done, stopped, subagent, background
         case summary = "ios_summary"
     }
 
@@ -64,6 +68,8 @@ struct ToolRun: Codable, Hashable, Identifiable {
         secs = (d["secs"] as? Double) ?? (d["secs"] as? Int).map(Double.init)
         if let s = d["output"] as? String { output = s }
         else if let o = d["output"], !(o is NSNull) { output = ToolText.json(o) }
+        subagent = SubagentInfo(any: d["subagent"])
+        background = (d["background"] as? Bool) ?? false
         if let diff = d["diff"] as? [String: Any] {
             added = (diff["added"] as? Int) ?? (diff["added"] as? Double).map { Int($0) }
             removed = (diff["removed"] as? Int) ?? (diff["removed"] as? Double).map { Int($0) }
@@ -85,7 +91,9 @@ struct ToolRun: Codable, Hashable, Identifiable {
         removed = c.lenientDouble(.removed).map { Int($0) }
         done = c.lenientBool(.done) ?? true
         stopped = c.lenientBool(.stopped) ?? false
-        if let s = try? c.decode(String.self, forKey: .summary), !s.isEmpty { summary = s } else { finish() }
+        subagent = try? c.decode(SubagentInfo.self, forKey: .subagent)
+        background = c.lenientBool(.background) ?? false
+        if let s = try? c.decode(String.self, forKey: .summary), !s.isEmpty, subagent == nil { summary = s } else { finish() }
     }
 
     /// The offline copy keeps the start of a long output; the summary line was
@@ -102,6 +110,8 @@ struct ToolRun: Codable, Hashable, Identifiable {
         try c.encodeIfPresent(removed, forKey: .removed)
         try c.encode(done, forKey: .done)
         try c.encode(stopped, forKey: .stopped)
+        try c.encodeIfPresent(subagent, forKey: .subagent)
+        if background { try c.encode(true, forKey: .background) }
         try c.encode(summary, forKey: .summary)
     }
 
@@ -117,6 +127,13 @@ struct ToolRun: Codable, Hashable, Identifiable {
         output = r.output
         added = r.added ?? added
         removed = r.removed ?? removed
+        if let sa = r.subagent {
+            // steps seen live stay when the result carries fewer (a background agent just launched)
+            var merged = sa
+            if merged.steps.count < (subagent?.steps.count ?? 0) { merged.steps = subagent?.steps ?? [] }
+            subagent = merged
+        }
+        background = r.background || background
         if args.isEmpty { args = r.args }
         done = true
         finish()
@@ -261,6 +278,8 @@ enum ToolText {
         let out = p.output ?? ""
         let disp = p.display
         if p.stopped { return "stopped before it came back" }
+        if let sa = p.subagent { return sa.line }
+        if p.background || (disp == "Bash" && p.args["run_in_background"] == "true") { return "Running in the background" }
         // Orbit's shell tools answer "exit=N\nstdout:\n…\nstderr:\n…": lead with what it printed
         if let sh = shell(out) {
             let printed = sh.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? sh.stderr : sh.stdout

@@ -576,6 +576,28 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .think.live{border-left-color:var(--acc)}
 .think.live summary{color:var(--acc)}
 .think.live .body{max-height:260px;overflow-y:auto}   /* only while it streams; finished thinking shows in full */
+/* long thinking, long messages: a few lines and a "Show all", as in Claude's app */
+.clamped{max-height:calc(var(--clampl,12) * 1.55em);overflow:hidden;
+ -webkit-mask-image:linear-gradient(#000 60%,transparent);mask-image:linear-gradient(#000 60%,transparent)}
+.clampbtn{display:inline-block;background:none;border:0;padding:2px 0;margin:0 0 6px;color:var(--acc);
+ font:inherit;font-size:12px;cursor:pointer}
+.clampbtn:hover{text-decoration:underline}
+.msg.u .clampbtn{margin-top:4px}
+/* a subagent at work, under the Agent row that started it */
+.tsubs{margin:2px 0 2px 18px;font-family:var(--mono);font-size:11.5px;color:var(--mut)}
+.tsubl{display:flex;gap:7px;line-height:1.55;min-width:0}
+.tsubl .tarr{width:12px;flex:none;color:var(--dim)}
+.tsubl span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tsubl.dim{color:var(--dim)}
+.tsubmeta{color:var(--dim);font-size:11px;margin-left:auto;margin-right:6px;white-space:nowrap}
+.tsubsteps{margin:3px 0 7px 18px;padding:6px 9px;background:var(--panel);border-radius:6px;font-family:var(--mono);font-size:11.5px}
+.tsubsteps .tsubhd{color:var(--dim);margin-bottom:3px;font-family:inherit}
+.tsubsteps .tsubl .tarr{color:var(--tool)}
+.tsubsteps pre.tsubsum{margin:6px 0 0;background:none;padding:0;max-height:220px}
+details.tool.bgrun .tdot{color:var(--think);animation:bgpulse 1.6s ease-in-out infinite}
+@keyframes bgpulse{50%{opacity:.35}}
+#bgchip{display:none;margin-left:8px;color:var(--acc);cursor:pointer;font-weight:500}
+#bgchip:hover{text-decoration:underline}
 .think .body .tstamp{display:block;color:var(--dim);font-size:10.5px;margin:8px 0 1px;font-variant-numeric:tabular-nums}
 .think .body .tstamp:first-child{margin-top:0}
 .planbox{margin:8px 0;border:1px solid var(--line);border-radius:9px;background:var(--card);
@@ -813,7 +835,7 @@ details.hookbox .hl{font-family:var(--mono);font-size:11px;margin:4px 0 0 16px;w
 .taskrow{display:flex;gap:10px;align-items:center;padding:8px 4px;border-bottom:1px solid var(--line)}
 .taskrow .tkind{font-size:10.5px;letter-spacing:.05em;text-transform:uppercase;border-radius:6px;padding:2px 7px;
  background:var(--panel);color:var(--mut);flex:0 0 auto}
-.taskrow .tkind.k-answer{color:var(--acc)}.taskrow .tkind.k-shell{color:var(--tool)}
+.taskrow .tkind.k-answer{color:var(--acc)}.taskrow .tkind.k-background{color:var(--think)}.taskrow .tkind.k-shell{color:var(--tool)}
 .taskrow .tmain{flex:1;min-width:0}
 .taskrow .ttitle{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .taskrow .tsub{font-size:11.5px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1809,6 +1831,22 @@ function copy(text){navigator.clipboard.writeText(text).then(()=>toast('copied')
 
 
 // raw: the composer text with [Pasted #n] tokens, so the paste shows collapsed
+// Long text shows its first lines with a "Show all" under it; the choice is kept per block.
+function clampLong(node,text,lines){
+ if(!node)return;
+ text=String(text||'');
+ const n=text.split('\n').length, long=n>lines+2||text.length>lines*140;
+ let btn=node.nextElementSibling&&node.nextElementSibling.classList.contains('clampbtn')?node.nextElementSibling:null;
+ if(!long){node.classList.remove('clamped');if(btn)btn.remove();return}
+ const label=()=>node._expanded?'Show less':'Show all \u00b7 '+plural(n,'line','lines');
+ if(!btn){btn=el('<button class=clampbtn></button>');node.after(btn);
+  btn.onclick=e=>{e.preventDefault();e.stopPropagation();node._expanded=!node._expanded;
+   node.classList.toggle('clamped',!node._expanded);btn.textContent=label()}}
+ node.style.setProperty('--clampl',lines);
+ node.classList.toggle('clamped',!node._expanded);btn.textContent=label();
+ // on screen, the drawn height decides (wrapped or joined lines differ from the text's)
+ requestAnimationFrame(()=>{if(node._expanded||!node.isConnected||!node.offsetParent)return;
+  if(node.scrollHeight<=node.clientHeight+4){node.classList.remove('clamped');btn.remove()}})}
 function addUser(text,images,ts,raw){
  const m=el('<div class="msg u"><div class=who>you<span class=acts></span></div></div>');
  const acts=m.querySelector('.acts');
@@ -1826,7 +1864,7 @@ function addUser(text,images,ts,raw){
   images.forEach(u=>{const i=document.createElement('img');i.src=u;b.appendChild(i)});m.appendChild(b)}
  const b=el('<div class=bub></div>');
  if(raw&&raw!==text)pasteBubble(b,raw);else{b.textContent=text;pathify(b)}m.appendChild(b);
- stamp(m,ts);wrap.appendChild(m);bottom();return m}
+ stamp(m,ts);wrap.appendChild(m);clampLong(b,text,14);bottom();return m}
 function modelLabel(id){
  const want=id||MODELS.current||MODELS.default;
  const m=(MODELS.models||[]).find(x=>x.id===want)||(MODELS.harness_recent||[]).find(x=>x.id===want);
@@ -1902,7 +1940,8 @@ function showSavedThinking(a,text,ts,marks){
  let took='';
  if(marks&&marks.length&&ts&&ts>marks[0][1])took=' for '+fmtSecs(ts-marks[0][1]);
  thinkLabel(a,'thought'+took);
- renderThink(a.think.querySelector('.body'),text,marks)}
+ renderThink(a.think.querySelector('.body'),text,marks);
+ clampLong(a.think.querySelector('.body'),text,12)}
 // Thinking with the time each paragraph began, where it began after a pause:
 // marks are [[offset, seconds], ...]; a label shows when 10s+ passed since the last.
 function renderThink(body,text,marks){
@@ -2275,6 +2314,15 @@ function attachLive(theSid, initial){
    lrows.push(c);a.tools.appendChild(c);if(c.classList.contains('done'))groupTool(c,0,true)});
   shownTools=tl.length;
   tl.forEach((t,i)=>{const r=lrows[i];if(r&&r.classList.contains('live')&&t.ok!=null){finishTool(r,t);groupTool(r,0,true)}});
+  // subagents at work, as the answering tab shows them (their last few steps)
+  Object.entries(lv.subagents||{}).forEach(([pid,sa])=>{
+   const i=tl.findIndex(t=>t.id===pid);const r=lrows[i];
+   if(!r||!r.classList.contains('live')||r._seenSub===sa.tools)return;
+   r._seenSub=sa.tools;
+   const last=(sa.last||[]).map(st=>({name:st.name,args:st.args}));
+   r._steps=Array(Math.max(0,(+sa.tools||0)-last.length)).fill({name:'tool'}).concat(last);
+   drawSub(r,sa)});
+  Object.values(lv.bgtasks||{}).forEach(b=>bgNote(theSid,b));
   if(lv.question&&lv.question.id!==a._q){a._q=lv.question.id;a.tools.appendChild(questionBox(lv.question))}
   // an approval waiting in this chat, raised by a stream some other tab owns
   if(lv.approval&&lv.approval.id!==shownApproval){
@@ -3646,7 +3694,7 @@ async function go(opts){
       if(thinkPending){clearTimeout(thinkPending);thinkPending=null}
       const tbody=a.think.querySelector('.body');
       renderThink(tbody,thinking,tmarks);
-      a.think.classList.remove('live');
+      a.think.classList.remove('live');clampLong(tbody,thinking,12);
       thinkLabel(a,thoughtFor());          // stays open: you close it when you want
      }
      if(!answer){a.bub.innerHTML='';a.m.querySelectorAll('.retrynote').forEach(x=>x.remove())}
@@ -3667,6 +3715,11 @@ async function go(opts){
       c.textContent='* '+m.p.name+'('+Object.entries(m.p.args||{}).map(([k,v])=>k+'='+String(v).slice(0,60)).join(', ')+')';
       a.tools.appendChild(c)}
      bottom()}
+    else if(m.k==='subagent'){
+     subagentLive(trows[m.p.parent],m.p);
+     statusSay((m.p.description||'subagent')+': '+subStepLine(m.p).slice(0,50));bottom()}
+    else if(m.k==='bgtask'){bgNote(sendSid,m.p)}
+    else if(m.k==='subagent_done'){subagentDone(trows[m.p.parent],m.p.subagent);bottom()}
     else if(m.k==='approval_request'){a.tools.appendChild(approvalBox(m.p));bottom();
      notify(sendSid,'Needs your approval',m.p.name+(m.p.reason?' — '+m.p.reason:''))}
     else if(m.k==='auto_approved'){
@@ -3828,6 +3881,9 @@ async function go(opts){
    }}
   if(queuedBy){SENDING.delete(sendSid);stopStatus(sendSid);await refreshRunning();syncBusy();renderSessions();return}
   if(pendingRender){clearTimeout(pendingRender);pendingRender=null}
+  // thinking that came after the answer's text is folded too, now that it is done
+  a.m.querySelectorAll('details.think .body').forEach(b=>{if(!b.classList.contains('clamped'))clampLong(b,b.textContent,12)});
+  setTimeout(pollBg,1200);             // background work it left running shows at once
  if(thinkPending){clearTimeout(thinkPending);thinkPending=null;
   renderThink(a.think.querySelector('.body'),thinking,tmarks)}
  if(thinking&&!answer){a.think.classList.remove('live');thinkLabel(a,thoughtFor())}
@@ -4841,6 +4897,7 @@ async function refreshRunning(){
   if([...RUNNING].some(x=>!SESSIONS.find(s=>s.id===x)))loadSessions();
   const badge=$('#runbadge');
   if(badge)badge.textContent=RUNNING.size?`${RUNNING.size} running`:'';
+  drawBgChip();
  }catch(e){}}
 setInterval(refreshRunning,2000);
 
@@ -5989,6 +6046,7 @@ function resultSummary(disp,p){
   return first.replace(/\s+/g,' ').slice(0,160)}
  if(p.diff&&(p.diff.added!=null||p.diff.removed!=null))
   return 'Added '+plural(+p.diff.added||0,'line','lines')+', removed '+plural(+p.diff.removed||0,'line','lines');
+ if(p.background||(disp==='Bash'&&args.run_in_background))return 'Running in the background';
  if(!out.trim())return disp==='Bash'||disp==='Python'?'(No output)':'(No content)';
  switch(disp){
   case 'Read':return 'Read '+plural(nLines(out),'line','lines');
@@ -6007,6 +6065,11 @@ function resultSummary(disp,p){
   case 'Web Search':case 'Fetch':case 'Fetch paper':
    return plural(nLines(out)>1?nLines(out):Math.max(1,Math.round(out.length/1000)),'line','lines')+' back';
   case 'Todos':case 'Plan':return 'Todos updated';
+  case 'Agent':if(p.subagent){const a=p.subagent;
+   if(a.background)return 'Running in the background';
+   return (a.status&&!/^(completed|done)$/.test(a.status)?a.status.charAt(0).toUpperCase()+a.status.slice(1):'Done')+' ('+plural(+a.tools||0,'tool use','tool uses')+
+    (a.tokens?' \u00b7 '+fmtTok(+a.tokens)+' tokens':'')+(a.secs!=null&&!a.background?' \u00b7 '+fmtSecs(+a.secs):'')+')'}
+   break;
  }
  // JSON back: say what is in it on one line rather than "{ +40 lines"
  const tr=out.trim();
@@ -6046,6 +6109,7 @@ function finishTool(d,p){
  tt.className='tt';tt.textContent=secs!=null&&secs>=0.5?fmtSecs(secs):'';
  if(secs!=null)d.dataset.secs=secs;
  if(p.args&&!d._args)d._args=p.args;
+ d.querySelectorAll('.tsubs,.tsubmeta').forEach(x=>x.remove());     // the live view gives way to "Done (…)"
  const res=el('<div class=tres><span class=tarr>⎿</span><span class=tsum></span></div>');
  if(!ok)res.classList.add('bad');
  res.querySelector('.tsum').textContent=resultSummary(disp,{...p,args:p.args||d._args});
@@ -6057,11 +6121,79 @@ function finishTool(d,p){
   a.textContent=Object.entries(d._args)
    .map(([k,v])=>k+': '+String(typeof v==='object'?JSON.stringify(v):v).slice(0,600)).join('\n');
   d.appendChild(a)}
+ // what a subagent did, step by step (Claude Code's ctrl+o view of it)
+ const sub=p.subagent||(d._steps&&d._steps.length?{steps:d._steps,tools:d._steps.length}:null);
+ if(sub&&(sub.steps||[]).length)d.appendChild(subStepsBox(sub));
+ if(sub&&sub.background)d.classList.add('bgrun');
  if(!out)return;
  const pre=document.createElement('pre');pre.textContent=out;d.appendChild(pre);
  const cp=el('<span class=more>copy output</span>');cp.onclick=e=>{e.stopPropagation();copy(out)};
  d.appendChild(cp);
  if(VERBOSE)d.open=true}
+/* ---------------- subagents and background tasks ----------------
+   As Claude Code shows them. An Agent row lists what its subagent is doing under it
+   ("⎿ Read src/app.py", "+5 more tool uses") and ends "Done (12 tool uses · 34k tokens ·
+   1m 5s)"; open the row for every step. Shells and agents sent to the background are
+   counted under the box ("2 background tasks") and listed in /tasks. */
+function subStepsBox(sub){
+ const box=el('<div class=tsubsteps><div class=tsubhd></div></div>');
+ const steps=(sub.steps||[]).filter(x=>x.name!=='tool'||x.args);
+ box.firstChild.textContent=(sub.type||'subagent')+' \u00b7 '+plural(+sub.tools||steps.length,'tool use','tool uses')+
+  (steps.length&&(+sub.tools||0)>steps.length?' (last '+steps.length+' shown)':'');
+ steps.forEach(st=>{const l=el('<div class=tsubl><span class=tarr>⏺</span><span></span></div>');
+  l.lastChild.textContent=subStepLine(st);l.lastChild.title=subStepLine(st);box.appendChild(l)});
+ if(sub.summary){const pr=document.createElement('pre');pr.className='tsubsum';pr.textContent=sub.summary;box.appendChild(pr)}
+ return box}
+// a subagent that ran in the background has finished: its row now reads "Done (…)"
+function subagentDone(row,sub){
+ if(!row||!sub)return;
+ row.classList.remove('bgrun');
+ row.querySelectorAll('.tsubs,.tsubmeta,.tsubsteps').forEach(x=>x.remove());
+ const t=row.querySelector('.tsum');if(t)t.textContent=resultSummary('Agent',{subagent:sub,output:'.'});
+ const tt=row.querySelector('.tt');if(tt&&sub.secs)tt.textContent=fmtSecs(+sub.secs);
+ row.appendChild(subStepsBox(sub))}
+function subStepLine(s){const t=toolTarget(s.name,s.args||{});return toolName(s.name)+(t?' '+t:'')}
+function subagentLive(row,p){
+ if(!row)return;
+ row._steps=row._steps||[];row._steps.push({name:p.name,args:p.args});drawSub(row,p)}
+function drawSub(row,p){
+ let box=row.querySelector('.tsubs');
+ if(!box){box=el('<div class=tsubs></div>');row.querySelector('summary').appendChild(box)}
+ box.innerHTML='';
+ const last=row._steps.slice(-3);
+ last.forEach((st,i)=>{const l=el('<div class=tsubl><span class=tarr></span><span></span></div>');
+  l.firstChild.textContent=i===0?'\u23bf':'';l.lastChild.textContent=subStepLine(st);box.appendChild(l)});
+ const more=row._steps.length-last.length;
+ if(more>0){const l=el('<div class="tsubl dim"><span class=tarr></span><span></span></div>');
+  l.lastChild.textContent='+'+plural(more,'more tool use','more tool uses');box.appendChild(l)}
+ let meta=row.querySelector('.tsubmeta');
+ if(!meta){meta=el('<span class=tsubmeta></span>');row.querySelector('.thead').insertBefore(meta,row.querySelector('.tt'))}
+ meta.textContent=plural(+p.tools||row._steps.length,'tool use','tool uses')+(p.tokens?' \u00b7 '+fmtTok(+p.tokens)+' tokens':'')}
+// background tasks by chat, from the stream and from /api/tasks
+let BGT={};
+function bgNote(forSid,p){if(!forSid||!p||!p.id)return;
+ BGT[forSid]=BGT[forSid]||{};BGT[forSid][p.id]={...(BGT[forSid][p.id]||{}),...p};drawBgChip()}
+function drawBgChip(){
+ let c=$('#bgchip');
+ if(!c){const h=$('#modehint');if(!h)return;c=el('<span id=bgchip title="Claude Code\'s background tasks — /tasks"></span>');
+  h.after(c);c.onclick=()=>showTasks()}
+ const n=Object.values(BGT[sid]||{}).filter(x=>/^(running|pending)/.test(x.status||'')).length;
+ c.textContent=n?'\u29d7 '+plural(n,'background task','background tasks'):'';c.style.display=n?'inline':'none'}
+async function pollBg(){
+ if(document.hidden)return;
+ try{const d=await (await fetch('/api/tasks')).json();
+  const next={};
+  (d.items||[]).filter(x=>x.kind==='background'&&x.sid).forEach(x=>{
+   (next[x.sid]=next[x.sid]||{})[x.id]={id:x.id,description:x.title,status:x.running?'running':(x.status||'ended')}});
+  BGT=next;drawBgChip();
+  // a background subagent that finished after its answer: its row on screen says so now
+  (d.items||[]).filter(x=>x.kind==='background'&&x.subkind==='agent'&&!x.running&&x.tool_id).forEach(x=>{
+   const row=wrap.querySelector('details.tool.bgrun[data-id="'+CSS.escape(x.tool_id)+'"]')||
+    [...wrap.querySelectorAll('details.tool[data-id="'+CSS.escape(x.tool_id)+'"]')].find(r=>/background/i.test((r.querySelector('.tsum')||{}).textContent||''));
+   if(row)subagentDone(row,{description:x.title,tools:+x.tools||(row._steps||[]).length,tokens:+x.tokens||0,
+    secs:x.secs,status:(x.status||'').split(' ')[0],summary:x.summary||'',
+    steps:(row._steps||[]).concat(x.steps||[])})})}catch(e){}}
+setInterval(pollBg,8000);setTimeout(pollBg,1500);
 /* Reading three files in a row is one thought, not three rows: finished look-ups fold
    into a single line ("Read 3 files, Searched for 1 pattern") you can open. */
 function famLabel(g){const counts={};
@@ -6171,7 +6303,7 @@ async function showTasks(){
  const items=d.items||[];
  openSheet('Background tasks',body=>{
   if(!items.length){body.appendChild(el('<div class=sheetnote>Nothing is running in the background.</div>'));return}
-  const label={answer:'answering',queued:'queued',shell:'shell'};
+  const label={answer:'answering',queued:'queued',shell:'shell',background:'background'};
   items.forEach(it=>{
    const r=el('<div class=taskrow><span class=tkind></span><div class=tmain><div class=ttitle></div><div class=tsub></div></div><div class=tacts></div></div>');
    r.querySelector('.tkind').textContent=label[it.kind]||it.kind;
@@ -6180,6 +6312,7 @@ async function showTasks(){
    const sub=[it.status];
    if(it.since)sub.push('for '+fmtSecs(d.now-it.since));
    if(it.text)sub.push('“'+it.text+'”');
+   if(it.kind==='background'&&it.chat)sub.push('in “'+it.chat+'”');
    r.querySelector('.tsub').textContent=sub.filter(Boolean).join(' · ');
    const acts=r.querySelector('.tacts');
    if(it.sid){const o=el('<button class=ghost>open</button>');
@@ -6379,7 +6512,7 @@ function drawHero(fromData){
  const grid=el('<div class=herogrid></div>');
  const skel=c=>{for(let i=0;i<3;i++){const x=el('<div class=hskel></div>');x.style.width=(90-i*18)+'%';c.appendChild(x)}};
  // ---- running now
- {const live=tasks.filter(t=>t.kind==='answer'||(t.kind==='shell'&&t.can_stop));
+ {const live=tasks.filter(t=>t.kind==='answer'||(t.kind==='shell'&&t.can_stop)||(t.kind==='background'&&t.running));
   const queued=tasks.filter(t=>t.kind==='queued'&&!/^at /.test(t.status||''));
   const c=heroCard('Running now',tasks.length?'all tasks':'',showTasks);
   const dot=el(`<span class="hdot${live.length?' live':''}"></span>`);c.querySelector('.hch').prepend(dot);
@@ -6387,9 +6520,9 @@ function drawHero(fromData){
   if(!d)skel(list);
   else if(!live.length&&!queued.length)list.appendChild(el('<div class=hempty>Nothing running — Orbit is idle.</div>'));
   live.slice(0,4).forEach(t=>{
-   const el_=heroRow(t.kind==='shell'?'$':t.status==='waiting for you'?'⏸':'⏺',t.title,
+   const el_=heroRow(t.kind==='shell'?'$':t.kind==='background'?'\u29d7':t.status==='waiting for you'?'⏸':'⏺',t.title,
     t.since?fmtSecs(d.now-t.since):'',t.sid?()=>openChatFromHome(t.sid):null,
-    t.kind==='answer'&&t.status&&t.status!=='answering'?t.status:'');
+    t.kind==='background'?t.status:t.kind==='answer'&&t.status&&t.status!=='answering'?t.status:'');
    if(t.status==='waiting for you')el_.classList.add('wait');
    if(t.can_stop){const x=el('<button class=hrx>stop</button>');x.title=t.kind==='answer'?'stop this answer':'stop this command';
     x.onclick=async e=>{e.stopPropagation();x.disabled=true;
