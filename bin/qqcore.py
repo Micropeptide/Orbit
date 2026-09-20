@@ -351,13 +351,47 @@ def _local_model_name_legacy():
     except Exception:
         return None
 
-def local_model_dirs():
-    """Model folders on disk — anything else you download shows up here."""
+_WEIGHTS = (".safetensors", ".gguf", ".npz", ".bin")
+
+def _has_weights(path):
+    """A folder with weights in it. A download in progress has a folder and a log and
+    no weights yet, and offering it as a model only ever ends in a failed restart."""
     try:
-        return sorted(d for d in os.listdir(MTPLX_MODELS)
-                      if os.path.isdir(os.path.join(MTPLX_MODELS, d)))
+        return any(f.endswith(_WEIGHTS) for f in os.listdir(path))
+    except OSError:
+        return False
+
+def local_model_dirs():
+    """Model folders on disk — anything else you download shows up here. Staging
+    folders (MTPLX downloads into a dot-folder first) and half-arrived downloads
+    are not models yet, so they are not offered as one."""
+    try:
+        names = sorted(d for d in os.listdir(MTPLX_MODELS) if not d.startswith("."))
     except OSError:
         return []
+    return [d for d in names
+            if os.path.isdir(os.path.join(MTPLX_MODELS, d))
+            and _has_weights(os.path.join(MTPLX_MODELS, d))]
+
+_DIR_LABEL = {}
+
+def local_dir_label(d):
+    """"orcarouter--Qwen3.8-27B-Uncensored-MLX" -> "Qwen3.8 27B Uncensored · 4-bit".
+    The publisher goes first in the folder name and last in what you read."""
+    path = os.path.join(MTPLX_MODELS, d)
+    try: key = (d, os.path.getmtime(os.path.join(path, "config.json")))
+    except OSError: key = (d, 0)
+    if key in _DIR_LABEL: return _DIR_LABEL[key]
+    name = d.split("--")[-1] if "--" in d else d
+    name = name.replace("-MLX", "").replace("_", " ").replace("-", " ").strip()
+    bits = None
+    try:
+        bits = (json.load(open(os.path.join(path, "config.json"))).get("quantization") or {}).get("bits")
+    except Exception:
+        bits = None
+    label = name + (f" · {int(bits)}-bit" if bits else "")
+    _DIR_LABEL[key] = label
+    return label
 
 def local_model_configured():
     try:
@@ -366,11 +400,43 @@ def local_model_configured():
     except Exception:
         return None
 
+_INSPECT = {}
+
+def local_model_check(dirname):
+    """What MTPLX makes of a model folder: whether it can run it at all, and whether
+    it has a recorded baseline. Asking costs a process, so the answer is kept until
+    the folder's config changes. Empty dict when MTPLX cannot be asked."""
+    path = os.path.join(MTPLX_MODELS, os.path.basename(dirname))
+    try: key = (path, os.path.getmtime(os.path.join(path, "config.json")))
+    except OSError: key = (path, 0)
+    if key in _INSPECT: return dict(_INSPECT[key])
+    out = {}
+    try:
+        r = subprocess.run([MTPLX, "inspect", path, "--json", "--no-strict-exit-code"],
+                           capture_output=True, text=True, timeout=60)
+        d = json.loads(r.stdout or "{}")
+        c = d.get("compatibility") or {}
+        out = {"can_run": bool(c.get("can_run")),
+               "verified": bool(c.get("runtime_contract")),
+               "arch": d.get("architecture") or "",
+               "message": c.get("message") or ""}
+    except Exception:
+        out = {}
+    _INSPECT[key] = out
+    return dict(out)
+
+
 def switch_local_model(dirname, on_status=None):
     """Point the local server at a different model folder and restart it."""
     path = os.path.join(MTPLX_MODELS, os.path.basename(dirname))
     if not os.path.isdir(path):
         return {"error": f"no model folder named {dirname}"}
+    # ask MTPLX before stopping anything: a model it cannot run used to be found out
+    # after the server had already been stopped and a minute spent loading weights
+    check = local_model_check(dirname)
+    if check and not check.get("can_run"):
+        return {"error": f"MTPLX cannot run {os.path.basename(dirname)}"
+                         + (f": {check['message']}" if check.get("message") else "")}
     cfg = json.load(open(LAUNCH))
     a = list(cfg.get("args") or [])
     if "--model" in a: a[a.index("--model") + 1] = path
@@ -379,7 +445,13 @@ def switch_local_model(dirname, on_status=None):
     json.dump(cfg, open(LAUNCH, "w"), indent=1)
     stop_server(); time.sleep(2)
     served = ensure_model(on_status)
-    return {"ok": True, "serving": served}
+    out = {"ok": True, "serving": served}
+    if check and not check.get("verified"):
+        # MTPLX runs a family-compatible model but marks its figures unverified
+        # until it has recorded a baseline of its own on a first load
+        out["note"] = ("MTPLX has no exactness baseline for this model yet, so its "
+                       "speed figures are marked unverified until it records one.")
+    return out
 
 def model_catalogue():
     cat = MODELS.catalogue(ROOT, local_model_name(), secrets_load())
@@ -391,7 +463,7 @@ def model_catalogue():
         squashed = d.lower().replace("-", "").replace("_", "")
         if squashed and squashed in served.replace("-", "").replace("_", ""): continue
         cat.append({"id": "local-dir:" + d, "provider": "local", "model": d,
-                    "label": d.replace("--", " · "), "kind": "openai",
+                    "label": local_dir_label(d), "kind": "openai",
                     "provider_label": "Local · needs a restart", "context": None,
                     "thinking": True, "ready": True, "switch": True})
     return cat

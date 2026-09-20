@@ -2287,11 +2287,14 @@ $('#modelsel').onchange=async()=>{setTimeout(drawClaudeBar,400);
    body:JSON.stringify({id,sid})});
  const d=await r.json();
  if(d.switch){
-  if(!confirm('That model is not loaded. Restart the local server with '+d.switch+'? '
+  const nm=(MODELS.models.find(x=>x.id===id)||{}).label||d.switch;
+  if(!confirm('That model is not loaded. Restart the local server with '+nm+'? '
              +'This takes a minute and stops anything running.')){drawModelPicker();return}
-  toast('loading '+d.switch+'…');
+  toast('loading '+nm+'…');
   const res=await apiPost('/api/model/local_switch',{name:d.switch},'switching model');
+  if(res&&res.error){toast(res.error.slice(0,160));drawModelPicker();return}
   if(res&&res.serving)toast('now serving '+res.serving);
+  if(res&&res.note)sysline(res.note);
   await loadModels();refreshStatus();return}
  if(d.error){toast(d.error);drawModelPicker();return}
  MODELS.current=id;drawOffpeak();
