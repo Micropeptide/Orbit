@@ -300,7 +300,7 @@ struct ModelPickerView: View {
             }
             Spacer()
             // a provider that lists its own models can be asked again from here
-            if let pid = g.providerID, let p, !p.isLocal, g.missing == nil, pid != "chatgpt" {
+            if let pid = g.providerID, let p, !p.isLocal, !p.keyless, g.missing == nil, pid != "chatgpt" {
                 if state.usage.refreshing.contains(pid) {
                     ProgressView().controlSize(.mini)
                 } else {

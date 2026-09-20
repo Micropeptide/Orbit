@@ -303,6 +303,7 @@ def autostart(on_status=None):
     return None
 
 import providers as MODELS
+import bionic as BIONIC          # the model host on this Mac, if it is installed
 
 # The chat currently being answered picks the model; unset means the default,
 # which means the local one. Set per turn by the caller.
@@ -403,6 +404,19 @@ def current_model(mid=None):
 def model_is_local(mid=None):
     m = current_model(mid)
     return bool(m and m["provider"] == "local")
+
+def model_shares_this_mac(mid=None):
+    """A model whose weights sit in this Mac's memory: the one MTPLX serves, or one
+    Bionic is running. Two of those answering at once evict each other's cache and
+    both crawl, so they take turns. Only MTPLX's is Orbit's own server to wake,
+    which is why this is not the same question as model_is_local()."""
+    if model_is_local(mid): return True
+    if not BIONIC.installed(): return False
+    try: m = current_model(mid) or {}
+    except Exception: return False
+    return (m.get("provider") == "bionic"
+            or (m.get("provider") == "harness"
+                and (m.get("provider_cfg") or {}).get("provider") == "bionic"))
 
 MODEL = None
 def quiet_left():
@@ -1508,6 +1522,9 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
         out["model"] = spec.get("label") or spec["model"]
         return out
     base = (prov.get("base_url") or BASE).rstrip("/")
+    if spec["provider"] == "bionic":
+        # Bionic only serves while its local server is on, and it starts off
+        base = (MODELS.bionic_ensure() or base).rstrip("/")
     body = {"model": (MODEL if spec["provider"] == "local" else spec["model"]),
             "messages": messages, "stream": True,
             "chat_template_kwargs": {"enable_thinking": think}}
@@ -5646,7 +5663,7 @@ GEN_STATE = {"holder": None, "since": 0.0, "ended": 0.0}
 _GEN_DEPTH = threading.local()
 
 def _slot_applies(model=None):
-    return bool(S.get("one_chat_at_a_time", True)) and model_is_local(model)
+    return bool(S.get("one_chat_at_a_time", True)) and model_shares_this_mac(model)
 
 def _slot_took(holder):
     d = getattr(_GEN_DEPTH, "n", 0)
@@ -6106,7 +6123,8 @@ def model_catalogue():
         # (through the gateway where the API needs translating or there are several accounts)
         for m in hcat:
             pid = m["model"].split("/")[0]
-            if pid in ("local", "claude", "anthropic"): continue      # Anthropic has its own native entry
+            # Anthropic and Bionic each have their own native entry already
+            if pid in ("local", "claude", "anthropic", "bionic"): continue
             did = "harness-direct:" + m["model"]
             if did in have: continue
             cat.append({**m, "id": did, "provider": "harness-direct", "kind": "anthropic",

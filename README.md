@@ -150,6 +150,7 @@ and line breaks picked up when copying a key are removed.
 | Provider | How it is reached | Notes |
 |---|---|---|
 | **Local** (MTPLX on Apple Silicon) | directly | Starts on demand, sleeps when idle; one answer at a time |
+| **Bionic** (models it runs on your Mac) | directly, and through the gateway in Claude Code mode | Found by itself, no key; its local server is switched on when you pick one of its models, and it takes turns with the local model |
 | **Claude · your subscription** | plain Claude Code on your own login | No API key; a long-lived token from `claude setup-token` can be saved instead of relying on the Keychain |
 | **OpenCode Go**, **OpenCode Zen** | Orbit's gateway, for every model | Each model on its own API (chat, Messages or Responses); the per-conversation session header OpenCode Go requires is sent for you |
 | **DeepSeek**, **Qwen** (Model Studio), **GLM** (Z.ai / BigModel), **MiniMax**, **Kimi**, **Anthropic** | directly, at their Anthropic-compatible endpoints | Region choice where a provider has two |
