@@ -45,6 +45,13 @@ extension OrbitServer {
         try await settingsCall("/api/secrets/save", method: "POST", body: ["secrets": [name: value]])
     }
 
+    /// Switch on the local server of a model host on the Mac (Bionic), which keeps
+    /// it off until something needs it. Returns what it says afterwards.
+    @discardableResult
+    func startBionic() async throws -> JSONValue {
+        try await postChecked("/api/bionic/start", [:], timeout: 60)
+    }
+
     /// add | remove | rename | activate | clear
     @discardableResult
     func harnessAccount(provider: String, op: String, id: String? = nil,

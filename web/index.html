@@ -3096,7 +3096,8 @@ async function renderHarnessModels(box){
   const card=el('<details class=memrow style="display:block;margin:6px 0;padding:8px 10px;border:1px solid var(--line);border-radius:9px"></details>');
   card.open=p.id==='opencode-go'||p.id==='local'||p.id==='claude';
   const nAcc=(p.accounts||[]).filter(a=>a.key_set).length;
-  const status=p.auth==='local'?'on this Mac':p.auth==='subscription'?(p.ready?'✓ uses your Claude login':p.login==='missing'?'Claude Code not installed':'not signed in — see below')
+  const status=p.auth==='local'?'on this Mac':p.keyless?('on this Mac · server '+(p.server&&p.server.running?'on':'off'))
+   :p.auth==='subscription'?(p.ready?'✓ uses your Claude login':p.login==='missing'?'Claude Code not installed':'not signed in — see below')
    :(p.key_set?(nAcc>1?`✓ ${nAcc} accounts`:'✓ key set'):'needs a key');
   card.appendChild(el(`<summary style="cursor:pointer"><b>${esc(p.label)}</b> <span class=note>${status} · ${p.models.length} models${p.auth==='subscription'?' · Claude Code mode only':''}</span></summary>`));
   if(p.docs)card.appendChild(el(`<div class=note style="margin:4px 0">${esc(p.docs)}</div>`));
@@ -3119,14 +3120,26 @@ async function renderHarnessModels(box){
     const c=(v.providers||[]).find(x=>x.id==='claude')||{};toast(c.ready?'signed in':'still not signed in');delete HPROV_CACHE[p.id];loadModels();renderHarnessModels(box)};
    card.appendChild(tr)}
   if(p.id==='opencode-go')card.appendChild(el(`<div class=note style="margin:4px 0">An OpenCode Go account has one allowance shared by all its models, in 5-hour, weekly and monthly windows; what is left comes from OpenCode itself and is shown with each account (and in the provider picker). Each model shows roughly what it has cost through Orbit.</div>`));
-  if(p.auth!=='local'&&p.auth!=='subscription'){
+  if(p.keyless&&p.server){
+   // Bionic: its models only answer while its own local server is on
+   const sv=el(`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0"><span class=note>${
+     p.server.running?'Serving on port <b>'+esc(String(p.server.port))+'</b> — Orbit reaches it there.'
+      :'Its local server is off. Orbit switches it on when you send a message to one of these models.'}</span>${
+     p.server.running?'':'<button class=ghost style="font-size:11.5px">start it now</button>'}</div>`);
+   const sb=sv.querySelector('button');
+   if(sb)sb.onclick=async()=>{sb.textContent='starting…';sb.disabled=true;
+    const d=await apiPost('/api/bionic/start',{},'starting Bionic');
+    toast(d&&d.ok?'Bionic is serving':'could not start it'+(d&&d.detail?': '+d.detail:''));
+    delete HPROV_CACHE[p.id];loadModels();renderHarnessModels(box)};
+   card.appendChild(sv)}
+  if(p.auth!=='local'&&p.auth!=='subscription'&&!p.keyless){
    const rf=el(`<div class=note style="margin:2px 0">${p.fetched_at?'model list updated '+new Date(p.fetched_at*1000).toLocaleString():'preset model list'} <button class=ghost style="font-size:11px">refresh model list</button></div>`);
    rf.querySelector('button').onclick=async()=>{rf.querySelector('button').textContent='…';
     const d=await apiPost('/api/harness/refresh',{provider:p.id},'refreshing models');
     const r=d&&d.results&&d.results[p.id];toast(r?`${p.label}: ${r[0]} models${r[1]?' — '+r[1]:''}`:'refresh failed');
     delete HPROV_CACHE[p.id];renderHarnessModels(box)};
    card.appendChild(rf)}
-  if(p.auth!=='local'&&p.auth!=='subscription'){
+  if(p.auth!=='local'&&p.auth!=='subscription'&&!p.keyless){
    // accounts: several keys for one provider (say two OpenCode Go subscriptions)
    const accs=p.accounts||[];
    const ab=el('<div style="margin:6px 0"></div>');
@@ -4259,8 +4272,9 @@ async function openSettings(tab){
       <span>${esc(pv.kind)}${pv.base_url?' · '+esc(pv.base_url.replace(/^https?:\/\//,'')):''}</span>
       ${kn?`<input id="k_${esc(pid)}" type=password style="max-width:230px"
             placeholder="${keys[kn]?esc(keys[kn]):'paste '+esc(kn)}">`
-          :'<span class=note style="min-width:230px">no key needed</span>'}
-      <button class=ghost data-fetch="${esc(pid)}">fetch models</button>
+          :`<span class=note style="min-width:230px">${pv.server?(pv.server.running?'serving — no key needed':'server off — starts when you use it'):'no key needed'}</span>`}
+      ${pv.server&&!pv.server.running?`<button class=ghost data-bionic="${esc(pid)}">start server</button>`
+        :`<button class=ghost data-fetch="${esc(pid)}">fetch models</button>`}
       ${pv.keys_url?`<a class=note href="${esc(pv.keys_url)}" target=_blank>get a key ↗</a>`:''}
      </div>`}).join('');
    body.innerHTML=`<div class=sec>Providers
@@ -4291,6 +4305,11 @@ async function openSettings(tab){
    body.querySelectorAll('[data-forget]').forEach(b=>b.onclick=async()=>{
     if(!confirm('Remove '+b.dataset.forget+' from the list?'))return;
     await apiPost('/api/model/forget',{id:b.dataset.forget},'removing');render('models')});
+   body.querySelectorAll('[data-bionic]').forEach(b=>b.onclick=async()=>{
+    b.textContent='starting…';b.disabled=true;
+    const d=await apiPost('/api/bionic/start',{},'starting Bionic');
+    toast(d&&d.ok?'Bionic is serving':'could not start it'+(d&&d.detail?': '+d.detail:''));
+    render('models')});
    body.querySelectorAll('[data-fetch]').forEach(b=>b.onclick=async()=>{
     const pid=b.dataset.fetch, inp=$('#k_'+pid);
     if(inp&&inp.value.trim()){

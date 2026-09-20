@@ -125,14 +125,16 @@ struct HarnessProvider: Decodable, Identifiable, Hashable {
     var custom: Bool
     var fetchedAt: Double?
     var models: [HarnessModel]
+    var keyless: Bool           // a host on the Mac: nothing to sign in to, no key
+    var server: HarnessServer?  // …but one that only answers while its server is on
 
     var isLocal: Bool { auth == "local" }
     var isSubscription: Bool { auth == "subscription" }
-    var takesKeys: Bool { !isLocal && !isSubscription }
+    var takesKeys: Bool { !isLocal && !isSubscription && !keyless }
 
     enum CodingKeys: String, CodingKey {
         case id, label, base, alt_bases, key, key_set, auth, ready, login, token_set
-        case accounts, docs, keys_url, custom, fetched_at, models
+        case accounts, docs, keys_url, custom, fetched_at, models, keyless, server
     }
 
     init(from d: Decoder) throws {
@@ -153,11 +155,14 @@ struct HarnessProvider: Decodable, Identifiable, Hashable {
         custom = c.lenient(Bool.self, .custom) ?? false
         fetchedAt = c.lenient(Double.self, .fetched_at)
         models = c.lenient([HarnessModel].self, .models) ?? []
+        keyless = c.lenient(Bool.self, .keyless) ?? false
+        server = try? c.decode(HarnessServer.self, forKey: .server)
     }
 
     /// One line for a list row.
     var statusLine: String {
         if isLocal { return "on the Mac" }
+        if keyless { return "on the Mac · server " + ((server?.running ?? false) ? "on" : "off") }
         if isSubscription {
             if ready { return "uses your Claude login" }
             return login == "missing" ? "Claude Code not installed" : "not signed in"
@@ -165,6 +170,22 @@ struct HarnessProvider: Decodable, Identifiable, Hashable {
         let n = accounts.filter(\.keySet).count
         if keySet { return n > 1 ? "\(n) accounts" : "key set" }
         return "needs a key"
+    }
+}
+
+/// A model host on the Mac that serves only while its own server is running
+/// (Bionic). Orbit starts it when a chat needs it; this is so you can see it.
+struct HarnessServer: Decodable, Hashable {
+    var installed: Bool
+    var running: Bool
+    var port: Int
+
+    enum CodingKeys: String, CodingKey { case installed, running, port }
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        installed = c.lenient(Bool.self, .installed) ?? false
+        running = c.lenient(Bool.self, .running) ?? false
+        port = Int(c.lenient(Double.self, .port) ?? 0)
     }
 }
 

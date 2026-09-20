@@ -691,6 +691,10 @@ class H(http.server.BaseHTTPRequestHandler):
                                                      a["id"], q.ROOT)
                         if a["live"] and not a["live"].get("error"):
                             a["exhausted"] = q.USAGE.exhausted(q.ROOT, pv["id"], a["id"])
+                if pv["id"] == "bionic":
+                    # its models only answer while its own server is on
+                    try: pv["server"] = q.BIONIC.status()
+                    except Exception: pv["server"] = None
             view["limits_at"] = (q.USAGE.limits_meta(q.ROOT) or {}).get("at")
             view["gateway"] = {"port": q.HARNESS_PORT, "error": GATEWAY["error"]}
             try:
@@ -832,7 +836,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 "models": q.model_catalogue(),
                 "current": S.model or q.MODELS.load(q.ROOT).get("default") or "",
                 "default": q.MODELS.load(q.ROOT).get("default") or "",
-                "providers": q.MODELS.load(q.ROOT)["providers"],
+                "providers": _providers_view(),
                 "keys": q.secrets_masked(), "harness_mode": bool(q.S.get("harness_mode")),
                 "codex_mode": bool(q.S.get("codex_mode")) and not q.S.get("harness_mode"),
                 "codex_recent": q.S.get("codex_recent") or [],
@@ -1369,6 +1373,10 @@ class H(http.server.BaseHTTPRequestHandler):
                 return self._send(200, jdump({"cancelled": True, "error": (r.stderr or "").strip()[-200:]
                                               if "-128" not in (r.stderr or "") else ""}))
             return self._send(200, jdump({"path": path.rstrip("/") or "/"}))
+        if p == "/api/bionic/start":
+            # Bionic keeps its local server switched off until something needs it
+            ok, why = q.BIONIC.start()
+            return self._send(200, jdump({"ok": ok, "detail": why, "server": q.BIONIC.status()}))
         if p == "/api/harness/refresh":
             ids = [d["provider"]] if d.get("provider") else [k for k in q.HARN.providers(q.ROOT) if k != "local"]
             out = {}
@@ -2730,6 +2738,19 @@ def _live_record(st, k, p):
         lv["status"] = _status_text(k, p)
     lv["seq"] = lv.get("seq", 0) + 1
 
+def _providers_view():
+    """The provider registry as the settings page sees it. Bionic's endpoint is not
+    stored — it is whatever port its own server reports — so it is filled in here."""
+    provs = q.MODELS.load(q.ROOT)["providers"]
+    if "bionic" in provs:
+        provs = dict(provs)
+        st = {}
+        try: st = q.BIONIC.status()
+        except Exception: pass
+        provs["bionic"] = {**provs["bionic"], "base_url": q.MODELS.bionic_base(), "server": st}
+    return provs
+
+
 GATEWAY = {"srv": None, "error": None}
 
 def _gateway_route(provider, model):
@@ -2746,17 +2767,24 @@ def _gateway_route(provider, model):
         fmt = ("messages" if low.startswith(("claude", "qwen3.", "minimax")) else
                "responses" if low.startswith(("gpt", "grok", "o3", "o4")) else "chat")
         if p.get("auth") == "api_key": fmt = "messages"
+        if provider == "bionic": fmt = "chat"        # whatever it is called, Bionic speaks chat
         keys = q.HARN.account_keys(p, q.secrets_load(), q.ROOT, provider)
-        return {"base": p.get("base") or "", "format": fmt, "api_key": keys[0]["api_key"] if keys else "",
+        return {"base": (q.MODELS.bionic_ensure() if provider == "bionic" else "") or p.get("base") or "",
+                "format": fmt, "api_key": keys[0]["api_key"] if keys else "",
                 "accounts": [{"id": a["id"], "api_key": a["api_key"]} for a in keys],
+                "key_required": not p.get("keyless"),
                 "proxy": q.HARN.load(q.ROOT).get("proxy") or ""}
     pc = spec["provider_cfg"]
     base = pc["base"]
     if pc.get("local"):
         base = q.CE.model_endpoint()[0] + "/v1"
+    if provider == "bionic":
+        # Bionic serves only while its own server is on; switch it on for this run
+        base = q.MODELS.bionic_ensure() or base
     return {"base": base, "format": pc["format"], "api_key": pc["api_key"], "proxy": pc.get("proxy"),
             "accounts": pc.get("accounts") or [],
-            "key_required": not pc.get("local"), "max_output": pc.get("max_output"),
+            "key_required": not (pc.get("local") or pc.get("keyless")),
+            "max_output": pc.get("max_output"),
             # Anthropic itself takes every field Claude Code sends; other vendors may not
             "strict": provider not in ("anthropic",) and not str(model).startswith("claude")}
 

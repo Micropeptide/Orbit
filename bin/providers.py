@@ -46,6 +46,12 @@ BUILTIN_PROVIDERS = {
                "note": "another local server, if you run one"},
     "lmstudio": {"label": "LM Studio", "kind": "openai",
                  "base_url": "http://127.0.0.1:1234/v1", "key": ""},
+    # Bionic keeps its models on this Mac and serves them at the same OpenAI
+    # endpoint LM Studio does; base_url is filled in from the port its server
+    # actually reports, and the server is switched on when a model is picked.
+    "bionic": {"label": "Bionic · this Mac", "kind": "openai", "managed": True,
+               "base_url": "", "key": "",
+               "note": "the models Bionic runs on this Mac"},
 }
 
 # Claude ids change faster than this file does; the Models API is the source of
@@ -347,6 +353,34 @@ def cli_stream(backend, model, messages, emit=None, cancel=None, timeout=900,
     return msg
 
 
+def bionic_models():
+    """What Bionic has on this Mac, so its models are in the picker without
+    anyone having to fetch a list first. Silent when Bionic is not installed."""
+    try:
+        import bionic
+        return bionic.catalogue_models()
+    except Exception:
+        return []
+
+
+def bionic_base():
+    """Bionic's endpoint, on the port its own server reports."""
+    try:
+        import bionic
+        return bionic.base_url(bionic.port())
+    except Exception:
+        return ""
+
+
+def bionic_ensure():
+    """Bionic's endpoint, switching its server on first if it is off."""
+    try:
+        import bionic
+        return bionic.ensure()
+    except Exception:
+        return ""
+
+
 def _path(root):  return os.path.join(root, "config", "models.json")
 
 
@@ -404,6 +438,8 @@ def catalogue(root, local_model=None, secrets=None):
     if local_model:
         add({"provider": "local", "model": local_model, "label": local_model,
              "context": None, "thinking": True})
+    for m in bionic_models():
+        add(m)
     for m in cli_models():
         add(m)
     for m in cfg["models"]:
@@ -429,6 +465,8 @@ def resolve(root, mid, local_model=None, secrets=None):
         return {**pick, "provider_cfg": {"kind": "cli", "backend": pick["provider"],
                                          "label": b["label"], "api_key": ""}}
     prov = dict(cfg["providers"].get(pick["provider"]) or {})
+    if pick["provider"] == "bionic" and not prov.get("base_url"):
+        prov["base_url"] = bionic_base()
     key_name = prov.get("key") or ""
     prov["api_key"] = (secrets or {}).get(key_name) or os.environ.get(key_name) or ""
     return {**pick, "provider_cfg": prov}

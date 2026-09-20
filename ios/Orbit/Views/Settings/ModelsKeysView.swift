@@ -132,6 +132,7 @@ struct ProviderDetailView: View {
                     }
                 }
 
+                if p.keyless, let sv = p.server { localServer(p, sv) }
                 if p.isSubscription { subscription(p) }
                 if p.takesKeys { accounts(p) }
                 if p.takesKeys { modelList(p) }
@@ -204,6 +205,33 @@ struct ProviderDetailView: View {
     }
 
     // MARK: sections
+
+    /// A host that runs models on the Mac itself (Bionic). There is no key; the one
+    /// thing that can be wrong is that its local server is off, and Orbit starts it
+    /// when a chat needs it — this is so you can see that, and start it from here.
+    @ViewBuilder private func localServer(_ p: HarnessProvider, _ sv: HarnessServer) -> some View {
+        Section {
+            LabeledContent("Local server", value: sv.running ? "on · port \(sv.port)" : "off")
+            if !sv.running {
+                Button(busy == "bionic" ? "Starting…" : "Start it now") {
+                    Task {
+                        busy = "bionic"
+                        await actResult("\(p.label) is serving", fresh: true) {
+                            try await state.requireServer().startBionic()
+                        }
+                        busy = nil
+                    }
+                }
+                .disabled(busy == "bionic")
+            }
+        } header: {
+            Text("On the Mac")
+        } footer: {
+            Text("\(p.label) runs these models on the Mac, so there is no key and nothing "
+                 + "leaves it. Orbit switches its server on by itself when you send a message "
+                 + "to one of them; the first answer then takes a few seconds longer.")
+        }
+    }
 
     @ViewBuilder private func subscription(_ p: HarnessProvider) -> some View {
         Section {

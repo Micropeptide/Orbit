@@ -64,6 +64,13 @@ PRESETS = {
         "label": "Local (this Mac)", "base": "", "key": "", "auth": "local", "models": [],
         "docs": "The model MTPLX serves on this Mac.",
     },
+    "bionic": {
+        "label": "Bionic", "base": "", "key": "", "auth": "gateway", "keyless": True,
+        "docs": "The models Bionic runs on this Mac. They speak OpenAI's API, so the harness "
+                "reaches them through Orbit's gateway; there is no key and nothing leaves the Mac. "
+                "Orbit switches Bionic's local server on when you pick one.",
+        "models": [],
+    },
     "claude": {
         "label": "Claude · your subscription", "base": "", "key": "", "auth": "subscription",
         "docs": "Claude Code as you use it in a terminal: your own Claude login (Pro, Max, Team), no API key. "
@@ -285,6 +292,15 @@ def providers(root, local_name=None):
             p["fetched_at"] = fetched_all[pid].get("at")
         if pid == "local" and local_name:
             p["models"] = [_m(local_name, "messages", 131072, label=f"{local_name}")]
+        if pid == "bionic":
+            # Bionic is asked what it has, every time: models come and go there
+            b = _bionic()
+            if b is None or not b.installed():
+                continue                        # not on this Mac: not in the picker
+            if not p.get("base"): p["base"] = b.base_url(b.port())
+            if not over.get("extra_models"):
+                p["models"] = [_m(m["model"], "chat", m["context"], label=m["label"])
+                               for m in b.models()]
         for m in p["models"]:
             m.setdefault("format", "messages"); m.setdefault("context", 128000)
             m.setdefault("label", _label(m["id"]))
@@ -364,8 +380,16 @@ def claude_login(max_age=120, token=None):
     return state
 
 
+def _bionic():
+    try:
+        import bionic
+        return bionic
+    except Exception:
+        return None
+
+
 def _ready(pid, p, secrets):
-    if p.get("auth") == "local": return True
+    if p.get("auth") == "local" or p.get("keyless"): return True
     if p.get("auth") == "subscription": return claude_login(token=_secret(TOKEN_KEY, secrets)) == "yes"
     return bool(_key_value(p, secrets))
 
@@ -418,6 +442,7 @@ def resolve(root, mid, secrets=None, local_name=None):
                              "context": m["context"], "max_output": m.get("output"),
                              "label": p["label"], "proxy": cfg["proxy"],
                              "local": p.get("auth") == "local",
+                             "keyless": bool(p.get("keyless")),
                              "subscription": p.get("auth") == "subscription"}}
 
 
@@ -468,7 +493,7 @@ def public_view(root, secrets=None, local_name=None):
     for pid, p in providers(root, local_name).items():
         out.append({"id": pid, "label": p["label"], "base": p.get("base"), "alt_bases": p.get("alt_bases") or [],
                     "key": p.get("key"), "key_set": bool(_key_value(p, secrets)), "auth": p.get("auth"),
-                    "ready": _ready(pid, p, secrets),
+                    "keyless": bool(p.get("keyless")), "ready": _ready(pid, p, secrets),
                     "login": claude_login(token=_secret(TOKEN_KEY, secrets)) if p.get("auth") == "subscription" else None,
                     "token_set": bool(_secret(TOKEN_KEY, secrets)) if p.get("auth") == "subscription" else None,
                     "accounts": [{"id": a["id"], "label": a["label"], "key": a["key"],
