@@ -212,6 +212,38 @@ struct ProviderDetailView: View {
     @ViewBuilder private func localServer(_ p: HarnessProvider, _ sv: HarnessServer) -> some View {
         Section {
             LabeledContent("Local server", value: sv.running ? "on · port \(sv.port)" : "off")
+            ForEach(sv.loaded) { m in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("In memory: \(m.label)").font(.callout)
+                    Text([m.size, m.context > 0 ? "\(m.context / 1000)k context" : ""]
+                            .filter { !$0.isEmpty }.joined(separator: " · "))
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button(busy == m.model ? "Unloading…" : "Unload\(m.size.isEmpty ? "" : " (\(m.size) back)")") {
+                        Task {
+                            busy = m.model
+                            await actResult("\(m.label) unloaded", fresh: true) {
+                                try await state.requireServer().unloadBionic(model: m.model)
+                            }
+                            busy = nil
+                        }
+                    }
+                    .font(.callout)
+                    .disabled(busy == m.model)
+                }
+            }
+            ForEach(p.models.filter { !sv.isLoaded($0.id) }) { m in
+                Button(busy == m.id ? "Loading \(m.label)…" : "Load \(m.label) into memory") {
+                    Task {
+                        busy = m.id
+                        await actResult("\(m.label) is in memory", fresh: true) {
+                            try await state.requireServer().loadBionic(model: m.id)
+                        }
+                        busy = nil
+                    }
+                }
+                .font(.callout)
+                .disabled(busy != nil)
+            }
             if !sv.running {
                 Button(busy == "bionic" ? "Starting…" : "Start it now") {
                     Task {
@@ -229,7 +261,12 @@ struct ProviderDetailView: View {
         } footer: {
             Text("\(p.label) runs these models on the Mac, so there is no key and nothing "
                  + "leaves it. Orbit switches its server on by itself when you send a message "
-                 + "to one of them; the first answer then takes a few seconds longer.")
+                 + "to one of them, and loads the model then — which is the wait on the first "
+                 + "message only. "
+                 + (sv.idleMin > 0
+                    ? "It lets a model go again after \(Int(sv.idleMin)) minutes in which nothing "
+                      + "on the Mac used it — \(p.label) itself included."
+                    : "It is left in memory until you unload it."))
         }
     }
 

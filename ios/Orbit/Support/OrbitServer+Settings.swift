@@ -52,6 +52,19 @@ extension OrbitServer {
         try await postChecked("/api/bionic/start", [:], timeout: 60)
     }
 
+    /// Put a model into the Mac's memory now, so the next message does not wait for it.
+    @discardableResult
+    func loadBionic(model: String) async throws -> JSONValue {
+        try await postChecked("/api/bionic/load", ["model": model], timeout: 600)
+    }
+
+    /// Give back the memory a model host on the Mac is holding. Only ever on your say-so:
+    /// the host is an app you use yourself, and it reloads the model when it is next needed.
+    @discardableResult
+    func unloadBionic(model: String) async throws -> JSONValue {
+        try await postChecked("/api/bionic/unload", ["model": model], timeout: 60)
+    }
+
     /// add | remove | rename | activate | clear
     @discardableResult
     func harnessAccount(provider: String, op: String, id: String? = nil,

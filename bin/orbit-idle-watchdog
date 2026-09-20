@@ -24,6 +24,23 @@ LOG   = os.path.join(q.LOGS, "watchdog.log")
 def log(m):
     open(LOG, "a").write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {m}\n")
 
+# Bionic holds a model in this Mac's memory the same way the local server holds one,
+# and nothing was giving it back. Let go of a model nothing has used for a while --
+# "nothing" meaning Orbit, Bionic itself, or anything else on this Mac: Bionic reports
+# when each model was last asked something, and whether it is answering right now.
+try:
+    bionic_idle = float(q.S.get("bionic_idle_min", q.S.get("idle_min", 20)) or 0)
+except (TypeError, ValueError):
+    bionic_idle = 0
+if bionic_idle > 0 and q.BIONIC.installed():
+    try:
+        for m in q.BIONIC.idle_models(bionic_idle):
+            ok, why = q.BIONIC.unload(m["model"])
+            log(f"Bionic: {'unloaded' if ok else 'could not unload'} {m['model']} "
+                f"after {m['idle_min']:.0f} min unused ({why})")
+    except Exception as e:
+        log(f"Bionic: {type(e).__name__}: {e}")
+
 if IDLE <= 0: sys.exit(0)
 if not q.probe(3):
     if os.path.exists(STATE): os.remove(STATE)

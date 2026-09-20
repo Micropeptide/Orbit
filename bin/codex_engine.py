@@ -528,7 +528,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                     "then send this again — or pick a Codex model from another provider.")
     if c.get("provider") != CHATGPT:
         h = spec.get("harness") or {}
-        if not (h.get("provider_cfg") or {}).get("api_key") and not (h.get("provider_cfg") or {}).get("local"):
+        pc = h.get("provider_cfg") or {}
+        if not pc.get("api_key") and not pc.get("local") and not pc.get("keyless"):
             return fail(f"No API key for {spec.get('provider_label') or c.get('provider')}. "
                         "Add it in Settings → Models & keys.")
     if host: emit("status", {"msg": f"starting Codex on {host}"})

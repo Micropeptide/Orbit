@@ -189,7 +189,9 @@ def harness_target(spec=None):
         env.update(HTTPS_PROXY=pc["proxy"], HTTP_PROXY=pc["proxy"])
     return {"url": url, "model": pc.get("model"), "small": pc.get("small") or pc.get("model"),
             "ctx": int(pc.get("context") or 128000), "local": False, "provider": pc.get("provider"),
-            "auth": auth, "env": env, "key_missing": not pc.get("api_key"), "key_name": pc.get("key_name")}
+            "auth": auth, "env": env, "key_name": pc.get("key_name"),
+            # a host on this Mac (Bionic) has nothing to sign in to: no key is not a fault
+            "key_missing": not (pc.get("api_key") or pc.get("keyless"))}
 
 
 # ------------------------------------------------------------------ the process

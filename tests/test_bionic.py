@@ -1,7 +1,7 @@
 """Bionic, the model host on this Mac: what it has, whether it is serving, and how
 those models reach the picker and the Claude Code harness. Bionic is never really
 asked here -- its CLI and its HTTP endpoint are both stood in for."""
-import json, os, sys, tempfile, unittest
+import json, os, sys, tempfile, time, unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bin"))
@@ -13,7 +13,8 @@ LS = [{"type": "llm", "modelKey": "qwen3.8-27b-mlx", "displayName": "Qwen3.8 27B
        "maxContextLength": 262144, "vision": True, "trainedForToolUse": True},
       {"type": "llm", "modelKey": "small-1b", "displayName": "Small 1B", "maxContextLength": 32768},
       {"type": "embedding", "modelKey": "nomic-embed", "displayName": "Nomic Embed"}]
-PS = [{"modelKey": "qwen3.8-27b-mlx", "contextLength": 119552, "status": "idle"}]
+PS = [{"modelKey": "qwen3.8-27b-mlx", "displayName": "Qwen3.8 27B", "contextLength": 119552,
+       "sizeBytes": 16081498475, "status": "idle", "lastUsedTime": 1_789_000_000_000}]
 
 
 class Fake:
@@ -75,6 +76,58 @@ class TestWhatBionicHas(BionicTest):
         self.assertFalse(B.status()["installed"])
 
 
+class TestWhatItHolds(BionicTest):
+    def test_what_is_in_memory_and_how_much_it_costs(self):
+        self.use(Fake(up=True))
+        held = B.loaded(max_age=0)
+        self.assertEqual([r["model"] for r in held], ["qwen3.8-27b-mlx"])
+        self.assertEqual(held[0]["bytes"], 16_081_498_475)
+        self.assertTrue(B.is_loaded("qwen3.8-27b-mlx"))
+        self.assertFalse(B.is_loaded("small-1b"))
+
+    def test_unloading_asks_bionic_and_forgets_what_it_knew(self):
+        f = self.use(Fake(up=True))
+        B.loaded(max_age=0)
+        import subprocess
+        said = {}
+        def run(argv, **kw):
+            said["argv"] = argv
+            class R: returncode = 0; stdout = ""; stderr = ""
+            return R()
+        saved = subprocess.run
+        subprocess.run = run
+        self.addCleanup(setattr, subprocess, "run", saved)
+        ok, why = B.unload("qwen3.8-27b-mlx")
+        self.assertTrue(ok, why)
+        self.assertEqual(said["argv"][1:], ["unload", "qwen3.8-27b-mlx"])
+        self.assertEqual(B._PS["at"], 0.0)          # asked again next time
+
+
+class TestLettingItGo(BionicTest):
+    """Memory given back when nothing on this Mac has used a model for a while."""
+    def use_with(self, **over):
+        f = self.use(Fake(up=True))
+        row = dict(PS[0], **over)
+        saved = B._lms
+        B._lms = lambda args, timeout=25: [row] if args == ["ps"] else saved(args, timeout)
+        return f
+
+    def test_a_model_nobody_has_used_can_go(self):
+        self.use_with(lastUsedTime=(time.time() - 3600) * 1000)
+        self.assertEqual([m["model"] for m in B.idle_models(20)], ["qwen3.8-27b-mlx"])
+        self.assertEqual(B.idle_models(90), [])            # not idle for that long yet
+        self.assertEqual(B.idle_models(0), [])             # 0 keeps it loaded
+
+    def test_one_that_is_answering_right_now_is_left_alone(self):
+        self.use_with(lastUsedTime=(time.time() - 3600) * 1000, status="generating")
+        self.assertEqual(B.idle_models(20), [])
+
+    def test_bionics_own_use_counts_not_just_orbits(self):
+        # used a minute ago from Bionic itself: Orbit does not pull it out from under you
+        self.use_with(lastUsedTime=(time.time() - 60) * 1000)
+        self.assertEqual(B.idle_models(20), [])
+
+
 class TestSwitchingTheServerOn(BionicTest):
     def test_a_server_that_is_off_is_started_once(self):
         f = self.use(Fake(up=False))
@@ -114,8 +167,9 @@ class TestInThePicker(BionicTest):
     def test_the_harness_offers_them_through_the_gateway_with_no_key(self):
         self.use(Fake(up=True))
         mine = [m for m in H.catalogue(self.tmp, {}, None) if m["model"].startswith("bionic/")]
+        # a model never trained to call tools says so: it cannot drive the harness
         self.assertEqual([m["label"] for m in mine],
-                         ["Qwen3.8 27B · Bionic", "Small 1B · Bionic"])
+                         ["Qwen3.8 27B · Bionic", "Small 1B · no tool use · Bionic"])
         self.assertTrue(all(m["ready"] and m["format"] == "chat" for m in mine))
         pc = H.resolve(self.tmp, "harness:bionic/small-1b", {}, None)["provider_cfg"]
         self.assertTrue(pc["keyless"])
