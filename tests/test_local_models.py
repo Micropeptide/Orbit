@@ -55,6 +55,61 @@ class TestLocalModelFolders(unittest.TestCase):
         self.assertIn("no MLX implementation", out["error"])
         self.assertEqual(stopped, [])              # the running server was left alone
 
+    def test_each_model_keeps_the_draft_depth_measured_for_it(self):
+        """MTPLX tunes a draft depth per model; the last model's depth must not be
+        carried over to the next one, which used to cost ~13% of its speed."""
+        d = self.model("orcarouter--Qwen3.8-27B-Uncensored-MLX", quant=4)
+        tuning = os.path.join(self.tmp, "tuning.json")
+        json.dump({"records": {
+            "small-sample": {"key_material": {"model": d},
+                             "payload": {"best": {"depth": 3},
+                                         "results": [{"depth": 3, "drafted_by_depth": [4]}]}},
+            "real-run": {"key_material": {"model": d},
+                         "payload": {"best": {"depth": 2},
+                                     "results": [{"depth": 2, "drafted_by_depth": [131]}]}},
+            "another-model": {"key_material": {"model": os.path.join(self.tmp, "elsewhere")},
+                              "payload": {"best": {"depth": 1},
+                                          "results": [{"depth": 1, "drafted_by_depth": [200]}]}},
+        }}, open(tuning, "w"))
+        saved = q.MTPLX_TUNING
+        q.MTPLX_TUNING = tuning
+        self.addCleanup(setattr, q, "MTPLX_TUNING", saved)
+        # the run with the most drafted tokens wins, not the last one written
+        self.assertEqual(q.local_model_depth("orcarouter--Qwen3.8-27B-Uncensored-MLX"), 2)
+        self.assertIsNone(q.local_model_depth("never-tuned"))
+
+    def test_switching_writes_that_depth_into_the_settings(self):
+        d = self.model("orcarouter--Qwen3.8-27B-Uncensored-MLX", quant=4)
+        json.dump({"records": {"r": {"key_material": {"model": d},
+                                     "payload": {"best": {"depth": 2},
+                                                 "results": [{"depth": 2, "drafted_by_depth": [131]}]}}}},
+                  open(os.path.join(self.tmp, "tuning.json"), "w"))
+        launch = os.path.join(self.tmp, "launch.json")
+        json.dump({"command": "/bin/true", "args": ["serve", "--depth", "3", "--model", "/old"]},
+                  open(launch, "w"))
+        settings = os.path.join(self.tmp, "settings.json")
+        json.dump({"server": {"depth": 3}}, open(settings, "w"))
+        for k, v in (("MTPLX_TUNING", os.path.join(self.tmp, "tuning.json")),
+                     ("LAUNCH", launch), ("SETTINGS", settings),
+                     ("stop_server", lambda *a, **k: "stopped"),
+                     ("ensure_model", lambda *a, **k: "served"),
+                     # MTPLX itself is not run here: its verdict is stood in for
+                     ("local_model_check", lambda d: {"can_run": True, "verified": True})):
+            old_v = getattr(q, k)
+            setattr(q, k, v)
+            self.addCleanup(setattr, q, k, old_v)
+        saved_sleep = q.time.sleep
+        q.time.sleep = lambda n: None
+        self.addCleanup(setattr, q.time, "sleep", saved_sleep)
+        saved_S = q.S
+        self.addCleanup(setattr, q, "S", saved_S)
+
+        out = q.switch_local_model("orcarouter--Qwen3.8-27B-Uncensored-MLX")
+        self.assertEqual(out["depth"], 2)
+        self.assertIn("depth 3 → 2", out["note"])
+        # the next start composes its arguments from the settings, so that is where it goes
+        self.assertEqual(json.load(open(settings))["server"]["depth"], 2)
+
     def test_no_folder_no_switch(self):
         self.assertIn("error", q.switch_local_model("not-here"))
 
