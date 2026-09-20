@@ -286,13 +286,14 @@ actor OrbitServer {
 
     /// Point the Mac at a different model folder and restart it.
     func switchLocalModel(_ folder: String) async throws -> String {
-        struct R: Codable { var ok: Bool?; var serving: String?; var error: String? }
+        struct R: Codable { var ok: Bool?; var serving: String?; var error: String?; var note: String? }
         var req = try request("/api/model/local_switch", method: "POST", body: ["name": folder])
         req.timeoutInterval = 300
         let data = try await run(req)
         let r = try JSONDecoder().decode(R.self, from: data)
         if let e = r.error { throw Failure.server(400, e) }
-        return "now serving \(r.serving ?? folder)"
+        // the Mac may have something to say about a model it has not measured before
+        return "now serving \(r.serving ?? folder)" + (r.note.map { " — " + $0 } ?? "")
     }
 
     // ------------------------------------------------------------ backup
