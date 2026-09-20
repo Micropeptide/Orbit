@@ -12,7 +12,7 @@ on its own terms. Listing is read from the `lms` command Bionic ships with, so
 it works while the server is off; when the server is on, what it is serving is
 read straight from it.
 """
-import json, os, subprocess, time, urllib.error, urllib.request
+import json, os, subprocess, threading, time, urllib.error, urllib.request
 
 HOME = os.path.expanduser("~/.lmstudio")
 LMS = os.path.join(HOME, "bin", "lms")
@@ -21,7 +21,7 @@ DEFAULT_PORT = 1234
 LIST_TTL = 60.0            # `lms` spawns a big binary; the picker asks often
 PROBE_TTL = 5.0
 
-_LIST = {"at": 0.0, "rows": []}
+_LIST = {"at": 0.0, "rows": [], "busy": False}
 _PROBE = {"at": 0.0, "port": 0, "ids": []}
 _PORT = {"at": 0.0, "n": 0}
 _PS = {"at": 0.0, "rows": []}
@@ -217,11 +217,37 @@ def models(max_age=LIST_TTL):
 
     [{"model", "label", "context", "vision", "tools", "loaded"}] — text models
     only; an embedding model is not something you can hold a conversation with.
+
+    Asking means running Bionic's CLI, which takes about a second. This is read
+    while resolving which model a turn uses -- a hot path -- so only the first ask
+    waits: after that a stale answer comes back at once and the refresh happens
+    behind it. Models appear or disappear a minute late; nothing else waits.
     """
     if not installed(): return []
     now = time.time()
-    if now - _LIST["at"] < max_age and _LIST["rows"]:
+    if now - _LIST["at"] < max_age:
         return [dict(r) for r in _LIST["rows"]]
+    if _LIST["at"]:
+        _refresh_soon()
+        return [dict(r) for r in _LIST["rows"]]
+    return _refresh()
+
+
+def _refresh_soon():
+    """Ask Bionic in the background, once at a time."""
+    if _LIST["busy"]: return
+    _LIST["busy"] = True
+    threading.Thread(target=_refresh, daemon=True).start()
+
+
+def _refresh():
+    try:
+        return _read_models()
+    finally:
+        _LIST["busy"] = False
+
+
+def _read_models():
     have = _lms(["ls"], timeout=25)
     if not isinstance(have, list): return [dict(r) for r in _LIST["rows"]]
     live = {}
@@ -237,7 +263,7 @@ def models(max_age=LIST_TTL):
         rows.append({"model": key, "label": _label(r), "context": int(ctx),
                      "vision": bool(r.get("vision")), "tools": bool(r.get("trainedForToolUse")),
                      "loaded": bool(loaded)})
-    _LIST.update(at=now, rows=rows)
+    _LIST.update(at=time.time(), rows=rows)
     return [dict(r) for r in rows]
 
 

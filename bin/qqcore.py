@@ -401,6 +401,31 @@ def local_model_configured():
         return None
 
 _INSPECT = {}
+MTPLX_TUNING = os.path.expanduser("~/.mtplx/tuning.json")
+
+def local_model_depth(dirname):
+    """The MTP draft depth MTPLX measured as fastest for this model, or None.
+
+    Depth is a property of the model, not of the Mac's taste: `mtplx tune` tries
+    each depth and records the winner. One forged for speed accepts three drafted
+    tokens and wants depth 3; another accepts fewer and is *slower* at 3 than at 2.
+    Carrying the last model's depth over to the next one quietly costs speed."""
+    path = os.path.realpath(os.path.join(MTPLX_MODELS, os.path.basename(dirname)))
+    try: recs = (json.load(open(MTPLX_TUNING)) or {}).get("records") or {}
+    except Exception: return None
+    best = None
+    for rec in recs.values():
+        try:
+            if os.path.realpath((rec.get("key_material") or {}).get("model") or "") != path: continue
+            d = ((rec.get("payload") or {}).get("best") or {}).get("depth")
+            # several runs of the same model: the one with the most drafted tokens
+            n = max((r.get("drafted_by_depth") or [0])[0]
+                    for r in ((rec.get("payload") or {}).get("results") or []) if r.get("depth"))
+        except Exception:
+            continue
+        if d and (best is None or n > best[1]): best = (int(d), n)
+    return best[0] if best else None
+
 
 def local_model_check(dirname):
     """What MTPLX makes of a model folder: whether it can run it at all, and whether
@@ -443,14 +468,29 @@ def switch_local_model(dirname, on_status=None):
     else: a += ["--model", path]
     cfg["args"] = a
     json.dump(cfg, open(LAUNCH, "w"), indent=1)
+    # ...and the draft depth this model was measured fastest at, since the next start
+    # composes the args from settings and would otherwise keep the last model's
+    depth = local_model_depth(dirname)
+    was = (S.get("server") or {}).get("depth")
+    if depth and depth != was:
+        s = load_settings()
+        s.setdefault("server", {})["depth"] = depth
+        save_settings(s); reload_settings()
     stop_server(); time.sleep(2)
     served = ensure_model(on_status)
-    out = {"ok": True, "serving": served}
+    out, notes = {"ok": True, "serving": served}, []
+    if depth and depth != was:
+        out["depth"] = depth
+        notes.append(f"draft depth {was} → {depth}, the depth MTPLX measured fastest for this one")
+    elif not depth:
+        notes.append("MTPLX has not measured a draft depth for this model — `mtplx tune` "
+                     f"finds the fastest one; it is running at {was}")
     if check and not check.get("verified"):
         # MTPLX runs a family-compatible model but marks its figures unverified
         # until it has recorded a baseline of its own on a first load
-        out["note"] = ("MTPLX has no exactness baseline for this model yet, so its "
-                       "speed figures are marked unverified until it records one.")
+        notes.append("MTPLX has no exactness baseline for it yet, so its speed figures "
+                     "are marked unverified until it records one")
+    if notes: out["note"] = " · ".join(notes)
     return out
 
 def model_catalogue():
