@@ -299,7 +299,10 @@ def providers(root, local_name=None):
                 continue                        # not on this Mac: not in the picker
             if not p.get("base"): p["base"] = b.base_url(b.port())
             if not over.get("extra_models"):
-                p["models"] = [_m(m["model"], "chat", m["context"], label=m["label"])
+                # a model that was never trained to call tools cannot drive the harness:
+                # say so in its name rather than let it fail half way through an answer
+                p["models"] = [_m(m["model"], "chat", m["context"],
+                                  label=m["label"] + ("" if m["tools"] else " · no tool use"))
                                for m in b.models()]
         for m in p["models"]:
             m.setdefault("format", "messages"); m.setdefault("context", 128000)

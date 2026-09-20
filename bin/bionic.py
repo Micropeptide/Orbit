@@ -24,7 +24,9 @@ PROBE_TTL = 5.0
 _LIST = {"at": 0.0, "rows": []}
 _PROBE = {"at": 0.0, "port": 0, "ids": []}
 _PORT = {"at": 0.0, "n": 0}
+_PS = {"at": 0.0, "rows": []}
 PORT_TTL = 300.0
+PS_TTL = 5.0
 
 
 def installed():
@@ -90,6 +92,7 @@ def status():
         return st
     st["port"] = port()
     st["running"] = bool(serving(st["port"]))
+    st["loaded"] = loaded()
     return st
 
 
@@ -124,6 +127,84 @@ def ensure():
     if serving(p): return base_url(p)
     ok, _ = start()
     return base_url(port()) if ok else ""
+
+
+def loaded(max_age=PS_TTL):
+    """What Bionic is holding in this Mac's memory right now:
+    [{"model", "label", "context", "bytes"}]. Empty when it is holding nothing."""
+    if not installed(): return []
+    now = time.time()
+    if now - _PS["at"] < max_age:
+        return [dict(r) for r in _PS["rows"]]
+    rows = []
+    for r in (_lms(["ps"], timeout=15) or []):
+        if not isinstance(r, dict) or not r.get("modelKey"): continue
+        used = r.get("lastUsedTime")
+        rows.append({"model": r["modelKey"], "label": _label(r),
+                     "context": int(r.get("contextLength") or 0),
+                     "bytes": int(r.get("sizeBytes") or 0),
+                     # when anything last asked it something (Orbit, Bionic itself,
+                     # anything else on this Mac), and whether it is answering now
+                     "used_at": (float(used) / 1000 if used else None),
+                     "busy": str(r.get("status") or "").lower() not in ("idle", "")})
+    _PS.update(at=now, rows=rows)
+    return [dict(r) for r in rows]
+
+
+def is_loaded(model):
+    """This model's weights are in memory, so the next request answers straight away."""
+    return any(r["model"] == model for r in loaded())
+
+
+def load(model, timeout=600):
+    """Put a model in memory now, so the next message does not wait for it.
+    Bionic picks the context length and placement it would pick anyway."""
+    if not installed(): return False, "Bionic is not installed on this Mac"
+    if not model: return False, "no model named"
+    if is_loaded(model): return True, "already in memory"
+    if not ensure(): return False, "Bionic's server would not start"
+    try:
+        r = subprocess.run([LMS, "load", model, "-y"], capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+    _PS["at"] = 0.0
+    _LIST["at"] = 0.0
+    if r.returncode:
+        tail = ((r.stderr or r.stdout or "").strip().splitlines() or [""])[-1]
+        return False, tail[:200] or "it would not load"
+    return True, model + " is in memory"
+
+
+def idle_models(minutes):
+    """Models nobody has used for this many minutes and that are not answering now —
+    the ones whose memory can be given back without interrupting anything."""
+    if minutes <= 0: return []
+    now = time.time()
+    out = []
+    for r in loaded(max_age=0):
+        if r["busy"]: continue
+        used = r.get("used_at")
+        if used and (now - used) / 60.0 < minutes: continue
+        if not used: continue                 # never used: it was loaded for a reason
+        out.append({**r, "idle_min": (now - used) / 60.0})
+    return out
+
+
+def unload(model=""):
+    """Give a model's memory back. Bionic is an app you use yourself, so this only ever
+    happens when you ask for it. Returns (ok, message)."""
+    if not installed(): return False, "Bionic is not installed on this Mac"
+    args = ["unload", model] if model else ["unload", "--all"]
+    try:
+        r = subprocess.run([LMS, *args], capture_output=True, text=True, timeout=60)
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+    _PS["at"] = 0.0
+    _LIST["at"] = 0.0
+    if r.returncode:
+        tail = ((r.stderr or r.stdout or "").strip().splitlines() or [""])[-1]
+        return False, tail[:200] or "it would not unload"
+    return True, (model or "everything") + " unloaded"
 
 
 def _label(row):
@@ -163,5 +244,6 @@ def models(max_age=LIST_TTL):
 def catalogue_models():
     """Bionic's models in the shape Orbit's model registry uses."""
     return [{"provider": "bionic", "model": r["model"], "label": r["label"],
-             "context": r["context"], "thinking": True, "vision": r["vision"]}
+             "context": r["context"], "thinking": True, "vision": r["vision"],
+             "tools": r["tools"]}
             for r in models()]

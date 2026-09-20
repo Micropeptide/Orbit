@@ -110,6 +110,9 @@ DEFAULTS = {
     "ssd_session_cache": "on",
   },
   "idle_min": 20,
+  # Bionic holds its own weights: give them back when nothing on this Mac has used
+  # that model for this long (0 = keep it loaded). Its own use counts, not just Orbit's.
+  "bionic_idle_min": 20,
   "autocompact_pct": 80,
   "trash_days": 30,
   "watch_cluster_jobs": False,
@@ -1486,6 +1489,21 @@ def _strip_reasoning(messages):
         out[i] = n
     return out
 
+def _bionic_waking(spec, emit):
+    """Bionic loads a model into memory when the first request for it arrives, which for a
+    big one is tens of seconds of silence. Say so, the way a cold local server does, so the
+    wait does not look like a hung chat. True when something was said."""
+    if not emit: return False
+    try:
+        if BIONIC.is_loaded(spec["model"]): return False
+    except Exception:
+        return False
+    emit("server_starting", {
+        "msg": "Bionic is loading " + (spec.get("label") or spec["model"]),
+        "note": "it stays in memory afterwards, so only the first message waits"})
+    return True
+
+
 def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
                 interrupt=None):
     if think is None: think = getattr(TURN_CTX, "think", None)
@@ -1522,9 +1540,11 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
         out["model"] = spec.get("label") or spec["model"]
         return out
     base = (prov.get("base_url") or BASE).rstrip("/")
+    waking = False
     if spec["provider"] == "bionic":
         # Bionic only serves while its local server is on, and it starts off
         base = (MODELS.bionic_ensure() or base).rstrip("/")
+        waking = _bionic_waking(spec, emit)
     body = {"model": (MODEL if spec["provider"] == "local" else spec["model"]),
             "messages": messages, "stream": True,
             "chat_template_kwargs": {"enable_thinking": think}}
@@ -1547,6 +1567,14 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
                                  headers=headers)
     content, reasoning, tcalls, usage = [], [], {}, None
     marks, mstate = [], [0, ""]
+
+    def answered():
+        """The wait is over the moment anything comes back."""
+        nonlocal waking
+        if waking:
+            waking = False
+            emit("server_ready", {"elapsed": 0})
+
     try:
         r = urllib.request.urlopen(req, timeout=3600)
     except urllib.error.HTTPError as e:
@@ -1573,6 +1601,7 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
             # far better than the character estimate for deciding when to compact
             if isinstance(d.get("usage"), dict): usage = d["usage"]
             dl = ((d.get("choices") or [{}])[0]).get("delta") or {}
+            if dl.get("reasoning_content") or dl.get("content") or dl.get("tool_calls"): answered()
             if dl.get("reasoning_content"):
                 para_marks(marks, mstate, dl["reasoning_content"])
                 reasoning.append(dl["reasoning_content"])

@@ -2275,7 +2275,8 @@ function drawModelPicker(){
   list.forEach(m=>{
    const o=document.createElement('option');
    o.value=m.id;
-   o.textContent=(m.label||m.model)+(m.ready?'':' — needs a key')+opSuffix(m.offpeak);
+   o.textContent=(m.label||m.model)+(m.ready?'':' — needs a key')
+    +(m.tools===false?' — no tool use':'')+opSuffix(m.offpeak);
    o.selected=(m.id===cur);
    g.appendChild(o)});
   sel.appendChild(g)});
@@ -3131,7 +3132,45 @@ async function renderHarnessModels(box){
     const d=await apiPost('/api/bionic/start',{},'starting Bionic');
     toast(d&&d.ok?'Bionic is serving':'could not start it'+(d&&d.detail?': '+d.detail:''));
     delete HPROV_CACHE[p.id];loadModels();renderHarnessModels(box)};
-   card.appendChild(sv)}
+   card.appendChild(sv);
+   // what it is holding in memory, and a way to have that memory back
+   (p.server.loaded||[]).forEach(L=>{
+    const gb=L.bytes?(L.bytes/1e9).toFixed(1)+' GB':'';
+    const r=el(`<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:2px 0">
+      <span class=note>in memory: <b>${esc(L.label||L.model)}</b>${gb?' · '+gb:''}${
+        L.context?' · '+(L.context/1000|0)+'k context':''}</span>
+      <button class=ghost style="font-size:11.5px">unload${gb?' ('+gb+' back)':''}</button></div>`);
+    r.querySelector('button').onclick=async()=>{
+     if(!confirm(`Unload ${L.label||L.model} from memory? Bionic will load it again when it is next used — here or in Bionic itself.`))return;
+     const d=await apiPost('/api/bionic/unload',{model:L.model},'unloading');
+     toast(d&&d.ok?'unloaded':'could not unload it'+(d&&d.detail?': '+d.detail:''));
+     delete HPROV_CACHE[p.id];loadModels();renderHarnessModels(box)};
+    card.appendChild(r)});
+   // models it has but is not holding: put one in memory before you need it
+   const cold=(p.models||[]).filter(m=>!(p.server.loaded||[]).some(L=>L.model===m.id));
+   if(cold.length){
+    const lr=el(`<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:2px 0">
+      <span class=note>not in memory:</span><select style="max-width:260px">${
+        cold.map(m=>`<option value="${esc(m.id)}">${esc(m.label||m.id)}</option>`).join('')}</select>
+      <button class=ghost style="font-size:11.5px">load it now</button></div>`);
+    lr.querySelector('button').onclick=async()=>{
+     const b=lr.querySelector('button'), m=lr.querySelector('select').value;
+     b.textContent='loading…';b.disabled=true;
+     const d=await apiPost('/api/bionic/load',{model:m},'loading the model');
+     toast(d&&d.ok?'in memory':'could not load it'+(d&&d.detail?': '+d.detail:''));
+     delete HPROV_CACHE[p.id];loadModels();renderHarnessModels(box)};
+    card.appendChild(lr)}
+   // …and let it go again when nothing has used it for a while
+   const idle=(INFO.settings&&INFO.settings.bionic_idle_min);
+   const ir=el(`<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0">
+     <span class=note>let a model go after</span>
+     <input type=number min=0 style="width:70px" value="${idle===undefined||idle===null?
+       ((INFO.settings&&INFO.settings.idle_min)||20):idle}">
+     <span class=note>min in which nothing on this Mac used it — Orbit, Bionic itself or anything else. 0 keeps it loaded.</span></div>`);
+   ir.querySelector('input').onchange=async e=>{
+    const d=await apiPost('/api/settings',{settings:{bionic_idle_min:Number(e.target.value)||0}},'saving');
+    if(d){toast('saved');INFO=await (await fetch('/api/info')).json()}};
+   card.appendChild(ir)}
   if(p.auth!=='local'&&p.auth!=='subscription'&&!p.keyless){
    const rf=el(`<div class=note style="margin:2px 0">${p.fetched_at?'model list updated '+new Date(p.fetched_at*1000).toLocaleString():'preset model list'} <button class=ghost style="font-size:11px">refresh model list</button></div>`);
    rf.querySelector('button').onclick=async()=>{rf.querySelector('button').textContent='…';
@@ -3855,9 +3894,9 @@ async function go(opts){
      const secs=m.p.elapsed?` · ${m.p.elapsed}s`:'';
      a.bub.innerHTML=`<span class=working>${esc(m.p.msg)}<span class=dots></span>`
       +`<span style="color:var(--dim)">${secs}</span></span>`
-      +`<div class=note style="margin-top:5px">the server sleeps after `
-      +`${(INFO.settings&&INFO.settings.idle_min)||20} min idle — first message after that reloads `
-      +`~15 GB of weights</div>`;
+      +`<div class=note style="margin-top:5px">${m.p.note?esc(m.p.note)
+        :`the server sleeps after ${(INFO.settings&&INFO.settings.idle_min)||20} min idle — `
+         +`first message after that reloads ~15 GB of weights`}</div>`;
      bottom()}
     else if(m.k==='question'){a.tools.appendChild(questionBox(m.p));bottom();
      notify(sendSid,'Orbit has a question',m.p.question||'')}
@@ -4401,7 +4440,8 @@ async function openSettings(tab){
      the first time an action is refused: <b>Screen Recording</b> (for screenshots) and
      <b>Accessibility</b> (for clicks and keystrokes), both in System Settings → Privacy &amp; Security.
      Nothing here can turn those on for you. A screenshot only actually gets <em>seen</em> by a
-     vision-capable model — a hosted Claude model, not the local model or a CLI-backed one — but every
+     vision-capable model — a hosted Claude model, or one Bionic runs on this Mac that says it takes
+     images, but not the MTPLX local model or a CLI-backed one — but every
      mode still asks before a click or keystroke unless you have turned on Full access, same as any
      other confirm-level action.</div>
     <div class=sec>Available tools</div><div class=toolgrid id=tg></div>`;

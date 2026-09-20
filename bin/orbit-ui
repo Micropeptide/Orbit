@@ -692,8 +692,11 @@ class H(http.server.BaseHTTPRequestHandler):
                         if a["live"] and not a["live"].get("error"):
                             a["exhausted"] = q.USAGE.exhausted(q.ROOT, pv["id"], a["id"])
                 if pv["id"] == "bionic":
-                    # its models only answer while its own server is on
-                    try: pv["server"] = q.BIONIC.status()
+                    # its models only answer while its own server is on, and Orbit lets
+                    # a model go again after this long with nothing on the Mac using it
+                    try:
+                        pv["server"] = {**q.BIONIC.status(),
+                                        "idle_min": float(q.S.get("bionic_idle_min", 20) or 0)}
                     except Exception: pv["server"] = None
             view["limits_at"] = (q.USAGE.limits_meta(q.ROOT) or {}).get("at")
             view["gateway"] = {"port": q.HARNESS_PORT, "error": GATEWAY["error"]}
@@ -1373,6 +1376,14 @@ class H(http.server.BaseHTTPRequestHandler):
                 return self._send(200, jdump({"cancelled": True, "error": (r.stderr or "").strip()[-200:]
                                               if "-128" not in (r.stderr or "") else ""}))
             return self._send(200, jdump({"path": path.rstrip("/") or "/"}))
+        if p == "/api/bionic/load":
+            # put it in memory now, so the next message does not wait for 16 GB
+            ok, why = q.BIONIC.load(d.get("model") or "")
+            return self._send(200, jdump({"ok": ok, "detail": why, "server": q.BIONIC.status()}))
+        if p == "/api/bionic/unload":
+            # its memory back, when you ask: Bionic is an app you use yourself too
+            ok, why = q.BIONIC.unload(d.get("model") or "")
+            return self._send(200, jdump({"ok": ok, "detail": why, "server": q.BIONIC.status()}))
         if p == "/api/bionic/start":
             # Bionic keeps its local server switched off until something needs it
             ok, why = q.BIONIC.start()
@@ -2160,7 +2171,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 _restart_when_idle()
                 return self._send(200, jdump({"ok": True, "deferred": True, "running": len(busy),
                     "msg": f"will restart as soon as {len(busy)} running answer(s) finish"}))
-            threading.Timer(0.4, lambda: (q.CE.close_live(), q.CX.shutdown(), time.sleep(1), os._exit(0))).start()
+            threading.Timer(0.4, _bow_out).start()
             return self._send(200, jdump({"ok": True, "msg": "restarting the interface…"}))
         if p == "/api/server/stop":
             return self._send(200, jdump({"msg": q.stop_server()}))
@@ -3363,6 +3374,18 @@ class Srv(socketserver.ThreadingTCPServer):
 
 _RESTART_WAITING = threading.Event()
 
+def _bow_out(grace=6.0):
+    """Leave, whatever else is going on. Letting go of live sessions first is the
+    polite thing, but a kept-alive Claude session that will not close used to leave
+    the interface running on old code while the page said it had restarted -- which
+    looks exactly like new code that does not work. So the exit is armed first."""
+    threading.Timer(grace, lambda: os._exit(0)).start()
+    for step in (q.CE.close_live, q.CX.shutdown):
+        try: step()
+        except Exception: pass
+    time.sleep(1); os._exit(0)
+
+
 def _restart_when_idle():
     """Restart once no chat is answering (checked every few seconds)."""
     if _RESTART_WAITING.is_set(): return
@@ -3370,7 +3393,7 @@ def _restart_when_idle():
     def wait():
         while running_sids() or JOBS_INFLIGHT:
             time.sleep(3)
-        (q.CE.close_live(), q.CX.shutdown(), time.sleep(1), os._exit(0))
+        _bow_out()
     threading.Thread(target=wait, daemon=True).start()
 
 def _sched_log(msg):

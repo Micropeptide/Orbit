@@ -176,16 +176,42 @@ struct HarnessProvider: Decodable, Identifiable, Hashable {
 /// A model host on the Mac that serves only while its own server is running
 /// (Bionic). Orbit starts it when a chat needs it; this is so you can see it.
 struct HarnessServer: Decodable, Hashable {
+    /// A model this host is holding in the Mac's memory right now.
+    struct Loaded: Decodable, Hashable, Identifiable {
+        var model: String
+        var label: String
+        var context: Int
+        var bytes: Double
+        var id: String { model }
+        /// "16.1 GB", or "" when the host does not say.
+        var size: String { bytes > 0 ? String(format: "%.1f GB", bytes / 1e9) : "" }
+
+        enum CodingKeys: String, CodingKey { case model, label, context, bytes }
+        init(from d: Decoder) throws {
+            let c = try d.container(keyedBy: CodingKeys.self)
+            model = c.lenient(String.self, .model) ?? ""
+            label = c.lenient(String.self, .label) ?? model
+            context = Int(c.lenient(Double.self, .context) ?? 0)
+            bytes = c.lenient(Double.self, .bytes) ?? 0
+        }
+    }
+
     var installed: Bool
     var running: Bool
     var port: Int
+    var loaded: [Loaded]
+    var idleMin: Double         // Orbit lets a model go after this long unused (0 = never)
 
-    enum CodingKeys: String, CodingKey { case installed, running, port }
+    func isLoaded(_ model: String) -> Bool { loaded.contains { $0.model == model } }
+
+    enum CodingKeys: String, CodingKey { case installed, running, port, loaded, idle_min }
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         installed = c.lenient(Bool.self, .installed) ?? false
         running = c.lenient(Bool.self, .running) ?? false
         port = Int(c.lenient(Double.self, .port) ?? 0)
+        loaded = c.lenient([Loaded].self, .loaded) ?? []
+        idleMin = c.lenient(Double.self, .idle_min) ?? 0
     }
 }
 
