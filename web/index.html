@@ -3115,7 +3115,14 @@ async function drawEasyTools(draft){
   const ck=new Set(d.keep||[]);
   d.known.forEach(n=>{const l=document.createElement('label');
    const c=document.createElement('input');c.type='checkbox';c.dataset.ceasy=n;c.checked=ck.has(n);
-   l.appendChild(c);l.appendChild(document.createTextNode(' '+n));cbox.appendChild(l)})};
+   l.appendChild(c);l.appendChild(document.createTextNode(' '+n));cbox.appendChild(l)});
+  const mbox=$('#easymcp'); if(mbox){
+   const mk=new Set(d.mcp_keep||[]);
+   mbox.innerHTML='';
+   if(!(d.mcp||[]).length)mbox.appendChild(el('<span class=note>no MCP servers in your Claude config</span>'));
+   (d.mcp||[]).forEach(n=>{const l=document.createElement('label');
+    const c=document.createElement('input');c.type='checkbox';c.dataset.mcpeasy=n;c.checked=mk.has(n);
+    l.appendChild(c);l.appendChild(document.createTextNode(' '+n));mbox.appendChild(l)})}};
  load(false);
  const b=$('#easylearn'); if(b)b.onclick=()=>load(true)}
 
@@ -4491,9 +4498,14 @@ async function openSettings(tab){
     <div id=easybox style="display:none">
      <div class=sec style="margin-top:10px">Orbit's own agent <small>— ticked tools are offered</small></div>
      <div class=toolgrid id=easygrid></div>
-     <div class=sec style="margin-top:10px">Claude Code <small>— what Claude Code reported having</small>
+     <div class=sec style="margin-top:10px">Claude Code tools <small>— what Claude Code reported having</small>
       <button class=ghost style="font-size:11px;margin-left:6px" id=easylearn>ask Claude Code again</button></div>
      <div class=toolgrid id=easyclaude><span class=note>loading…</span></div>
+     <div class=sec style="margin-top:10px">Claude Code MCP servers <small>— each one's tools ride in every request</small></div>
+     <div class=hint2>None ticked means none are started, which is usually what you want: a server's
+      tools cost prompt whether or not they are ever called. Easy mode also turns hooks off for the
+      run, because a plugin's hooks expect that plugin's server to be there.</div>
+     <div class=toolgrid id=easymcp><span class=note>loading…</span></div>
     </div>
     <div class=sec>Available tools <small>— turned off here, a tool is gone from every mode</small></div><div class=toolgrid id=tg></div>`;
    $('#t_easy').checked=!!draft.easy_mode;
@@ -5053,7 +5065,12 @@ async function openSettings(tab){
   collect();
   // Claude Code's own list lives in its settings, not Orbit's
   const ckeep=[...document.querySelectorAll('[data-ceasy]')].filter(c=>c.checked).map(c=>c.dataset.ceasy);
-  if(ckeep.length)await apiPost('/api/claude/settings',{settings:{easy_tools:ckeep}},'saving Claude Code tools');
+  const mkeep=[...document.querySelectorAll('[data-mcpeasy]')].map(c=>c.checked?c.dataset.mcpeasy:null).filter(Boolean);
+  if(ckeep.length||document.querySelector('[data-mcpeasy]')){
+   const st={};
+   if(ckeep.length)st.easy_tools=ckeep;
+   if(document.querySelector('[data-mcpeasy]'))st.easy_mcp=mkeep;   // none ticked = none started
+   await apiPost('/api/claude/settings',{settings:st},'saving Claude Code easy mode')}
   if($('#m_ins'))await fetch('/api/instructions',{method:'POST',
     headers:{'Content-Type':'application/json'},body:JSON.stringify({text:$('#m_ins').value})});
   if($('#mcp_json')){try{const cfg=JSON.parse($('#mcp_json').value);
@@ -7269,6 +7286,7 @@ $('#more').onclick=e=>{e.stopPropagation();
   {icon:(INFO.settings&&INFO.settings.easy_mode)?'☑':'☐',
    label:'Easy mode — essential tools only',
    run:()=>setEasy(!(INFO.settings&&INFO.settings.easy_mode))},
+  {icon:'⚙',label:'Choose what easy mode keeps…',run:()=>openSettings('tools')},
   {icon:'✎',label:'System prompt for this chat',run:chatPromptDlg},
   {icon:'★',label:'Save memories from this chat',run:suggestMem},
   '-',
