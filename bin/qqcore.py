@@ -5387,7 +5387,22 @@ TOOL_OUT_KEEP = 200
 TOOL_LOG = os.path.join(LOGS, "tools.jsonl")
 LAST_TURN = {}                 # sid -> {"secs", "usage", "tool_runs", "rounds"} of its last answer
 
+# One size never fitted every tool: a grep wants its matches, a fetched page is mostly
+# chrome, and a directory listing is short by nature. The budget the model sees per tool,
+# in characters; anything not named here gets MAXCH. The whole output is still written to
+# disk either way, with the path and how to page it.
+TOOL_BUDGET = {
+    "read_file": 30000, "grep_files": 20000, "search_knowledge": 20000,
+    "run_shell": 16000, "python": 16000, "check_background": 16000,
+    "fetch_url": 10000, "web_search": 8000, "http_json": 10000,
+    "list_dir": 6000, "glob": 6000, "list_skills": 4000, "search_chats": 8000,
+}
+
 def _truncate_output(fn, out, limit=None):
+    if limit is None: limit = TOOL_BUDGET.get(fn)
+    return _truncate_output_base(fn, out, limit)
+
+def _truncate_output_base(fn, out, limit=None):
     """Cut an over-long tool result to fit, but never silently: the whole of
     it goes to a file and the model is told where, so it can page through the
     part it needs. Used to be str(out)[:MAXCH], which dropped the end of a
