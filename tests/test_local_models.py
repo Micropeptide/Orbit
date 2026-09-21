@@ -146,6 +146,20 @@ class TestLocalModelFolders(unittest.TestCase):
         d = q.projects_reorder(["b", "a"])
         self.assertEqual([k for k in sorted(d, key=lambda k: d[k]["order"])], ["b", "a", "c", "z"])
 
+    def test_the_local_window_is_the_one_it_is_served_with(self):
+        """The window is a setting; a number written into the harness preset was right
+        until someone changed it."""
+        import harness as H
+        os.makedirs(os.path.join(self.tmp, "config"), exist_ok=True)
+        json.dump({"server": {"context_window": 262144}},
+                  open(os.path.join(self.tmp, "config", "settings.json"), "w"))
+        self.assertEqual(H._local_context(self.tmp), 262144)
+        provs = H.providers(self.tmp, "some-local-model")
+        self.assertEqual([m["context"] for m in provs["local"]["models"]], [262144])
+        json.dump({"server": {}}, open(os.path.join(self.tmp, "config", "settings.json"), "w"))
+        self.assertEqual(H._local_context(self.tmp), 131072)          # nothing set: a sane default
+        self.assertEqual(H._local_context(os.path.join(self.tmp, "nowhere")), 131072)
+
     def test_no_folder_no_switch(self):
         self.assertIn("error", q.switch_local_model("not-here"))
 
