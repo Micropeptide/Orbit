@@ -499,6 +499,9 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .projrow .pclaude{color:var(--acc);font-size:11px;opacity:.75}
 .projrow.over{outline:2px dashed var(--acc);outline-offset:-2px}
 /* a mode that changes what the model is handed reads as on from across the room */
+.pdsec{display:flex;gap:8px;align-items:baseline;cursor:pointer;padding:3px 0}
+.pdsec b{font-size:12px}
+.pddig{color:var(--dim);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .findbar{position:fixed;top:10px;right:18px;z-index:80;display:flex;gap:6px;align-items:center;
  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px 8px;
  box-shadow:0 6px 24px rgba(0,0,0,.18)}
@@ -5223,7 +5226,7 @@ async function pollList(force){
 setInterval(pollList,4000);
 // back on this window: everything it may have missed while away, at once
 function catchUp(){if(document.hidden)return;
- refreshRunning();pollList(true);watchOpenChat();pollBg();
+ refreshRunning();pollList(true);watchOpenChat();pollBg();pollGit();
  if(sid&&QUEUE_SID===sid)loadQueue(sid)}
 addEventListener('focus',catchUp);document.addEventListener('visibilitychange',catchUp);
 
@@ -7350,23 +7353,69 @@ function parsePlan(out){
  return steps}
 // Claude Code's todo marks: ☒ done, ◼ in hand, ☐ still to do
 function todoMark(x){return x.done?'\u2612':x.active?'\u25fc':'\u2610'}
+// During a long run the three questions are "what is it doing", "what else is still
+// running" and "what has it touched" — which lived in a dock, a chip and a modal. One
+// dock, one section each, every section showing its digest while collapsed.
+let GITSTATE=null,GITAT=0;
+async function pollGit(){
+ if(!sid)return;
+ if(Date.now()-GITAT<15000)return;
+ GITAT=Date.now();
+ try{GITSTATE=await (await fetch('/api/git?sid='+encodeURIComponent(sid))).json()}catch(e){}
+ drawPlanDock()}
+
+function dockSection(d,key,title,digest,fill){
+ const openKey='_sec_'+key;
+ if(d[openKey]===undefined)d[openKey]=(key==='plan');
+ const h=el('<div class=pdsec></div>');
+ h.appendChild(el(`<b>${title}</b>`));
+ const dg=document.createElement('span');dg.className='pddig';dg.textContent=digest;h.appendChild(dg);
+ h.onclick=()=>{d[openKey]=!d[openKey];drawPlanDock()};
+ d.appendChild(h);
+ if(d[openKey]){const body=el('<div class=pdl></div>');fill(body);d.appendChild(body)}}
+
 function drawPlanDock(){
  const d=$('#plandock');if(!d)return;
  const steps=PLANS[sid]||[],open=steps.filter(x=>!x.done);
+ const running=[...RUNNING].length, queued=(QUEUE&&QUEUE.length)||0, bg=(BGT&&BGT.length)||0;
+ const git=GITSTATE&&GITSTATE.repo?GITSTATE:null;
+ const anything=open.length||running||queued||bg||(git&&git.dirty);
  d.innerHTML='';
- if(!open.length||d.dataset.hidden==='1'){d.style.display='none';return}
+ if(!anything||d.dataset.hidden==='1'){d.style.display='none';return}
  d.style.display='';
- const h=el('<div class=pdh></div>');
- h.appendChild(el(`<b>todos ${steps.length-open.length}/${steps.length}</b>`));
- const cur=open.find(x=>x.active)||open[0];
- h.appendChild(document.createTextNode(' · \u25fc '+cur.t));
- h.title=d._open?'hide the plan':'show the whole plan';
- h.onclick=()=>{d._open=!d._open;drawPlanDock()};d.appendChild(h);
- if(!d._open)return;
- const list=el('<div class=pdl></div>');
- steps.forEach(x=>{const r=el(`<div class="st${x.done?' done':''}${x.active&&!x.done?' active':''}"><span class=bx>${todoMark(x)}</span></div>`);
-  const sp=document.createElement('span');sp.textContent=x.t;r.appendChild(sp);list.appendChild(r)});
- d.appendChild(list)}
+
+ if(open.length){
+  const cur=open.find(x=>x.active)||open[0];
+  dockSection(d,'plan',`todos ${steps.length-open.length}/${steps.length}`,'\u25fc '+cur.t,body=>{
+   steps.forEach(x=>{
+    const r=el(`<div class="st${x.done?' done':''}${x.active&&!x.done?' active':''}"><span class=bx>${todoMark(x)}</span></div>`);
+    const sp=document.createElement('span');sp.textContent=x.t;r.appendChild(sp);body.appendChild(r)})})}
+
+ if(running||queued||bg){
+  const bits=[];
+  if(running)bits.push(running+' answering');
+  if(queued)bits.push(queued+' queued');
+  if(bg)bits.push(bg+' in the background');
+  dockSection(d,'work','work',bits.join(' · '),body=>{
+   (BGT||[]).slice(0,6).forEach(t=>{
+    const r=el('<div class=st></div>');
+    const sp=document.createElement('span');
+    sp.textContent=(t.title||t.name||'task')+(t.secs?' · '+fmtSecs(t.secs):'');
+    r.appendChild(sp);body.appendChild(r)});
+   if(queued){const r=el('<div class=st></div>');
+    const sp=document.createElement('span');sp.textContent=queued+' message(s) waiting to send';
+    r.appendChild(sp);body.appendChild(r)}})}
+
+ if(git){
+  const bits=[git.branch];
+  if(git.dirty)bits.push(git.dirty+' changed');
+  if(git.ahead)bits.push('↑'+git.ahead);
+  if(git.behind)bits.push('↓'+git.behind);
+  dockSection(d,'git','git',bits.join(' · '),body=>{
+   [[git.diff||'nothing uncommitted'],[git.untracked?git.untracked+' untracked':''],
+    [git.last?'last: '+git.last:'']].forEach(([t])=>{
+    if(!t)return;const r=el('<div class=st></div>');
+    const sp=document.createElement('span');sp.textContent=t;r.appendChild(sp);body.appendChild(r)})})}}
 
 /* ---------------- jump between your messages ---------------- */
 function jumpTo(n,block){
