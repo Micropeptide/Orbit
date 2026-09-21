@@ -1145,10 +1145,14 @@ class H(http.server.BaseHTTPRequestHandler):
             # other window and the phone — /api/new, /api/settings, picking a model, all
             # of it — on the next click. Only the swap needs the lock.
             before = len(st.msgs)
-            was = list(st.msgs)
-            new_msgs, summary = q.compact(was)
+            live = st.msgs                       # the list itself, not a copy of it
+            new_msgs, summary = q.compact(list(live))
             with LOCK:
-                if st.msgs is not was and len(st.msgs) != before:
+                # A turn can start while the model summarises. It appends to the list
+                # object it was given, so rebinding st.msgs to a new list would throw
+                # its messages away — and comparing a COPY by identity is always true,
+                # which is what the first version of this check did.
+                if st.msgs is not live or len(live) != before:
                     return self._send(409, jdump({"error": "that chat changed while it was "
                                                            "being compacted — try again"}))
                 st.msgs = new_msgs
@@ -2795,6 +2799,8 @@ def _queue_add(st, text, atts=None, effort=None, at=None, repeat=None, model=Non
     _queue_saved(st)
     return {k: v for k, v in item.items() if k != "attachments"}
 
+_PREF_ON = {"auto_review": "changes", "verify_turns": "tools"}
+
 _PREF_SHAPES = {
     "easy_mode": bool, "thinking": bool, "parallel_tools": bool,
     "easy_tools": list, "claude_easy_tools": list,
@@ -2814,7 +2820,11 @@ def _checked_pref(key, value):
     if shape is list:
         if not isinstance(value, list): return None, f"{key} must be a list"
         return [str(x) for x in value if str(x).strip()], ""
-    if shape is str: return str(value), ""
+    if shape is str:
+        # these are words, "" or "changes"/"tools", and False is how a client says off.
+        # str(False) is "False", which is truthy — the setting would be stuck on.
+        if isinstance(value, bool): return ("" if not value else _PREF_ON.get(key, "on")), ""
+        return str(value), ""
     return value, ""
 
 

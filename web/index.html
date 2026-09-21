@@ -293,11 +293,13 @@ sup.fnref{color:var(--acc);cursor:pointer;font-size:.72em;padding:0 1px}
 .codeblk .cacts button:not(.primary):not(.cpy){opacity:.0;transition:opacity .12s}
 .codeblk:hover .cacts button{opacity:1}
 @media(hover:none){.codeblk .cacts button:not(.primary):not(.cpy){opacity:1}}
-/* only the body scrolls, so Copy / Wrap / Save stay reachable on a 400-line block —
-   scrolling used to carry the whole header off the top of the window with it */
+/* Only the body scrolls, so Copy / Wrap / Save stay reachable on a 400-line block —
+   scrolling used to carry the whole header off the top of the window with it. The
+   header is a sibling of the scrolling <pre>, so it needs no sticky rule; and the
+   block must not trap a swipe (overscroll-behavior:contain meant a touch that started
+   inside it could never carry on to the page). */
 .bub .codeblk pre{background:none;border:0;border-radius:0;margin:0;padding:9px 13px;
- overflow:auto;max-height:min(62vh,560px);overscroll-behavior:contain}
-.codeblk .codehead{position:sticky;top:0;z-index:1;background:var(--panel)}
+ overflow:auto;max-height:min(62vh,560px);overscroll-behavior-x:contain}
 .bub .codeblk pre code.hljs{background:none;padding:0}
 .codeblk.wrap pre{white-space:pre-wrap;word-break:break-word}
 .codeblk.collapsed pre{max-height:430px;overflow:hidden;-webkit-mask-image:linear-gradient(#000 75%,transparent)}
@@ -7232,7 +7234,9 @@ let railSpy=null;
 function drawTurnRail(){
  let r=$('#turnrail');
  const us=[...wrap.querySelectorAll('.msg.u:not(.note)')];
- if(us.length<4||$('#log').style.display==='none'||narrow()){if(r)r.style.display='none';return}
+ if(us.length<4||$('#log').style.display==='none'||narrow()){
+  if(railSpy){railSpy.disconnect();railSpy=null}    // the last chat's rows are gone
+  if(r)r.style.display='none';return}
  if(!r){r=el('<div id=turnrail class=turnrail></div>');$('main').appendChild(r)}
  r.style.display='';
  r.innerHTML='';
@@ -7987,7 +7991,11 @@ $('#more').onclick=e=>{e.stopPropagation();
   {icon:'✓',label:'Health check',run:showHealth},
  ])};
 async function chatPromptDlg(){
- const st=await (await fetch('/api/state')).json();
+ // THIS chat's, not whichever chat the Mac happens to have open: on a phone, or in a
+ // second window, the dialog pre-filled another chat's prompt and then saved it onto
+ // this one
+ const st=await (await fetch('/api/state'+(sid?'?sid='+encodeURIComponent(sid):''))).json();
+ if(st.error)return toast('could not read this chat — '+st.error);
  const t=prompt('Extra system prompt for THIS chat only (blank to clear):',st.sys_override||'');
  if(t===null)return;
  await fetch('/api/sysprompt',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -8152,12 +8160,18 @@ $('#srv_stop').onclick=async()=>{const d=await (await fetch('/api/server/stop',{
  toast(d.msg);refreshStatus()};
 $('#srv_restart').onclick=async()=>{toast('restarting...');
  const d=await (await fetch('/api/server/restart',{method:'POST'})).json();toast(d.msg);refreshStatus()};
-// Which physical key was pressed, not which character it produces. ⌘K on a Dvorak or
-// a Cyrillic layout sends a different e.key and matched nothing; e.code is the key.
-const keyIs=(e,letter)=>e.code===('Key'+letter.toUpperCase())||
-  (e.key||'').toLowerCase()===letter;
+// Which physical key was pressed, not which character it produces: ⌘K on a Dvorak or a
+// Cyrillic layout sends a different e.key and matched nothing. `e.code` alone, not
+// "code OR key" — that gave every shortcut two triggers, so on Dvorak the key that
+// produces `l` also fired ⌘L and took the browser's address bar with it. Where there is
+// no code (a synthetic event, some remote keyboards) fall back to the character.
+const keyIs=(e,letter)=>e.code?e.code===('Key'+letter.toUpperCase())
+  :(e.key||'').toLowerCase()===letter;
 addEventListener('keydown',e=>{
- // a shortcut must not fire out of the middle of composing Japanese or Chinese
+ // Escape is not a shortcut, it is the way out, and a modal that cannot be dismissed
+ // while an IME session is open is worse than one closed a keystroke early
+ if(e.key==='Escape'&&$('#modalhost').innerHTML){closeModal();return}
+ // the rest must not fire out of the middle of composing Japanese or Chinese
  if(composing(e))return;
  // and a held-down ⌘K must open one new chat, not forty. Arrows are the exception:
  // holding one to walk through your messages is what it is for.
@@ -8165,7 +8179,7 @@ addEventListener('keydown',e=>{
  if(e.key==='Escape')closeModal();
  if((e.metaKey||e.ctrlKey)&&(e.key===','||e.code==='Comma')){e.preventDefault();openSettings()}
  if((e.metaKey||e.ctrlKey)&&e.shiftKey&&keyIs(e,'k')){e.preventDefault();newChatWith();return}
- if((e.metaKey||e.ctrlKey)&&keyIs(e,'k')){e.preventDefault();newChat()}
+ if((e.metaKey||e.ctrlKey)&&keyIs(e,'k')){e.preventDefault();newChat();return}
  if((e.metaKey||e.ctrlKey)&&keyIs(e,'f')){e.preventDefault();
   if(e.shiftKey||!sid||!wrap.children.length)$('#search').focus(); else openFind()}
  if((e.metaKey||e.ctrlKey)&&keyIs(e,'j')){e.preventDefault();showPane('files')}

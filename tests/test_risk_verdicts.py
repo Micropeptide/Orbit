@@ -114,5 +114,95 @@ class TestRulesCannotReachPastTheFloor(unittest.TestCase):
         self.assertTrue(q._never_auto("run_shell", why))
 
 
+class TestTheFloorIsNotParsedFromProse(unittest.TestCase):
+    """risk_check decorates the reason it gives — "(inside workspace)" when every path is
+    inside, "(also: …)" when a call is destructive for several reasons at once. Anything
+    that decides from the reason has to ask `_never_auto`, not test the decorated
+    sentence against the set: a call destructive for two reasons walked past the floor."""
+
+    def setUp(self):
+        self.saved = dict(q.S)
+        self.addCleanup(lambda: (q.S.clear(), q.S.update(self.saved)))
+        q.S["autonomy_mode"] = "auto"
+
+    def test_a_decorated_never_auto_reason_still_always_asks(self):
+        for r in ("sudo -- runs as administrator (also: shutil.rmtree)",
+                  "rewriting git history (inside workspace)",
+                  "destructive git (also: recursive/forced delete)"):
+            with self.subTest(reason=r):
+                self.assertTrue(q._never_auto("run_shell", r))
+                self.assertFalse(q._auto_approvable("edit_file", {"path": "x.py"}, r))
+                self.assertFalse(q._auto_approvable("multi_edit", {"path": "x.py"}, r))
+
+
+class TestTheClassifierDoesNotHandOverAShell(unittest.TestCase):
+    """A "read-only" command that can run another command is not read-only."""
+
+    def test_awk_can_run_a_shell_so_it_is_not_claimed(self):
+        self.assertIsNot(q._shell_is_readonly('awk \'BEGIN{system("rm -rf /tmp/x")}\''), True)
+
+    def test_git_subcommands_that_write_are_not_reads(self):
+        for c in ("git stash", "git branch -D main", "git tag v9",
+                  "git config --global user.email x", "git config --unset a.b",
+                  "git diff --output=/tmp/x", "git -c core.pager=sh log"):
+            self.assertIsNot(q._shell_is_readonly(c), True, c)
+
+    def test_and_the_ones_that_read_still_are(self):
+        for c in ("git log --oneline", "git status", "git diff --stat", "git branch",
+                  "git tag -l", "git config --get user.email", "git config a.b"):
+            self.assertIs(q._shell_is_readonly(c), True, c)
+
+    def test_a_filter_told_to_write_somewhere_is_not_a_read(self):
+        for c in ("sort -o out.txt in.txt", "uniq in.txt out.txt", "sed 'w /tmp/out' f"):
+            self.assertIsNot(q._shell_is_readonly(c), True, c)
+        for c in ("sort in.txt", "uniq in.txt", "sed s/a/b/ f"):
+            self.assertIs(q._shell_is_readonly(c), True, c)
+
+
+class TestSeparatorsInsideQuotes(unittest.TestCase):
+    """A `|` inside a quoted string is a character, not a pipe. Splitting on it made a
+    harmless grep for a literal look like two commands — the second one matching a deny
+    rule, unapprovably — and silently killed every saved rule naming several commands."""
+
+    def setUp(self):
+        self.saved = dict(q.S)
+        self.addCleanup(lambda: (q.S.clear(), q.S.update(self.saved)))
+
+    def test_a_quoted_separator_is_not_a_separator(self):
+        self.assertEqual(q._split_commands('grep "foo|rm -rf /etc" notes.txt'),
+                         ['grep "foo|rm -rf /etc" notes.txt'])
+        self.assertEqual(q._split_commands("echo 'a;b' && ls"), ["echo 'a;b'", "ls"])
+
+    def test_a_literal_search_is_not_denied_by_a_rule_about_deleting(self):
+        q.S["permission_rules"] = {"allow": [],
+                                   "deny": [{"tool": "run_shell", "pattern": "rm -rf*", "note": "no"}]}
+        self.assertFalse(q.denied_by_rule("run_shell", {"command": 'grep "foo|rm -rf /etc" notes.txt'}))
+        self.assertTrue(q.denied_by_rule("run_shell", {"command": "ls; rm -rf /etc"}))
+
+    def test_a_saved_rule_naming_several_commands_still_works(self):
+        q.S["permission_rules"] = {"allow": [{"tool": "run_shell", "pattern": "cd build && make*",
+                                              "note": ""}], "deny": []}
+        self.assertTrue(q.allowed_by_rule("run_shell", {"command": "cd build && make -j4"}))
+        self.assertFalse(q.allowed_by_rule("run_shell", {"command": "cd build && rm -rf /"}))
+
+
+class TestTypingAPathIsNotDestroyingIt(unittest.TestCase):
+    def setUp(self):
+        self.saved = dict(q.S)
+        self.addCleanup(lambda: (q.S.clear(), q.S.update(self.saved)))
+        q.S["computer_use_enabled"] = True
+
+    def test_a_keystroke_naming_a_protected_path_is_approvable(self):
+        lvl, why = q.risk_check(
+            "run_shell",
+            {"command": "osascript -e 'tell application \"System Events\" to keystroke \"/Applications/Mail.app\"'"})
+        self.assertEqual(lvl, "confirm", why)
+
+    def test_but_actually_deleting_one_is_not(self):
+        lvl, _ = q.risk_check("run_shell",
+                              {"command": "osascript -e 'keystroke \"x\"'; rm -rf /Applications"})
+        self.assertEqual(lvl, "block")
+
+
 if __name__ == "__main__":
     unittest.main()
