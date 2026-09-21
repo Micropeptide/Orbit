@@ -416,8 +416,22 @@ STATS = {"requests": 0, "errors": 0, "by_provider": {}, "last": None}
 
 
 def _error(handler, status, message, etype=None):
-    data = json.dumps({"type": "error", "error": {"type": etype or ERROR_TYPES.get(status, "api_error"),
-                                                  "message": message}}).encode()
+    """Say the request failed.
+
+    Once a streaming answer has started, its headers are already on the wire and there
+    is no status left to send: writing one put "HTTP/1.1 502 …" into the middle of the
+    event stream, so the client saw a malformed stream and the real reason was lost.
+    After the headers, the failure goes out as an SSE error event instead."""
+    body = {"type": "error", "error": {"type": etype or ERROR_TYPES.get(status, "api_error"),
+                                       "message": message}}
+    if getattr(handler, "streaming", False):
+        try:
+            handler.wfile.write(b"event: error\ndata: " + json.dumps(body).encode() + b"\n\n")
+            handler.wfile.flush()
+        except Exception:
+            pass
+        return
+    data = json.dumps(body).encode()
     handler.send_response(status)
     handler.send_header("content-type", "application/json")
     handler.send_header("content-length", str(len(data)))
@@ -537,6 +551,7 @@ def make_handler(resolver, log=None, token=None, hooks=None):
                 body["max_tokens"] = int(cap)            # a model's own output limit, not Claude's default
             if self.inbound == "responses" and cap and int(body.get("max_output_tokens") or 0) > int(cap):
                 body["max_output_tokens"] = int(cap)
+            self.streaming = False
             try:
                 if self.inbound == "responses":
                     return self._responses(route, body)
@@ -678,6 +693,7 @@ def make_handler(resolver, log=None, token=None, hooks=None):
             self.send_header("cache-control", "no-cache")
             self.send_header("connection", "close")
             self.end_headers()
+            self.streaming = True          # from here a failure is an SSE event, not a status
             for out in stream:
                 if b"response.completed" in out or b"response.incomplete" in out:
                     for line in out.decode("utf-8", "replace").splitlines():
@@ -715,6 +731,7 @@ def make_handler(resolver, log=None, token=None, hooks=None):
             self.send_header("cache-control", "no-cache")
             self.send_header("connection", "close")
             self.end_headers()
+            self.streaming = True          # from here a failure is an SSE event, not a status
             conv = responses_stream_to_anthropic if responses else stream_to_anthropic
             seen = {}
             lines = iter(r.readline, b"") if responses else _watch_stream(iter(r.readline, b""), seen)

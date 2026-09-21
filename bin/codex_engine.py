@@ -57,13 +57,34 @@ def login_state(max_age=300):
     return state
 
 
+_MODELS_CACHE = {"at": None, "rows": None}
+_MODELS_FALLBACK = [{"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol"}]
+
 def chatgpt_models():
-    """The models your Codex account offers (Codex's own cache of them)."""
+    """The models your Codex account offers (Codex's own cache of them).
+
+    On the hot path — resolve() -> catalogue() -> cli_models() on every turn — so the
+    parse is kept until the file changes. And a file whose shape Codex has changed must
+    not take the model picker down with it: anything unexpected is simply not a list of
+    models, and the default stands in."""
+    path = os.path.join(os.path.expanduser("~/.codex"), "models_cache.json")
+    try: stamp = os.stat(path)
+    except OSError: stamp = None
+    key = (stamp.st_mtime_ns, stamp.st_size) if stamp else None
+    if key == _MODELS_CACHE["at"] and _MODELS_CACHE["rows"] is not None:
+        return list(_MODELS_CACHE["rows"])
+    rows = _MODELS_FALLBACK
     try:
-        d = json.load(open(os.path.join(os.path.expanduser("~/.codex"), "models_cache.json")))
-    except (OSError, ValueError):
-        return [{"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol"}]
-    return [m for m in d.get("models") or [] if m.get("visibility", "list") == "list" and m.get("supported_in_api", True)]
+        with open(path) as f: d = json.load(f)
+        got = d.get("models") if isinstance(d, dict) else None
+        if isinstance(got, list):
+            rows = [m for m in got if isinstance(m, dict) and m.get("slug")
+                    and m.get("visibility", "list") == "list" and m.get("supported_in_api", True)] \
+                   or _MODELS_FALLBACK
+    except Exception:
+        rows = _MODELS_FALLBACK
+    _MODELS_CACHE.update(at=key, rows=rows)
+    return list(rows)
 
 
 def parse_id(mid):
