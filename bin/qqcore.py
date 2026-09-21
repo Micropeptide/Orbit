@@ -5096,7 +5096,11 @@ def _tighten_stream(resp, secs):
 # Settings that belong to a chat rather than to Orbit. A chat on a small local model
 # wants easy mode and a hosted reviewer; the one next to it does not, and switching
 # between them should not mean setting both again each time.
-PER_CHAT = ("easy_mode", "easy_tools", "helper_model", "auto_review", "verify_turns",
+# "easy_tools" is two different lists under one name: Orbit's own tool names here
+# (read_file, run_shell) and Claude Code's there (Read, Bash). A chat that set one would
+# have had it read as the other, so the Claude Code list is named separately.
+PER_CHAT = ("easy_mode", "easy_tools", "claude_easy_tools", "helper_model",
+            "auto_review", "verify_turns",
             "autonomy_mode", "reasoning_effort", "thinking", "parallel_tools")
 
 def chat_setting(key, sid=None, default=None):

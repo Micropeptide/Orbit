@@ -500,7 +500,7 @@ def route_skills(text, limit=6):
 
 def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None, mode=None,
                settings_path=None, mcp_path=None, append=None, sdk=True, add_dirs=None, model=None,
-               kind="local", remote=False, **_):
+               kind="local", remote=False, sid=None, **_):
     """The claude command line. The same for the terminal (sdk=False) and for
     Orbit, which only adds the stream transport, the session and a chat's mode.
 
@@ -539,18 +539,22 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
         argv += ["--permission-mode", mode]
     dis = [t for t in (c.get("disallowed_tools") if kind == "local" else
                        [] if kind == "subscription" else c.get("provider_disallowed_tools", ["WebSearch"])) or [] if t]
-    if easy_mode():
+    if easy_mode(sid):
         # keep a few, deny the rest -- but only names Claude Code has said it has, so a
         # tool it has never heard of cannot stop the run
-        keep = {str(t) for t in (c.get("easy_tools") or []) if t}
+        # this chat's own list of Claude Code tools to keep, if it set one. Its name is
+        # not "easy_tools": that one holds Orbit's own tool names, which mean nothing here
+        try: mine = Q.chat_setting("claude_easy_tools", sid)
+        except Exception: mine = None
+        keep = {str(t) for t in (mine or c.get("easy_tools") or []) if t}
         dis = sorted(set(dis) | {t for t in known_tools() if t not in keep})
     if dis: argv += ["--disallowedTools", *dis]
     if settings_path: argv += ["--settings", settings_path]
     if mcp_path:
         argv += ["--mcp-config", mcp_path]
-        if easy_mode() or ("*" not in (c.get("mcp_servers") or []) and prof != "full"):
+        if easy_mode(sid) or ("*" not in (c.get("mcp_servers") or []) and prof != "full"):
             argv.append("--strict-mcp-config")
-    if prof != "lean" and not easy_mode() and not remote:
+    if prof != "lean" and not easy_mode(sid) and not remote:
         # plugins' own MCP servers: a Claude Code started with --print marks them failed
         # without starting them (while the plugins' hooks still run -- context-mode's then
         # send every web fetch to tools that are not there). Naming each plugin's folder,
@@ -575,12 +579,12 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
     return argv
 
 
-def launcher_files(c, tag, skills=None, extra_servers=None):
+def launcher_files(c, tag, skills=None, extra_servers=None, sid=None):
     """--settings and --mcp-config files for one run (None where not needed)."""
     settings = {}
     # A plugin's hooks expect that plugin's MCP tools to be there. Easy mode takes the
     # servers away, so the hooks go with them rather than firing at tools that are gone.
-    if easy_mode() or c.get("hooks") in (False, "off"):
+    if easy_mode(sid) or c.get("hooks") in (False, "off"):
         settings["disableAllHooks"] = True
     if skills is not None and c.get("skill_routing") and (c.get("profile") or "standard") != "lean":
         keep = set(skills)
@@ -590,7 +594,7 @@ def launcher_files(c, tag, skills=None, extra_servers=None):
     # Easy mode is about what the model is handed, and an MCP server hands it tools:
     # the servers cost prompt whether or not the model ever calls them, and they are
     # most of what a plugin-heavy setup sends.
-    names = (c.get("easy_mcp") or []) if easy_mode() else (c.get("mcp_servers") or [])
+    names = (c.get("easy_mcp") or []) if easy_mode(sid) else (c.get("mcp_servers") or [])
     servers = {}
     if "*" not in names:
         known = user_mcp_servers()
@@ -1503,7 +1507,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                             "env": {"ORBIT_MCP_URL": bridge_url(), "ORBIT_MCP_TOKEN": token}}
     # on another machine Claude uses that machine's own setup (settings, skills, MCP)
     settings_path, mcp_path = (None, None) if remote else launcher_files(c, mk["session"], skills=chosen,
-                                                                           extra_servers=servers)
+                                                                          extra_servers=servers, sid=sid)
 
     # a chat's own mode, else Orbit's default for new chats, else Claude's own
     mode = prefs.get("permission_mode") or c.get("permission_mode") or None
@@ -1511,8 +1515,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         mode = c["unattended_mode"]
     kind = "subscription" if target.get("subscription") else ("local" if target.get("local") else "provider")
     argv = build_argv(c, session_id=mk["session"], resume=resume, read_only=bool(read_only), mode=mode,
-                      model=target.get("cli_model"), kind=kind, remote=bool(remote),
-                      effort=getattr(T, "effort", None) or q.S.get("reasoning_effort"),
+                      model=target.get("cli_model"), kind=kind, remote=bool(remote), sid=sid,
+                      effort=getattr(T, "effort", None) or q.chat_setting("reasoning_effort", sid),
                       settings_path=settings_path, mcp_path=mcp_path, add_dirs=prefs.get("add_dirs"),
                       append=_orbit_append(project, c, orbit_tools, prefs.get("instructions"), kind))
     if fork: argv.append("--fork-session")
