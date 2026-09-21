@@ -14,11 +14,17 @@ struct TurnRail: View {
     /// (row index, the words you sent, how tall that turn is)
     let turns: [(index: Int, text: String, height: CGFloat)]
     var live = false
+    /// Whether it is on screen at all. An always-on strip down the trailing edge takes
+    /// every touch that lands there — a link, a Copy button, the edge of a code block —
+    /// so it appears while you scroll or while an answer is being written, and fades.
+    var showing = false
     var onPick: (Int) -> Void
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var at: Int?
     @State private var scrubbing = false
+    @State private var visible = false
+    @State private var hideToken = UUID()
 
     private var tallest: CGFloat { max(turns.map(\.height).max() ?? 1, 1) }
 
@@ -35,8 +41,17 @@ struct TurnRail: View {
                 }
                 bars
             }
-            .padding(.trailing, 20)          // clear of the interactive back-swipe edge
+            .padding(.trailing, 20)
+            .opacity(visible ? 1 : 0)
+            .allowsHitTesting(visible)       // invisible, it takes no touches from the chat
+            .animation(.easeOut(duration: 0.18), value: visible)
             .animation(.easeOut(duration: 0.15), value: scrubbing)
+            .onChange(of: showing) { _, on in
+                if on { visible = true; hideToken = UUID(); return }
+                let token = UUID(); hideToken = token
+                Task { try? await Task.sleep(for: .milliseconds(1400))
+                       if hideToken == token && !scrubbing { visible = false } }
+            }
         }
     }
 
@@ -53,8 +68,10 @@ struct TurnRail: View {
         .frame(width: 24)                     // the target is the strip, not the bar
         .contentShape(.rect)
         .opacity(scrubbing ? 1 : 0.55)
+        // a real drag, not a tap: a tap here used to jump the transcript to a turn you
+        // had not chosen, and the strip sits over the right edge of the conversation
         .gesture(
-            DragGesture(minimumDistance: 0)
+            DragGesture(minimumDistance: 6)
                 .onChanged { v in
                     scrubbing = true
                     let i = index(at: v.location.y)
@@ -63,6 +80,7 @@ struct TurnRail: View {
                 .onEnded { _ in
                     if let i = at, i < turns.count { onPick(turns[i].index) }
                     scrubbing = false
+                    at = nil            // nothing is "where you are" once you let go
                 }
         )
         .accessibilityLabel("Turn navigator")

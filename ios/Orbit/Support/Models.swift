@@ -136,6 +136,13 @@ struct Message: Identifiable, Codable, Hashable {
     }
 }
 
+/// A message that decodes, or nothing — so one bad element in a list does not take
+/// the other two hundred with it.
+private struct FailableMessage: Decodable {
+    let value: Message?
+    init(from d: Decoder) throws { value = try? Message(from: d) }
+}
+
 struct ChatDetail: Codable {
     var sid: String
     var title: String?
@@ -168,7 +175,11 @@ struct ChatDetail: Codable {
         let c = try d.container(keyedBy: CodingKeys.self)
         sid = try c.decode(String.self, forKey: .sid)
         title = c.lenient(String.self, .title)
-        messages = c.lenient([Message].self, .messages) ?? []
+        // Per message, not per array: `lenient` on the whole list means one malformed
+        // message — a new field, a type the Mac changed — decodes the chat as EMPTY,
+        // and AppState then writes that empty list over the cache. A chat that will
+        // not open is bad; a chat that silently becomes blank, on disk too, is worse.
+        messages = (c.lenient([FailableMessage].self, .messages) ?? []).compactMap(\.value)
         n = c.lenient(Int.self, .n)
         running = c.lenient(Bool.self, .running)
         context = c.lenient(ContextState.self, .context)

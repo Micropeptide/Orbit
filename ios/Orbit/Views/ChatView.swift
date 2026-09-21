@@ -19,8 +19,8 @@ struct ChatView: View {
     /// mistaken for you scrolling back to the bottom.
     @State private var userScrolling = false
     @State private var scrollToken = UUID()
-    /// Where each of your messages sits in the transcript, for the turn rail.
-    @State private var rowTops: [Int: CGFloat] = [:]
+    /// How tall each transcript row is, for the turn rail's bars.
+    @State private var rowHeights: [Int: CGFloat] = [:]
     @State private var viewportHeight: CGFloat = 800
     /// Draw lazily only in very long chats. Decided from the saved messages with a gap between
     /// the two thresholds, so an answer finishing (or streaming) never flips it mid-read --
@@ -176,19 +176,19 @@ struct ChatView: View {
     private var currentModelName: String { state.currentModelName }
 
     /// (row index, first words, how tall that turn is) — one entry per message of
-    /// yours, measured from where the next one starts.
+    /// yours, a turn being everything from it up to the next one.
     private var turnAnchors: [(index: Int, text: String, height: CGFloat)] {
         let rows = transcriptRows
-        var starts: [(Int, String)] = []
-        for r in rows where r.message.isUser && r.message.note != true {
-            starts.append((r.index, r.message.text))
+        var out: [(index: Int, text: String, height: CGFloat)] = []
+        for r in rows {
+            let m = r.message
+            if m.isUser && m.note != true {
+                out.append((index: r.index, text: m.text, height: 0))
+            }
+            guard !out.isEmpty else { continue }
+            out[out.count - 1].height += (rowHeights[r.index] ?? 60)
         }
-        guard starts.count > 3 else { return [] }
-        return starts.enumerated().map { i, s in
-            let top = rowTops[s.0] ?? 0
-            let next = i + 1 < starts.count ? (rowTops[starts[i + 1].0] ?? top + 60) : (rowTops[-1] ?? top + 60)
-            return (index: s.0, text: s.1, height: max(10, next - top))
-        }
+        return out.count > 3 ? out.map { ($0.index, $0.text, max(10, $0.height)) } : []
     }
 
     private var transcriptRows: [TranscriptRow] {
@@ -240,7 +240,9 @@ struct ChatView: View {
             // how long this is and where you are in it — a question the outline, which
             // lists what you asked, does not answer
             .overlay(alignment: .trailing) {
-                TurnRail(sid: sid, turns: turnAnchors, live: state.streaming && state.liveSid == sid) { i in
+                TurnRail(sid: sid, turns: turnAnchors,
+                         live: state.streaming && state.liveSid == sid,
+                         showing: userScrolling || (state.streaming && state.liveSid == sid)) { i in
                     jumpTo = i
                 }
             }
@@ -308,12 +310,13 @@ struct ChatView: View {
                             .background(flashed == i ? Color.yellow.opacity(0.18) : .clear,
                                         in: .rect(cornerRadius: 10))
                             .id("row-\(i)")
-                            // where each of your messages starts, so the rail can size
-                            // its bars by how long that turn actually is
-                            .onGeometryChange(for: CGFloat.self) {
-                                $0.frame(in: .named("transcript")).minY
-                            } action: { y in
-                                if m.isUser && m.note != true, rowTops[i] != y { rowTops[i] = y }
+                            // how tall each row is, so the rail can size its bars by how
+                            // long a turn actually is. A height changes when the layout
+                            // does; a POSITION changes on every scroll frame, and writing
+                            // one per row per frame rebuilt the whole transcript each time.
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
+                                let r = (h / 4).rounded() * 4          // ignore sub-step noise
+                                if rowHeights[i] != r { rowHeights[i] = r }
                             }
                     }
                     if state.streaming {
@@ -334,9 +337,6 @@ struct ChatView: View {
                     // edge counts as being at the newest message (appear/disappear can't tell --
                     // an ordinary stack creates every row up front)
                     Color.clear.frame(height: 8).id("bottom")
-                        .onGeometryChange(for: CGFloat.self) {
-                            $0.frame(in: .named("transcript")).minY
-                        } action: { y in if rowTops[-1] != y { rowTops[-1] = y } }
                         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named("transcript")).minY } action: { y in
                             let near = y < viewportHeight + 60
                             if near != atBottom { atBottom = near }

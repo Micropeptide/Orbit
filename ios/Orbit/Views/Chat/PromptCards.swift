@@ -205,7 +205,9 @@ struct ApprovalCard: View {
                     guard !sending else { return }
                     sending = true
                     Haptics.press()
-                    Task { await state.allowForThisChat(prompt); sending = false }
+                    // no `sending = false`: the prompt is answered, and the card is about
+                    // to go. Re-enabling it let both grant buttons fire a second time.
+                    Task { await state.allowForThisChat(prompt) }
                 } label: {
                     VStack(alignment: .leading, spacing: 1) {
                         Text("Allow for the rest of this chat")
@@ -223,7 +225,7 @@ struct ApprovalCard: View {
                         guard !sending else { return }
                         sending = true
                         Haptics.press()
-                        Task { await state.allowInProject(prompt); sending = false }
+                        Task { await state.allowInProject(prompt) }
                     } label: {
                         VStack(alignment: .leading, spacing: 1) {
                             Text("Allow in \(prompt.projectName ?? pid)")
@@ -338,6 +340,7 @@ struct DiffView: View {
                 .padding(8)
             }
             .frame(maxHeight: 220)
+            .modifier(CodeTextSize())      // a diff is code: it keeps its own size
         }
         .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 9))
     }

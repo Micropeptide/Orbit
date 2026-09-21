@@ -92,14 +92,18 @@ struct TodoDock: View {
     var body: some View {
         let steps = state.plans[sid] ?? []
         let remaining = steps.filter { !$0.done }
-        if !hidden, let current = remaining.first(where: \.active) ?? remaining.first {
+        // a finished plan is worth reading — it is the account of what it just did — so
+        // the dock stays with every step ticked rather than vanishing at the last one
+        if !hidden, !steps.isEmpty {
+            let current = remaining.first(where: \.active) ?? remaining.first
             VStack(alignment: .leading, spacing: 6) {
                 Button {
                     withAnimation(.easeInOut(duration: 0.15)) { open.toggle() }
                 } label: {
                     HStack(spacing: 5) {
                         Text("todos \(steps.count - remaining.count)/\(steps.count)").fontWeight(.semibold)
-                        Text("· \u{25FC} " + current.text).foregroundStyle(.secondary).lineLimit(1)
+                        Text(current.map { "· \u{25FC} " + $0.text } ?? "· all done")
+                            .foregroundStyle(.secondary).lineLimit(1)
                         Spacer(minLength: 4)
                         Image(systemName: open ? "chevron.down" : "chevron.up").font(.caption2)
                             .foregroundStyle(.tertiary)
@@ -183,12 +187,20 @@ struct GitDock: View {
             }
         }
         .task(id: key) {
-            // a chat that is not in a repository answers nil, and the strip is not drawn
             guard let server = state.server, Date().timeIntervalSince(at) > 10 else { return }
-            at = Date()
-            git = try? await server.gitState(sid: sid)
+            do {
+                // a chat that is not in a repository answers nil, and the strip is not
+                // drawn. `try?` would turn the CANCELLATION that .task(id:) performs on
+                // every key change into that same nil — the dock vanished and the stamp
+                // below then blocked the replacement for ten seconds.
+                let g = try await server.gitState(sid: sid)
+                git = g
+                at = Date()
+            } catch {
+                // cancelled, or one dropped request: keep what is on screen and let the
+                // next key change try again straight away
+            }
         }
-        .onChange(of: sid) { _, _ in git = nil; at = .distantPast }
     }
 }
 

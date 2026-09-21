@@ -292,7 +292,10 @@ struct QueueStrip: View {
                         }
                         .dropDestination(for: String.self) { ids, _ in
                             dropOn = nil
-                            guard let id = ids.first, id != item.id else { return false }
+                            // only a message of this queue: any text can be dragged here
+                            // from a code block, or from another app in Split View
+                            guard let id = ids.first, id != item.id,
+                                  queued.contains(where: { $0.id == id }) else { return false }
                             Task { await state.moveQueued(id, before: item.id) }
                             return true
                         } isTargeted: { over in
@@ -312,7 +315,8 @@ struct QueueStrip: View {
                     }
                     .dropDestination(for: String.self) { ids, _ in
                         dropOn = nil
-                        guard let id = ids.first else { return false }
+                        guard let id = ids.first,
+                              queued.contains(where: { $0.id == id }) else { return false }
                         Task { await state.moveQueued(id, before: nil) }
                         return true
                     } isTargeted: { over in
