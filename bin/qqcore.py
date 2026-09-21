@@ -6348,15 +6348,61 @@ ALL_SPECS += [
 # undo an answer's file changes, plan mode, asking the user a question
 # mid-task, glob, multi_edit, and built-in /init and /review commands
 
+def _file_sha(path):
+    try:
+        with open(path, "rb") as f: return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return ""
+
 def _note_change(path, snap, created=False):
     ch = getattr(TURN_CTX, "changes", None)
     if ch is None: return
-    ch.append({"path": path, "snap": snap, "created": bool(created and not snap)})
+    # the hash of the file as the tool left it, so undo can tell "unchanged since" from
+    # "you have edited this yourself since, and putting the old text back would lose it"
+    ch.append({"path": path, "snap": snap, "created": bool(created and not snap),
+               "after_sha": _file_sha(path)})
 
-def undo_changes(changes):
+
+def preview_undo(changes):
+    """What undoing this answer would do, before it does any of it.
+
+    Undo used to restore every snapshot blindly. If you had edited one of those files
+    yourself after the answer, your edit was overwritten with no warning -- and a failure
+    half way through left the tree half undone. Returns {safe, unsafe, gone}."""
+    safe, unsafe, gone = [], [], []
+    for c in reversed(changes or []):
+        p = c.get("path")
+        if not p: continue
+        if c.get("created"):
+            (safe if os.path.exists(p) else gone).append({"path": p, "what": "remove (created here)"})
+            continue
+        snap = c.get("snap")
+        if not snap or not os.path.exists(snap):
+            gone.append({"path": p, "why": "no snapshot — it lives outside the workspace"})
+            continue
+        if not os.path.exists(p):
+            safe.append({"path": p, "what": "restore (it is gone now)"})
+            continue
+        left = c.get("after_sha")
+        if left and _file_sha(p) != left:
+            unsafe.append({"path": p, "why": "changed since the answer wrote it"})
+        else:
+            safe.append({"path": p, "what": "restore"})
+    return {"safe": safe, "unsafe": unsafe, "gone": gone}
+
+def undo_changes(changes, force=False):
     """Put back every file an answer changed, newest first: an edited file from
     the snapshot taken just before, a created one to the bin. Each restore is
-    itself checkpointed, so undoing can be undone. Returns what it did."""
+    itself checkpointed, so undoing can be undone. Returns what it did.
+
+    All of it or none of it: if any file has changed since the answer wrote it, nothing
+    is restored and the reason is returned instead, because a half-undone tree is worse
+    than an un-undone one. `force` goes ahead anyway."""
+    look = preview_undo(changes)
+    if look["unsafe"] and not force:
+        return ([f"nothing was undone: {x['path']} {x['why']}" for x in look["unsafe"]]
+                + [f"({len(look['safe'])} other file(s) could be restored — undo with force "
+                   "to do it anyway)"])
     done = []
     for c in reversed(changes or []):
         p = c.get("path")
