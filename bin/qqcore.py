@@ -4400,6 +4400,11 @@ def trash_purge(name=None):
         try:
             if os.path.exists(p): os.remove(p)
         except OSError: pass
+        if rec.get("kind") == "session":
+            gone = (rec.get("meta") or {}).get("sid")
+            if gone:
+                try: CE.forget_chat_prefs(gone)
+                except Exception: pass
         idx.pop(key, None); n += 1
     with open(os.path.join(TRASH, "index.json"), "w") as f: json.dump(idx, f)
     return n

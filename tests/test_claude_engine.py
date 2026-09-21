@@ -810,6 +810,48 @@ class TestChatPrefsUnderLoad(unittest.TestCase):
         finally:
             CE._work_dir = saved
 
+class TestTheBridgeTokenLivesAsLongAsTheProcess(unittest.TestCase):
+    """Orbit's own tools reach a Claude Code run through a token, and the run's MCP child
+    reads that token from its environment exactly once, when it is spawned. A chat that
+    keeps its process alive -- a remote one, or a local one with background work still
+    going -- therefore cannot be given a new token between turns. Revoking it anyway left
+    the bridge answering "unknown run" for every Orbit tool call from the second turn on,
+    for the rest of the chat."""
+
+    def setUp(self):
+        self.tok = "t-" + os.urandom(4).hex()
+        CE.BRIDGE[self.tok] = {"sid": "test-bridge", "specs": []}
+        self.addCleanup(CE.BRIDGE.pop, self.tok, None)
+        self.addCleanup(CE.LIVE.pop, "test-bridge", None)
+
+    def test_closing_the_session_revokes_it(self):
+        CE.LIVE["test-bridge"] = {"proc": _DeadProc(), "sig": None, "lines": None, "got": None,
+                                  "err_tail": None, "wlock": threading.Lock(), "host": None,
+                                  "used": time.time(), "token": self.tok}
+        CE.close_live("test-bridge")
+        self.assertNotIn("test-bridge", CE.LIVE)
+        self.assertNotIn(self.tok, CE.BRIDGE, "the token outlived the process it belonged to")
+
+    def test_a_session_that_never_had_one_still_closes(self):
+        CE.LIVE["test-bridge"] = {"proc": _DeadProc(), "sig": None, "lines": None, "got": None,
+                                  "err_tail": None, "wlock": threading.Lock(), "host": None,
+                                  "used": time.time()}
+        CE.close_live("test-bridge")           # no "token" key at all
+        self.assertNotIn("test-bridge", CE.LIVE)
+
+    def test_an_unknown_token_is_refused_rather_than_answered(self):
+        self.assertEqual(CE.bridge_call("no-such-token", "read_file", {}).get("error"), "unknown run")
+
+
+class _DeadProc:
+    """A process object that is already finished, so close_live has nothing to wait for."""
+    class _P:
+        def close(self): pass
+    stdin = _P()
+    def poll(self): return 0
+    def wait(self, timeout=None): return 0
+
+
 if __name__ == "__main__":
     unittest.main()
 

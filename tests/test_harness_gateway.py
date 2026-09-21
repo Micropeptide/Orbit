@@ -327,6 +327,35 @@ class TestServer(unittest.TestCase):
         self.assertEqual(code, 502)
 
 
+    def test_a_gateway_timeout_is_not_sent_again(self):
+        """504 means the provider took too long, which means it may well be generating.
+        Sending the same completion again bills the turn twice and leaves the answer
+        nowhere. Only a refusal from something in front of the model is repeatable."""
+        Upstream.seen.clear()
+        Upstream.script = [{"status": 504, "error": {"error": {"message": "gateway timeout"}}},
+                           {"status": 504, "error": {"error": {"message": "gateway timeout"}}},
+                           {"status": 504, "error": {"error": {"message": "gateway timeout"}}}]
+        code, _ = self.post("/h/p/v1/messages", {"model": "deepseek-v4-pro", "max_tokens": 10,
+                                                 "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(len(Upstream.seen), 1, "the turn was sent upstream more than once")
+        self.assertGreaterEqual(code, 400)
+
+    def test_a_refused_connection_in_front_of_the_model_is_retried(self):
+        """502/503 from a proxy means the request never reached the model, so repeating
+        it costs nothing and usually works."""
+        Upstream.seen.clear()
+        Upstream.script = [{"status": 503, "error": {"error": {"message": "no upstream"}}},
+                           {"chunks": [delta(content="second time lucky"),
+                                       {"id": "c", "choices": [{"index": 0, "delta": {},
+                                                                "finish_reason": "stop"}]}]}]
+        code, raw = self.post("/h/p/v1/messages", {"model": "deepseek-v4-pro", "max_tokens": 10,
+                                                   "stream": True,
+                                                   "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(code, 200)
+        self.assertEqual(len(Upstream.seen), 2)
+        self.assertIn("second time lucky", raw.decode())
+
+
 if __name__ == "__main__":
     unittest.main()
 
