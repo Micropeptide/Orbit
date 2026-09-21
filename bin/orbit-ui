@@ -74,7 +74,8 @@ class State:
         self.temp = False          # temporary chat: never written to disk
         self.project = None
         self.sys_override = None   # per-chat system prompt
-        self.tools, self.tool_errors = q.active_tools()
+        self.tools, self.tool_errors = [], {}
+        self.refresh_tools()       # easy mode is per chat, so the list is built per chat
         self.lock = threading.Lock()   # one turn at a time *per chat*
         self.busy_since = 0
         self.cancel = threading.Event()
@@ -113,9 +114,12 @@ class State:
         self.model = None
         self.queue = []
         self.queue_paused = False
+        self.refresh_tools()       # a new chat id means its own settings, not the last chat's
     def refresh_tools(self):
         specs, self.tool_errors = q.active_tools(self.project)
-        self.tools = q.tools_for(self.agent, specs)
+        # name the chat: easy mode belongs to it, and this runs before the turn sets
+        # the thread-local that chat_setting() would otherwise have to read
+        self.tools = q.tools_for(self.agent, specs, sid=self.sid)
 
 S = State()                        # the chat the browser is currently looking at
 
@@ -576,7 +580,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 st_ = STATES.get(for_sid)
                 if st_ is not None and getattr(st_, "tools", None): tools_ = st_.tools
                 else:
-                    try: tools_ = q.tools_for(None, q.active_tools()[0])
+                    # a chat with no state yet still has its own easy mode on disk
+                    try: tools_ = q.tools_for(None, q.active_tools()[0], sid=for_sid)
                     except Exception: tools_ = S.tools
             return self._send(200, jdump({
                 "tools": sorted(t["function"]["name"] for t in tools_),
@@ -633,15 +638,23 @@ class H(http.server.BaseHTTPRequestHandler):
                           "skills": os.path.join(q.CE.claude_dir(), "skills")},
                 "skills": q.CE.skills_list()}))
         if p.split("?")[0] == "/api/git":
-            # what the folder this chat works in looks like right now
+            # What the folder this chat works in looks like right now. The folder is the
+            # one the chat was given even before it has answered once -- that lives in the
+            # chat's own prefs, not only in a session marker -- and a chat that works over
+            # SSH has no local folder to read at all, so it says so rather than reporting
+            # on whatever local path happens to share the name.
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
             sid_ = (qs.get("sid") or [""])[0]
             st_ = STATES.get(sid_) if sid_ else None
-            cwd = None
-            if st_ is not None:
-                cwd = q.project_folder(st_.project) if st_.project else None
-                mk = q.CE.marker_of(st_.msgs) or {}
-                cwd = mk.get("cwd") or cwd
+            prefs = q.CE.chat_prefs(sid_) if sid_ else {}
+            mk = q.CE.marker_of(st_.msgs) if st_ is not None else {}
+            host = (mk or {}).get("host") or prefs.get("host") or ""
+            if host:
+                return self._send(200, jdump({"repo": False, "host": host,
+                                              "why": "it works on " + host}))
+            cwd = (mk or {}).get("cwd") or prefs.get("cwd")
+            if not cwd and st_ is not None and st_.project:
+                cwd = q.project_folder(st_.project)
             return self._send(200, jdump(q.git_state(cwd or q.WORKSPACE)))
         if p.split("?")[0] == "/api/claude/tools":
             # what Claude Code says it has, so easy mode can offer them as a choice
@@ -913,7 +926,14 @@ class H(http.server.BaseHTTPRequestHandler):
             # ?sid= a chat's own state (a phone asks about the chat on its screen, not the Mac's)
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
             want = (qs.get("sid") or [""])[0]
-            st = get_state(want) if want and os.path.exists(q.session_path(want)) else S
+            # a brand-new chat is in memory before it is on disk; answering about the
+            # Mac's current chat instead put another chat's title and temp flag on screen
+            if want and (want in STATES or os.path.exists(q.session_path(want))):
+                st = get_state(want)
+            elif want:
+                return self._send(404, jdump({"error": "no such chat"}))
+            else:
+                st = S
             return self._send(200, jdump({"sid": st.sid, "title": st.title, "temp": st.temp,
                                           "agent": st.agent, "sys_override": st.sys_override, "project": st.project}))
         if p == "/api/files":
@@ -1418,8 +1438,13 @@ class H(http.server.BaseHTTPRequestHandler):
             ok, why = q.BIONIC.load(d.get("model") or "")
             return self._send(200, jdump({"ok": ok, "detail": why, "server": q.BIONIC.status()}))
         if p == "/api/bionic/unload":
-            # its memory back, when you ask: Bionic is an app you use yourself too
-            ok, why = q.BIONIC.unload(d.get("model") or "")
+            # its memory back, when you ask: Bionic is an app you use yourself too, so
+            # one model has to be named -- the empty string means "all of them" to lms,
+            # and that would evict models another app on the Mac is in the middle of using
+            which = str(d.get("model") or "").strip()
+            if not which and not d.get("all"):
+                return self._send(400, jdump({"error": "name the model to unload, or pass all:true"}))
+            ok, why = q.BIONIC.unload(which)
             return self._send(200, jdump({"ok": ok, "detail": why, "server": q.BIONIC.status()}))
         if p == "/api/bionic/start":
             # Bionic keeps its local server switched off until something needs it
@@ -1647,7 +1672,11 @@ class H(http.server.BaseHTTPRequestHandler):
             with LOCK:
                 keep, seen = [], 0
                 for m in S.msgs:
-                    if m.get("role") == "user":
+                    # Orbit's own nudges ("your plan still has open steps") are written as
+                    # user messages, and the page never draws them -- so counting them here
+                    # cut at the wrong turn and destroyed the messages in between. /api/rewind
+                    # and /api/rewind/preview have always skipped them.
+                    if m.get("role") == "user" and not m.get("nudge"):
                         if seen == idx:
                             if check and not _msg_text(m).strip().startswith(check):
                                 return self._send(409, jdump({
@@ -1692,12 +1721,13 @@ class H(http.server.BaseHTTPRequestHandler):
                     keep.append(m)
                 if cut is None:
                     return self._send(404, jdump({"error": "that message is no longer there"}))
-                undone = []
+                undone, restored, refused = [], [], []
                 if want_files:
                     for m in reversed(st.msgs[cut:]):
                         if m.get("role") == "assistant" and m.get("changes") and not m.get("changes_undone"):
-                            undone += q.undo_changes(m["changes"], force=bool(d.get("force")))
-                            m["changes_undone"] = True
+                            r = q.undo_result(m["changes"], force=bool(d.get("force")))
+                            undone += r["lines"]; restored += r["restored"]; refused += r["refused"]
+                            if r["undone"]: m["changes_undone"] = True
                 dropped = len(st.msgs) - len(keep)
                 # Codex's thread still holds the turns cut here: its next message starts a
                 # new thread with the chat as it now is (Claude Code resumes at the last kept answer)
@@ -1710,7 +1740,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 st.msgs = keep
                 save_session(st)
             return self._send(200, jdump({"ok": True, "n": len(st.msgs), "dropped": dropped,
-                                          "undone": undone}))
+                                          "undone": undone, "restored": restored,
+                                          "refused": refused}))
         if p == "/api/files/delete":
             return self._send(200, jdump({"ok": q.delete_file(d.get("rel",""))}))
         if p == "/api/skills/save":
@@ -1788,10 +1819,14 @@ class H(http.server.BaseHTTPRequestHandler):
                       and (want is None or abs(float(x.get("t") or 0) - float(want)) < 0.01)), None)
             if m is None: return self._send(404, jdump({"error": "no file changes to undo there"}))
             if m.get("changes_undone"): return self._send(409, jdump({"error": "already undone"}))
-            done = q.undo_changes(m["changes"])
-            m["changes_undone"] = True
-            save_session(st)
-            return self._send(200, jdump({"ok": True, "done": done}))
+            # A refusal ("you changed that file since") used to be recorded as done, which
+            # made the snapshots unreachable for good. Only a restore marks it undone.
+            r = q.undo_result(m["changes"], force=bool(d.get("force")))
+            if r["undone"]:
+                m["changes_undone"] = True
+                save_session(st)
+            return self._send(200, jdump({"ok": True, "undone": r["undone"], "done": r["lines"],
+                                          "restored": r["restored"], "refused": r["refused"]}))
         if p == "/api/approve":
             rec = PENDING.get(d.get("id"))
             if not rec: return self._send(404, jdump({"error": "no such request"}))
@@ -1812,7 +1847,18 @@ class H(http.server.BaseHTTPRequestHandler):
             key = str(d.get("key") or "")
             if key not in q.PER_CHAT:
                 return self._send(400, jdump({"error": f"{key} is not a per-chat setting"}))
-            prefs = q.set_chat_setting(sid_, key, d.get("value"))
+            # a string where a list belongs turned easy mode into "keep these letters"
+            # and the chat was handed no tools at all, with no error anywhere
+            val, bad = _checked_pref(key, d.get("value"))
+            if bad: return self._send(400, jdump({"error": bad}))
+            prefs = q.set_chat_setting(sid_, key, val)
+            # the tool list this chat is offered follows from easy mode, so rebuild it
+            # now rather than leaving the next answer (and the count on screen) stale
+            if key in ("easy_mode", "easy_tools"):
+                st_ = STATES.get(sid_)
+                if st_ is not None:
+                    try: st_.refresh_tools()
+                    except Exception: pass
             return self._send(200, jdump({"ok": True, "prefs": prefs,
                                           "effective": q.chat_setting(key, sid_)}))
         if p == "/api/permissions/project":
@@ -1821,9 +1867,14 @@ class H(http.server.BaseHTTPRequestHandler):
                                      project=d.get("project") or None)
             return self._send(200, jdump({"ok": bool(lst), "rules": lst}))
         if p == "/api/permissions/session":
-            # allow it for the rest of this chat, and not one message longer
+            # allow it for the rest of this chat, and not one message longer. The chat
+            # has to be named: without one the rule was filed under "" and applied to
+            # nothing, while the answer said it had been saved.
+            sid_ = str(d.get("sid") or "").strip() or S.sid
+            if not sid_:
+                return self._send(400, jdump({"error": "name the chat this is for"}))
             lst = q.add_session_rule(d.get("tool") or "*", d.get("pattern") or "*",
-                                     d.get("note") or "", sid=d.get("sid") or "")
+                                     d.get("note") or "", sid=sid_)
             return self._send(200, jdump({"ok": True, "rules": lst}))
         if p == "/api/permissions/add":
             with LOCK:
@@ -2398,6 +2449,12 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                     PENDING[rid] = {"event": ev, "allow": False, "fn": fn, "args": a}
                     req = {"id": rid, "name": (info or {}).get("tool") or fn, "args": a, "reason": reason,
                            "suggested_pattern": q._rule_pattern_suggestion(fn, a)}
+                    # the chat's project, so "allow it here" can say where "here" is;
+                    # a chat with no project simply is not offered that size of grant
+                    pid = getattr(st, "project", None)
+                    if pid:
+                        try: req["project"] = {"id": pid, "name": (q.projects_load().get(pid) or {}).get("name") or pid}
+                        except Exception: pass
                     if info and info.get("codex"):
                         req.update(codex=True)          # "always" = Codex's own approval for the rest of this session
                     elif info:
@@ -2715,6 +2772,28 @@ def _queue_add(st, text, atts=None, effort=None, at=None, repeat=None, model=Non
     _queue_saved(st)
     return {k: v for k, v in item.items() if k != "attachments"}
 
+_PREF_SHAPES = {
+    "easy_mode": bool, "thinking": bool, "parallel_tools": bool,
+    "easy_tools": list, "helper_model": str, "auto_review": str, "verify_turns": str,
+    "autonomy_mode": ("ask", "auto", "full"),
+    "reasoning_effort": ("low", "medium", "high", "xhigh", "max"),
+}
+
+def _checked_pref(key, value):
+    """(value, error). None always means "follow Orbit's own setting again"."""
+    if value is None: return None, ""
+    shape = _PREF_SHAPES.get(key)
+    if isinstance(shape, tuple):
+        v = str(value)
+        return (v, "") if v in shape else (None, f"{key} must be one of {', '.join(shape)}")
+    if shape is bool: return bool(value), ""
+    if shape is list:
+        if not isinstance(value, list): return None, f"{key} must be a list"
+        return [str(x) for x in value if str(x).strip()], ""
+    if shape is str: return str(value), ""
+    return value, ""
+
+
 def _drain():
     """Start the next queued message in every chat that is free, while there are
     free slots. Called when an answer ends and when something is queued."""
@@ -2729,20 +2808,34 @@ def _drain():
             if not due: continue
             if len(running_sids()) >= _max_parallel(): break
             if not st.lock.acquire(blocking=False): continue
-            due = [it for it in _due_items(st, now) if it.get("at") or not st.queue_paused]
-            if not due:
-                st.lock.release(); continue
-            item = due[0]
-            st.queue.remove(item)
-            if item.get("repeat") in REPEATS:
-                # the next one waits for its own time, in the same place
-                nxt = dict(item, id=uuid.uuid4().hex[:10], at=_next_time(float(item["at"]), item["repeat"], now))
-                nxt.pop("skipped", None)
-                st.queue.append(nxt)
-            if item.get("model"):
-                # a message scheduled for a model: the chat moves to it, as if you had
-                # picked it in the model menu and then sent the message
-                st.model = item["model"]
+            # From here the chat's lock is held, and it is released either by the turn
+            # that starts below or by this block failing. Anything that raises in between
+            # used to leave it held for good: the chat then said "answering" for ever,
+            # every later message queued behind nothing, and a restart waited on it.
+            try:
+                due = [it for it in _due_items(st, now) if it.get("at") or not st.queue_paused]
+                if not due:
+                    st.lock.release(); continue
+                item = due[0]
+                # /api/queue rebinds st.queue without this lock, so the item may be gone
+                # by now -- dropping it by id rather than by value, and not minding if it
+                # has already gone
+                st.queue = [x for x in st.queue if x is not item and x.get("id") != item.get("id")]
+                if item.get("repeat") in REPEATS:
+                    # the next one waits for its own time, in the same place
+                    nxt = dict(item, id=uuid.uuid4().hex[:10],
+                               at=_next_time(float(item["at"]), item["repeat"], now))
+                    nxt.pop("skipped", None)
+                    st.queue.append(nxt)
+                if item.get("model"):
+                    # a message scheduled for a model: the chat moves to it, as if you had
+                    # picked it in the model menu and then sent the message
+                    st.model = item["model"]
+            except Exception as e:
+                print(f"  ! queue in {st.sid}: {type(e).__name__}: {e}")
+                try: st.lock.release()
+                except RuntimeError: pass
+                continue
             started.append((st, item))
     for st, item in started:
         _queue_saved(st)

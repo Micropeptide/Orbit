@@ -1950,6 +1950,7 @@ function addAssistant(who,ts){
   if(!r.ok)return toast('nothing to retry');
   const msgs=[...wrap.querySelectorAll('.msg')];
   for(let i=msgs.length-1;i>=0;i--){msgs[i].remove();if(msgs[i].classList.contains('u'))break}
+  dropEmptyFolds();
   q.value=r.content; go({effort:'xhigh'})};
  acts.appendChild(hard);
  stamp(m,ts);wrap.appendChild(m);markCont(m);bottom();const ret={m,think:th,tools,bub:b};m._a=ret;return ret}
@@ -2411,11 +2412,18 @@ function attachLive(theSid, initial){
  },800);
 }
 
+// Which open is the current one. Clicking a 2,000-message chat and then a small one
+// used to leave the big one's answer to land last and replace the small one on screen,
+// with the sidebar still highlighting the small one.
+let OPEN_GEN=0;
 async function openSession(id){
+ const gen=++OPEN_GEN;
  stopLive();
+ findClose();                                  // its hits belong to the chat leaving
  if(tempMode){tempMode=false;$('#tempbtn').style.borderColor='';$('#tempbtn').style.color='';
   $('#burnbtn').style.display='none'}          // a saved chat is never temporary
  const d=await (await fetch('/api/session/'+id)).json();
+ if(gen!==OPEN_GEN)return;                     // you opened something else while it loaded
  if(d.error)return sysline('could not open: '+d.error);
  if(sid&&sid!==d.sid){clearTimeout(draftT);saveDraft(sid)}
  sid=d.sid;$('#title').textContent=d.title||'(untitled)';wrap.innerHTML='';
@@ -2447,10 +2455,10 @@ async function openSession(id){
   wrap.appendChild(btn)}
  d.messages.forEach((m,i)=>{if(i>=older)drawMsg(m,i,i>older)});
  if(PREF.get('foldtools','1')==='1')foldTurns();
- CHATPREFS=d.prefs||{};                       // what this chat remembers for itself
+ chatChanged(d.prefs);                        // easy mode, the branch, the find bar
  try{const i=await (await fetch('/api/info?sid='+encodeURIComponent(id))).json();
-  if(i&&i.tools)INFO.tools=i.tools}catch(e){}
- drawEasyBtn();
+  if(gen!==OPEN_GEN)return;                    // this chat's tool list, not the last one's
+  if(i&&i.tools){INFO.tools=i.tools;drawEasyBtn()}}catch(e){}
  loadSessions();bottom();refreshStatus();loadModels().then(drawClaudeBar);
  if(typeof sideOpen==='function'&&matchMedia('(max-width:820px)').matches)sideOpen(false)}
 
@@ -2621,6 +2629,7 @@ async function newChat(){
   PLAN_MODE=false;drawPlanMode();wrap.innerHTML='';$('#title').textContent='New chat';atts=[];$('#chips').innerHTML='';
   tempMode=false;$('#tempbtn').style.borderColor='';$('#tempbtn').style.color='';
   $('#burnbtn').style.display='none';
+  chatChanged(null);                     // a new chat keeps nothing from the last one
   syncBusy();
   $('#ctxbox').style.display='none';loadSessions();drawClaudeBar()})();
  try{await switching}finally{switching=null}}
@@ -2637,13 +2646,17 @@ async function regenerate(text){
  const r=await (await fetch('/api/regenerate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sid})})).json();
  const msgs=[...wrap.querySelectorAll('.msg')];
  for(let i=msgs.length-1;i>=0;i--){msgs[i].remove();if(msgs[i].classList.contains('u'))break}
+ dropEmptyFolds();
  q.value=text;go()}
 
 async function editFrom(node,text){
  if(busy)return;
  const users=[...wrap.querySelectorAll('.msg.u')];
  const idx=users.indexOf(node); if(idx<0)return;
- if(!await apiPost('/api/truncate',{index:idx,id:sid},'edit'))return;
+ // say what that message starts with: the server refuses rather than cutting the
+ // wrong turn if this page is looking at a stale copy of the chat
+ const head=((node.querySelector('.bub')||{}).textContent||'').trim().slice(0,80);
+ if(!await apiPost('/api/truncate',{index:idx,id:sid,check:head},'edit'))return;
  let cur=node; while(cur){const nx=cur.nextElementSibling;cur.remove();cur=nx}
  q.value=text;q.focus();fitQ()}
 
@@ -2748,6 +2761,14 @@ function approvalBox(p){
      headers:{'Content-Type':'application/json'},
      body:JSON.stringify({sid,tool:p.name||'*',pattern:pat||'*'})});
     send(true)}}]),
+  // and the size between a chat and everywhere: "let pytest run here" belongs to
+  // the project, beside its folder, and is only offered when the chat has one
+  ...(p.claude||p.codex||!p.project?[]:[{label:'Yes, and allow it in '+p.project.name,
+   act:async()=>{await fetch('/api/permissions/project',{method:'POST',
+     headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({kind:'allow',project:p.project.id,tool:p.name||'*',
+                          pattern:pat||'*',note:'allowed in '+p.project.name})});
+    send(true)}}]),
   {label:p.codex?'Yes, and allow this for the rest of the session'
    :p.claude?"Yes, and don't ask again"+(pat?' for '+pat:'')
    :'Yes, and always allow'+(pat?' '+pat:' this'),act:()=>alwaysRow()},
@@ -2811,14 +2832,14 @@ function approvalBox(p){
  box._keys=e=>{
   if(box._done||!box.isConnected)return false;
   if(e.target&&e.target.closest&&e.target.closest('.alwaysrow'))return false;
-  if(/^[123]$/.test(e.key)){opts[+e.key-1].act();return true}
+  if(/^[1-9]$/.test(e.key)&&+e.key<=opts.length){opts[+e.key-1].act();return true}
   if(e.key==='ArrowDown'){sel=(sel+1)%opts.length;draw();return true}
   if(e.key==='ArrowUp'){sel=(sel+opts.length-1)%opts.length;draw();return true}
   if(e.key==='Enter'){opts[sel].act();return true}
   if(e.key==='Escape'){whyRow();return true}
   return false};
  return box}
-// A prompt takes 1/2/3, the arrows, Enter and Esc only when it has the focus (click it, or
+// A prompt takes its numbers, the arrows, Enter and Esc only when it has the focus (click it, or
 // Tab to it) or nothing else does -- never while the message box has it, where a "1" or an
 // Enter meant for your own message would otherwise answer "yes" to a command.
 addEventListener('keydown',e=>{
@@ -3533,6 +3554,16 @@ function undoButton(a,t,n){
  const b=el(`<button class="undo undobtn">undo ${n} file change${n>1?'s':''}</button>`);
  b.onclick=async()=>{if(!confirm('Put back the files this answer changed? (Files it created go to the bin.)'))return;
   const d=await apiPost('/api/undo_changes',{sid,t},'undo');if(!d)return;
+  // a refusal is not a success: the button stays, and you are offered the way past it
+  if(!d.undone){
+   sysline((d.done||[]).join('; '));
+   if((d.refused||[]).length&&confirm('Nothing was put back — '+d.refused.length+
+     ' file(s) changed since this answer wrote them.\n\nPut them back anyway, '+
+     'overwriting what you did to them since?')){
+    const f=await apiPost('/api/undo_changes',{sid,t,force:true},'undo');
+    if(f&&f.undone){b.remove();sysline('undone: '+(f.done||[]).join('; '))}
+    else if(f)sysline((f.done||[]).join('; '))}
+   return}
   b.remove();sysline('undone: '+(d.done||[]).join('; '))};
  acts.appendChild(b)}
 // Notes sent while an answer is running. The server hands each one to the
@@ -3965,8 +3996,12 @@ async function go(opts){
        d.style.color='var(--mut)';d.textContent='• '+t;b.appendChild(d)})}
      const btn=el('<button>Continue</button>');
      btn.onclick=async()=>{btn.disabled=true;
+      // whatever you were typing while you read the outstanding list is yours: it used
+      // to be overwritten by the canned prompt and sent in your name
+      const typed=q.value;
       const r=await (await fetch('/api/continue',{method:'POST'})).json();
-      q.value=r.message;go()};
+      q.value=r.message;go();
+      if(typed){q.value=typed;fitQ();saveDraft(sid)}};
      b.appendChild(btn);a.m.appendChild(b);bottom()}
     else if(m.k==='tool_result'&&m.p&&m.p.diff&&m.p.diff.diff){
      a.tools.appendChild(diffBlock(m.p.diff));bottom()}
@@ -5836,7 +5871,7 @@ $('#tempbtn').onclick=async()=>{
  tempMode=!tempMode;
  const d=await (await fetch('/api/temp',{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify({on:tempMode})})).json();
- stopLive(); sid=d.sid; syncBusy();      // without this the next message went to the OLD
+ stopLive(); sid=d.sid; chatChanged(null); syncBusy();   // without this the next message went to the OLD
  wrap.innerHTML='';$('#title').textContent=tempMode?'Temporary chat':'New chat';
  $('#tempbtn').style.borderColor=tempMode?'var(--err)':'';
  $('#tempbtn').style.color=tempMode?'var(--err)':'';
@@ -5849,7 +5884,7 @@ $('#burnbtn').onclick=async()=>{
  const d=await (await fetch('/api/burn',{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify({sid})})).json();
  if(!d.ok){toast(d.error||'nothing erased');return}
- stopLive(); sid=d.sid; syncBusy();
+ stopLive(); sid=d.sid; chatChanged(null); syncBusy();
  wrap.innerHTML='';sysline('erased');loadSessions()};
 addEventListener('beforeunload',()=>{
  // names the chat, so the server can refuse if it isn't the temporary one
@@ -6546,6 +6581,9 @@ async function pollBg(){
     secs:x.secs,status:(x.status||'').split(' ')[0],summary:x.summary||'',
     steps:(row._steps||[]).concat(x.steps||[])})})}catch(e){}}
 setInterval(pollBg,8000);setTimeout(pollBg,1500);
+// the git line in the dock: it only ever refreshed when you left the window and came
+// back, so a repo could sit there all session showing the state it had on open
+setInterval(()=>{if(!document.hidden&&sid)pollGit()},15000);
 /* Reading three files in a row is one thought, not three rows: finished look-ups fold
    into a single line ("Read 3 files, Searched for 1 pattern") you can open. */
 function famLabel(g){const counts={};
@@ -6599,8 +6637,9 @@ function groupTool(row,_depth,live){
 // and the answer stays where it is.
 // Find in this conversation. The browser's own find cannot see inside a collapsed turn
 // or a closed thinking block, which is most of a long run — this opens what it has to.
-const FIND={hits:[],at:-1,bar:null,opened:[]};
+const FIND={hits:[],at:-1,bar:null,opened:[],timer:null};
 function findClose(){
+ clearTimeout(FIND.timer);FIND.timer=null;
  FIND.hits.forEach(m=>{const t=document.createTextNode(m.textContent);
   const par=m.parentNode; if(par){par.replaceChild(t,m);par.normalize()}});
  FIND.opened.forEach(d=>{d.open=false});
@@ -6654,8 +6693,10 @@ function openFind(){
    <button class=ghost data-a=next>↓</button><button class=ghost data-a=x>✕</button></div>`);
  FIND.bar=bar;document.body.appendChild(bar);
  const inp=bar.querySelector('input');
- let t=null;
- inp.addEventListener('input',()=>{clearTimeout(t);t=setTimeout(()=>findRun(inp.value.trim()),160)});
+ // the debounce has to die with the bar: typing and pressing Escape inside 160ms used
+ // to leave a highlighted chat with no bar left to clear it
+ inp.addEventListener('input',()=>{clearTimeout(FIND.timer);
+  FIND.timer=setTimeout(()=>{if(FIND.bar)findRun(inp.value.trim())},160)});
  inp.addEventListener('keydown',e=>{
   if(e.key==='Enter'){e.preventDefault();findGo(FIND.at+(e.shiftKey?-1:1))}
   if(e.key==='Escape'){e.preventDefault();findClose()}});
@@ -6663,6 +6704,13 @@ function openFind(){
  bar.querySelector('[data-a=prev]').onclick=()=>findGo(FIND.at-1);
  bar.querySelector('[data-a=x]').onclick=findClose;
  inp.focus()}
+
+// Folding moves the earlier blocks of a turn inside a <details> that is not itself a
+// .msg, so removing the messages (retry, regenerate, edit) leaves the summary line
+// behind -- "worked for 41s · 5 steps" opening onto nothing.
+function dropEmptyFolds(){
+ wrap.querySelectorAll('details.toolfold').forEach(d=>{
+  if(!d.querySelector('.msg'))d.remove()})}
 
 function foldTurns(){
  const kids=[...wrap.children];
@@ -7261,8 +7309,13 @@ async function doRewind(index,files,force){
  const d=await apiPost('/api/rewind',{sid,index,files,force:!!force},'rewinding');
  if(!d)return;
  closeModal();await openSession(sid);
- toast('rewound '+d.dropped+' message'+(d.dropped===1?'':'s')+
-  (files?' · '+(d.undone||[]).length+' file change'+((d.undone||[]).length===1?'':'s')+' undone':''))}
+ // "undone" is every line it had to say, refusals included: count what was restored
+ const put=(d.restored||[]).length, no=(d.refused||[]).length;
+ let line='rewound '+d.dropped+' message'+(d.dropped===1?'':'s');
+ if(files)line+=' · '+put+' file'+(put===1?'':'s')+' put back'
+   +(no?' · '+no+' left alone (changed since)':'');
+ toast(line);
+ if(files&&no&&!put)sysline((d.undone||[]).join('; '))}
 // ctrl+r: what you have typed before, newest first
 function openPromptSearch(){
  const hist=(()=>{try{return JSON.parse(PREF.get('hist','[]'))}catch(e){return []}})();
@@ -7370,12 +7423,17 @@ function todoMark(x){return x.done?'\u2612':x.active?'\u25fc':'\u2610'}
 // During a long run the three questions are "what is it doing", "what else is still
 // running" and "what has it touched" — which lived in a dock, a chip and a modal. One
 // dock, one section each, every section showing its digest while collapsed.
-let GITSTATE=null,GITAT=0;
-async function pollGit(){
- if(!sid)return;
- if(Date.now()-GITAT<15000)return;
- GITAT=Date.now();
- try{GITSTATE=await (await fetch('/api/git?sid='+encodeURIComponent(sid))).json()}catch(e){}
+let GITSTATE=null,GITSID=null,GITAT=0;
+async function pollGit(force){
+ // per chat: the answer is about the folder THIS chat works in, so it is thrown away
+ // when the chat changes rather than shown under the next one
+ if(!sid){GITSTATE=null;GITSID=null;return}
+ if(sid!==GITSID){GITSTATE=null;GITSID=sid;GITAT=0;drawPlanDock()}
+ if(!force&&Date.now()-GITAT<15000)return;
+ const forSid=sid;GITAT=Date.now();
+ try{const g=await (await fetch('/api/git?sid='+encodeURIComponent(forSid))).json();
+  if(forSid!==sid)return;                       // you moved on while it answered
+  GITSTATE=g;GITSID=forSid}catch(e){}
  drawPlanDock()}
 
 function dockSection(d,key,title,digest,fill){
@@ -7389,10 +7447,22 @@ function dockSection(d,key,title,digest,fill){
  if(d[openKey]){const body=el('<div class=pdl></div>');fill(body);d.appendChild(body)}}
 
 function drawPlanDock(){
+ // The dock is decoration, but syncBusy() calls it on the path that opens a chat and
+ // the path that sends a message: a throw in here used to stop both, and the composer
+ // stuck on "Queue" until a reload. It may fail; it may not take anything with it.
+ try{drawPlanDockInner()}catch(e){console.warn('plan dock:',e)}}
+
+function drawPlanDockInner(){
  const d=$('#plandock');if(!d)return;
  const steps=PLANS[sid]||[],open=steps.filter(x=>!x.done);
- const running=[...RUNNING].length, queued=(QUEUE&&QUEUE.length)||0, bg=(BGT&&BGT.length)||0;
- const git=GITSTATE&&GITSTATE.repo?GITSTATE:null;
+ const running=[...RUNNING].length;
+ // QUEUE is {items,paused,running} for ONE chat, and BGT is keyed by chat: neither
+ // has a .length, so both counts used to be a silent zero
+ const qitems=(QUEUE_SID===sid&&QUEUE&&QUEUE.items)?QUEUE.items:[];
+ const bgjobs=Object.values((BGT&&BGT[sid])||{})
+   .filter(x=>/^(running|pending)/.test(x.status||'running'));
+ const queued=qitems.length, bg=bgjobs.length;
+ const git=GITSTATE&&GITSID===sid&&GITSTATE.repo?GITSTATE:null;
  const anything=open.length||running||queued||bg||(git&&git.dirty);
  d.innerHTML='';
  if(!anything||d.dataset.hidden==='1'){d.style.display='none';return}
@@ -7411,14 +7481,17 @@ function drawPlanDock(){
   if(queued)bits.push(queued+' queued');
   if(bg)bits.push(bg+' in the background');
   dockSection(d,'work','work',bits.join(' · '),body=>{
-   (BGT||[]).slice(0,6).forEach(t=>{
+   bgjobs.slice(0,6).forEach(t=>{
     const r=el('<div class=st></div>');
     const sp=document.createElement('span');
-    sp.textContent=(t.title||t.name||'task')+(t.secs?' · '+fmtSecs(t.secs):'');
+    sp.textContent=(t.title||t.command||t.name||'task')
+      +(t.secs?' · '+fmtSecs(t.secs):'');
     r.appendChild(sp);body.appendChild(r)});
-   if(queued){const r=el('<div class=st></div>');
-    const sp=document.createElement('span');sp.textContent=queued+' message(s) waiting to send';
-    r.appendChild(sp);body.appendChild(r)}})}
+   qitems.slice(0,4).forEach(it=>{
+    const r=el('<div class=st></div>');
+    const sp=document.createElement('span');
+    sp.textContent='waiting to send: '+String(it.text||'').split('\n')[0].slice(0,70);
+    r.appendChild(sp);body.appendChild(r)})})}
 
  if(git){
   const bits=[git.branch];
@@ -7537,6 +7610,16 @@ async function setEasy(on){
            :`easy mode off — ${(INFO.tools||[]).length} tools offered`)}
 
 let CHATPREFS={};           // the settings this chat keeps for itself
+// Everything on this page that belongs to one chat rather than to Orbit. A chat can
+// change without openSession -- a new chat, the temporary one, burning it -- and each
+// of those used to leave the last chat's easy mode and branch on screen.
+function chatChanged(prefs){
+ CHATPREFS=prefs||{};
+ GITSTATE=null;GITSID=null;GITAT=0;
+ findClose();
+ drawEasyBtn();drawPlanDock();
+ if(sid)pollGit(true)}
+
 function easyOn(){
  if('easy_mode' in CHATPREFS)return !!CHATPREFS.easy_mode;
  return !!(INFO.settings&&INFO.settings.easy_mode)}
@@ -7686,7 +7769,12 @@ addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();
    e.preventDefault();jumpRel(e.key==='ArrowUp'?-1:1)}}
  if(e.key==='?'&&document.activeElement!==q&&!/input|textarea/i.test(document.activeElement.tagName)){
   e.preventDefault();showShortcuts()}});
-fetch('/api/info').then(r=>r.json()).then(d=>{INFO=d;sid=d.sid;
+fetch('/api/info').then(r=>r.json()).then(d=>{
+ // this lands whenever it lands, and on a slow first load that can be after you have
+ // already clicked a chat: it may not drag the page back to the Mac's current one
+ const first=!sid;
+ INFO=Object.assign(d,first?{}:{tools:INFO.tools||d.tools});
+ if(first)sid=d.sid;
  $('#tools').dataset.orbit=d.tools.length+' tools ready';if(!MODELS.harness_mode)$('#tools').textContent=d.tools.length+' tools ready';
  drawEasyBtn();refreshStatus()});
 fetch('/api/prompts').then(r=>r.json()).then(d=>PROMPTS=d);

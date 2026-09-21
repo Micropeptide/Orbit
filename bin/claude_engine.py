@@ -941,10 +941,28 @@ def _prefs_path():
     return os.path.join(_work_dir(), "chat-prefs.json")
 
 
+_PREFS_CACHE = {"at": None, "data": {}}
+
 def chat_prefs(sid=None):
-    try: d = json.load(open(_prefs_path()))
-    except Exception: d = {}
-    return d.get(sid) or {} if sid else d
+    """What a chat remembers for itself, or every chat's when no sid is given.
+
+    Read on a hot path -- qqcore.chat_setting() asks for each per-chat key, and
+    full_access() asks on every tool call -- so the parse is kept until the file's
+    mtime and size change. Another process writing it is picked up the same way."""
+    path = _prefs_path()
+    try: stamp = os.stat(path)
+    except OSError: stamp = None
+    key = (stamp.st_mtime_ns, stamp.st_size) if stamp else None
+    if key != _PREFS_CACHE["at"] or not isinstance(_PREFS_CACHE["data"], dict):
+        try:
+            with open(path) as f: d = json.load(f)
+            if not isinstance(d, dict): d = {}
+        except Exception: d = {}
+        _PREFS_CACHE["data"], _PREFS_CACHE["at"] = d, key
+    d = _PREFS_CACHE["data"]
+    if not sid: return d
+    got = d.get(sid)
+    return dict(got) if isinstance(got, dict) else {}
 
 
 def set_chat_pref(sid, **kw):
@@ -953,7 +971,7 @@ def set_chat_pref(sid, **kw):
 
 
 def _set_chat_pref(sid, **kw):
-    d = chat_prefs()
+    d = dict(chat_prefs())          # the cache's own dict must not be written through
     cur = dict(d.get(sid) or {})
     for k, v in kw.items():
         if v is None: cur.pop(k, None)

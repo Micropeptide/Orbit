@@ -93,6 +93,49 @@ Screenshots are saved under `workspace/.screenshots/` like anything else the
 Python tool creates, so they go to the bin on delete and are excluded from
 git the same way the rest of `workspace/` is.
 
+## Rules, and how long they last
+
+Approving the same call over and over is how a guard stops being read, so a
+grant can be given at four sizes. None of them can reach past a `blocked`
+verdict or a deny rule — those are a floor, not a default.
+
+| | Where it lives | How long |
+|---|---|---|
+| **Yes** | nowhere | this call |
+| **Yes, for the rest of this chat** | memory only | until that chat ends; it is not written to your settings and it does not follow the chat to another machine |
+| **Yes, and allow it in \<project>** | the project's own rules, beside its folder | that project, for good — "let `pytest` run here" is the natural size of such a grant, and it used to be sayable only everywhere. Offered only when the chat belongs to a project |
+| **Yes, and don't ask again** | `config/permissions.json` | everywhere, until you edit or remove it in Settings → Tools |
+
+A rule names a tool and a pattern (`Bash(git diff:*)`, `write_file` on
+`workspace/**`). A deny rule always beats an allow rule, whichever is more
+specific and whichever was added later, and neither can approve a `blocked`
+action. Session and project rules are checked the same way as permanent ones,
+and every one of them is written to `logs/safety.log` when it decides something.
+
+## Undoing what an answer changed
+
+Every file an answer edits is snapshotted first, with a hash of how the answer
+left it. *Undo* and *Rewind chat + files* use both:
+
+- A file that is still exactly as the answer left it is restored.
+- A file **you** changed since is not touched, and stops the whole restore —
+  all of it or none of it, because a half-undone folder is worse than one left
+  alone. The preview says which files are which before anything happens, and
+  going ahead anyway is a separate, explicit button.
+- A file with no snapshot (it lives outside the workspace) is reported as
+  unrestorable rather than silently skipped.
+- Each restore is itself checkpointed, so undoing can be undone.
+
+## Orbit's own work
+
+The review of a diff, the check that the work was done, a chat's title, a
+compaction summary and a saved memory are all model calls Orbit makes on its
+own account. They run on the model named in **Settings → General → Orbit's own
+work** — per chat — and they are reads: the reviewer and the checker are given
+the diff and the transcript and cannot call tools, so nothing they conclude can
+change a file. A check that fails to run passes the work rather than blocking
+it, and it may send the model back to work at most twice per answer.
+
 ## Untrusted content
 
 Anything Orbit reads from outside — a web page, a fetched PDF, another agent's
