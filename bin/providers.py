@@ -106,7 +106,7 @@ CLI_BACKENDS = {
         "label": "Codex CLI", "bin": "codex",
         "argv": ["exec", "--json", "--skip-git-repo-check"],
         "model_flag": "--model", "system_flag": None,
-        "models": [("", "Codex (default model)")],
+        "models": [("", "Codex · the model in your codex config")],
         "note": "your ChatGPT plan — no API key",
     },
     "opencode-cli": {
@@ -158,12 +158,31 @@ def cli_available(backend):
     return bool(which((CLI_BACKENDS.get(backend) or {}).get("bin") or ""))
 
 
+def _cli_routes(bid, b):
+    """The model routes a CLI offers.
+
+    "Codex (default model)" meant "whatever ~/.codex/config.toml happens to say", which
+    is a fine default and a poor choice: picking it for Orbit's side work tells you
+    nothing about what will answer. Codex caches the models your account offers, so they
+    are listed by name, with the configured default still first."""
+    routes = list(b["models"])
+    if bid == "codex-cli":
+        try:
+            import codex_engine
+            known = [(m["slug"], m.get("display_name") or m["slug"]) for m in codex_engine.chatgpt_models()]
+        except Exception:
+            known = []
+        seen = {r for r, _ in routes}
+        routes += [(slug, f"Codex · {name}") for slug, name in known if slug not in seen]
+    return routes
+
+
 def cli_models():
     """One entry per (installed CLI, model route)."""
     out = []
     for bid, b in CLI_BACKENDS.items():
         if not cli_available(bid): continue
-        for route, label in b["models"]:
+        for route, label in _cli_routes(bid, b):
             out.append({"provider": bid, "model": route or "default",
                         "label": label if bid == "claude-qwen-cli" else f"{label} · CLI", "context": None,
                         "thinking": False, "kind": "cli",
