@@ -48,14 +48,17 @@ def _lms(args, timeout=25):
     except ValueError: return None
 
 
-def port():
+def port(fresh=False):
     """The port Bionic's server uses — the one it was last started on, which is
-    not always 1234. Asking costs a process, so the answer is kept for a while."""
+    not always 1234. Asking costs a process, so the answer is kept for a while.
+
+    `fresh` skips the cache: Bionic restarted on another port is unreachable until
+    something asks again, and five minutes is a long time to be wrong about that."""
     now = time.time()
-    if _PORT["n"] and now - _PORT["at"] < PORT_TTL:
+    if not fresh and _PORT["n"] and now - _PORT["at"] < PORT_TTL:
         return _PORT["n"]
     d = _lms(["server", "status"], timeout=10)
-    n = int((d or {}).get("port") or DEFAULT_PORT)
+    n = int((d or {}).get("port") or _PORT["n"] or DEFAULT_PORT)
     _PORT.update(at=now, n=n)
     return n
 
@@ -125,8 +128,12 @@ def ensure():
     if not installed(): return ""
     p = port()
     if serving(p): return base_url(p)
+    # the cached port may simply be stale: Bionic restarted on another one, and there is
+    # nothing to start. Ask before paying for a server start that would do nothing.
+    p2 = port(fresh=True)
+    if p2 != p and serving(p2): return base_url(p2)
     ok, _ = start()
-    return base_url(port()) if ok else ""
+    return base_url(port(fresh=True)) if ok else ""
 
 
 def loaded(max_age=PS_TTL):
@@ -233,23 +240,33 @@ def models(max_age=LIST_TTL):
     return _refresh()
 
 
+_BUSY = threading.Lock()
+
 def _refresh_soon():
-    """Ask Bionic in the background, once at a time."""
-    if _LIST["busy"]: return
-    _LIST["busy"] = True
-    threading.Thread(target=_refresh, daemon=True).start()
+    """Ask Bionic in the background, once at a time.
+
+    The flag was read and then set, which is two steps: two callers a moment apart both
+    saw it clear and both started a thread. And the foreground path cleared it in its
+    `finally` without ever having set it, so "one at a time" was not true either way."""
+    if not _BUSY.acquire(blocking=False): return
+    def run():
+        try: _read_models()
+        finally: _BUSY.release()
+    threading.Thread(target=run, daemon=True).start()
 
 
 def _refresh():
-    try:
-        return _read_models()
-    finally:
-        _LIST["busy"] = False
+    return _read_models()
 
 
 def _read_models():
     have = _lms(["ls"], timeout=25)
-    if not isinstance(have, list): return [dict(r) for r in _LIST["rows"]]
+    if not isinstance(have, list):
+        # Bionic did not answer — mid-update, or `lms` is wedged. Stamping the cache
+        # anyway is the point: without it every later call took the blocking path and
+        # waited the full 25s + 15s again, on every model resolve and every picker load.
+        _LIST["at"] = time.time()
+        return [dict(r) for r in _LIST["rows"]]
     live = {}
     for r in (_lms(["ps"], timeout=15) or []):
         if isinstance(r, dict) and r.get("modelKey"): live[r["modelKey"]] = r

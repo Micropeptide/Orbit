@@ -3047,8 +3047,24 @@ def _start_gateway():
         q.HARNESS_PORT = GATEWAY["srv"].server_address[1]
         print(f"  harness gateway on 127.0.0.1:{q.HARNESS_PORT}")
     except OSError as e:
-        GATEWAY["error"] = str(e)
-        print(f"  ! harness gateway could not start on {port}: {e}")
+        # Something else already holds that port — a stale Orbit, or another program.
+        # Falling back to the configured number meant every harness turn posted the whole
+        # conversation, and the gateway token, to that unrelated process. Take any free
+        # port instead, and only give up if even that fails.
+        try:
+            GATEWAY["srv"] = harness_gateway.serve(0, _gateway_route,
+                                                   log=lambda m: print("  gateway: " + m),
+                                                   token=q.CE.gateway_token(),
+                                                   hooks={"usage": lambda pr, ac, mo, u: q.USAGE.record(q.ROOT, pr, ac, mo, u),
+                                                          "exhausted": lambda pr, ac, msg, secs=None: q.USAGE.mark_exhausted(q.ROOT, pr, ac, msg, seconds=secs)})
+            q.HARNESS_PORT = GATEWAY["srv"].server_address[1]
+            GATEWAY["error"] = ""
+            print(f"  harness gateway on 127.0.0.1:{q.HARNESS_PORT} "
+                  f"(port {port} was taken: {e})")
+        except OSError as e2:
+            q.HARNESS_PORT = None
+            GATEWAY["error"] = f"{e} (and no free port: {e2})"
+            print(f"  ! harness gateway could not start on {port}: {e}")
 
 def _claude_sync(sid):
     """Opening a chat: a Claude-Qwen session from a terminal is brought in (or,

@@ -162,13 +162,14 @@ def gateway_token():
 
 
 def gateway_port():
+    """The port Orbit's gateway is actually listening on, or None.
+
+    This used to fall back to the configured number when the gateway had failed to
+    start — which is the very port something else was already holding, so a failed
+    gateway meant sending the conversation, and the gateway token, to whatever that
+    was. A caller that gets None must not build a URL at all."""
     port = getattr(Q, "HARNESS_PORT", None)
-    if port: return int(port)
-    try:
-        import harness
-        return int(harness.load(Q.ROOT).get("gateway_port") or 8897)
-    except Exception:
-        return 8897
+    return int(port) if port else None
 
 
 def _harness():
@@ -197,7 +198,18 @@ def harness_target(spec=None):
         return {"url": url, "model": model, "small": model, "ctx": ctx, "local": True, "provider": "local",
                 "auth": {"ANTHROPIC_AUTH_TOKEN": "local-qwen"}, "env": {}, "key_missing": False}
     if pc.get("auth") == "gateway" or pc.get("format") != "messages":
-        url = f"http://127.0.0.1:{gateway_port()}/h/{pc['provider']}"
+        gp = gateway_port()
+        if not gp:
+            # with no gateway there is nowhere to send this. Saying so is the only safe
+            # answer: a guessed port is a port something else is holding.
+            return {"url": "", "model": pc.get("model"), "small": pc.get("model"),
+                    "ctx": int(pc.get("context") or 128000), "local": False,
+                    "provider": pc.get("provider"), "auth": {}, "env": {},
+                    "key_missing": True,
+                    "error": "Orbit's translating gateway is not running, and this model "
+                             "needs it. Restart Orbit, or free port "
+                             f"{(_harness().load(Q.ROOT).get('gateway_port') or 8897)}."}
+        url = f"http://127.0.0.1:{gp}/h/{pc['provider']}"
         auth = {"ANTHROPIC_AUTH_TOKEN": gateway_token()}           # the gateway adds the real key
     else:
         url = pc.get("base") or ""
@@ -1002,6 +1014,26 @@ def control(sid, subtype, timeout=15, **params):
 _LEARN = {"lock": threading.Lock()}
 
 
+def _lines_until(proc, deadline):
+    """Yield stdout lines until the deadline, and kill the process when it passes.
+
+    `while time.time() < deadline: proc.stdout.readline()` only checks the clock
+    *between* lines, so a claude that printed nothing and did not exit blocked for ever
+    — with the lock these callers hold, so every later caller blocked behind it too.
+    The timeout is enforced by a watchdog that kills the process, which is what makes
+    readline return."""
+    timer = threading.Timer(max(0.1, deadline - time.time()), lambda: _kill(proc))
+    timer.daemon = True
+    timer.start()
+    try:
+        while True:
+            line = proc.stdout.readline()
+            if not line: return
+            yield line
+    finally:
+        timer.cancel()
+
+
 def learn_tools(timeout=40):
     """Ask Claude Code what tools it has, by starting a turn and stopping at the answer
     to the first question it asks itself.
@@ -1024,10 +1056,7 @@ def learn_tools(timeout=40):
             proc.stdin.write((json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}})
                               + "\n").encode())
             proc.stdin.flush()
-            deadline = time.time() + timeout
-            while time.time() < deadline:
-                line = proc.stdout.readline()
-                if not line: break
+            for line in _lines_until(proc, time.time() + timeout):
                 try: ev = json.loads(line)
                 except ValueError: continue
                 if ev.get("type") == "system" and ev.get("subtype") == "init" and ev.get("tools"):
@@ -1069,10 +1098,7 @@ def command_catalog(max_age=600):
             proc.stdin.write((json.dumps({"type": "control_request", "request_id": "orbit-init",
                                           "request": {"subtype": "initialize"}}) + "\n").encode())
             proc.stdin.flush()
-            deadline = time.time() + 30
-            while time.time() < deadline:
-                line = proc.stdout.readline()
-                if not line: break
+            for line in _lines_until(proc, time.time() + 30):
                 try: ev = json.loads(line)
                 except ValueError: continue
                 if ev.get("type") == "system" and ev.get("subtype") == "init" and ev.get("tools"):
@@ -1327,7 +1353,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         emit("error", msg); emit("done", None)
         return msg
     elif target["key_missing"]:
-        msg = (f"No API key for {spec.get('provider_label') or target['provider']} "
+        msg = target.get("error") or (
+               f"No API key for {spec.get('provider_label') or target['provider']} "
                f"({target.get('key_name') or 'key'}). Add it in Settings → Models & keys.")
         messages.append({"role": "user", "content": user_content, "t": time.time()})
         emit("error", msg); emit("done", None)
@@ -3235,13 +3262,20 @@ def launch_harness(query, args):
                       mode=c.get("permission_mode") or None, append=launcher_append(c, None, kind),
                       model=t.get("cli_model"))
     env = target_env(t)
+    # `--disallowedTools <tools...>` is variadic: it eats every non-option argument after
+    # it. Whatever the user typed — `claude-harness kimi "fix the bug"` — landed on the
+    # end of that list as a deny rule, and an unknown deny name aborts the run. Inside
+    # Orbit nothing follows, so this only bit the terminal launcher. `--` ends the list.
+    rest = list(args)
+    if rest and "--disallowedTools" in argv and "--" not in argv:
+        argv = argv + ["--"]
     print(f"Claude Code on {spec['label']}", file=sys.stderr)
     if os.environ.get("CLAUDE_QWEN_DRY_RUN") == "1":
-        print(json.dumps({"argv": argv + list(args), "env": {k: ("<set>" if "KEY" in k else v) for k, v in env.items()
-                                                             if k.startswith(("ANTHROPIC", "CLAUDE"))}}, indent=1))
+        print(json.dumps({"argv": argv + rest, "env": {k: ("<set>" if "KEY" in k else v) for k, v in env.items()
+                                                       if k.startswith(("ANTHROPIC", "CLAUDE"))}}, indent=1))
         return 0
     exe = which_claude()
-    os.execvpe(exe, argv + list(args), env)
+    os.execvpe(exe, argv + rest, env)
 
 
 if __name__ == "__main__":
