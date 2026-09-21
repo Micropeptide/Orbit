@@ -865,6 +865,19 @@ textarea.memmode{outline:2px solid var(--think)!important}
 .trbar.busy{background:var(--acc);animation:railpulse 1.6s ease-in-out infinite}
 @keyframes railpulse{0%,100%{opacity:.4}50%{opacity:1}}
 @media(prefers-reduced-motion:reduce){.trbar.busy{animation:none;opacity:1}}
+.pick{position:absolute;left:-30px;top:6px;width:30px;height:30px;display:flex;
+ align-items:center;justify-content:center;cursor:pointer}
+.pick input{accent-color:var(--acc);width:15px;height:15px;cursor:pointer}
+#log.picking .msg{position:relative}
+#log.picking .wrap,#log.picking .cwrap{padding-left:34px}
+.pickbar{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:85;
+ display:flex;gap:var(--s2);align-items:center;background:var(--panel);
+ border:1px solid var(--line);border-radius:var(--r-xl);padding:var(--s2) var(--s3);
+ box-shadow:0 8px 30px rgba(0,0,0,.22);font-size:var(--fs-sm)}
+.pickbar .pn{color:var(--mut);min-width:150px}
+.pickbar button{font:inherit;font-size:var(--fs-sm);padding:4px 11px;border-radius:var(--r-md);
+ border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+.pickbar button[disabled]{opacity:.45;cursor:default}
 .hero{container-type:inline-size}
 .sugg{display:flex;gap:var(--s2);overflow-x:auto;scrollbar-width:none;margin:14px 0 2px;padding-bottom:2px}
 .sugg::-webkit-scrollbar{display:none}
@@ -7958,7 +7971,8 @@ $('#more').onclick=e=>{e.stopPropagation();
  const r=$('#more').getBoundingClientRect();
  ctxMenu({clientX:r.left-90,clientY:r.bottom+4},[
   {icon:'⤓',label:'Export markdown',run:()=>location.href='/api/export?id='+encodeURIComponent(sid||'')},
-  {icon:'⤓',label:'Export HTML (with figures)',run:exportHTML},
+  {icon:'⤓',label:'Export HTML (with figures)',run:()=>exportHTML()},
+  {icon:'☑',label:'Pick turns to export or copy…',run:startPicking},
   '-',
   {icon:easyOn()?'☑':'☐',
    label:'Easy mode — essential tools only (this chat)',
@@ -8023,14 +8037,62 @@ $('#footmore').onclick=e=>{e.stopPropagation();const r=e.target.getBoundingClien
   {icon:'\u2695',label:'Doctor',run:()=>showHealth()},
   {icon:'\u2328',label:'Keyboard shortcuts',run:()=>showShortcuts()},
   {icon:'\u2139',label:'About & help',run:()=>showAbout()}])};
-function exportHTML(){
+// Sending a colleague the three turns where you worked something out used to mean
+// exporting the whole chat or copying one answer: there was nothing in between.
+let PICKING=false;
+function startPicking(){
+ if(PICKING)return stopPicking();
+ PICKING=true;log.classList.add('picking');
+ wrap.querySelectorAll('.msg').forEach(m=>{
+  if(m.querySelector(':scope > .pick'))return;
+  const l=el('<label class=pick><input type=checkbox></label>');
+  l.onclick=ev=>ev.stopPropagation();
+  l.querySelector('input').onchange=drawPickBar;
+  m.insertBefore(l,m.firstChild)});
+ drawPickBar()}
+function stopPicking(){
+ PICKING=false;log.classList.remove('picking');
+ wrap.querySelectorAll('.pick').forEach(x=>x.remove());
+ const b=$('#pickbar');if(b)b.remove()}
+function pickedMsgs(){
+ return [...wrap.querySelectorAll('.msg')].filter(m=>{
+  const c=m.querySelector(':scope > .pick input');return c&&c.checked})}
+function drawPickBar(){
+ let b=$('#pickbar');
+ if(!b){b=el(`<div id=pickbar class=pickbar><span class=pn></span>
+   <button class=ghost data-a=all>all</button><button class=ghost data-a=none>none</button>
+   <button data-a=html>Export</button><button class=ghost data-a=copy>Copy</button>
+   <button class=ghost data-a=x>done</button></div>`);
+  document.body.appendChild(b);
+  b.querySelector('[data-a=all]').onclick=()=>{
+   wrap.querySelectorAll('.pick input').forEach(c=>c.checked=true);drawPickBar()};
+  b.querySelector('[data-a=none]').onclick=()=>{
+   wrap.querySelectorAll('.pick input').forEach(c=>c.checked=false);drawPickBar()};
+  b.querySelector('[data-a=x]').onclick=stopPicking;
+  b.querySelector('[data-a=html]').onclick=()=>{const p=pickedMsgs();
+   if(!p.length)return toast('nothing picked');exportHTML(p);stopPicking()};
+  b.querySelector('[data-a=copy]').onclick=()=>{const p=pickedMsgs();
+   if(!p.length)return toast('nothing picked');
+   copy(p.map(m=>(m.classList.contains('u')?'You: ':'Orbit: ')+
+     ((m.querySelector('.bub')||{}).textContent||'').trim()).join('\n\n'));
+   stopPicking()}}
+ const p=pickedMsgs();
+ const bytes=p.reduce((n,m)=>n+((m.querySelector('.bub')||m).innerHTML||'').length,0);
+ b.querySelector('.pn').textContent=p.length?
+   `${p.length} of ${wrap.querySelectorAll('.msg').length} · ${fmtBytes(bytes)}`
+   :'pick the turns you want';
+ b.querySelectorAll('[data-a=html],[data-a=copy]').forEach(x=>x.disabled=!p.length)}
+function fmtBytes(n){return n>=1048576?(n/1048576).toFixed(1)+' MB'
+ :n>=1024?Math.round(n/1024)+' KB':n+' B'}
+
+function exportHTML(only){
  const html=`<!doctype html><meta charset=utf-8><title>${esc($('#title').textContent)}</title>`
   +`<style>body{font:15px/1.6 -apple-system,sans-serif;max-width:800px;margin:40px auto;padding:0 20px}
     .u{background:#f4f3f0;border-radius:10px;padding:10px 14px;margin:14px 0}
     pre{background:#f4f3f0;padding:10px;border-radius:8px;overflow-x:auto}
     img{max-width:100%;border-radius:8px}h1{font-size:20px}</style>`
   +`<h1>${esc($('#title').textContent)}</h1>`
-  +[...wrap.querySelectorAll('.msg')].map(m=>{
+  +(only&&only.length?only:[...wrap.querySelectorAll('.msg')]).map(m=>{
      const who=m.classList.contains('u')?'You':'Orbit';
      const b=m.querySelector('.bub');
      return `<h3>${who}</h3><div class="${m.classList.contains('u')?'u':''}">${b?b.innerHTML:''}</div>`
@@ -8090,16 +8152,26 @@ $('#srv_stop').onclick=async()=>{const d=await (await fetch('/api/server/stop',{
  toast(d.msg);refreshStatus()};
 $('#srv_restart').onclick=async()=>{toast('restarting...');
  const d=await (await fetch('/api/server/restart',{method:'POST'})).json();toast(d.msg);refreshStatus()};
-addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();
- if((e.metaKey||e.ctrlKey)&&e.key===','){e.preventDefault();openSettings()}
- if((e.metaKey||e.ctrlKey)&&e.shiftKey&&(e.key==='K'||e.key==='k')){e.preventDefault();newChatWith();return}
- if((e.metaKey||e.ctrlKey)&&e.key==='k'){e.preventDefault();newChat()}
- if((e.metaKey||e.ctrlKey)&&e.key==='f'){e.preventDefault();
+// Which physical key was pressed, not which character it produces. ⌘K on a Dvorak or
+// a Cyrillic layout sends a different e.key and matched nothing; e.code is the key.
+const keyIs=(e,letter)=>e.code===('Key'+letter.toUpperCase())||
+  (e.key||'').toLowerCase()===letter;
+addEventListener('keydown',e=>{
+ // a shortcut must not fire out of the middle of composing Japanese or Chinese
+ if(composing(e))return;
+ // and a held-down ⌘K must open one new chat, not forty. Arrows are the exception:
+ // holding one to walk through your messages is what it is for.
+ if(e.repeat&&e.key!=='ArrowUp'&&e.key!=='ArrowDown')return;
+ if(e.key==='Escape')closeModal();
+ if((e.metaKey||e.ctrlKey)&&(e.key===','||e.code==='Comma')){e.preventDefault();openSettings()}
+ if((e.metaKey||e.ctrlKey)&&e.shiftKey&&keyIs(e,'k')){e.preventDefault();newChatWith();return}
+ if((e.metaKey||e.ctrlKey)&&keyIs(e,'k')){e.preventDefault();newChat()}
+ if((e.metaKey||e.ctrlKey)&&keyIs(e,'f')){e.preventDefault();
   if(e.shiftKey||!sid||!wrap.children.length)$('#search').focus(); else openFind()}
- if((e.metaKey||e.ctrlKey)&&e.key==='j'){e.preventDefault();showPane('files')}
- if((e.metaKey||e.ctrlKey)&&e.key==='p'){e.preventDefault();openPal()}
+ if((e.metaKey||e.ctrlKey)&&keyIs(e,'j')){e.preventDefault();showPane('files')}
+ if((e.metaKey||e.ctrlKey)&&keyIs(e,'p')){e.preventDefault();openPal()}
  const dialog=!!$('#modalhost').innerHTML;
- if(!dialog&&(e.metaKey||e.ctrlKey)&&!e.shiftKey&&(e.key==='g'||e.key==='G')){e.preventDefault();openJump()}
+ if(!dialog&&(e.metaKey||e.ctrlKey)&&!e.shiftKey&&keyIs(e,'g')){e.preventDefault();openJump()}
  if(!dialog&&e.altKey&&!e.metaKey&&!e.ctrlKey&&(e.key==='ArrowUp'||e.key==='ArrowDown')&&log.style.display!=='none'){
   const ae=document.activeElement;           // leave Alt+arrows alone while editing text
   if(!(ae&&/input|textarea|select/i.test(ae.tagName)&&ae.value)){
