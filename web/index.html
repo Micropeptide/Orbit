@@ -2647,8 +2647,13 @@ q.addEventListener('input',()=>{fitQ();
  showMenu(); showAt(); histPos=-1;
  const s=sid;clearTimeout(draftT);draftT=setTimeout(()=>saveDraft(s),400)});
 let lastEsc=0;
+// An input method turns keystrokes into candidates, and Enter chooses one. Firing on
+// that Enter sends the message mid-word — and a held key repeating is never a shortcut.
+const composing=e=>e.isComposing||e.keyCode===229||e.key==='Process'||e.key==='Dead';
 q.addEventListener('keydown',e=>{
+ if(composing(e))return;
  // Esc stops the answer that is running; Esc twice opens the rewind list, as in Claude Code
+ if(e.key==='Escape'&&e.repeat)return;        // held down is one press, not two
  if(e.key==='Escape'&&!menu&&!atMenu&&!$('#modalhost').innerHTML){
   const now=Date.now(), dbl=now-lastEsc<600; lastEsc=now;
   if(dbl){e.preventDefault();lastEsc=0;openRewind();return}
@@ -2784,6 +2789,7 @@ function approvalBox(p){
 // Tab to it) or nothing else does -- never while the message box has it, where a "1" or an
 // Enter meant for your own message would otherwise answer "yes" to a command.
 addEventListener('keydown',e=>{
+ if(composing(e))return;                      // never answer a prompt from a candidate pick
  if(e.metaKey||e.ctrlKey||e.altKey||$('#modalhost').innerHTML)return;
  const ae=document.activeElement;
  const inBox=ae&&ae.closest&&ae.closest('.ccask:not(.answered)');
