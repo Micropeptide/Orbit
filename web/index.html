@@ -499,6 +499,9 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .projrow .pclaude{color:var(--acc);font-size:11px;opacity:.75}
 .projrow.over{outline:2px dashed var(--acc);outline-offset:-2px}
 /* a mode that changes what the model is handed reads as on from across the room */
+.toolfold>summary{color:var(--dim);font-size:12.5px;padding:2px 0}
+.toolfold[open]>summary{margin-bottom:4px}
+.toolfold .foldbody{border-left:2px solid var(--line);padding-left:8px;margin-left:2px}
 #easybtn.on{border-color:var(--acc);color:var(--acc);background:color-mix(in srgb,var(--acc) 12%,transparent)}
 .projrow.dragging{opacity:.5}
 .projrow[draggable=true]{cursor:grab}
@@ -1010,6 +1013,7 @@ const CMDS=[
  {c:'/plan',d:'plan mode: it may read and think but change nothing'},
  {c:'/build',d:'leave plan mode: it may make changes again'},
  {c:'/sound',d:'toggle a short beep when an answer finishes while you are away'},
+ {c:'/foldtools',d:'fold a finished turn\'s steps behind one line'},
  {c:'/hidetools',d:'hide or show finished tool rows'},
  {c:'/clear',d:'clear the screen only'},
  {c:'/start',d:'start the model server'},
@@ -2431,6 +2435,7 @@ async function openSession(id){
    wrap.querySelectorAll('.msg.a').forEach(markCont)};
   wrap.appendChild(btn)}
  d.messages.forEach((m,i)=>{if(i>=older)drawMsg(m,i,i>older)});
+ if(PREF.get('foldtools','1')==='1')foldTurns();
  loadSessions();bottom();refreshStatus();loadModels().then(drawClaudeBar);
  if(typeof sideOpen==='function'&&matchMedia('(max-width:820px)').matches)sideOpen(false)}
 
@@ -2541,6 +2546,9 @@ async function runCmd(cmd,rest){
  if(cmd==='/jump'){openJump();return true}
  if(cmd==='/sound'){const on=PREF.get('beep','0')!=='1';PREF.set('beep',on?'1':'0');
   if(on)beep();toast(on?'beep on — when an answer finishes while you are away':'beep off');return true}
+ if(cmd==='/foldtools'){const on=PREF.get('foldtools','1')!=='1';
+  PREF.set('foldtools',on?'1':'0');
+  toast(on?'finished turns fold their steps away':'every step stays visible');return true}
  if(cmd==='/hidetools'){const on=!log.classList.contains('hidedone');log.classList.toggle('hidedone',on);
   PREF.set('hidetools',on?'1':'0');toast(on?'finished tool rows hidden':'tool rows shown');return true}
  if(cmd==='/clear'){wrap.innerHTML='';return true}
@@ -4076,7 +4084,10 @@ async function go(opts){
  if(!answer)a.bub.textContent=(stoppedSid===sendSid)?'(stopped before it wrote anything)'
                                             :'(no answer)';
  else {a.bub.innerHTML=md(answer);decorate(a.bub)}
- answerStats(a,endP&&endP.secs!=null?endP.secs:(performance.now()-t0)/1000,endP&&endP.usage);
+ const took=endP&&endP.secs!=null?endP.secs:(performance.now()-t0)/1000;
+ answerStats(a,took,endP&&endP.usage);
+ // the turn is over: its steps fold away behind one line, as they do on reopening
+ if(PREF.get('foldtools','1')==='1')foldTurns();
  if(endP&&(endP.changes||[]).length&&endP.t)undoButton(a,endP.t,endP.changes.length);
  if(stoppedSid!==sendSid&&!errored)
   notify(sendSid,'Answer ready',answer.replace(/\s+/g,' ').trim().slice(0,160)||'(no answer)');
@@ -6552,7 +6563,43 @@ function groupTool(row,_depth,live){
   if(VERBOSE)g.open=true;
   prev.before(g);const body=g.querySelector('.tgbody');body.appendChild(prev);body.appendChild(row);
   updateGroup(g)}}
+// A forty-minute run leaves hundreds of tool rows in the transcript, and scrolling back
+// through it means scrolling past all of them. Once the turn is done they fold behind one
+// line saying how long it took and what it did; the turn you care about opens with a click.
+// In a Claude Code chat every tool call is its own assistant block, so folding each
+// block on its own achieves nothing -- the unit that matters is the turn: everything
+// between your message and the answer it ended with. That run folds behind one line,
+// and the answer stays where it is.
+function foldTurns(){
+ const kids=[...wrap.children];
+ let run=[];
+ const flush=()=>{
+  if(run.length>1){
+   const steps=run.reduce((n,b)=>n+(b._a&&b._a.tools?[...b._a.tools.children]
+     .filter(x=>x.classList&&(x.classList.contains('tool')||x.tagName==='DETAILS')).length:0),0);
+   const bad=run.reduce((n,b)=>n+b.querySelectorAll('.bad').length,0);
+   const last=run[run.length-1];
+   const hide=run.slice(0,-1);                 // keep the block that carries the answer
+   if(steps>=3&&hide.length&&!hide.some(b=>b.closest('.toolfold'))){
+    const d=el('<details class="think toolfold"></details>');
+    const secs=(last._a&&last._a._secs)||0;
+    d.appendChild(el(`<summary>worked for ${fmtSecs(secs)} · ${steps} step${steps===1?'':'s'}`
+      +(bad?` · ${bad} failed`:'')+`</summary>`));
+    const body=el('<div class=foldbody></div>');
+    hide[0].before(d);
+    hide.forEach(b=>body.appendChild(b));
+    d.appendChild(body);
+    if(bad)d.open=true;
+    d.querySelector('summary').addEventListener('click',()=>{d._user=true})}}
+  run=[]};
+ kids.forEach(k=>{
+  if(!k.classList)return;
+  if(k.classList.contains('a')){run.push(k);return}
+  flush()});
+ flush()}
+
 function answerStats(a,secs,usage){
+ a._secs=secs;
  const who=a.m.querySelector('.who');let s=who.querySelector('.bystat');
  if(!s){s=el('<span class=bystat></span>');who.querySelector('.byline').after(s)}
  const out=usage&&+usage.completion_tokens,parts=[];
@@ -6577,6 +6624,7 @@ function savedAssistant(m,merge){
  if(!m.text&&!m.thinking&&!(m.tool_runs||[]).length&&!(m.tools||[]).length)
   a.bub.innerHTML='<span style="color:var(--mut)">(stopped before it wrote anything)</span>';
  if(m.secs!=null||m.usage)answerStats(a,m.secs,m.usage);
+
  if((m.changes||[]).length&&!m.changes_undone&&m.t)undoButton(a,m.t,m.changes.length);
  return a}
 function diffBlock(D,label){
