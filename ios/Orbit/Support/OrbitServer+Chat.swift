@@ -157,6 +157,22 @@ extension OrbitServer {
                                ["sid": sid, "tool": tool, "pattern": pattern, "note": note])
     }
 
+    /// Put the projects in the order given. One write: ten separate saves used to race
+    /// the Claude-group sync on the Mac and lose.
+    func reorderProjects(_ ids: [String]) async throws {
+        _ = try await postJSON("/api/projects/reorder", ["ids": ids])
+    }
+
+    /// Put these chats in this order, at the top of the list, until you sort by recent.
+    func reorderChats(_ ids: [String]) async throws {
+        _ = try await postJSON("/api/session/reorder", ["order": ids])
+    }
+
+    /// Back to newest first, forgetting every hand-placed position.
+    func sortChatsByRecent() async throws {
+        _ = try await postJSON("/api/session/sort_recent", [:])
+    }
+
     /// Allow a tool in one project, for good: the scope between "for the rest of this
     /// chat" and "everywhere". The rule lives with that project's folder.
     func allowInProject(project: String, tool: String, pattern: String, note: String = "") async throws {
