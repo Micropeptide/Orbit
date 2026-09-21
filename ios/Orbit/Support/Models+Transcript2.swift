@@ -35,6 +35,11 @@ enum TranscriptEvent {
     case interjection(text: String, late: Bool)
     /// Stopped at the round or time limit, with the plan steps still open.
     case roundLimit(reason: String, pending: [String])
+    /// A second model read back the diff this answer produced.
+    case review(text: String, files: Int, model: String)
+    /// A second model checked the answer against what was asked. `failOpen` means
+    /// the check itself could not run, so the work was passed rather than failed.
+    case verified(passed: Bool, reason: String, next: String, failOpen: Bool)
 
     static func int(_ v: Any?) -> Int {
         (v as? Int) ?? (v as? Double).map { Int($0) } ?? (v as? String).flatMap { Int($0) } ?? 0
@@ -81,6 +86,16 @@ enum TranscriptEvent {
             return .autocompactDone(before: int(d["before"]), after: int(d["after"]))
         case "interjection":
             return .interjection(text: (d["text"] as? String) ?? "", late: (d["late"] as? Bool) ?? false)
+        case "review":
+            let text = (d["text"] as? String) ?? ""
+            return text.isEmpty ? nil
+                : .review(text: text, files: int(d["files"]),
+                          model: (d["model"] as? String) ?? "")
+        case "verified":
+            return .verified(passed: (d["passed"] as? Bool) ?? true,
+                             reason: (d["reason"] as? String) ?? "",
+                             next: (d["next"] as? String) ?? "",
+                             failOpen: (d["fail_open"] as? Bool) ?? false)
         case "round_limit":
             let why = (d["reason"] as? String) == "time" ? "stopped at the time limit"
                 : "stopped after \(int(d["rounds"])) tool rounds"
@@ -169,10 +184,43 @@ struct AnswerExtras: Hashable {
     /// Only the latest of each: they replace themselves as the answer goes on.
     var retry: String?
     var longRunning: String?
+    /// The read-back of what this answer changed, and the check against what was
+    /// asked — each from whichever model does Orbit's own work.
+    var review: Review?
+    var check: Check?
 
     var isEmpty: Bool {
         sources.isEmpty && weakClaims.isEmpty && warnings.isEmpty && skillHint == nil
             && hooks.lines.isEmpty && lines.isEmpty && retry == nil && longRunning == nil
+            && review == nil && check == nil
+    }
+
+    struct Review: Hashable {
+        var text: String
+        var files: Int
+        var model: String
+        var title: String {
+            let n = "\(files) changed file" + (files == 1 ? "" : "s")
+            return model.isEmpty ? "Review of \(n)" : "Review of \(n) · \(model)"
+        }
+    }
+
+    struct Check: Hashable {
+        var passed: Bool
+        var reason: String
+        var next: String
+        var failOpen: Bool
+        /// What to say about it in one line, or nil when it needs the fuller box.
+        var line: String? {
+            guard passed else { return nil }
+            if failOpen { return "the check could not run" + (reason.isEmpty ? "" : ": " + reason) }
+            return "checked against your request — looks done"
+        }
+        var problem: String {
+            var t = "not finished" + (reason.isEmpty ? "" : ": " + reason)
+            if !next.isEmpty { t += " → " + next }
+            return t
+        }
     }
 }
 

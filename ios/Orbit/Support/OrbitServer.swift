@@ -458,7 +458,7 @@ actor OrbitServer {
         case "server_ready":   return .status("")
         case "squeezed", "autocompact_done", "stagnation", "round_limit", "interjection", "retry",
              "sources", "weak_claims", "injection", "skill_hint", "long_running",
-             "plan_nudge", "fail_streak", "ultrathink":
+             "plan_nudge", "fail_streak", "ultrathink", "review", "verified":
             return TranscriptEvent.parse(kind: kind, p).map { .extra($0) }
         case "autocompact":    return .status("summarising earlier turns")
         case "blocked":        return .blocked(reason: str("reason"))
@@ -668,6 +668,15 @@ actor OrbitServer {
                                                                       ["host": host, "path": path, "on": on]))
         if let e = r.error { throw Failure.server(400, e) }
         return r.bookmarks ?? []
+    }
+
+    /// The git state of the folder a chat works in, as the Mac reads it (cached
+    /// there for a few seconds, and read-only — nothing is committed from here).
+    func gitState(sid: String) async throws -> GitState? {
+        let data = try await run(try request("/api/git?sid=\(OrbitServer.escaped(sid))"))
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              (obj["repo"] as? Bool) == true else { return nil }
+        return GitState(obj)
     }
 
     /// Where a Claude Code or Codex chat works, and how much it may do unasked.

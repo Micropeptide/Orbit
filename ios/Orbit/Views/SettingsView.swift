@@ -6,6 +6,7 @@ struct SettingsView: View {
     @State private var copied = false
     @AppStorage("theme") private var theme = "system"
     @AppStorage("textSize") private var textSize = "default"
+    @AppStorage("codeSize") private var codeSize = "follow"
     @AppStorage("haptics") private var haptics = true
     @AppStorage("faceID") private var faceID = false
 
@@ -103,9 +104,18 @@ struct SettingsView: View {
                         Text("Default").tag("default"); Text("Large").tag("large")
                         Text("Extra large").tag("xlarge")
                     }
+                    Picker("Code and output", selection: $codeSize) {
+                        Text("Follows the answer").tag("follow")
+                        Text("Default").tag("default"); Text("Large").tag("large")
+                        Text("Extra large").tag("xlarge")
+                    }
                     Toggle("Haptics", isOn: $haptics)
                 } header: {
                     Text("Appearance")
+                } footer: {
+                    Text("Code, diffs and command output can keep their own size: reading "
+                         + "an answer bigger otherwise reflows every diff and wraps every "
+                         + "shell line.")
                 }
 
                 Section {

@@ -109,12 +109,86 @@ struct TodoDock: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityHint(open ? "Hides the plan" : "Shows the whole plan")
-                if open { TodoList(steps: steps) }
+                // A twenty-step plan is taller than the screen, and with the keyboard up
+                // it pushed the message box — and the answer — out of sight entirely.
+                // The header stays put and only the list scrolls.
+                if open {
+                    ScrollViewReader { sp in
+                        ScrollView {
+                            TodoList(steps: steps)
+                                .id("todos")
+                        }
+                        .frame(maxHeight: min(CGFloat(steps.count) * 26 + 8, 200))
+                        .scrollBounceBehavior(.basedOnSize)
+                        .onAppear {
+                            if let i = steps.firstIndex(where: { $0.active && !$0.done }) {
+                                sp.scrollTo("todo-\(i)", anchor: .center)
+                            }
+                        }
+                    }
+                }
             }
             .padding(.horizontal, 14).padding(.vertical, 7)
             .frame(maxWidth: .infinity, alignment: .leading)
             .overlay(Divider(), alignment: .top)
         }
+    }
+}
+
+/// What the folder this chat works in looks like right now. "What did it change while I
+/// was away" is the question a phone gets asked most, and the branch name alone in the
+/// bar above the transcript was not an answer to it.
+struct GitDock: View {
+    let sid: String
+    @EnvironmentObject var state: AppState
+    @AppStorage("orbit.gitDockOpen") private var open = false
+    @State private var git: GitState?
+    @State private var at = Date.distantPast
+
+    /// Read again when a turn lands or an answer starts or ends — not on every token.
+    private var key: String { "\(sid)|\(state.messages.count)|\(state.streaming)" }
+
+    var body: some View {
+        Group {
+            if let g = git, g.dirty > 0 || g.ahead > 0 || g.behind > 0 {
+                VStack(alignment: .leading, spacing: 5) {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) { open.toggle() }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.trianglehead.branch").font(.caption2)
+                            Text(g.short).lineLimit(1)
+                                .foregroundStyle(g.dirty > 0 ? .orange : .secondary)
+                            Spacer(minLength: 4)
+                            Image(systemName: open ? "chevron.down" : "chevron.up")
+                                .font(.caption2).foregroundStyle(.tertiary)
+                        }
+                        .font(.caption)
+                        .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    if open {
+                        VStack(alignment: .leading, spacing: 2) {
+                            if !g.diff.isEmpty { Text(g.diff) }
+                            if g.untracked > 0 { Text("\(g.untracked) untracked") }
+                            if !g.last.isEmpty { Text("last: " + g.last).lineLimit(2) }
+                        }
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .frame(maxHeight: 96, alignment: .top)
+                    }
+                }
+                .padding(.horizontal, 14).padding(.vertical, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .overlay(Divider(), alignment: .top)
+            }
+        }
+        .task(id: key) {
+            // a chat that is not in a repository answers nil, and the strip is not drawn
+            guard let server = state.server, Date().timeIntervalSince(at) > 10 else { return }
+            at = Date()
+            git = try? await server.gitState(sid: sid)
+        }
+        .onChange(of: sid) { _, _ in git = nil; at = .distantPast }
     }
 }
 

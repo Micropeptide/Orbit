@@ -58,6 +58,25 @@ enum JSONValue: Codable, Hashable, Sendable {
     var isNull: Bool { if case .null = self { return true }; return false }
     var strings: [String] { array?.compactMap(\.string) ?? [] }
 
+    /// The other way round: what `JSONSerialization` handed back. Anything this
+    /// does not recognise is `nil` rather than a guess.
+    init?(any: Any?) {
+        switch any {
+        case nil, is NSNull: self = .null
+        case let n as NSNumber:
+            // `case let b as Bool` looks like the right first case and is not: an
+            // NSNumber holding 0 or 1 bridges to Bool, so the integers 0 and 1 became
+            // false and true. Only CFBoolean is really a boolean.
+            if CFGetTypeID(n) == CFBooleanGetTypeID() { self = .bool(n.boolValue) }
+            else { self = .number(n.doubleValue) }
+        case let b as Bool: self = .bool(b)
+        case let s as String: self = .string(s)
+        case let a as [Any]: self = .array(a.compactMap { JSONValue(any: $0) })
+        case let o as [String: Any]: self = .object(o.compactMapValues { JSONValue(any: $0) })
+        default: return nil
+        }
+    }
+
     /// Plain Foundation objects, for posting back through JSONSerialization.
     var foundation: Any {
         switch self {

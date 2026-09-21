@@ -48,6 +48,20 @@ struct AnswerTextSize: ViewModifier {
     }
 }
 
+/// Code, diffs and terminal output keep their own size.
+///
+/// They sat inside the answer's size, so reading the interface bigger reflowed every
+/// diff and wrapped every shell line — which is the opposite of what "make the text
+/// bigger" is for. "Follow the answer" is still what it does by default.
+struct CodeTextSize: ViewModifier {
+    @AppStorage("codeSize") private var raw = "follow"
+    func body(content: Content) -> some View {
+        if raw == "follow" { content }
+        else if let s = Appearance.typeSize(raw) { content.dynamicTypeSize(s) }
+        else { content.dynamicTypeSize(.medium) }      // "default" = the system's own
+    }
+}
+
 /// A rendered image on its way to the share sheet.
 struct ShareImage: Identifiable {
     let id = UUID()

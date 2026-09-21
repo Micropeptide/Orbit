@@ -109,6 +109,12 @@ extension AppState {
         case .interjection(let text, let late):
             if !late { liveStatus = "reading your note" }
             store.notes[sid, default: [:]][text] = late ? "kept — it reads this with your next message" : "✓ read"
+        case .review(let text, let files, let model):
+            liveStatus = ""
+            note { $0.review = .init(text: text, files: files, model: model) }
+        case .verified(let passed, let reason, let next, let failOpen):
+            liveStatus = ""
+            note { $0.check = .init(passed: passed, reason: reason, next: next, failOpen: failOpen) }
         case .roundLimit(let reason, let pending):
             chatExtras.roundLimit = reason
             store.roundPending[sid] = pending

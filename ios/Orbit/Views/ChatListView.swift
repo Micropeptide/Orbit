@@ -82,8 +82,19 @@ struct ChatListView: View {
                     }
                     FileSearchSection(query: search, preview: $filePreview)
                     ForEach(dayGroups, id: \.0) { day, chats in
-                     Section(day) {
+                     Section {
                       ForEach(chats) { chat in listRow(chat) }
+                     } header: {
+                      // the header floats while its rows scroll (plain list style), so it
+                      // may as well say how many are under it
+                      HStack(spacing: 6) {
+                       Text(day)
+                       Text("\(chats.count)")
+                        .font(.caption2.monospacedDigit())
+                        .padding(.horizontal, 6).padding(.vertical, 1)
+                        .background(.quaternary.opacity(0.5), in: .capsule)
+                       Spacer(minLength: 0)
+                      }
                      }
                     }
                     if shown.isEmpty { empty }
@@ -204,6 +215,16 @@ struct ChatListView: View {
                 while !Task.isCancelled {
                     await state.refreshRunningState()
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
+                }
+            }
+            .task {
+                // A chat renamed, binned or started on the Mac shows up here without
+                // pulling to refresh — and asking "has it changed?" costs one small
+                // answer, rather than a page of JSON every ten seconds on cellular.
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 10_000_000_000)
+                    if Task.isCancelled { break }
+                    await state.loadChatsIfChanged()
                 }
             }
             .onAppear { listModel.refreshSeen() }

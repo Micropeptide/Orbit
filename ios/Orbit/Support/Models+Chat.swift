@@ -36,6 +36,10 @@ struct ApprovalPrompt: Identifiable, Hashable {
     var suggestions: [String]
     var diff: String?
     var diffPath: String?
+    /// The project this chat belongs to, when it belongs to one: the scope between
+    /// "for this chat" and "everywhere" — "let pytest run here".
+    var projectID: String?
+    var projectName: String?
 
     static func == (a: ApprovalPrompt, b: ApprovalPrompt) -> Bool { a.id == b.id }
     func hash(into h: inout Hasher) { h.combine(id) }
@@ -54,6 +58,9 @@ struct ApprovalPrompt: Identifiable, Hashable {
         let d = obj["diff"] as? [String: Any]
         diff = d?["diff"] as? String
         diffPath = d?["path"] as? String
+        let pr = obj["project"] as? [String: Any]
+        projectID = pr?["id"] as? String
+        projectName = (pr?["name"] as? String) ?? projectID
     }
 }
 
@@ -84,6 +91,12 @@ struct ChatExtras {
     var approval: ApprovalPrompt?
     /// Plan mode for the open chat: it may read and propose, and change nothing.
     var planMode = false
+    /// What the open chat remembers for itself. Empty means it follows Orbit's
+    /// own settings, which is what a chat does until you change something in it.
+    var prefs: [String: JSONValue] = [:]
+    /// Easy mode in the open chat: a small model is offered only the essential
+    /// tools. The Mac resolves it, since a chat that never set one follows Orbit's.
+    var easyMode = false
     /// The temporary chat opened from this phone, if any — the only one burn may erase.
     var tempSid: String?
     /// The answer stopped at its round or time limit; offer to continue.

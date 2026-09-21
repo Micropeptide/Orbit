@@ -37,6 +37,25 @@ struct ToolRunRow: View {
             } label: { header }
             .buttonStyle(.plain)
             .accessibilityHint(open ? "Hides the details" : "Shows the arguments and output")
+            // The whole row is the tap target, which is right on a phone — but that
+            // leaves the command, the path and the result unselectable. Long press
+            // copies them, folded or not, which is what you actually reach for.
+            .contextMenu {
+                if !run.target.isEmpty {
+                    Button { UIPasteboard.general.string = run.target } label: {
+                        Label("Copy \(run.display.lowercased()) target", systemImage: "doc.on.doc")
+                    }
+                }
+                if run.done, !run.summary.isEmpty {
+                    Button { UIPasteboard.general.string = run.summary } label: {
+                        Label("Copy result", systemImage: "text.quote")
+                    }
+                }
+                Button {
+                    UIPasteboard.general.string = [run.display, run.target, run.summary]
+                        .filter { !$0.isEmpty }.joined(separator: "\n")
+                } label: { Label("Copy the whole line", systemImage: "list.clipboard") }
+            }
             if open, run.done { ToolRunDetail(run: run).padding(.leading, 18) }
         }
     }
@@ -50,6 +69,7 @@ struct ToolRunRow: View {
                     .font(.footnote)
                     .lineLimit(open ? 4 : 1)
                     .truncationMode(.tail)
+                    .modifier(Working(on: run.running))
                 Spacer(minLength: 4)
                 ToolClock(run: run)
             }
@@ -89,8 +109,10 @@ struct ToolGroupRow: View {
                     ToolDot(running: false, failed: false)
                     Text(ToolText.familyLabel(runs)).font(.footnote.weight(.semibold))
                         .lineLimit(2)
+                        .layoutPriority(1)
                     Image(systemName: open ? "chevron.down" : "chevron.right")
                         .font(.caption2).foregroundStyle(.tertiary)
+                    if !open { names }
                     Spacer(minLength: 4)
                     let secs = runs.compactMap(\.secs).reduce(0, +)
                     if secs >= 0.5 {
@@ -109,6 +131,27 @@ struct ToolGroupRow: View {
             }
         }
     }
+
+    /// Which files, not just how many — two on a phone, because the header already
+    /// competes with the duration and the chevron.
+    private var names: some View {
+        let all = ToolText.familyNames(runs)
+        let show = all.prefix(2)
+        return HStack(spacing: 4) {
+            ForEach(Array(show), id: \.self) { n in
+                Text(n)
+                    .font(.caption2.monospaced())
+                    .lineLimit(1).truncationMode(.middle)
+                    .padding(.horizontal, 5)
+                    .background(.quaternary.opacity(0.4), in: .rect(cornerRadius: 4))
+                    .foregroundStyle(.secondary)
+            }
+            if all.count > show.count {
+                Text("+\(all.count - show.count)").font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+        .accessibilityLabel(all.isEmpty ? "" : "touched " + all.joined(separator: ", "))
+    }
 }
 
 struct ToolDot: View {
@@ -116,28 +159,73 @@ struct ToolDot: View {
     var failed: Bool
 
     var body: some View {
-        if running {
-            ProgressView().controlSize(.mini).frame(width: 12)
+        // A spinner per running row is one display-link-driven animation per call, and a
+        // parallel fan-out is eight of them at once, on top of re-parsing streaming
+        // Markdown. The glyph stays; the row says it is working by sweeping its name.
+        Text("⏺")
+            .font(.caption2)
+            .foregroundStyle(running ? Color.orange : failed ? Color.red : Color.green)
+            .frame(width: 12)
+            .accessibilityLabel(running ? "running" : failed ? "failed" : "done")
+    }
+}
+
+/// A running call's name, breathing, so you can see which row is working without a
+/// spinner on every one of them. Still, under Reduce Motion.
+private struct Working: ViewModifier {
+    var on: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var dim = false
+
+    func body(content: Content) -> some View {
+        if on && !reduceMotion {
+            content
+                .opacity(dim ? 0.55 : 1)
+                .animation(.easeInOut(duration: 0.95).repeatForever(autoreverses: true), value: dim)
+                .onAppear { dim = true }
+                .onDisappear { dim = false }
         } else {
-            Text("⏺")
-                .font(.caption2)
-                .foregroundStyle(failed ? Color.red : Color.green)
-                .frame(width: 12)
-                .accessibilityLabel(failed ? "failed" : "done")
+            content
         }
+    }
+}
+
+/// One clock for every running row on screen, instead of one timer each — and none at
+/// all while the app is in the background or nothing is running.
+@MainActor final class LiveClock: ObservableObject {
+    static let shared = LiveClock()
+    @Published private(set) var now = Date()
+    private var timer: Timer?
+    private var watchers = 0
+
+    func join() {
+        watchers += 1
+        guard timer == nil else { return }
+        now = Date()
+        let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.now = Date() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    func leave() {
+        watchers = max(0, watchers - 1)
+        if watchers == 0 { timer?.invalidate(); timer = nil }
     }
 }
 
 /// How long it took, or a running clock while it runs.
 private struct ToolClock: View {
     let run: ToolRun
+    @ObservedObject private var clock = LiveClock.shared
 
     var body: some View {
         if run.running, let t0 = run.startedAt {
-            TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                Text(ToolText.secs(ctx.date.timeIntervalSince(t0)))
-            }
-            .font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
+            Text(ToolText.secs(clock.now.timeIntervalSince(t0)))
+                .font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
+                .onAppear { clock.join() }
+                .onDisappear { clock.leave() }
         } else if let s = run.secs, s >= 0.5 {
             Text(ToolText.secs(s)).font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
         }
@@ -171,6 +259,7 @@ struct ToolRunDetail: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxHeight: 280)
+                .modifier(CodeTextSize())
             }
             HStack {
                 Spacer()
@@ -194,7 +283,7 @@ struct TodoList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(Array(steps.enumerated()), id: \.offset) { _, s in
+            ForEach(Array(steps.enumerated()), id: \.offset) { i, s in
                 HStack(alignment: .firstTextBaseline, spacing: 7) {
                     Text(s.mark)
                         .foregroundStyle(s.active && !s.done ? Color.accentColor : .secondary)
@@ -205,6 +294,7 @@ struct TodoList: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .font(.footnote)
+                .id("todo-\(i)")          // so a long plan can open on the step in hand
             }
         }
     }
@@ -217,6 +307,8 @@ struct ThinkingBlock: View {
     var secs: Double? = nil
     @State private var open = false
     @State private var showAll = false
+    /// You opened or closed it yourself, so nothing opens or closes it for you again.
+    @State private var userTouched = false
 
     /// Long thinking shows its first lines (the latest ones while it is written) and a
     /// "Show all"; the rest is a tap away.
@@ -241,6 +333,7 @@ struct ThinkingBlock: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
+                userTouched = true
                 withAnimation(.easeInOut(duration: 0.15)) { open.toggle() }
             } label: {
                 HStack(spacing: 5) {
@@ -259,6 +352,10 @@ struct ThinkingBlock: View {
                     .textSelection(.enabled)
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    // while it thinks, it may not fill the screen: the answer is what you
+                    // are waiting for, and it has to stay in view
+                    .frame(maxHeight: live && !showAll ? 240 : nil, alignment: .top)
+                    .clipped()
                     .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 9))
                 if long {
                     Button(showAll ? "Show less" : "Show all · \(ToolText.plural(lineCount, "line", "lines"))") {
@@ -267,6 +364,13 @@ struct ThinkingBlock: View {
                     .font(.caption).buttonStyle(.plain).foregroundStyle(.tint)
                 }
             }
+        }
+        // It is written out to be read: open while it thinks, folded away when the
+        // answer starts. Nothing ever opened it, so streaming it was work for nobody.
+        .onAppear { if live && !userTouched { open = true } }
+        .onChange(of: live) { _, nowLive in
+            guard !userTouched else { return }
+            withAnimation(.easeInOut(duration: 0.2)) { open = nowLive }
         }
     }
 }
@@ -295,6 +399,7 @@ struct BangBlock: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .frame(maxHeight: 240)
+                .modifier(CodeTextSize())
                     .fixedSize(horizontal: false, vertical: true)
                     Text(run.meta)
                         .font(.caption2.monospacedDigit())

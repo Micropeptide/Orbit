@@ -146,6 +146,36 @@ struct ChatDetail: Codable {
     var running: Bool?
     var context: ContextState?
     var plan_mode: Bool?
+    /// The settings this chat keeps for itself, overriding Orbit's own: easy mode,
+    /// which model does the side work, how much it may do without asking.
+    var prefs: [String: JSONValue]?
+    /// Easy mode as it applies to this chat — the chat's own if it set one, and
+    /// otherwise Orbit's, resolved on the Mac so the phone need not hold both.
+    var easy_mode: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case sid, title, messages, n, running, context, plan_mode, prefs, easy_mode
+    }
+
+    init(sid: String, title: String? = nil, messages: [Message] = []) {
+        self.sid = sid; self.title = title; self.messages = messages
+    }
+
+    /// Hand-rolled, like every other type here: a Mac that words one of these
+    /// differently — `easy_mode` as "" / "changes", say, which is exactly what it
+    /// already does for auto_review — must not stop the chat from opening at all.
+    init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        sid = try c.decode(String.self, forKey: .sid)
+        title = c.lenient(String.self, .title)
+        messages = c.lenient([Message].self, .messages) ?? []
+        n = c.lenient(Int.self, .n)
+        running = c.lenient(Bool.self, .running)
+        context = c.lenient(ContextState.self, .context)
+        plan_mode = c.lenient(Bool.self, .plan_mode)
+        prefs = c.lenient([String: JSONValue].self, .prefs)
+        easy_mode = c.lenient(Bool.self, .easy_mode)
+    }
 }
 
 struct ContextState: Codable, Hashable {

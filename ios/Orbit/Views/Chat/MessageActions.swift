@@ -303,6 +303,17 @@ struct ChatMenuItems: View {
             Label(state.chatExtras.planMode ? "Leave plan mode" : "Plan mode",
                   systemImage: state.chatExtras.planMode ? "hammer" : "list.bullet.clipboard")
         }
+        Button {
+            let on = !state.chatExtras.easyMode
+            Task {
+                await state.setChatSetting("easy_mode", on, saying: on
+                    ? "Easy mode in this chat: essential tools only"
+                    : "Easy mode off in this chat: every tool is offered")
+            }
+        } label: {
+            Label(state.chatExtras.easyMode ? "Leave easy mode" : "Easy mode — essential tools only",
+                  systemImage: state.chatExtras.easyMode ? "wrench.and.screwdriver" : "wrench")
+        }
         Button { model.showJump = true } label: {
             Label("Jump to a message…", systemImage: "arrow.down.to.line")
         }

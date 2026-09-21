@@ -258,6 +258,20 @@ final class AppState: ObservableObject {
         return raw
     }
 
+    /// The last "has anything changed?" answer, so a poll that has not moved costs one
+    /// tiny call instead of the whole list.
+    private static var chatsStamp = ""
+
+    /// Reload the list only if the Mac says it has changed. `force` skips the check.
+    func loadChatsIfChanged(force: Bool = false) async {
+        guard let server else { return }
+        if !force, let stamp = try? await server.chatsStamp() {
+            if stamp == Self.chatsStamp, !chats.isEmpty { return }
+            Self.chatsStamp = stamp
+        }
+        await loadChats()
+    }
+
     func loadChats() async {
         guard let server else { return }
         do {
@@ -328,7 +342,16 @@ final class AppState: ObservableObject {
             // leave the old answer running on the Mac; just stop watching it here
             detachLive()
         }
-        if openChat?.sid != id { queue = .empty }
+        if openChat?.sid != id {
+            queue = .empty
+            // These describe one chat, and only a *successful* load used to replace
+            // them: opening a chat from the cache, or when the Mac is briefly out of
+            // reach, left the last chat's plan mode and easy mode on screen — and
+            // tapping the menu then wrote that answer onto a chat that never set it.
+            chatExtras.planMode = false
+            chatExtras.prefs = [:]
+            chatExtras.easyMode = false
+        }
         markSeen(id)
         // show the cached copy immediately; the network fills it in
         if let cached = Cache.loadMessages(id), !cached.isEmpty {
@@ -343,6 +366,8 @@ final class AppState: ObservableObject {
             if streaming, let live = liveSid, live != id { detachLive() }
             openChat = d
             chatExtras.planMode = d.plan_mode ?? false
+            chatExtras.prefs = d.prefs ?? [:]
+            chatExtras.easyMode = d.easy_mode ?? false
             var fresh = d.messages
             // Mid-answer the Mac may not have written the question yet (it starts
             // the model server first). Keep the one we showed rather than losing it.
@@ -399,7 +424,7 @@ final class AppState: ObservableObject {
                         if let t = d.title { self.openChat?.title = t }
                         Cache.saveMessages(d.messages, for: id)
                     }
-                    Task { await self.loadChats() }
+                    Task { await self.loadChatsIfChanged() }
                 }
                 // a waiting message may have gone out, or been added on the Mac
                 if s.n != self.watchedCount || !(self.queue.items.isEmpty) { await self.loadQueue() }
@@ -609,6 +634,9 @@ final class AppState: ObservableObject {
         case .approvalPrompt(let a):
             chatExtras.approval = a
             pendingApproval = (a.name, a.reason, a.id)
+            // An approval is the thing that stops a run, and being stopped is exactly
+            // what happens while you are somewhere else. Answer it from the Lock Screen.
+            notifyApproval(a)
         case .roundLimit(let why): chatExtras.roundLimit = why
         case .usageLimit(let msg): noteUsageLimit(msg)
         case .error(let e):    lastError = e
@@ -627,6 +655,27 @@ final class AppState: ObservableObject {
     /// hold it open, keep reading the stream, and post a local notification when
     /// the answer lands. If iOS suspends us first the answer is still safe on
     /// the Mac — you just find it there instead of being tapped on the shoulder.
+    /// The approval, with Allow and Deny on the notification itself.
+    func notifyApproval(_ a: ApprovalPrompt) {
+        guard backgrounded, let sid = liveSid ?? openChat?.sid else { return }
+        let c = UNMutableNotificationContent()
+        c.title = (openChat?.title ?? "Orbit") + " needs your approval"
+        c.body = String((a.reason.isEmpty ? a.name : a.reason).prefix(240))
+        c.sound = .default
+        c.categoryIdentifier = Notifications.approvalCategory
+        c.userInfo = ["sid": sid, "approvalID": a.id]
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: "approval-" + a.id, content: c, trigger: nil))
+    }
+
+    /// Answer an approval by its id alone — what a notification action has to go on.
+    func answerApproval(id: String, allow: Bool) async {
+        guard let server, !id.isEmpty else { return }
+        try? await server.approve(id, reply: ApprovalReply(allow: allow))
+        if chatExtras.approval?.id == id { chatExtras.approval = nil }
+        if pendingApproval?.id == id { pendingApproval = nil }
+    }
+
     func notifyIfBackgrounded(title: String, body: String, sid: String? = nil) {
         guard backgrounded else { return }
         let c = UNMutableNotificationContent()
