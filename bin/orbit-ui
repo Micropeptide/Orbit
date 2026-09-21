@@ -3095,8 +3095,10 @@ def autotitle(msgs):
     """A short, recognisable name for the chat, from its first request and latest words."""
     material = _title_material(msgs)
     if len(material) < 10: return None
+    # naming a chat is Orbit's work, not the chat's: it goes to the side-work model
     out = q.stream_call([{"role": "system", "content": TITLE_PROMPT},
-                         {"role": "user", "content": f"<chat>\n{material}\n</chat>"}], None, think=False)
+                         {"role": "user", "content": f"<chat>\n{material}\n</chat>"}], None,
+                        think=False, model=q.helper_model())
     return _clean_title(out.get("content"))
 
 import re as _re
