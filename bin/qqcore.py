@@ -118,7 +118,13 @@ DEFAULTS = {
   # request at a time, so asking it to review its own turn means queueing behind that
   # turn; pick a hosted one here and the review runs while the local model is busy.
   # "" = whatever the chat is using.
+  # Name your saved skills in the system prompt, so the model knows they exist.
+  "skills_in_prompt": True,
   "helper_model": "",
+  # How long to wait for the first token, and then between tokens. A stalled provider
+  # used to hold an answer for the full hour-long request timeout with nothing arriving.
+  "first_token_timeout_s": 600,
+  "stream_idle_timeout_s": 120,
   # Review the files an answer changed, when it changed any: "" off, "changes" on.
   "auto_review": "",
   "easy_mode": False,
@@ -237,6 +243,9 @@ def memory_blob(limit=12000):
 
 def system_prompt():
     parts = [S.get("system_prompt") or BASE_SYSTEM]
+    if S.get("skills_in_prompt", True):
+        sk = skills_section()
+        if sk: parts.append(sk)
     if S.get("use_instructions"):
         ins = read_instructions()
         if ins: parts.append("## User instructions (always follow)\n" + ins)
@@ -1706,7 +1715,7 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
     req = urllib.request.Request(base + "/chat/completions", data=json.dumps(body).encode(),
                                  headers=headers)
     content, reasoning, tcalls, usage = [], [], {}, None
-    marks, mstate = [], [0, ""]
+    marks, mstate, tightened = [], [0, ""], [False]
 
     def answered():
         """The wait is over the moment anything comes back."""
@@ -1716,7 +1725,7 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
             emit("server_ready", {"elapsed": 0})
 
     try:
-        r = urllib.request.urlopen(req, timeout=3600)
+        r = urllib.request.urlopen(req, timeout=float(S.get("first_token_timeout_s") or 600))
     except urllib.error.HTTPError as e:
         try: detail = e.read().decode("utf-8", "replace")[:800]
         except Exception: detail = ""
@@ -1728,9 +1737,13 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
         except (TypeError, ValueError):
             ra = None
         raise ModelError(f"HTTP {e.code} from the model server: {detail or e.reason}", e.code, ra)
+    idle = float(S.get("stream_idle_timeout_s") or 120)
     with r:
+      try:
         for raw in r:
             if stop.is_set(): break
+            if not tightened[0]:
+                tightened[0] = _tighten_stream(r, idle)
             line = raw.decode("utf-8", "replace")
             if not line.startswith("data: "): continue
             p = line[6:].strip()
@@ -1757,6 +1770,15 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
                 f = tc.get("function") or {}
                 if f.get("name"): slot["function"]["name"] = f["name"]
                 if f.get("arguments"): slot["function"]["arguments"] += f["arguments"]
+      except (TimeoutError, OSError) as e:
+        # nothing arrived for the idle window. Partial text is kept -- the retry path
+        # decides whether to carry on with it -- and the failure is a transient one,
+        # so the usual retry and provider fallback handle it instead of the whole
+        # answer hanging until the request timeout an hour later.
+        if content or reasoning:
+            emit and emit("notice", {"msg": f"the model stopped sending for {idle:.0f}s"})
+        raise ModelError(f"the model stopped sending for {idle:.0f}s "
+                         f"({type(e).__name__})", 504, None)
     msg = {"role": "assistant", "content": "".join(content),
            "model": spec.get("label") or spec["model"]}
     if reasoning: msg["reasoning_content"] = "".join(reasoning)
@@ -2988,14 +3010,60 @@ ALL_SPECS += [
 ]
 
 # ------------------------------------------------------------------ skills
+def _skill_title(body):
+    """What a skill is for, in one line: its frontmatter description if it has one,
+    otherwise its first real line. A skill written the way Claude writes them starts
+    with "---", and reading that as the title made half the list say "---"."""
+    lines = body.splitlines()
+    if lines and lines[0].strip() == "---":
+        end = next((i for i, l in enumerate(lines[1:], 1) if l.strip() == "---"), None)
+        if end:
+            for key in ("description", "title", "name"):
+                for l in lines[1:end]:
+                    if l.lower().startswith(key + ":"):
+                        v = l.split(":", 1)[1].strip().strip("'\"")
+                        if v: return v
+            lines = lines[end + 1:]
+    return next((l.strip("# ").strip() for l in lines if l.strip()), "")
+
+
 def skills_list():
     out = []
     for f in sorted(os.listdir(SKILLS)):
         if not f.endswith(".md"): continue
         body = open(os.path.join(SKILLS, f)).read()
-        first = next((l.strip("# ").strip() for l in body.splitlines() if l.strip()), "")
-        out.append({"name": f[:-3], "title": first[:140], "chars": len(body)})
+        out.append({"name": f[:-3], "title": _skill_title(body)[:140], "chars": len(body)})
     return out
+
+SKILL_BUDGET = 4000        # characters of the system prompt a skill list may take
+
+def skills_section(budget=None):
+    """The skills you have saved, named in the system prompt.
+
+    A skill the model does not know about is a skill that never fires -- and until now
+    the only way to find out was to call list_skills, which the model has no reason to
+    do. Each line is one skill and its first line; if the whole block would be too big
+    the descriptions are dropped before the names are, because a name it can look up
+    beats a truncated list it cannot."""
+    try: skills = skills_list()
+    except OSError: return ""
+    if not skills: return ""
+    budget = SKILL_BUDGET if budget is None else budget
+    head = ("## Your skills\n"
+            "Saved procedures for work you have done before. Read one with use_skill(name) "
+            "before starting something it covers -- the name alone is not the procedure.\n")
+    lines = [f"- {sk['name']}: {(sk['title'] or '').strip()[:120]}" for sk in skills]
+    if len(head) + sum(len(x) + 1 for x in lines) > budget:
+        lines = [f"- {sk['name']}" for sk in skills]
+    body = "\n".join(lines)
+    if len(head) + len(body) > budget:                  # still too many: name what fits
+        keep, used = [], 0
+        for x in lines:
+            if used + len(x) + 1 > budget - len(head) - 40: break
+            keep.append(x); used += len(x) + 1
+        body = "\n".join(keep) + f"\n- …and {len(lines) - len(keep)} more (list_skills)"
+    return head + body
+
 
 def skill_read(name):
     p = os.path.join(SKILLS, os.path.basename(name) + ".md")
@@ -4517,6 +4585,19 @@ def _usable_window(mx):
     try: want = int(S.get("max_output_tokens") or 32000)
     except (TypeError, ValueError): want = 32000
     return max(mx - min(want, OUTPUT_RESERVE), mx // 2, 1)
+
+def _tighten_stream(resp, secs):
+    """Once tokens are arriving, stop waiting like it is the first one.
+
+    urlopen's timeout is the socket timeout, and it applies to every read -- so one
+    number has to cover both "a cold local model is loading 17 GB" and "this provider
+    stopped talking". It is set generously to open the stream, then tightened here."""
+    try:
+        resp.fp.raw._sock.settimeout(float(secs))
+        return True
+    except Exception:
+        return False
+
 
 def helper_model(want=None):
     """The model Orbit uses for its own work, or None for "whatever the chat uses".

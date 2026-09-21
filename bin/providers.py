@@ -578,6 +578,30 @@ def _tools_for_anthropic(tools):
     return out
 
 
+def _cache_breakpoint(msgs):
+    """Mark where the reusable part of the conversation ends.
+
+    The provider caches the prefix up to a breakpoint, so the right place for one is the
+    end of what will still be there next round: the last message. Old marks are cleared
+    first -- there are only four to spend, and a stale one in the middle pays to cache a
+    prefix nobody will ask for again."""
+    for m in msgs:
+        c = m.get("content")
+        if isinstance(c, list):
+            for b in c:
+                if isinstance(b, dict):
+                    b.pop("cache_control", None)
+    for m in reversed(msgs):
+        c = m.get("content")
+        if isinstance(c, str) and c:
+            m["content"] = [{"type": "text", "text": c,
+                             "cache_control": {"type": "ephemeral"}}]
+            return
+        if isinstance(c, list) and c and isinstance(c[-1], dict):
+            c[-1]["cache_control"] = {"type": "ephemeral"}
+            return
+
+
 def anthropic_stream(model, messages, tools, api_key, think=True, effort="medium",
                      emit=None, cancel=None, max_tokens=32000, base_url=""):
     """One Claude turn, returned in the OpenAI shape the rest of Orbit speaks."""
@@ -587,9 +611,17 @@ def anthropic_stream(model, messages, tools, api_key, think=True, effort="medium
     client = anthropic.Anthropic(api_key=api_key, **({"base_url": base_url} if base_url else {}))
     system, msgs = _to_anthropic(messages)
     kw = {"model": model, "max_tokens": max_tokens, "messages": msgs}
-    if system: kw["system"] = system
+    # An agent loop re-sends the whole conversation every round, and the front of it --
+    # the system prompt and the tool schemas -- is identical every time. Marking that
+    # cacheable makes those tokens cost a fraction on every round after the first.
+    if system:
+        kw["system"] = [{"type": "text", "text": system,
+                         "cache_control": {"type": "ephemeral"}}]
     at = _tools_for_anthropic(tools)
-    if at: kw["tools"] = at
+    if at:
+        at[-1] = {**at[-1], "cache_control": {"type": "ephemeral"}}
+        kw["tools"] = at
+    _cache_breakpoint(msgs)
     if model.startswith(ADAPTIVE):
         # adaptive thinking replaces the old fixed budget; display must be asked
         # for or the blocks stream back empty
@@ -627,6 +659,11 @@ def anthropic_stream(model, messages, tools, api_key, think=True, effort="medium
     if calls: msg["tool_calls"] = calls
     usage = getattr(final, "usage", None)
     if usage is not None:
-        msg["_usage"] = {"prompt_tokens": getattr(usage, "input_tokens", 0),
-                         "completion_tokens": getattr(usage, "output_tokens", 0)}
+        read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        wrote = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        # input_tokens counts only what was not served from cache, so once caching works
+        # the window meter would read a 60k conversation as 2k
+        msg["_usage"] = {"prompt_tokens": (getattr(usage, "input_tokens", 0) or 0) + read + wrote,
+                         "completion_tokens": getattr(usage, "output_tokens", 0),
+                         "cached_tokens": read}
     return msg
