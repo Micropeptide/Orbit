@@ -3362,7 +3362,8 @@ def suggest_memories(messages, max_items=4):
            "\"content\" (one or two sentences). Reply with JSON only, or [] if nothing qualifies."
            "\n\n" + "\n".join(convo)[:14000])
     out = stream_call([{"role":"system","content":"You extract durable facts. Reply with JSON only."},
-                       {"role":"user","content":ask}], None, think=False).get("content","")
+                       {"role":"user","content":ask}], None, think=False,
+                      model=helper_model()).get("content","")
     m = _re.search(r"\[.*\]", out, _re.S)
     if not m: return []
     try: items = json.loads(m.group(0))
@@ -4394,7 +4395,8 @@ def capture_skill(messages, name, writer=None):
            "Markdown, start with a '# ' title line. No conversational filler.\n\n"
            + "\n".join(convo)[:24000])
     body = stream_call([{"role":"system","content":"You write precise operational procedures."},
-                        {"role":"user","content":ask}], None, think=False).get("content","").strip()
+                        {"role":"user","content":ask}], None, think=False,
+                       model=helper_model()).get("content","").strip()
     if not body: return None
     return (writer or skill_write)(name, body)
 
