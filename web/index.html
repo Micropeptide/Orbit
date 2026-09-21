@@ -3755,8 +3755,13 @@ async function go(opts){
   syncComposerMode();return runBang(t.replace(/^!\s*/,''))}
  if(/^#\s+\S/.test(t)&&!t.includes('\n')&&t.length<300&&!atts.length){
   q.value='';q.style.height='auto';clearDraft(sid);syncComposerMode();return rememberNote(t.replace(/^#\s+/,''))}
- // a Claude Code chat hands commands Orbit doesn't have (skills, /compact, /context…) to Claude
- const orbitCmd=c0=>CMDS.some(x=>x.c===c0)||!!PROMPTS[c0.slice(1)];
+ // A Claude Code chat hands commands Orbit doesn't have (its skills, its own commands) to
+ // Claude. /compact and /context are in both lists and belong to Claude there: its session
+ // is the one holding the conversation, and compacting Orbit's copy of the transcript would
+ // change nothing about what gets sent — while saying it had.
+ const CLAUDE_OWN=['/compact','/context'];
+ const orbitCmd=c0=>(CMDS.some(x=>x.c===c0)||!!PROMPTS[c0.slice(1)])
+   && !(isClaudeChat()&&CLAUDE_OWN.includes(c0));
  if(t.startsWith('/')&&!(isClaudeChat()&&!orbitCmd(t.split(' ')[0]))){const c=t.split(' ')[0],rest=t.slice(c.length).trim();
   if(PROMPTS[c.slice(1)]){q.value=expandPrompt(PROMPTS[c.slice(1)].text,rest);return}
   if(await runCmd(c,rest))return;
