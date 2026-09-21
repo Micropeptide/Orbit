@@ -621,6 +621,11 @@ class H(http.server.BaseHTTPRequestHandler):
                 "paths": {"user": q.CE.claude_settings_path("user"),
                           "skills": os.path.join(q.CE.claude_dir(), "skills")},
                 "skills": q.CE.skills_list()}))
+        if p.split("?")[0] == "/api/claude/tools":
+            # what Claude Code says it has, so easy mode can offer them as a choice
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            known = q.CE.learn_tools() if (qs.get("learn") or [""])[0] else q.CE.known_tools()
+            return self._send(200, jdump({"known": known, "keep": q.CE.cfg().get("easy_tools") or []}))
         if p == "/api/claude/plugins":
             return self._send(200, jdump({**q.CE.plugins_list(), **q.CE.marketplaces_list()}))
         if p == "/api/claude/mcp":

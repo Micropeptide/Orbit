@@ -109,6 +109,13 @@ DEFAULTS = {
     "max_active_requests": 3,
     "ssd_session_cache": "on",
   },
+  # Easy mode: hand the model a short bench of tools instead of the whole workshop.
+  # Orbit's 55 tool schemas cost ~9,800 tokens of every request -- three times its system
+  # prompt -- and a small model chooses better from a dozen than from fifty. The lists are
+  # yours to edit; "" in a list is ignored.
+  "easy_mode": False,
+  "easy_tools": ["read_file", "edit_file", "write_file", "run_shell", "list_dir", "glob",
+                 "grep_files", "python", "web_search", "fetch_url", "task", "plan", "remember"],
   "idle_min": 20,
   # Bionic holds its own weights: give them back when nothing on this Mac has used
   # that model for this long (0 = keep it loaded). Its own use counts, not just Orbit's.
@@ -2783,8 +2790,18 @@ def system_prompt_for(agent=None):
 def tools_for(agent, all_specs):
     a = agents_load().get(agent or "", {})
     allow = a.get("tools")
-    if not allow: return all_specs
-    return [t for t in all_specs if t["function"]["name"] in allow]
+    if allow:
+        all_specs = [t for t in all_specs if t["function"]["name"] in allow]
+    return easy_tools(all_specs)
+
+
+def easy_tools(specs):
+    """In easy mode, only the tools on the list. An agent's own list still narrows it
+    further; nothing here widens what an agent was given."""
+    if not S.get("easy_mode"): return specs
+    keep = {str(x) for x in (S.get("easy_tools") or []) if x}
+    if not keep: return specs
+    return [t for t in specs if t["function"]["name"] in keep]
 
 # ------------------------------------------------------------------ bio tools
 import urllib.parse as _up

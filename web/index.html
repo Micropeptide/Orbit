@@ -3086,6 +3086,33 @@ async function renderFallback(box){
  $('#fb_addbtn').onclick=()=>{const v=$('#fb_add').value;if(!v||list.includes(v))return;list.push(v);draw();save()};
  ['fb_on','fb_after','fb_same','fb_limit'].forEach(id=>$('#'+id).onchange=save);
  draw()}
+// Easy mode's two lists: Orbit's own tools, and the ones Claude Code says it has.
+async function drawEasyTools(draft){
+ const grid=$('#easygrid'), cbox=$('#easyclaude');
+ if(!grid)return;
+ const keep=new Set(draft.easy_tools||[]);
+ // every tool that exists, not just the ones this chat is being offered: in easy mode
+ // those are the short list, and you could not tick anything back on
+ const all=[...new Set([...(INFO.all_tools||[]),...(INFO.tools||[])])].sort();
+ grid.innerHTML='';
+ all.forEach(n=>{const l=document.createElement('label');
+  const c=document.createElement('input');c.type='checkbox';c.dataset.easy=n;c.checked=keep.has(n);
+  l.appendChild(c);l.appendChild(document.createTextNode(' '+n));grid.appendChild(l)});
+ $('#easycount').textContent=all.length?`${keep.size} of ${all.length} kept`:'';
+ const load=async learn=>{
+  cbox.innerHTML='<span class=note>'+(learn?'asking Claude Code…':'loading…')+'</span>';
+  let d=null;
+  try{d=await (await fetch('/api/claude/tools'+(learn?'?learn=1':''))).json()}catch(e){}
+  cbox.innerHTML='';
+  if(!d||!(d.known||[]).length){
+   cbox.appendChild(el('<span class=note>Claude Code has not said yet what tools it has — send one message in Claude Code mode, or ask it again.</span>'));return}
+  const ck=new Set(d.keep||[]);
+  d.known.forEach(n=>{const l=document.createElement('label');
+   const c=document.createElement('input');c.type='checkbox';c.dataset.ceasy=n;c.checked=ck.has(n);
+   l.appendChild(c);l.appendChild(document.createTextNode(' '+n));cbox.appendChild(l)})};
+ load(false);
+ const b=$('#easylearn'); if(b)b.onclick=()=>load(true)}
+
 async function renderHarnessModels(box){
  const h=await (await fetch('/api/harness')).json();
  const fmtName={messages:'native',chat:'via gateway',responses:'via gateway (Responses)'};
@@ -4447,7 +4474,27 @@ async function openSettings(tab){
      images, but not the MTPLX local model or a CLI-backed one — but every
      mode still asks before a click or keystroke unless you have turned on Full access, same as any
      other confirm-level action.</div>
-    <div class=sec>Available tools</div><div class=toolgrid id=tg></div>`;
+    <div class=sec>Easy mode <small>— a short bench of tools instead of the whole workshop</small></div>
+    <div class=hint2>Orbit's tool schemas cost about 9,800 tokens of every request — three times its
+     system prompt — and a small model chooses better from a dozen tools than from fifty. With easy
+     mode on, only the tools ticked below are offered; everything else stays installed and comes back
+     the moment you turn it off. In Claude Code mode the second list applies instead.</div>
+    <div style="margin:4px 0"><label style="display:inline-flex;gap:6px;align-items:center">
+      <input type=checkbox id=t_easy> <b>Only the essential tools</b></label>
+      <span class=note id=easycount></span></div>
+    <div id=easybox style="display:none">
+     <div class=sec style="margin-top:10px">Orbit's own agent <small>— ticked tools are offered</small></div>
+     <div class=toolgrid id=easygrid></div>
+     <div class=sec style="margin-top:10px">Claude Code <small>— what Claude Code reported having</small>
+      <button class=ghost style="font-size:11px;margin-left:6px" id=easylearn>ask Claude Code again</button></div>
+     <div class=toolgrid id=easyclaude><span class=note>loading…</span></div>
+    </div>
+    <div class=sec>Available tools <small>— turned off here, a tool is gone from every mode</small></div><div class=toolgrid id=tg></div>`;
+   $('#t_easy').checked=!!draft.easy_mode;
+   $('#easybox').style.display=draft.easy_mode?'':'none';
+   $('#t_easy').onchange=e=>{draft.easy_mode=e.target.checked;
+    $('#easybox').style.display=e.target.checked?'':'none'};
+   drawEasyTools(draft);
    $('#t_code').checked=draft.code_execution!==false;
    $('#t_h2').checked=!!draft.cluster_write;
    $('#t_shell').checked=!!draft.shell_enabled;$('#t_wany').checked=!!draft.write_any;
@@ -4990,10 +5037,17 @@ async function openSettings(tab){
    const am=document.querySelector('input[name=automode]:checked');
    if(am)draft.autonomy_mode=am.value;
    const en={};document.querySelectorAll('[data-tool]').forEach(c=>{en[c.dataset.tool]=c.checked});
-   draft.tools_enabled=en}
+   draft.tools_enabled=en;
+   draft.easy_mode=$('#t_easy').checked;
+   const keep=[...document.querySelectorAll('[data-easy]')].filter(c=>c.checked).map(c=>c.dataset.easy);
+   if(keep.length)draft.easy_tools=keep;
+   }
  }
  async function save(){
   collect();
+  // Claude Code's own list lives in its settings, not Orbit's
+  const ckeep=[...document.querySelectorAll('[data-ceasy]')].filter(c=>c.checked).map(c=>c.dataset.ceasy);
+  if(ckeep.length)await apiPost('/api/claude/settings',{settings:{easy_tools:ckeep}},'saving Claude Code tools');
   if($('#m_ins'))await fetch('/api/instructions',{method:'POST',
     headers:{'Content-Type':'application/json'},body:JSON.stringify({text:$('#m_ins').value})});
   if($('#mcp_json')){try{const cfg=JSON.parse($('#mcp_json').value);
