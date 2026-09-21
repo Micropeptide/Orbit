@@ -497,7 +497,7 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .projrow .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .projrow .ct{color:var(--dim);font-size:11px}
 .projrow .pclaude{color:var(--acc);font-size:11px;opacity:.75}
-.projrow.drop{outline:2px dashed var(--acc);outline-offset:-2px}
+.projrow.over{outline:2px dashed var(--acc);outline-offset:-2px}
 .projrow.dragging{opacity:.5}
 .projrow[draggable=true]{cursor:grab}
 .daygroup .gsw{width:8px;height:8px;border-radius:2px;display:inline-block;margin-right:2px}
@@ -5852,10 +5852,14 @@ async function loadProjects(){
   r.draggable=true;
   r.ondragstart=e=>{e.dataTransfer.setData('pid',pid);e.dataTransfer.effectAllowed='move';
    r.classList.add('dragging')};
-  r.ondragend=()=>r.classList.remove('dragging');
-  r.ondragover=e=>{e.preventDefault();r.classList.add('drop')};
-  r.ondragleave=()=>r.classList.remove('drop');
-  r.ondrop=async e=>{e.preventDefault();r.classList.remove('drop');
+  r.ondragend=()=>{r.classList.remove('dragging');
+   wrap.querySelectorAll('.projrow.over').forEach(x=>x.classList.remove('over'))};
+  // "over", not "drop": .drop is the full-screen file overlay, and a row wearing that
+  // class became one -- a page-sized orange sheet that swallowed the drop it was
+  // supposed to receive, so the project never moved
+  r.ondragover=e=>{e.preventDefault();e.dataTransfer.dropEffect='move';r.classList.add('over')};
+  r.ondragleave=()=>r.classList.remove('over');
+  r.ondrop=async e=>{e.preventDefault();e.stopPropagation();r.classList.remove('over');
    const moved=e.dataTransfer.getData('pid');
    if(moved&&moved!==pid){await reorderProject(moved,pid);return}
    const sid=e.dataTransfer.getData('sid'); if(!sid)return;
@@ -5872,10 +5876,11 @@ async function reorderProject(moved,before){
  ids.splice(to<0?ids.length:to,0,moved);
  ids.forEach((id,i)=>{if(PROJECTS[id])PROJECTS[id].order=i});
  loadProjects._local=true;await loadProjects();       // the new order shows at once
- for(const [i,id] of ids.entries()){
-  await fetch('/api/projects/save',{method:'POST',headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({id,name:PROJECTS[id]&&PROJECTS[id].name,order:i})})}
- await loadProjects();
+ // one call: saving each project in turn raced the Claude-group sync, which reads the
+ // list and writes it back, and the order came out as it was before the drag
+ const d=await apiPost('/api/projects/reorder',{ids},'saving the order');
+ if(d&&d.projects)PROJECTS=d.projects;
+ loadProjects._local=true;await loadProjects();
  if(GROUP_BY==='project')renderSessions(true)}
 function editProject(pid){
  const pr=PROJECTS[pid]||{};

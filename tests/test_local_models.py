@@ -103,12 +103,48 @@ class TestLocalModelFolders(unittest.TestCase):
         self.addCleanup(setattr, q.time, "sleep", saved_sleep)
         saved_S = q.S
         self.addCleanup(setattr, q, "S", saved_S)
+        q.S = {"server": {"depth": 3}}          # what is configured now, not this Mac's
 
         out = q.switch_local_model("orcarouter--Qwen3.8-27B-Uncensored-MLX")
         self.assertEqual(out["depth"], 2)
         self.assertIn("depth 3 → 2", out["note"])
         # the next start composes its arguments from the settings, so that is where it goes
         self.assertEqual(json.load(open(settings))["server"]["depth"], 2)
+
+    def test_the_served_model_is_named_like_the_others(self):
+        """MTPLX answers with a short id of its own; the picker should still show the
+        name you went looking for."""
+        self.model("orcarouter--Qwen3.8-27B-Uncensored-MLX", quant=4)
+        for k, v in (("local_model_name", lambda: "orcarouter-qwen3.8-27b-uncensored-mlx"),
+                     ("local_model_configured", lambda: "orcarouter--Qwen3.8-27B-Uncensored-MLX"),
+                     ("secrets_load", lambda: {})):
+            old_v = getattr(q, k); setattr(q, k, v)
+            self.addCleanup(setattr, q, k, old_v)
+        served = [m for m in q.model_catalogue() if str(m["id"]).startswith("local:")]
+        self.assertEqual([m["label"] for m in served], ["Qwen3.8 27B Uncensored · 4-bit"])
+
+    def test_reordering_is_one_write(self):
+        """Ten saves raced the Claude-group sync, which reads the list and writes it
+        back, and the drag came out looking like it had done nothing."""
+        import tempfile as _tf
+        path = os.path.join(self.tmp, "projects.json")
+        json.dump({"a": {"name": "A", "order": 0}, "b": {"name": "B", "order": 1},
+                   "c": {"name": "C", "order": 2}}, open(path, "w"))
+        old_p = q.PROJECTS
+        q.PROJECTS = path
+        self.addCleanup(setattr, q, "PROJECTS", old_p)
+        writes = []
+        real = q.projects_save
+        q.projects_save = lambda d: (writes.append(1), real(d))[1]
+        self.addCleanup(setattr, q, "projects_save", real)
+        q.projects_reorder(["c", "a", "b"])
+        self.assertEqual(len(writes), 1)
+        d = json.load(open(path))
+        self.assertEqual(sorted(d, key=lambda k: d[k]["order"]), ["c", "a", "b"])
+        # a project the page did not know about keeps its place at the end
+        json.dump({**d, "z": {"name": "Z", "order": 9}}, open(path, "w"))
+        d = q.projects_reorder(["b", "a"])
+        self.assertEqual([k for k in sorted(d, key=lambda k: d[k]["order"])], ["b", "a", "c", "z"])
 
     def test_no_folder_no_switch(self):
         self.assertIn("error", q.switch_local_model("not-here"))
