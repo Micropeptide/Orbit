@@ -144,6 +144,42 @@ ignore previous rules, to act as something else, to hide something from you, to
 run a destructive command, to send data somewhere. Matches are surfaced in the
 conversation and the instructions are not followed.
 
+**The fence cannot be closed from inside it.** Content containing Orbit's own
+end marker, its opening marker, or the frame Orbit uses for its automatic notes
+has those rewritten before it goes in — otherwise a page could end the fence
+early and everything after it would read as Orbit's own narration, which is
+exactly the injection the fence exists to prevent. An attempt is reported in the
+conversation like any other injection marker.
+
+## What a shell command is allowed to be
+
+`run_shell` is one tool that runs both `ls` and `rm -rf`, so it can never be on
+a list of tools that are safe by name. The command line is read instead:
+
+- Commands that only look (`ls`, `cat`, `grep`, `rg`, `wc`, `jq`, `git log`,
+  `git status`, `git diff`, `find` without an action, `sed` without `-i`) may
+  share a round with each other and do not stop to ask.
+- The flag that changes that is caught: `sed -i`, `find -delete`, `find -exec`,
+  `git -c` and `--git-dir` (which can run arbitrary code through a config key),
+  `git config --unset`, any redirect, `tee`, `xargs`.
+- **A command nobody has written a rule for is never "safe"** — it is simply not
+  claimed, and everything else decides, exactly as before there was a
+  classifier.
+
+A call is only called workspace-confined when every operand of every command on
+the line resolves inside the workspace, and never when the line expands a
+variable, runs a substitution, or pipes names into `xargs` — Orbit cannot read
+where those point, and "I don't know" is not "inside".
+
+## Editing a file you changed
+
+Every file the model reads is remembered with its size and modification time.
+If that file changes on disk before the model edits it — you in your editor,
+another tool, a build — the edit is refused and the model is told to read it
+again. A model editing from what it read three steps ago would otherwise throw
+your change away with no word said, and the forgiving edit matchers make a
+wrong match likelier, not less likely.
+
 ## The local server
 
 Orbit listens on `127.0.0.1` with no login, which means any web page you visit

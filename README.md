@@ -122,8 +122,12 @@ and the file it wrote is a card under the answer.</sub></td>
   much it may do unasked — set in one chat and the chat beside it is unaffected, and each
   chat is as you left it when you come back to it.
 - **Guardrails that hold.** Approvals with diffs, a hard floor of refused commands,
-  writes confined to a workspace, fenced web content, keys that never leave the Mac, and
-  grants that can last one chat instead of forever.
+  writes confined to a workspace, fenced web content that cannot close its own fence,
+  keys that never leave the Mac, and grants that can last one chat instead of forever.
+- **It reads the command, not the tool's name.** `ls`, `grep` and `git log` run together
+  and unasked; `sed -i`, `find -delete`, a redirect or a command nobody has classified
+  does not. A file you changed in your editor is never overwritten from what the model
+  read three steps ago.
 - **Plain files in one folder.** Chats, notes and settings are JSON and Markdown.
   Backed up daily to iCloud Drive (keys left out). Delete the folder and Orbit is gone.
 
@@ -493,10 +497,16 @@ tool definitions, your messages, answers, tool results, thinking, free — with 
 *Compact now* button. The meter in the top bar measures the chat on screen, and warns
 when it is nearly full.
 
-**Finding a line.** **Ctrl+F** searches the chat on screen, marks every hit and steps
-through them with Enter and Shift+Enter; Esc closes it. Long chats fold to their answers
-with the tool calls tucked away, so you can read what was said without scrolling past
-everything it did to say it.
+**Finding your place.** **Ctrl+F** searches the chat on screen, marks every hit and steps
+through them with Enter and Shift+Enter; Esc closes it. A rail down the right edge is a
+minimap of the conversation — one bar per turn, as tall as that turn is long, the one you
+are reading lit and the running one pulsing; click a bar to go there. Long chats fold to
+their answers with the tool calls tucked away, so you can read what was said without
+scrolling past everything it did to say it. Following the answer as it writes is your
+decision, not the scrollbar's: nothing that merely changes the layout moves you.
+
+**Sending part of a chat.** *Pick turns to export or copy…* in the ⋯ menu ticks the turns
+you want, says how many and how big, and exports or copies just those.
 
 Also: `/copy` (the last answer, or `/copy 2`), `/diff` (every change shown in the chat),
 `/usage`, `/model`, `/permissions`, `/theme`, `/help`; Ctrl+R searches what you sent
@@ -718,7 +728,12 @@ live, with the same model picker and a Files tab.
   file cards under answers; share as PDF or image.
 - Start, stop or switch the local model server; set the default model.
 - Easy mode per chat, the review and the completion check under each answer, and the
-  approval choice that lasts only as long as the chat.
+  approval choices that last only as long as the chat or only inside its project.
+- Approvals answered from the Lock Screen: Allow or Deny on the notification itself,
+  without unlocking into the app.
+- A rail down the right edge you can scrub through a long conversation, thinking that
+  opens while it thinks and folds away when the answer starts, and code that keeps its
+  own text size so reading an answer bigger does not reflow every diff.
 - The branch, what is uncommitted and how far it is from upstream, under the chat's title;
   and the file-by-file account of a rewind before it happens.
 - If the phone loses the connection mid-answer the Mac carries on and the app rejoins.
