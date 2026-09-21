@@ -3500,8 +3500,41 @@ def _rule_match(rules, fn, args):
             return {"tool": tool, "pattern": pat, "note": r.get("note") or ""}
     return None
 
+def project_rules_for(kind, project=None):
+    """This project's own allow/deny rules.
+
+    "Let pytest run here" is the natural size of such a grant, and it could only be
+    said everywhere. Rules live with the project, next to the folder and the trust
+    flag they belong with."""
+    try:
+        pid = project if project is not None else current_project()
+    except Exception:
+        pid = None
+    if not pid: return []
+    pr = (projects_load().get(pid) or {}).get("permission_rules") or {}
+    return pr.get(kind) or []
+
+
+def add_project_rule(kind, tool, pattern, note="", project=None):
+    if kind not in ("allow", "deny"): return []
+    pid = project if project is not None else current_project()
+    if not pid: return []
+    with PROJ_LOCK:
+        d = projects_load()
+        pr = dict((d.get(pid) or {}).get("permission_rules") or {})
+        lst = list(pr.get(kind) or [])
+        lst.append({"tool": tool or "*", "pattern": pattern or "*", "note": note,
+                    "added": time.strftime("%Y-%m-%d %H:%M:%S")})
+        pr[kind] = lst
+        d.setdefault(pid, {})["permission_rules"] = pr
+        projects_save(d)
+        return lst
+
+
 def denied_by_rule(fn, args):
-    return _rule_match((S.get("permission_rules") or {}).get("deny"), fn, args)
+    # a project may narrow, never widen: its deny is checked with the global one
+    return (_rule_match(project_rules_for("deny"), fn, args)
+            or _rule_match((S.get("permission_rules") or {}).get("deny"), fn, args))
 
 SESSION_RULES = {}       # sid -> [rule], in memory only: they end when the chat does
 
@@ -3526,6 +3559,8 @@ def drop_session_rules(sid=None):
 def allowed_by_rule(fn, args):
     hit = _rule_match(session_rules(), fn, args)
     if hit: return {**hit, "note": hit.get("note") or "allowed for this chat"}
+    hit = _rule_match(project_rules_for("allow"), fn, args)
+    if hit: return {**hit, "note": hit.get("note") or "allowed in this project"}
     return _rule_match((S.get("permission_rules") or {}).get("allow"), fn, args)
 
 def _rule_pattern_suggestion(fn, args):

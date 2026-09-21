@@ -1630,6 +1630,24 @@ class H(http.server.BaseHTTPRequestHandler):
                 S.msgs = keep
                 save_session()
             return self._send(200, jdump({"ok": True, "n": len(S.msgs)}))
+        if p == "/api/rewind/preview":
+            # what "chat + files" would actually do, before you press it
+            st = get_state(d.get("sid")) if d.get("sid") else S
+            idx = int(d.get("index", 0))
+            seen, cut = 0, None
+            for i, m in enumerate(st.msgs):
+                if m.get("role") == "user" and not m.get("nudge"):
+                    if seen == idx: cut = i; break
+                    seen += 1
+            if cut is None:
+                return self._send(404, jdump({"error": "that message is no longer there"}))
+            changes = []
+            for m in reversed(st.msgs[cut:]):
+                if m.get("role") == "assistant" and m.get("changes") and not m.get("changes_undone"):
+                    changes += m["changes"]
+            look = q.preview_undo(changes)
+            look["messages"] = len(st.msgs) - cut
+            return self._send(200, jdump(look))
         if p == "/api/rewind":
             # Claude Code's /rewind: put the chat back to just before one of your
             # messages, and optionally put the files back the way they were then.
@@ -1650,7 +1668,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 if want_files:
                     for m in reversed(st.msgs[cut:]):
                         if m.get("role") == "assistant" and m.get("changes") and not m.get("changes_undone"):
-                            undone += q.undo_changes(m["changes"])
+                            undone += q.undo_changes(m["changes"], force=bool(d.get("force")))
                             m["changes_undone"] = True
                 dropped = len(st.msgs) - len(keep)
                 # Codex's thread still holds the turns cut here: its next message starts a
@@ -1760,6 +1778,11 @@ class H(http.server.BaseHTTPRequestHandler):
             path = os.path.join(q.WORKSPACE, d.get("rel") or "")
             msg = q.restore_checkpoint(path, d.get("name") or "")
             return self._send(200, jdump({"ok": not msg.startswith("Error"), "message": msg}))
+        if p == "/api/permissions/project":
+            lst = q.add_project_rule(d.get("kind") or "allow", d.get("tool") or "*",
+                                     d.get("pattern") or "*", d.get("note") or "",
+                                     project=d.get("project") or None)
+            return self._send(200, jdump({"ok": bool(lst), "rules": lst}))
         if p == "/api/permissions/session":
             # allow it for the rest of this chat, and not one message longer
             lst = q.add_session_rule(d.get("tool") or "*", d.get("pattern") or "*",
