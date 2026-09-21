@@ -78,5 +78,42 @@ class TestReadBeforeEdit(unittest.TestCase):
         self.assertIn(os.path.join(self.tmp, f"f{q.READ_STATE_MAX + 39}.txt"), q.READ_STATE)
 
 
+class TestItDoesNotTripOverTheAnswersOwnWork(unittest.TestCase):
+    """The guard is about somebody ELSE changing a file. A turn that reformats one with
+    the shell, or rewrites it from the python tool, has changed it itself — and refusing
+    its next edit for that would be Orbit tripping over its own feet."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="orbit-own-")
+        self.p = os.path.join(self.tmp, "a.py")
+        open(self.p, "w").write("one\ntwo\n")
+        q.READ_STATE.clear()
+        self.addCleanup(q.READ_STATE.clear)
+        self.saved = q.WORKSPACE
+        q.WORKSPACE = self.tmp
+        self.addCleanup(setattr, q, "WORKSPACE", self.saved)
+
+    def test_identical_bytes_are_not_a_change(self):
+        """A save that writes the same content, a touch, a checkout of what was already
+        there — all move the modification time and none of them change the file."""
+        q.t_read_file(self.p)
+        time.sleep(0.01)
+        open(self.p, "w").write("one\ntwo\n")          # same bytes, new mtime
+        self.assertEqual(q._changed_since_read(self.p), "")
+
+    def test_the_shell_reformatting_it_does_not_block_the_next_edit(self):
+        q.t_read_file(self.p)
+        q._forget_reads({"a.py"})                      # what run_shell does after it runs
+        time.sleep(0.01)
+        open(self.p, "w").write("ONE\nTWO\n")
+        self.assertEqual(q._changed_since_read(self.p), "")
+
+    def test_and_someone_elses_change_is_still_caught(self):
+        q.t_read_file(self.p)
+        time.sleep(0.01)
+        open(self.p, "w").write("what I typed myself\n")
+        self.assertIn("changed on disk", q._changed_since_read(self.p))
+
+
 if __name__ == "__main__":
     unittest.main()

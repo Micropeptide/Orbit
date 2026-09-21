@@ -995,6 +995,9 @@ def t_run_shell(command, timeout=None):
         return (f"Error: no answer after {secs}s, so it was stopped. Raise `timeout` (up to 900) "
                 "if it genuinely takes that long, or start it with run_shell_background and "
                 "check on it with check_background.")
+    # anything this command wrote is the answer's own doing, not somebody else's: the
+    # read-before-edit guard must not then refuse the next edit to it
+    _forget_reads({os.path.basename(t) for t in _shell_operands(command)})
     # not cut here: _truncate_output keeps the head AND the tail and writes the whole
     # thing to a file. Cutting to MAXCH first threw the tail away -- the part of a build
     # log with the error in it -- before the budget that exists to keep it ever ran.
@@ -1232,6 +1235,8 @@ def t_python(code, timeout=120):
                            timeout=int(timeout), cwd=WORKSPACE)
         out = (r.stdout or "")           # _truncate_output keeps head and tail and files the rest
         if r.stderr: out += "\n--- stderr ---\n" + r.stderr
+        # python code can write any file; what it touched is the answer's own work
+        READ_STATE.clear()
         fresh = list(_ws_images(since=t0).keys())
         LAST_IMAGES = fresh
         if fresh:
@@ -1864,18 +1869,46 @@ def _git_reads(toks):
     # --git-dir=/x is one token, so a bare equality test missed it
     danger = ("-c", "--git-dir", "--work-tree", "--exec-path", "--namespace")
     if any(t in danger or any(t.startswith(d + "=") for d in danger) for t in toks[1:]): return False
+    # -o/--output writes a file, whatever the subcommand
+    if any(t in ("-o", "--output") or t.startswith("--output=") for t in toks[1:]): return False
     sub = next((t for t in toks[1:] if not t.startswith("-")), "")
-    return sub in {"status", "log", "diff", "show", "branch", "remote", "describe",
-                   "rev-parse", "blame", "shortlog", "ls-files", "ls-tree", "tag",
-                   "config", "stash"} and not any(
-        t in ("--set", "--unset", "--replace-all", "--add", "--edit", "-e") for t in toks[1:])
+    # `config` writes when given a value, `branch`/`tag` write unless only listing, and
+    # `stash` reverts the working tree — reading is the narrow case for each of them
+    if sub == "config":
+        # `git config name` reads it; `git config name value` sets it. And the flags
+        # that write do so with no value at all — --unset, --edit, --remove-section.
+        rest = [t for t in toks[1:] if t != "config"]
+        writes = ("--unset", "--unset-all", "--replace-all", "--add", "--edit", "-e",
+                  "--rename-section", "--remove-section")
+        if any(t in writes for t in rest): return False
+        return len([t for t in rest if not t.startswith("-")]) <= 1
+    if sub in ("branch", "tag"):
+        return all(t in ("-l", "--list", "-a", "-r", "-v", "-vv", "--all", "--contains",
+                         "--merged", "--no-merged", "--sort", "--format", sub)
+                   or not t.startswith("-") and False
+                   for t in toks[1:] if t != sub) or not [t for t in toks[1:] if t != sub]
+    return sub in {"status", "log", "diff", "show", "remote", "describe",
+                   "rev-parse", "blame", "shortlog", "ls-files", "ls-tree"}
 
 def _sed_reads(toks):
-    return not any(t == "-i" or t.startswith("-i") or t == "--in-place" for t in toks[1:])
+    if any(t == "-i" or t.startswith("-i") or t == "--in-place" for t in toks[1:]): return False
+    # a sed program can write files itself: `w file`, `s/…/…/w file`, and `W`
+    script = " ".join(t for t in toks[1:] if not t.startswith("-"))
+    return not _re.search(r"(^|[;\s/}])[wW]\s|\bw\s+\S", script)
 
 def _find_reads(toks):
     return not any(t in ("-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint",
                          "-fprintf", "-fls") for t in toks[1:])
+
+def _no_output_flag(toks):
+    """A filter that only reads — unless it was asked to write its output somewhere."""
+    return not any(t in ("-o", "--output") or t.startswith("--output=") or
+                   (t.startswith("-o") and len(t) > 2) for t in toks[1:])
+
+def _uniq_reads(toks):
+    """POSIX uniq writes its SECOND operand, which is a file path with no flag on it."""
+    if not _no_output_flag(toks): return False
+    return len([t for t in toks[1:] if not t.startswith("-")]) <= 1
 
 def _only_version(toks):
     """An interpreter reads nothing only when it is being asked its version."""
@@ -1893,9 +1926,10 @@ SHELL_READONLY = {
     "dirname": True, "realpath": True, "readlink": True, "tree": {"-a", "-d", "-L", "-I", "-l"},
     "grep": True, "egrep": True, "fgrep": True, "rg": True, "ag": True,
     "diff": True, "cmp": True, "md5": True, "shasum": True, "sha256sum": True,
-    "sort": True, "uniq": True, "cut": True, "nl": True, "tr": True,
+    # sort -o and uniq's second operand write files; cut/nl/tr only read
+    "sort": _no_output_flag, "uniq": _uniq_reads, "cut": True, "nl": True, "tr": True,
     "jq": True, "yq": True, "column": True, "printf": True, "seq": True,
-    "git": _git_reads, "sed": _sed_reads, "find": _find_reads, "awk": True,
+    "git": _git_reads, "sed": _sed_reads, "find": _find_reads,
     "python3": _only_version, "python": _only_version, "node": _only_version,
     "pip": _pip_reads, "pip3": _pip_reads,
 }
@@ -1912,9 +1946,7 @@ def _shell_is_readonly(command):
     # a redirect writes, and an assignment can change what the next word means
     if _re.search(r"(?<![0-9<>])>{1,2}(?![>])|(?<!\d)>\||\btee\b", text): return False
     verdicts = []
-    for seg in _CMD_SPLIT.split(text):
-        seg = seg.strip()
-        if not seg: continue
+    for seg in _split_commands(text):
         try: toks = shlex.split(seg)
         except ValueError: return None
         if not toks: continue
@@ -1960,8 +1992,8 @@ def _run_batch(batch, messages, emit, approve, seen_calls):
     change ledger, which is to say the safety checks would read differently inside a
     thread than outside one."""
     ctx = {k: getattr(TURN_CTX, k, None) for k in
-           ("sid", "project", "agent", "read_only", "emit", "approve", "cancel",
-            "tools", "changes", "usage", "model", "effort", "think")}
+           ("sid", "settings_sid", "project", "agent", "read_only", "emit", "approve",
+            "cancel", "tools", "changes", "usage", "model", "effort", "think")}
     boxes = [[] for _ in batch]
 
     def work(i, tc, fn, args):
@@ -3669,6 +3701,38 @@ def _permission_text(fn, args):
 SHELL_SUBJECT = {"run_shell", "run_shell_background", "cluster_run"}
 _CMD_SPLIT = _re.compile(r"\|\||&&|[;|\n]|\$\(|`")
 
+def _split_commands(text):
+    """A shell line's separate commands, ignoring separators inside quotes.
+
+    A plain regex split cut `grep "foo|rm -rf /etc" notes.txt` in two and the second
+    half then matched a deny rule for `rm -rf*` — a harmless grep for a literal string
+    refused as your own rule, unapprovably. It also broke every saved allow rule that
+    contains a separator, because a part never contains one."""
+    out, buf, quote, i = [], [], "", 0
+    text = str(text or "")
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            buf.append(ch)
+            if ch == "\\" and quote == '"' and i + 1 < len(text):
+                i += 1; buf.append(text[i])
+            elif ch == quote:
+                quote = ""
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch; buf.append(ch); i += 1; continue
+        two = text[i:i + 2]
+        if two in ("||", "&&"):
+            out.append("".join(buf)); buf = []; i += 2; continue
+        if two == "$(" or ch in ";|\n`":
+            out.append("".join(buf)); buf = []
+            i += 2 if two == "$(" else 1
+            continue
+        buf.append(ch); i += 1
+    out.append("".join(buf))
+    return [p.strip() for p in out if p.strip()]
+
 def _rule_parts(fn, args):
     """The pieces of the subject a rule has to cover.
 
@@ -3678,7 +3742,7 @@ def _rule_parts(fn, args):
     an allow rule only covers it if it covers every one of them."""
     text = _permission_text(fn, args)
     if fn in SHELL_SUBJECT:
-        parts = [p.strip() for p in _CMD_SPLIT.split(text) if p.strip()]
+        parts = _split_commands(text)
         if parts: return parts
     return [text]
 
@@ -3689,6 +3753,7 @@ def _rule_match(rules, fn, args, need_all=True):
     A deny list is the other way round -- one denied command denies the call -- so it
     passes need_all=False."""
     parts = [p.lower() for p in _rule_parts(fn, args)]
+    whole = _permission_text(fn, args).strip().lower()
     for r in rules or []:
         if not isinstance(r, dict): continue
         tool = str(r.get("tool") or "*").strip()
@@ -3701,10 +3766,17 @@ def _rule_match(rules, fn, args, need_all=True):
         # exact name with no wildcard still means "this whole tool", as it always did.
         if pat == fn.lower():
             return {"tool": tool, "pattern": pat, "note": r.get("note") or ""}
+        # A pattern that names several commands ("cd build && make*") can never match a
+        # single command, so checking parts alone silently killed every rule of that
+        # shape somebody had saved. One that spells out the whole line may match it.
+        if _SEPARATOR.search(pat) and fnmatch.fnmatch(whole, pat):
+            return {"tool": tool, "pattern": pat, "note": r.get("note") or ""}
         covered = [fnmatch.fnmatch(t, pat) for t in parts]
         if (all(covered) if need_all else any(covered)):
             return {"tool": tool, "pattern": pat, "note": r.get("note") or ""}
     return None
+
+_SEPARATOR = _re.compile(r"\|\||&&|[;|`]|\$\(")
 
 _GIT_CACHE = {}
 
@@ -3897,13 +3969,17 @@ def risk_check(fn, args):
     # destruction (block), and `sudo rm -rf <workspace>/x` was a workspace delete
     # (auto-approvable) rather than sudo (never auto). One prefix laundered the floor.
     hits = [why for pat, why in DESTRUCTIVE if _re.search(pat, low)]
-    if _re.search(SCREEN_VIA_OSASCRIPT, blob, _re.I):
+    screen = bool(_re.search(SCREEN_VIA_OSASCRIPT, blob, _re.I))
+    if screen:
         hits.append("a screen action (via osascript) on your Mac")
     if hits:
         blocked = [h for h in hits if h in ALWAYS_BLOCK]
         if blocked:
             return ("block", f"{blocked[0]} — this is never approvable, in any mode")
-        prot = _targets_protected(blob)
+        # A protected path makes a *destructive* command unapprovable. Typing one into
+        # another app does not destroy it: a keystroke naming /Applications/Mail.app
+        # became unapprovable in every mode, where it used to be one click.
+        prot = None if (screen and len(hits) == 1) else _targets_protected(blob)
         if prot:
             return ("block", f"{hits[0]} targeting protected path {prot}")
         # the strictest reason speaks for the call: one that never auto-approves is
@@ -3962,9 +4038,7 @@ def _shell_operands(cmd):
     text called them workspace-confined and 'auto' mode deleted the other."""
     import shlex
     out = []
-    for seg in _CMD_SPLIT.split(str(cmd or "")):
-        seg = seg.strip()
-        if not seg: continue
+    for seg in _split_commands(cmd):
         try: toks = shlex.split(seg)
         except ValueError: toks = seg.split()
         for t in toks[1:]:
@@ -5818,6 +5892,12 @@ TOOL_BUDGET = {
     "run_shell": 16000, "python": 16000, "check_background": 16000,
     "fetch_url": 10000, "web_search": 8000, "http_json": 10000,
     "list_dir": 6000, "glob": 6000, "list_skills": 4000, "search_chats": 8000,
+    # a helper exists to keep an investigation OUT of this window, so its report is a
+    # report: what it found, not everything it read
+    "task": 8000,
+    # a chat is read for what was said in it; one huge tool result inside it must not
+    # take the whole budget and hide the conversation
+    "read_chat": 20000,
 }
 
 def _truncate_output(fn, out, limit=None):
@@ -5894,11 +5974,20 @@ def _did_you_mean(p):
 READ_STATE = {}
 
 def _stat_key(p):
+    """What the file looked like: its size, and a hash of its contents when that is
+    cheap. Mtime alone said "changed" for a save that wrote identical bytes, a `touch`,
+    or a checkout of the same content — and refused a perfectly good edit."""
     try:
         st = os.stat(p)
-        return (st.st_mtime_ns, st.st_size)
     except OSError:
         return None
+    if st.st_size > 4_000_000:                  # too big to hash on every read
+        return (st.st_size, st.st_mtime_ns)
+    try:
+        with open(p, "rb") as f:
+            return (st.st_size, hashlib.md5(f.read()).hexdigest())
+    except OSError:
+        return (st.st_size, st.st_mtime_ns)
 
 READ_STATE_MAX = 400
 
@@ -5911,7 +6000,12 @@ def _note_read(p):
         READ_STATE.pop(next(iter(READ_STATE)), None)
 
 def _changed_since_read(p):
-    """The warning to give, or "" — silent when the file was never read here."""
+    """The warning to give, or "" — silent when the file was never read here.
+
+    Only what the answer itself did keeps the record current; anything else — you in
+    your editor, a build, another tool — is what this exists to catch. A run_shell that
+    reformats the file (`sed -i`, `black`, `prettier`) is the answer's own work, so it
+    clears the record rather than tripping over it: see `_forget_reads`."""
     was = READ_STATE.get(p)
     if not was: return ""
     now = _stat_key(p)
@@ -5919,6 +6013,18 @@ def _changed_since_read(p):
     return (f"Error: {p} has changed on disk since you read it. Someone else — the user in "
             "their editor, another tool, a build — has written to it, and editing from what "
             "you read before would throw that away. Read it again, then edit.")
+
+
+def _forget_reads(names):
+    """Whatever this call may have written, the answer no longer claims to know.
+
+    A turn that reformats a file with the shell or rewrites it from the python tool has
+    changed it itself — refusing its next edit for that would be Orbit tripping over its
+    own feet. Forgetting is the safe direction: the guard then simply says nothing."""
+    if not names: return
+    for p in list(READ_STATE):
+        base = os.path.basename(p)
+        if base in names or p in names: READ_STATE.pop(p, None)
 
 
 def t_read_file(path, offset=None, limit=None):
@@ -6564,7 +6670,10 @@ def risk_check(fn, args):
 
 _auto_approvable_base = _auto_approvable
 def _auto_approvable(fn, args, reason):
-    if fn == "edit_file" and reason not in NEVER_AUTO:
+    # `_never_auto`, not `reason not in NEVER_AUTO`: the reason is a decorated sentence
+    # ("… (inside workspace)", "… (also: …)"), and testing the decorated form against the
+    # set let a call that is destructive for two reasons walk past the floor entirely.
+    if fn == "edit_file" and not _never_auto(fn, reason):
         return _write_allowed(os.path.abspath(_resolve_path((args or {}).get("path", ""))))
     return _auto_approvable_base(fn, args, reason)
 
@@ -6708,8 +6817,12 @@ def t_task(prompt, description=None):
         # compaction state: its context is its own, and the parent's cost report is not
         # the helper's. So the chat is named for settings only.
         TURN_CTX.settings_sid = parent["sid"]
+        # A helper has no one watching it and no plan of its own to finish, so it gets a
+        # time limit even when the answer that started it has none: a helper that will
+        # not stop spends the whole run and reports nothing.
         ans = turn(msgs, str(prompt), tools, emit=sub_emit, approve=parent["approve"],
-                   cancel=parent["cancel"], project=project)
+                   cancel=parent["cancel"], project=project,
+                   max_minutes=float(S.get("task_minutes") or 20))
         child = TURN_CTX.usage
         if parent["usage"] is not None and child is not parent["usage"]:
             for k, v in (child or {}).items(): parent["usage"][k] = parent["usage"].get(k, 0) + v
@@ -7007,7 +7120,10 @@ def preview_undo(changes):
         p = c.get("path")
         if not p: continue
         if c.get("created"):
-            (safe if os.path.exists(p) else gone).append({"path": p, "what": "remove (created here)"})
+            if os.path.exists(p):
+                safe.append({"path": p, "what": "remove (created here)"})
+            else:
+                gone.append({"path": p, "why": "created here, and already gone"})
             continue
         snap = c.get("snap")
         if not snap or not os.path.exists(snap):
@@ -7050,6 +7166,12 @@ def undo_result(changes, force=False):
             if c.get("created"):
                 if os.path.exists(p):
                     trash_put("file", p, {"why": "undo"}); done.append(f"removed {p} (it's in the bin)")
+                    restored.append(p)
+                else:
+                    # the answer created it and something has already removed it: the
+                    # tree is where undo wants it. Reporting neither restored nor
+                    # refused left the undo "failed" with no reason, for ever.
+                    done.append(f"{p} was created here and is already gone")
                     restored.append(p)
             elif c.get("snap") and os.path.exists(c["snap"]):
                 _save_checkpoint(p)
@@ -7184,7 +7306,7 @@ ALL_SPECS += [
 
 _auto_approvable_prev = _auto_approvable
 def _auto_approvable(fn, args, reason):
-    if fn == "multi_edit" and reason not in NEVER_AUTO:
+    if fn == "multi_edit" and not _never_auto(fn, reason):     # see the note above
         return _write_allowed(os.path.abspath(_resolve_path((args or {}).get("path", ""))))
     return _auto_approvable_prev(fn, args, reason)
 

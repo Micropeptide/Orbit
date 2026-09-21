@@ -190,7 +190,10 @@ class TestQueue(unittest.TestCase):
     def test_a_scheduled_message_goes_out_at_its_time_without_holding_others_back(self):
         ui = self.ui
         st = self.chat()
-        ui._queue_add(st, "later", at=time.time() + 0.6)
+        # Far enough out that it cannot come due while the first half of this test runs.
+        # It used to be 0.6s, which under load was gone before the "not yet" check —
+        # the test failed for being slow, not for being wrong.
+        ui._queue_add(st, "later", at=time.time() + 3600)
         # a message scheduled for later does not make new ones queue
         self.assertEqual(self.send(st, "now"), "started")
         self.assertTrue(self.wait(lambda: self.starts() == ["now"]))
@@ -198,7 +201,9 @@ class TestQueue(unittest.TestCase):
         ui._drain()
         time.sleep(0.2)
         self.assertEqual(self.starts(), ["now"])                  # not yet
-        time.sleep(0.6)
+        # its time arrives
+        for it in st.queue:
+            if it.get("text") == "later": it["at"] = time.time() - 1
         ui._drain()                                                # what the 15-second ticker does
         self.assertTrue(self.wait(lambda: self.starts() == ["now", "later"]))
         self.assertFalse(st.queue)
