@@ -498,6 +498,8 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .projrow .ct{color:var(--dim);font-size:11px}
 .projrow .pclaude{color:var(--acc);font-size:11px;opacity:.75}
 .projrow.over{outline:2px dashed var(--acc);outline-offset:-2px}
+/* a mode that changes what the model is handed should be visible while it is on */
+#easybtn{border-color:var(--acc);color:var(--acc)}
 .projrow.dragging{opacity:.5}
 .projrow[draggable=true]{cursor:grab}
 .daygroup .gsw{width:8px;height:8px;border-radius:2px;display:inline-block;margin-right:2px}
@@ -934,6 +936,7 @@ table.stbl{border-collapse:collapse;width:100%;font-size:13px;margin:2px 0 6px}
     <span class=ctx id=ctxbox style="display:none">
       <span class=bar><i id=ctxbar></i></span><span id=ctxtxt></span></span>
     <span style="margin-left:auto;display:flex;gap:7px">
+      <button class=ghost id=easybtn style="display:none">easy</button>
       <button class=ghost id=tempbtn title="temporary chat — nothing is saved">temp</button>
       <button class=ghost id=burnbtn style="display:none;border-color:var(--err);color:var(--err)">burn</button>
       <button class=ghost id=compact>compact</button>
@@ -987,6 +990,7 @@ const CMDS=[
  {c:'/new',d:'start a fresh chat'},
  {c:'/rename',d:'rename this chat: /rename <title>'},
  {c:'/compact',d:'summarise history to free context'},
+ {c:'/easy',d:'easy mode on/off — only the essential tools'},
  {c:'/settings',d:'open settings'},
  {c:'/memory',d:'memory and instructions'},
  {c:'/prompts',d:'saved prompts'},
@@ -2546,6 +2550,8 @@ async function runCmd(cmd,rest){
   if(!p||!p.text){q.value='/later '+rest;toast('usage: /later 21:30 <message> · /later tomorrow 9am <message> · /later in 2h <message> · /later daily 8:00 <message>');return true}
   q.value=p.text;await scheduleSend(p.at,p.repeat);return true}
  if(cmd==='/tools'){sysline('active tools: '+INFO.tools.join(', '));return true}
+ if(cmd==='/easy'){const w=(rest||'').trim().toLowerCase();
+  await setEasy(w==='on'?true:w==='off'?false:!(INFO.settings&&INFO.settings.easy_mode));return true}
  if(cmd==='/new'){newChat();return true}
  if(cmd==='/compact'){doCompact();return true}
  if(cmd==='/settings'){openSettings();return true}
@@ -5058,6 +5064,7 @@ async function openSettings(tab){
   const r=await (await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({settings:draft})})).json();
   INFO.tools=r.tools;$('#tools').dataset.orbit=r.tools.length+' tools ready';if(!MODELS.harness_mode)$('#tools').textContent=r.tools.length+' tools ready';
+  INFO.settings=Object.assign(INFO.settings||{},{easy_mode:!!draft.easy_mode});drawEasyBtn();
   $('#snote').textContent='saved '+new Date().toLocaleTimeString();
   return true}
  $('#savebtn').onclick=async()=>{if(await save())setTimeout(closeModal,400)};
@@ -7231,12 +7238,33 @@ $('#send').onclick=go;
 $('#newchat').onclick=newChat;
 $('#newwith').onclick=()=>newChatWith();
 $('#compact').onclick=doCompact;
+// Easy mode: only the ticked tools are offered. Switchable from here because the point
+// of it is to try a model with less on its bench and see if it does better.
+async function setEasy(on){
+ const d=await apiPost('/api/settings',{settings:{easy_mode:!!on}},'easy mode');
+ if(!d)return;
+ INFO.settings=Object.assign(INFO.settings||{},{easy_mode:!!on});
+ if(d.tools)INFO.tools=d.tools;
+ drawEasyBtn();
+ sysline(on?`easy mode on — ${(INFO.tools||[]).length} tools offered (Settings → Tools to choose which)`
+           :`easy mode off — ${(INFO.tools||[]).length} tools offered`)}
+
+function drawEasyBtn(){
+ const b=$('#easybtn'); if(!b)return;
+ const on=!!(INFO.settings&&INFO.settings.easy_mode);
+ b.style.display=on?'':'none';
+ b.title=`easy mode: ${(INFO.tools||[]).length} tools offered — click to turn it off`;
+ b.onclick=()=>setEasy(false)}
+
 $('#more').onclick=e=>{e.stopPropagation();
  const r=$('#more').getBoundingClientRect();
  ctxMenu({clientX:r.left-90,clientY:r.bottom+4},[
   {icon:'⤓',label:'Export markdown',run:()=>location.href='/api/export?id='+encodeURIComponent(sid||'')},
   {icon:'⤓',label:'Export HTML (with figures)',run:exportHTML},
   '-',
+  {icon:(INFO.settings&&INFO.settings.easy_mode)?'☑':'☐',
+   label:'Easy mode — essential tools only',
+   run:()=>setEasy(!(INFO.settings&&INFO.settings.easy_mode))},
   {icon:'✎',label:'System prompt for this chat',run:chatPromptDlg},
   {icon:'★',label:'Save memories from this chat',run:suggestMem},
   '-',
@@ -7361,7 +7389,8 @@ addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();
  if(e.key==='?'&&document.activeElement!==q&&!/input|textarea/i.test(document.activeElement.tagName)){
   e.preventDefault();showShortcuts()}});
 fetch('/api/info').then(r=>r.json()).then(d=>{INFO=d;sid=d.sid;
- $('#tools').dataset.orbit=d.tools.length+' tools ready';if(!MODELS.harness_mode)$('#tools').textContent=d.tools.length+' tools ready';refreshStatus()});
+ $('#tools').dataset.orbit=d.tools.length+' tools ready';if(!MODELS.harness_mode)$('#tools').textContent=d.tools.length+' tools ready';
+ drawEasyBtn();refreshStatus()});
 fetch('/api/prompts').then(r=>r.json()).then(d=>PROMPTS=d);
 async function loadAgents(){
  const d=await (await fetch('/api/agents')).json();
