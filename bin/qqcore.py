@@ -505,6 +505,9 @@ def model_catalogue():
         for m in cat:
             if m.get("provider") == "local" and str(m.get("id", "")).startswith("local:"):
                 m["label"] = local_dir_label(conf)
+                # and the window it is being served with, so the picker says what the
+                # meter counts against instead of leaving the one local model blank
+                m["context"] = m.get("context") or int(S["server"].get("context_window") or 0) or None
     for d in local_model_dirs():
         if d == conf: continue
         squashed = d.lower().replace("-", "").replace("_", "")
@@ -578,7 +581,10 @@ def server_status():
                 ("prompt_tokens","completion_tokens","ttft_s","decode_tok_s","prefill_tok_s")}
             out["memory_gb"] = round((l.get("active_memory_bytes") or 0)/1e9, 1)
             out["context_used"] = l.get("context_len")
-            out["context_max"] = (l.get("remaining_context_tokens") or 0) + (l.get("context_len") or 0)
+            out["context_max"] = ((l.get("remaining_context_tokens") or 0) + (l.get("context_len") or 0)
+                                  # a request that never got going reports neither, and
+                                  # "ctx 0/?" is not a context size
+                                  or int(S["server"].get("context_window") or 0) or None)
         except Exception:
             pass
     try:

@@ -291,7 +291,7 @@ def providers(root, local_name=None):
             p["models"] = [dict(m) for m in got]
             p["fetched_at"] = fetched_all[pid].get("at")
         if pid == "local" and local_name:
-            p["models"] = [_m(local_name, "messages", 131072, label=f"{local_name}")]
+            p["models"] = [_m(local_name, "messages", _local_context(root), label=f"{local_name}")]
         if pid == "bionic":
             # Bionic is asked what it has, every time: models come and go there
             b = _bionic()
@@ -311,6 +311,17 @@ def providers(root, local_name=None):
             if ctx: m["context"] = int(ctx)
         out[pid] = p
     return out
+
+
+def _local_context(root):
+    """The window the local server is actually started with. It is a setting, and a
+    model swapped in behind it may have a different one; a number written in here
+    would be right until the day it was not."""
+    try:
+        d = json.load(open(os.path.join(root, "config", "settings.json")))
+        return int((d.get("server") or {}).get("context_window") or 131072)
+    except Exception:
+        return 131072
 
 
 def _secret(name, secrets):
