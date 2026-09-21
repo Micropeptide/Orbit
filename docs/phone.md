@@ -56,7 +56,12 @@ for anyone building something similar in [tailnet-playbook.md](tailnet-playbook.
 | **Offline** | last chat list and recent conversations cached on the phone; a banner says when the copy is stale |
 | **Both sides stay in step** | a message sent from the phone appears in the Mac's browser within a few seconds, and the other way round; an answer started on one device is joined mid-stream on the other |
 | **Answers survive a dropped connection** | if the phone loses the stream mid-answer the Mac carries on; the app rejoins the running answer rather than showing an error |
-| **Notifications** | if an answer finishes while you are in another app it tells you; tapping the notification opens that chat |
+| **Notifications** | if an answer finishes while you are in another app it tells you; tapping the notification opens that chat. An approval — the thing that stops a run — carries **Allow once** and **Deny** on the notification itself, answered without unlocking into the app |
+| **Approvals** | Allow once, for the rest of this chat, in this chat's project, always (a saved rule), or deny with a reason. Each button says which calls it covers rather than leaving the scope unwritten |
+| **Where you are in a long chat** | a rail down the right edge, one bar per turn and as tall as that turn is long: drag it and each turn's first words appear as you pass. Following the answer as it writes is your decision — nothing that merely changes the layout moves you |
+| **Thinking** | opens while it thinks and folds away when the answer starts, unless you opened or closed it yourself; capped while live so the answer stays in view |
+| **The plan and the folder** | the todo list scrolls inside itself and opens on the step in hand, and a git strip says the branch, what is uncommitted and how far from upstream — "what did it change while I was away" |
+| **Queue** | drag to reorder with a line where it will land and a haptic as it moves, including to the end; each message says whether it is next, waiting or scheduled |
 | **iPad and landscape** | list beside conversation; ⌘N new chat, ⌘K model, ⌘F find, ⌘↩ send on a keyboard |
 | **Find in chat** | ⋯ → Find (or type `/find`): steps through matches and flashes each |
 | **Slash commands** | type `/` — `/new`, `/model`, `/compact`, `/find` |
@@ -68,7 +73,7 @@ for anyone building something similar in [tailnet-playbook.md](tailnet-playbook.
 | **Screen control** | A separate toggle, also in Settings — lets the Mac see its own screen and click/type/press keys there. Off by default, and not turned on by Full access; still asks before a click unless Full access is also on |
 | **Backup** | Settings shows the Mac's automatic backup (see below); back up now, list archives, put back what is missing |
 | **Bin** | what you binned on the Mac, with Restore |
-| **Appearance** | light/dark, larger answer text, haptics on/off |
+| **Appearance** | light/dark, larger answer text, a separate size for code and command output (so reading an answer bigger does not reflow every diff), haptics on/off |
 | **Face ID** | optional lock whenever Orbit comes to the front |
 | **Diagnostics** | one tap copies a short report (versions, address, model server, last error — no chat content, no token) |
 
