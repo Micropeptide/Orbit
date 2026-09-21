@@ -136,6 +136,19 @@ the diff and the transcript and cannot call tools, so nothing they conclude can
 change a file. A check that fails to run passes the work rather than blocking
 it, and it may send the model back to work at most twice per answer.
 
+## Helpers
+
+A helper started by the `task` tool gets a fresh, empty context, the chat's own
+settings, and — by default — reads only: it may read files, search, and fetch
+pages, and it changes nothing. A helper is sent to find something out; it has no
+plan of its own and nobody is watching it, so its mistakes belong in its report
+rather than in your files. A model that genuinely needs one to build something
+sends `profile="build"`, which gives it the tool set the answer itself has.
+
+It cannot start helpers of its own, it has twenty minutes even when the answer
+that started it has no limit, and its report is budgeted like any other tool
+result — the point of it is to keep an investigation *out* of the conversation.
+
 ## Untrusted content
 
 Anything Orbit reads from outside — a web page, a fetched PDF, another agent's
