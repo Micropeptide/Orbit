@@ -113,9 +113,10 @@ def cfg():
     return {**DEFAULTS, **s}
 
 
-def easy_mode():
-    """One switch for both engines: Orbit's own agent and Claude Code."""
-    try: return bool(Q.S.get("easy_mode"))
+def easy_mode(sid=None):
+    """One switch for both engines: Orbit's own agent and Claude Code. Per chat, so a
+    chat on a small model keeps it on while the one next to it does not."""
+    try: return bool(Q.chat_setting("easy_mode", sid))
     except Exception: return False
 
 

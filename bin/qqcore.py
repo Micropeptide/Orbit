@@ -2375,7 +2375,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                                       "snippet": x["text"][:260]} for x in LAST_SOURCES[:6]])
                     weak = annotate_support(answer)
                     if weak: emit("weak_claims", weak[:6])
-                if (S.get("verify_turns") and tool_runs[0] > 0
+                if (chat_setting("verify_turns") and tool_runs[0] > 0
                         and seen_calls.get("__verified__", 0) < int(S.get("verify_rounds") or 2)):
                     v = verify_turn(messages, user_content, emit=emit)
                     emit("verified", {k: v[k] for k in ("passed", "reason", "next", "fail_open")})
@@ -2388,7 +2388,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                                              f"this is not finished: {v['reason']} "
                                              f"Next: {v['next']} Carry on and then report.")})
                         continue
-                if S.get("auto_review") and getattr(T, "changes", None):
+                if chat_setting("auto_review") and getattr(T, "changes", None):
                     text = review_changes(T.changes, emit=emit)
                     if text:
                         emit("review", {"text": text, "files": len(T.changes),
@@ -2943,8 +2943,8 @@ def tools_for(agent, all_specs):
 def easy_tools(specs):
     """In easy mode, only the tools on the list. An agent's own list still narrows it
     further; nothing here widens what an agent was given."""
-    if not S.get("easy_mode"): return specs
-    keep = {str(x) for x in (S.get("easy_tools") or []) if x}
+    if not chat_setting("easy_mode"): return specs
+    keep = {str(x) for x in (chat_setting("easy_tools") or []) if x}
     if not keep: return specs
     return [t for t in specs if t["function"]["name"] in keep]
 
@@ -4795,6 +4795,31 @@ def _tighten_stream(resp, secs):
         return False
 
 
+# Settings that belong to a chat rather than to Orbit. A chat on a small local model
+# wants easy mode and a hosted reviewer; the one next to it does not, and switching
+# between them should not mean setting both again each time.
+PER_CHAT = ("easy_mode", "easy_tools", "helper_model", "auto_review", "verify_turns",
+            "autonomy_mode", "reasoning_effort", "thinking", "parallel_tools")
+
+def chat_setting(key, sid=None, default=None):
+    """This chat's value for a setting, or the one Orbit uses everywhere."""
+    if key in PER_CHAT:
+        sid = sid if sid is not None else getattr(TURN_CTX, "sid", None)
+        if sid:
+            try:
+                pref = CE.chat_prefs(sid)
+            except Exception:
+                pref = {}
+            if key in pref: return pref[key]
+    return S.get(key, default)
+
+
+def set_chat_setting(sid, key, value):
+    """Remember a setting for this chat. None puts it back to Orbit's own."""
+    if key not in PER_CHAT or not sid: return {}
+    return CE.set_chat_pref(sid, **{key: value})
+
+
 def helper_model(want=None):
     """The model Orbit uses for its own work, or None for "whatever the chat uses".
 
@@ -4802,7 +4827,7 @@ def helper_model(want=None):
     server takes one request at a time, so a review of a turn, asked of the model that
     is still finishing that turn, waits for it -- and if something else is generating,
     times out. Any model in the picker can do this work."""
-    want = str(want if want is not None else (S.get("helper_model") or "")).strip()
+    want = str(want if want is not None else (chat_setting("helper_model") or "")).strip()
     if not want: return None
     try:
         # current_model() falls back to the default for an id it does not know, which
