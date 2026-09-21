@@ -566,9 +566,20 @@ class H(http.server.BaseHTTPRequestHandler):
             try: return self._send(200, open(os.path.join(WEB, "index.html"), "rb").read(),
                                    "text/html; charset=utf-8")
             except OSError: return self._send(500, "index.html missing", "text/plain")
-        if p == "/api/info":
+        if p.split("?")[0] == "/api/info":
+            # with ?sid=, the tools that chat would actually be offered: easy mode and
+            # its list are per chat now, so the count in the header follows the chat
+            qs_ = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            for_sid = (qs_.get("sid") or [""])[0]
+            tools_ = S.tools
+            if for_sid:
+                st_ = STATES.get(for_sid)
+                if st_ is not None and getattr(st_, "tools", None): tools_ = st_.tools
+                else:
+                    try: tools_ = q.tools_for(None, q.active_tools()[0])
+                    except Exception: tools_ = S.tools
             return self._send(200, jdump({
-                "tools": sorted(t["function"]["name"] for t in S.tools),
+                "tools": sorted(t["function"]["name"] for t in tools_),
                 "all_tools": q.all_known_tools(),
                 "tool_errors": S.tool_errors, "root": q.ROOT, "sid": S.sid,
                 "title": S.title, "settings": q.S, "status": q.server_status(),
@@ -1044,6 +1055,9 @@ class H(http.server.BaseHTTPRequestHandler):
                                               "messages": render(shown), "n": len(msgs),
                                               "context": q.context_state(msgs, sid),
                                               "running": running, "live": live,
+                                              # what this chat remembers for itself
+                                              "prefs": {k: v for k, v in (q.CE.chat_prefs(sid) or {}).items()
+                                                        if k in q.PER_CHAT},
                                               "queue": _queue_view(stt)}))
             except Exception as e:
                 return self._send(404, jdump({"error": str(e)}))
@@ -1789,6 +1803,15 @@ class H(http.server.BaseHTTPRequestHandler):
             path = os.path.join(q.WORKSPACE, d.get("rel") or "")
             msg = q.restore_checkpoint(path, d.get("name") or "")
             return self._send(200, jdump({"ok": not msg.startswith("Error"), "message": msg}))
+        if p == "/api/chat/setting":
+            # a setting this chat keeps for itself; null puts it back to Orbit's own
+            sid_ = d.get("sid") or S.sid
+            key = str(d.get("key") or "")
+            if key not in q.PER_CHAT:
+                return self._send(400, jdump({"error": f"{key} is not a per-chat setting"}))
+            prefs = q.set_chat_setting(sid_, key, d.get("value"))
+            return self._send(200, jdump({"ok": True, "prefs": prefs,
+                                          "effective": q.chat_setting(key, sid_)}))
         if p == "/api/permissions/project":
             lst = q.add_project_rule(d.get("kind") or "allow", d.get("tool") or "*",
                                      d.get("pattern") or "*", d.get("note") or "",

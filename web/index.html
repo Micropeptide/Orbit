@@ -2447,6 +2447,10 @@ async function openSession(id){
   wrap.appendChild(btn)}
  d.messages.forEach((m,i)=>{if(i>=older)drawMsg(m,i,i>older)});
  if(PREF.get('foldtools','1')==='1')foldTurns();
+ CHATPREFS=d.prefs||{};                       // what this chat remembers for itself
+ try{const i=await (await fetch('/api/info?sid='+encodeURIComponent(id))).json();
+  if(i&&i.tools)INFO.tools=i.tools}catch(e){}
+ drawEasyBtn();
  loadSessions();bottom();refreshStatus();loadModels().then(drawClaudeBar);
  if(typeof sideOpen==='function'&&matchMedia('(max-width:820px)').matches)sideOpen(false)}
 
@@ -7512,6 +7516,18 @@ $('#compact').onclick=doCompact;
 // Easy mode: only the ticked tools are offered. Switchable from here because the point
 // of it is to try a model with less on its bench and see if it does better.
 async function setEasy(on){
+ // per chat: a chat on a small local model keeps easy mode on while the one next to
+ // it does not, and switching between them should not mean setting it again
+ if(sid){
+  const d=await apiPost('/api/chat/setting',{sid,key:'easy_mode',value:!!on},'easy mode');
+  if(!d)return;
+  CHATPREFS.easy_mode=!!on;
+  const info=await (await fetch('/api/info?sid='+encodeURIComponent(sid))).json().catch(()=>null);
+  if(info&&info.tools)INFO.tools=info.tools;
+  drawEasyBtn();
+  sysline(on?`easy mode on for this chat — ${(INFO.tools||[]).length} tools offered`
+            :`easy mode off for this chat — ${(INFO.tools||[]).length} tools offered`);
+  return}
  const d=await apiPost('/api/settings',{settings:{easy_mode:!!on}},'easy mode');
  if(!d)return;
  INFO.settings=Object.assign(INFO.settings||{},{easy_mode:!!on});
@@ -7520,9 +7536,14 @@ async function setEasy(on){
  sysline(on?`easy mode on — ${(INFO.tools||[]).length} tools offered (Settings → Tools to choose which)`
            :`easy mode off — ${(INFO.tools||[]).length} tools offered`)}
 
+let CHATPREFS={};           // the settings this chat keeps for itself
+function easyOn(){
+ if('easy_mode' in CHATPREFS)return !!CHATPREFS.easy_mode;
+ return !!(INFO.settings&&INFO.settings.easy_mode)}
+
 function drawEasyBtn(){
  const b=$('#easybtn'); if(!b)return;
- const on=!!(INFO.settings&&INFO.settings.easy_mode), n=(INFO.tools||[]).length;
+ const on=easyOn(), n=(INFO.tools||[]).length;
  b.classList.toggle('on',on);
  b.textContent=on?`easy · ${n}`:'easy';
  b.title=on?`easy mode is on — ${n} tools offered. Click to give the model all of them again `
@@ -7537,9 +7558,9 @@ $('#more').onclick=e=>{e.stopPropagation();
   {icon:'⤓',label:'Export markdown',run:()=>location.href='/api/export?id='+encodeURIComponent(sid||'')},
   {icon:'⤓',label:'Export HTML (with figures)',run:exportHTML},
   '-',
-  {icon:(INFO.settings&&INFO.settings.easy_mode)?'☑':'☐',
-   label:'Easy mode — essential tools only',
-   run:()=>setEasy(!(INFO.settings&&INFO.settings.easy_mode))},
+  {icon:easyOn()?'☑':'☐',
+   label:'Easy mode — essential tools only (this chat)',
+   run:()=>setEasy(!easyOn())},
   {icon:'⚙',label:'Choose what easy mode keeps…',run:()=>openSettings('tools')},
   {icon:'✎',label:'System prompt for this chat',run:chatPromptDlg},
   {icon:'★',label:'Save memories from this chat',run:suggestMem},
