@@ -3485,7 +3485,29 @@ def _rule_match(rules, fn, args):
 def denied_by_rule(fn, args):
     return _rule_match((S.get("permission_rules") or {}).get("deny"), fn, args)
 
+SESSION_RULES = {}       # sid -> [rule], in memory only: they end when the chat does
+
+def session_rules(sid=None):
+    sid = sid or getattr(TURN_CTX, "sid", None) or ""
+    return SESSION_RULES.get(sid) or []
+
+def add_session_rule(tool, pattern, note="", sid=None):
+    """Allow this for the rest of the chat, and no longer.
+
+    "Yes, and stop asking" was one thing: a rule written to disk for good. Most such
+    answers mean "for the next twenty minutes" -- and a grant you cannot mean loosely is
+    a grant people reach for the permanent version of instead."""
+    sid = sid or getattr(TURN_CTX, "sid", None) or ""
+    rule = {"tool": tool or "*", "pattern": pattern or "*", "note": note, "session": True}
+    SESSION_RULES.setdefault(sid, []).append(rule)
+    return SESSION_RULES[sid]
+
+def drop_session_rules(sid=None):
+    SESSION_RULES.pop(sid or getattr(TURN_CTX, "sid", None) or "", None)
+
 def allowed_by_rule(fn, args):
+    hit = _rule_match(session_rules(), fn, args)
+    if hit: return {**hit, "note": hit.get("note") or "allowed for this chat"}
     return _rule_match((S.get("permission_rules") or {}).get("allow"), fn, args)
 
 def _rule_pattern_suggestion(fn, args):

@@ -1760,6 +1760,11 @@ class H(http.server.BaseHTTPRequestHandler):
             path = os.path.join(q.WORKSPACE, d.get("rel") or "")
             msg = q.restore_checkpoint(path, d.get("name") or "")
             return self._send(200, jdump({"ok": not msg.startswith("Error"), "message": msg}))
+        if p == "/api/permissions/session":
+            # allow it for the rest of this chat, and not one message longer
+            lst = q.add_session_rule(d.get("tool") or "*", d.get("pattern") or "*",
+                                     d.get("note") or "", sid=d.get("sid") or "")
+            return self._send(200, jdump({"ok": True, "rules": lst}))
         if p == "/api/permissions/add":
             with LOCK:
                 lst = q.add_permission_rule(d.get("kind",""), d.get("tool") or "*",
