@@ -84,6 +84,32 @@ body{margin:0;display:flex;background:var(--bg);color:var(--fg);
 aside{width:256px;flex:0 0 256px;background:var(--panel);border-right:1px solid var(--line);
  display:flex;flex-direction:column;height:100vh}
 aside.hide{display:none}
+/* On a wide screen, hiding the sidebar used to remove every affordance with it: the
+   nav, the new-chat button, the "answering / waiting for you" badges. Collapsed it
+   becomes a rail of those instead, and the third press brings it back. */
+aside.rail{width:46px;flex:0 0 46px;overflow:hidden}
+aside.rail .brand .wordmark,aside.rail .brand small,aside.rail #srvmenu,
+aside.rail .sidetop #newwith,aside.rail .searchbtn kbd,aside.rail .navtabs button span,
+aside.rail .sechead,aside.rail .secbody .search,aside.rail .tagrow,aside.rail #projwrap,
+aside.rail .slist,aside.rail #extsecs,aside.rail .srvbar,aside.rail #fmodel{display:none}
+aside.rail .foot{padding:6px 4px;justify-content:center;gap:2px;flex-direction:column}
+aside.rail .foot a{font-size:0;padding:5px 0;text-align:center;width:100%}
+aside.rail #opensettings::after{content:'⚙';font-size:14px}
+aside.rail #footmore::after{content:'⋯';font-size:14px}
+aside.rail .brand{padding:11px 8px;justify-content:center;gap:4px}
+aside.rail .sidetop{padding:6px 5px}
+aside.rail .newbtn{padding:6px 0;text-align:center;font-size:0}
+aside.rail .newbtn::after{content:'+';font-size:17px}
+aside.rail .searchbtn{padding:6px 0;justify-content:center;font-size:0}
+aside.rail .searchbtn::after{content:'⌕';font-size:16px}
+aside.rail .navtabs{flex-direction:column;gap:2px;padding:4px 5px}
+aside.rail .navtabs button{padding:6px 0;text-align:center;font-size:0}
+aside.rail #nav_chats::after{content:'💬'}aside.rail #nav_files::after{content:'📁'}
+aside.rail #nav_lib::after{content:'📚'}aside.rail #nav_tasks::after{content:'⏱'}
+aside.rail #nav_trash::after{content:'🗑'}
+aside.rail .navtabs button::after{font-size:14px}
+aside.rail #sidestatus{padding:2px}
+aside.rail #sidehide{transform:rotate(180deg)}
 .brand{padding:11px 14px;border-bottom:1px solid var(--line);font-weight:650;font-size:var(--fs-base);
  display:flex;align-items:center;gap:8px}
 .brand .mark{flex:0 0 20px;border-radius:5px}
@@ -699,6 +725,12 @@ details.tool .tn{font-weight:600;flex:0 0 auto}
 details.tool .tl{color:var(--mut);overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;
  font-family:var(--mono);font-size:var(--fs-code-sm);user-select:text;cursor:text}
 details.tool summary .ttrigger{display:inline-flex;gap:7px;align-items:baseline;cursor:pointer}
+/* which files a folded run of look-ups touched */
+.tgchips{display:flex;gap:4px;min-width:0;overflow:hidden;flex:1}
+.tgchip{font-family:var(--mono);font-size:var(--fs-code-xs);color:var(--mut);background:var(--panel);
+ border-radius:var(--r-sm);padding:0 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+ max-width:15ch;flex:0 1 auto}
+.tgchip.more{color:var(--dim);background:none;flex:0 0 auto}
 details.tool .tt{color:var(--dim);font-size:var(--fs-xs);flex:0 0 auto}
 details.tool .tt.bad{color:var(--err)}
 /* the ⎿ line: what the call gave back, in one phrase, always visible */
@@ -822,6 +854,17 @@ textarea.memmode{outline:2px solid var(--think)!important}
 .ccopt .ccbx{font-family:var(--mono);color:var(--mut)}
 /* the greeting in an empty chat */
 .hero{max-width:780px;margin:7vh auto 40px;padding:0 18px;text-align:center}
+.turnrail{position:absolute;top:56px;bottom:96px;right:6px;width:14px;z-index:6;
+ display:flex;flex-direction:column;justify-content:flex-start;gap:3px;align-items:center;
+ opacity:.5;transition:opacity .15s}
+.turnrail:hover{opacity:1}
+.trbar{width:3px;border-radius:var(--r-full);background:var(--dim);opacity:.45;cursor:pointer;
+ flex:0 0 auto;transition:opacity .12s,background .12s,width .12s}
+.trbar:hover{width:6px;opacity:1}
+.trbar.on{background:var(--acc);opacity:1;width:5px}
+.trbar.busy{background:var(--acc);animation:railpulse 1.6s ease-in-out infinite}
+@keyframes railpulse{0%,100%{opacity:.4}50%{opacity:1}}
+@media(prefers-reduced-motion:reduce){.trbar.busy{animation:none;opacity:1}}
 .hero{container-type:inline-size}
 .sugg{display:flex;gap:var(--s2);overflow-x:auto;scrollbar-width:none;margin:14px 0 2px;padding-bottom:2px}
 .sugg::-webkit-scrollbar{display:none}
@@ -952,7 +995,7 @@ table.stbl{border-collapse:collapse;width:100%;font-size:var(--fs-cap);margin:2p
    <span class=wordmark>Orbit</span><span class="dot" id=dot title="model server"></span>
    <small id=badge>local</small>
    <button class=iconbtn2 id=srvmenu title="Local model server: start, stop, restart">⏻</button>
-   <button class=iconbtn2 id=sidehide title="Hide the sidebar (☰ brings it back)">«</button></div>
+   <button class=iconbtn2 id=sidehide title="Narrow the sidebar to icons, then hide it (☰ cycles it back)">«</button></div>
   <div class=srvbar id=srvbar style="display:none">
     <button id=srv_start>Start</button><button id=srv_stop>Stop</button><button id=srv_restart>Restart</button>
   </div>
@@ -2580,19 +2623,48 @@ const isFileDrag=e=>{
 // click or key -- none of which happen while something is being dragged.
 let dropT=null;
 function clearDrop(){clearTimeout(dropT);dropT=null;if(dropEl){dropEl.remove();dropEl=null}}
+// A folder is not an attachment. Orbit has a first-class idea of the folder a chat
+// works in, and dropping one used to upload nothing useful and say "attached" about it.
+function dragIsFolder(e){
+ const it=(e.dataTransfer&&e.dataTransfer.items)||[];
+ for(const x of it){
+  if(x.kind!=='file')continue;
+  try{const en=x.webkitGetAsEntry&&x.webkitGetAsEntry();if(en&&en.isDirectory)return true}catch(_){}
+  // during dragover the entry is often unavailable; a file with no type is the hint
+  if(x.type==='')return true}
+ return false}
 addEventListener('dragover',e=>{
  if(!isFileDrag(e))return;                    // let chat reordering work normally
  e.preventDefault();
- if(!dropEl){dropEl=el('<div class=drop>drop to attach</div>');document.body.appendChild(dropEl);
+ const folder=dragIsFolder(e);
+ if(!dropEl){dropEl=el('<div class=drop></div>');document.body.appendChild(dropEl);
   dropEl.onclick=clearDrop}
+ dropEl.textContent=folder?'drop to work in this folder':'drop to attach';
+ dropEl.dataset.kind=folder?'folder':'files';
  clearTimeout(dropT);dropT=setTimeout(clearDrop,400)});   // dragover repeats while it is over the page
 addEventListener('dragleave',e=>{if(e.clientX<=0||e.clientY<=0||e.clientX>=innerWidth||e.clientY>=innerHeight)clearDrop()});
 addEventListener('dragend',clearDrop);
 ['mousemove','mousedown','keydown','blur'].forEach(k=>addEventListener(k,()=>{if(dropEl)clearDrop()},true));
-addEventListener('drop',e=>{
+addEventListener('drop',async e=>{
  clearDrop();
  if(!isFileDrag(e))return;
  e.preventDefault();
+ // a folder sets where this chat works; files are attached to the next message
+ const items=[...(e.dataTransfer.items||[])];
+ for(const it of items){
+  if(it.kind!=='file')continue;
+  let en=null;try{en=it.webkitGetAsEntry&&it.webkitGetAsEntry()}catch(_){}
+  if(en&&en.isDirectory){
+   const f=it.getAsFile();
+   const path=(f&&f.path)||'';
+   // the browser only gives a real path for a directory in some cases; without one
+   // there is nothing to set, so say so rather than setting the wrong folder
+   if(!path){toast('Dropped a folder, but the browser did not say where it is — '+
+                   'set it from the bar under the title.');return}
+   if(!confirm('Work in '+path+' from now on in this chat?'))return;
+   const d=await apiPost('/api/claude/cwd',{sid,cwd:path},'working folder');
+   if(d){toast('this chat works in '+path);drawClaudeBar();pollGit(true)}
+   return}}
  [...e.dataTransfer.files].forEach(upload)});
 addEventListener('paste',e=>{const f=[...(e.clipboardData&&e.clipboardData.files||[])];
  if(f.length){e.preventDefault();f.forEach(upload)}});
@@ -6763,6 +6835,22 @@ function updateGroup(g){
  if(!n){g.remove();return}
  if(n===1){const only=g.querySelector('.tgbody>details.tool');g.replaceWith(only);return}
  g.querySelector('.tn').textContent=famLabel(g);
+ // "Read 3 files" says how many and not which, so scanning a transcript for "did it
+ // touch config.py?" meant opening every fold. Name a few of them.
+ const head=g.querySelector('.thead');
+ let chips=head.querySelector('.tgchips');
+ if(!chips){chips=el('<span class=tgchips></span>');
+  head.insertBefore(chips,head.querySelector('.tt'))}
+ chips.innerHTML='';
+ const names=[];
+ g.querySelectorAll('.tgbody>details.tool').forEach(r=>{
+  const t=(r.querySelector('.tl')||{}).textContent||'';
+  const nm=shortPath(t.split(/\s/)[0]);
+  if(nm&&!names.includes(nm))names.push(nm)});
+ names.slice(0,3).forEach(nm=>{const c=document.createElement('span');
+  c.className='tgchip';c.textContent=nm;chips.appendChild(c)});
+ if(names.length>3){const c=document.createElement('span');
+  c.className='tgchip more';c.textContent='+'+(names.length-3);chips.appendChild(c)}
  const secs=[...g.querySelectorAll('.tgbody>details.tool')]
    .reduce((a,r)=>a+(parseFloat(r.dataset.secs)||0),0);
  g.querySelector('.tt').textContent=secs>=0.5?fmtSecs(secs):''}
@@ -7114,13 +7202,45 @@ function showCommandHelp(){
 function drawOutline(){
  let o=$('#outline');
  const us=[...wrap.querySelectorAll('.msg.u:not(.note)')];
- if(us.length<3||$('#log').style.display==='none'){if(o)o.style.display='none';return}
+ if(us.length<3||$('#log').style.display==='none'){if(o)o.style.display='none';drawTurnRail();return}
  if(!o){o=el('<div id=outline class=outline><button class=olbtn title="outline of this chat">☰</button><div class=ollist></div></div>');
   $('main').appendChild(o);
   o.querySelector('.olbtn').onclick=e=>{e.stopPropagation();o.classList.toggle('open');fillOutline()};
   document.addEventListener('click',e=>{if(!o.contains(e.target))o.classList.remove('open')})}
  o.style.display='';
- if(o.classList.contains('open'))fillOutline()}
+ if(o.classList.contains('open'))fillOutline();
+ drawTurnRail()}
+
+// A minimap of the conversation down the right edge: one bar per turn, as tall as that
+// turn is long, the one you are reading lit. The outline behind the ☰ button answers
+// "what did I ask", which is a different question from "how long is this and where am
+// I in it" — and that one had no answer at all in a 60-turn chat.
+let railSpy=null;
+function drawTurnRail(){
+ let r=$('#turnrail');
+ const us=[...wrap.querySelectorAll('.msg.u:not(.note)')];
+ if(us.length<4||$('#log').style.display==='none'||narrow()){if(r)r.style.display='none';return}
+ if(!r){r=el('<div id=turnrail class=turnrail></div>');$('main').appendChild(r)}
+ r.style.display='';
+ r.innerHTML='';
+ if(railSpy)railSpy.disconnect();
+ railSpy=new IntersectionObserver(es=>{
+  es.forEach(e=>{const b=r.children[+e.target.dataset.turn];
+   if(b)b.classList.toggle('on',e.isIntersecting)})},{root:log,threshold:0});
+ const heights=us.map((u,i)=>{
+  const next=us[i+1];
+  return Math.max(10,(next?next.offsetTop:wrap.scrollHeight)-u.offsetTop)});
+ const tall=Math.max(...heights,1);
+ us.forEach((u,i)=>{
+  u.dataset.turn=i;
+  const b=el('<div class=trbar></div>');
+  b.style.height=Math.max(6,Math.round(26*heights[i]/tall))+'px';
+  const t=((u.querySelector('.bub,.bangcmd')||{}).textContent||'').replace(/\s+/g,' ').trim();
+  b.title=(i+1)+'. '+(t.slice(0,90)||'(image)');
+  if(i===us.length-1&&RUNNING.has(sid))b.classList.add('busy');
+  b.onclick=()=>{u.scrollIntoView({block:'start',behavior:'smooth'});
+   u.classList.add('flash');setTimeout(()=>u.classList.remove('flash'),1500)};
+  r.appendChild(b);railSpy.observe(u)})}
 function fillOutline(){
  const o=$('#outline');if(!o)return;
  const list=o.querySelector('.ollist');list.innerHTML='';
@@ -7894,7 +8014,7 @@ document.querySelectorAll('.sechead[data-sec]').forEach(h=>{
  h.onclick=e=>{if(e.target.closest('button,select'))return;
   const open=h.classList.contains('closed');apply(open);PREF.set('sec_'+name,open?'1':'0')}});
 $('#srvmenu').onclick=e=>{e.stopPropagation();const b=$('#srvbar');b.style.display=b.style.display==='none'?'':'none'};
-$('#sidehide').onclick=()=>sideOpen(false);
+$('#sidehide').onclick=cycleSide;    // full -> rail -> gone, the same as ☰
 $('#searchbtn').onclick=e=>{e.stopPropagation();openPal()};
 $('#footmore').onclick=e=>{e.stopPropagation();const r=e.target.getBoundingClientRect();
  ctxMenu({clientX:r.left,clientY:r.top-190},[
@@ -7929,19 +8049,37 @@ $('#openabout').onclick=showAbout;
 $('#openkeys').ondblclick=showOnboarding;
 // innerWidth is 0 while the window is hidden; that is not a phone
 const narrow=()=>innerWidth>0&&matchMedia('(max-width:820px)').matches;
-function sideOpen(on){
+function sideOpen(on,rail){
  const a=$('#side'); if(!a)return;
+ const railed=!!rail&&!!on&&!narrow();
+ a.classList.toggle('rail',railed);
  a.classList.toggle('hide',!on);
+ // applySidebar writes an inline width for the drag-to-resize grip, and an inline
+ // width beats a class: the rail would have kept the full width it was given
+ if(railed){a.style.width='';a.style.flexBasis=''}
+ else if(on&&!narrow()){const w=Number(PREF.get('sidew',256));
+  a.style.width=w+'px';a.style.flexBasis=w+'px'}
  let sc=document.querySelector('.scrim');
  if(on&&narrow()){
   if(!sc){sc=el('<div class=scrim></div>');sc.onclick=()=>sideOpen(false);document.body.appendChild(sc)}
  } else if(sc) sc.remove();
+ PREF.set('sidestate',!on?'hidden':(a.classList.contains('rail')?'rail':'open'));
 }
-$('#toggle').onclick=()=>sideOpen($('#side').classList.contains('hide'));
+// Three states on a wide screen — full, a rail of icons, gone — because "gone" alone
+// threw away the running indicators along with the width. A phone keeps the two it had.
+function cycleSide(){
+ const a=$('#side');
+ if(narrow())return sideOpen(a.classList.contains('hide'));
+ if(a.classList.contains('hide'))return sideOpen(true,false);
+ if(a.classList.contains('rail'))return sideOpen(false);
+ return sideOpen(true,true);
+}
+$('#toggle').onclick=cycleSide;
 const WIDE_PLACEHOLDER=q.placeholder;
 function applyWidth(){
  const n=narrow();
- sideOpen(!n);                               // a phone starts on the conversation
+ const want=PREF.get('sidestate','open');
+ sideOpen(n?false:want!=='hidden', want==='rail');   // a phone starts on the conversation
  q.placeholder=n?'Ask anything…':WIDE_PLACEHOLDER;
 }
 applyWidth();
