@@ -50,6 +50,10 @@ DEFAULTS = {
                          "CronList", "EnterWorktree", "ExitWorktree", "ReportFindings",
                          "SendMessage", "RemoteTrigger", "ListMcpResourcesTool",
                          "ReadMcpResourceTool", "ReadMcpResourceDirTool"],
+    # launcher: the profile to use when the model runs on this Mac. Its prompt costs
+    # seconds there, and plugins, their MCP servers and their hooks are most of it.
+    # "" keeps whatever "profile" says for every model alike.
+    "local_profile": "lean",
     # launcher: "claude" = run the hooks your Claude settings define; "off" = none
     "hooks": "claude",
     "extra_args": [],
@@ -1187,6 +1191,12 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     emit("model", {"id": spec.get("id"), "label": label, "provider": "Claude Code"})
     target = harness_target(spec)
     if target["local"]:
+        # A model on this Mac pays for the system prompt in seconds, not fractions of a
+        # cent: measured here, "standard" gave Claude Code a 40k-token prompt of MCP
+        # servers, plugins and their hooks, and one file read took 179s; the same read
+        # on "lean" sent 10k and took 44s, with the same answer. So a local model gets
+        # the lean profile unless you say otherwise (claude_qwen.local_profile).
+        if c.get("local_profile"): c = {**c, "profile": c["local_profile"]}
         _wake_model(emit)
     elif target.get("subscription") and _harness().claude_login(
             max_age=30, token=(target.get("env") or {}).get("CLAUDE_CODE_OAUTH_TOKEN")) != "yes":

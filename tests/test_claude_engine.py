@@ -622,6 +622,22 @@ class TestClaudeEngineOffline(unittest.TestCase):
             if old_env is None: os.environ.pop("ORBIT_CLAUDE_CONFIG_DIR", None)
             else: os.environ["ORBIT_CLAUDE_CONFIG_DIR"] = old_env
 
+    def test_a_local_model_gets_the_lean_profile(self):
+        """A model on this Mac pays for the system prompt in seconds: measured, the
+        standard profile sent Claude Code 40k tokens of plugins, MCP servers and hooks
+        and one file read took 179s; lean sent 10k and took 44s for the same answer.
+        The choice is per run, so a hosted model still starts as your setup has it."""
+        c = dict(CE.DEFAULTS)
+        self.assertEqual(c["local_profile"], "lean")
+        lean = CE.build_argv({**c, "profile": c["local_profile"]}, kind="local")
+        standard = CE.build_argv(c, kind="provider")
+        self.assertIn("--safe-mode", lean)
+        self.assertNotIn("--plugin-dir", lean)
+        self.assertNotIn("--safe-mode", standard)
+        # turning it off puts the local model back on whatever the profile says
+        off = CE.build_argv({**c, "local_profile": ""}, kind="local")
+        self.assertNotIn("--safe-mode", off)
+
     def test_claude_code_starts_fresh_outside_the_local_model(self):
         """REGRESSION: Orbit chose a subset of MCP servers (dropping plugins' servers, whose
         hooks still redirected web fetches to them) and added local-model tweaks to every
