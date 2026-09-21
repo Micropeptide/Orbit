@@ -577,7 +577,8 @@ Crossref, jobs on an SGE/UGE cluster over SSH, and any MCP server you add.
 **It keeps its shape over long work.** Projects with shared instructions and a folder of
 their own (its `ORBIT.md` / `AGENTS.md` / `CLAUDE.md` become the project's rules; a
 trusted project's `.orbit/tools/` become its own tools); skills loaded on demand; a plan
-it tracks; helpers with an empty context for side investigations; no cap on steps or
+it tracks; helpers with an empty context for side investigations — which read, search
+and fetch and change nothing unless you send one to build; no cap on steps or
 minutes unless you set one; scheduled prompts that run on their own, each on the model
 you name.
 
