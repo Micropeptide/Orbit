@@ -683,9 +683,10 @@ This matters when a model can run code on your machine.
 - **A grant can be smaller than forever.** "Yes, and stop asking" used to mean writing a
   permanent rule, when what you usually mean is "for the next twenty minutes". *Yes, and
   for the rest of this chat* holds it for that chat and not one message longer, and nothing
-  is written to your settings. A rule can also belong to a **project** — "let pytest run
-  here" is the natural size of that grant — and lives with the folder rather than
-  everywhere.
+  is written to your settings. In a chat that belongs to a project there is a third size —
+  *yes, and allow it in <project>* — which lives with that project's folder rather than
+  everywhere; "let pytest run here" is the natural size of that grant, and it used to be
+  sayable only for every folder at once.
 - **Undoing looks before it leaps.** *Rewind chat + files* first says what it would do to
   each file. One you edited yourself since the answer wrote it stops the whole restore —
   a half-undone folder is worse than one left alone — and going past that is its own

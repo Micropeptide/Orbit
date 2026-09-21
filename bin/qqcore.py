@@ -954,6 +954,21 @@ def t_write_file(path, content):
     verb = "Updated" if d["existed"] else "Created"
     return f"{verb} {p} (+{d['added']} −{d['removed']} lines)"
 
+def chat_folder():
+    """Where a command this chat runs should run.
+
+    The system prompt tells the model its project folder is where relative paths
+    resolve, and read_file/write_file do exactly that -- but run_shell ran in
+    whatever directory Orbit's own process happened to be started in, so `ls` and
+    `rm -rf build` meant somewhere else entirely. It also made the workspace check
+    in risk_check resolve bare names against the wrong folder."""
+    try:
+        folder = project_folder()
+        if folder and os.path.isdir(folder): return folder
+    except Exception:
+        pass
+    return WORKSPACE if os.path.isdir(WORKSPACE) else None
+
 def t_run_shell(command):
     if not (S.get("shell_enabled") or full_access()):
         return ("Error: shell is disabled. Enable it, or 'Full computer access', "
@@ -961,7 +976,7 @@ def t_run_shell(command):
     bad = _interactive(command)
     if bad: return bad
     r = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=180,
-                       env=_batch_env(), stdin=subprocess.DEVNULL)
+                       cwd=chat_folder(), env=_batch_env(), stdin=subprocess.DEVNULL)
     return (f"exit={r.returncode}\nstdout:\n{r.stdout[:MAXCH]}"
             + (f"\nstderr:\n{r.stderr[:2000]}" if r.stderr else ""))
 
@@ -1009,7 +1024,7 @@ def t_run_shell_background(command):
     outf = open(out_path, "w")
     bad = _interactive(command)
     if bad: outf.close(); return bad
-    proc = subprocess.Popen(command, shell=True, cwd=WORKSPACE, stdout=outf,
+    proc = subprocess.Popen(command, shell=True, cwd=chat_folder(), stdout=outf,
                             stderr=subprocess.STDOUT, text=True, env=_batch_env(),
                             stdin=subprocess.DEVNULL)
     BG_JOBS[jid] = {"id": jid, "command": command, "started": time.time(),
@@ -1663,7 +1678,7 @@ def _bionic_waking(spec, emit):
 def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
                 interrupt=None):
     if think is None: think = getattr(TURN_CTX, "think", None)
-    think = S.get("thinking", True) if think is None else think
+    think = chat_setting("thinking", default=True) if think is None else think
     as_saved = messages                    # a CLI agent reads its own session marker from these
     messages = _strip_reasoning(messages)
     stop = _Either(cancel or CANCEL, interrupt)
@@ -1689,7 +1704,7 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
         out = MODELS.anthropic_stream(
             spec["model"], messages, tools, prov["api_key"],
             think=think and spec.get("thinking", True),
-            effort=getattr(TURN_CTX, "effort", None) or S.get("reasoning_effort", "medium"),
+            effort=getattr(TURN_CTX, "effort", None) or chat_setting("reasoning_effort", default="medium"),
             emit=emit, cancel=stop,
             max_tokens=int(S.get("max_output_tokens") or 32000),
             base_url=prov.get("base_url") or "")
@@ -1707,7 +1722,8 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
     if tools: body["tools"] = tools
     smp = S.get("sampling") or {}
     if think:
-        body["reasoning_effort"] = getattr(TURN_CTX, "effort", None) or S.get("reasoning_effort", "medium")
+        body["reasoning_effort"] = (getattr(TURN_CTX, "effort", None)
+                                    or chat_setting("reasoning_effort", default="medium"))
     else:
         body.update(temperature=0.7, top_p=0.8, top_k=20, presence_penalty=1.5)
     for k in ("temperature","top_p","top_k","presence_penalty"):
@@ -1885,9 +1901,13 @@ def _run_one_tool(tc, fn, args, messages, emit, approve, seen_calls):
         emit("blocked", {"name": fn, "reason": reason})
         LOG_SAFETY(fn, args, "blocked", reason)
     elif level == "confirm":
-        mode = S.get("autonomy_mode", "ask")
+        mode = chat_setting("autonomy_mode", default="ask") or "ask"
         by_rule = allowed_by_rule(fn, args)
-        auto = bool(by_rule) or \
+        # a rule is a standing yes, not a way round the floor: the actions that always
+        # ask (sudo, a force-push, the keychain) still ask. Orbit itself suggests
+        # "git push*" as the pattern for `git push origin main`, and that pattern also
+        # covers `git push --force` -- which nobody meant to hand over by clicking yes.
+        auto = (bool(by_rule) and not _never_auto(fn, reason)) or \
                (mode == "full" and not _never_auto(fn, reason)) or \
                (mode == "auto" and _auto_approvable(fn, args, reason))
         if auto:
@@ -1953,7 +1973,7 @@ def pinned_model():
     return getattr(TURN_CTX, "pin_model", None) or ACTIVE_MODEL.get("id")
 
 def pinned_effort():
-    return getattr(TURN_CTX, "pin_effort", None) or S.get("reasoning_effort")
+    return getattr(TURN_CTX, "pin_effort", None) or chat_setting("reasoning_effort")
 _NO_PROJECT_ARG = object()     # turn() called without saying: use the one on screen
 
 _AWAKE = {"n": 0, "proc": None, "lock": threading.Lock()}
@@ -2388,10 +2408,11 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                                              f"this is not finished: {v['reason']} "
                                              f"Next: {v['next']} Carry on and then report.")})
                         continue
-                if chat_setting("auto_review") and getattr(T, "changes", None):
-                    text = review_changes(T.changes, emit=emit)
+                changed = getattr(TURN_CTX, "changes", None)
+                if chat_setting("auto_review") and changed:
+                    text = review_changes(changed, emit=emit)
                     if text:
-                        emit("review", {"text": text, "files": len(T.changes),
+                        emit("review", {"text": text, "files": len(changed),
                                         "model": helper_model() or "this chat's model"})
                 _finish(messages[-1], rnd)
                 emit("done", None)
@@ -2404,7 +2425,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
             # round stays sequential: mixing the two orders is where the bugs live.
             batched = {}
             cap = int(S.get("parallel_tools_max") or 6)
-            if S.get("parallel_tools", True) and 1 < len(calls) <= cap and not cancel.is_set():
+            if chat_setting("parallel_tools", default=True) and 1 < len(calls) <= cap and not cancel.is_set():
                 prep = []
                 for i, tc in enumerate(calls):
                     if not tc.get("id"): tc["id"] = f"call_{rnd}_{i}"
@@ -2932,19 +2953,23 @@ def system_prompt_for(agent=None):
     extra = (a.get("instructions") or "").strip()
     return base + ("\n\n## Agent: " + agent + "\n" + extra if extra else "")
 
-def tools_for(agent, all_specs):
+def tools_for(agent, all_specs, sid=None):
     a = agents_load().get(agent or "", {})
     allow = a.get("tools")
     if allow:
         all_specs = [t for t in all_specs if t["function"]["name"] in allow]
-    return easy_tools(all_specs)
+    return easy_tools(all_specs, sid)
 
 
-def easy_tools(specs):
+def easy_tools(specs, sid=None):
     """In easy mode, only the tools on the list. An agent's own list still narrows it
-    further; nothing here widens what an agent was given."""
-    if not chat_setting("easy_mode"): return specs
-    keep = {str(x) for x in (chat_setting("easy_tools") or []) if x}
+    further; nothing here widens what an agent was given.
+
+    The chat has to be named: the tool list is built before the turn starts, on a thread
+    where TURN_CTX.sid is still unset, so falling back to it meant a chat's own easy mode
+    was read as Orbit's and never applied to Orbit's own agent."""
+    if not chat_setting("easy_mode", sid): return specs
+    keep = {str(x) for x in (chat_setting("easy_tools", sid) or []) if x}
     if not keep: return specs
     return [t for t in specs if t["function"]["name"] in keep]
 
@@ -3417,7 +3442,9 @@ DESTRUCTIVE = [
     (r"\b(mkfs|fdisk|diskutil\s+erase|dd\s+if=.*of=/dev/)", "disk destruction"),
     (r"\bshred\b|\btruncate\s+-s\s*0", "file shredding"),
     (r">\s*/dev/(sd|disk|nvme)", "raw device write"),
-    (r"\bchmod\s+-R\b|\bchown\s+-R\b", "recursive permission change"),
+    # matched against the lowercased command, so this must be written lowercase --
+    # spelled -R it never fired at all, and -Rf/-fR have to hit as well
+    (r"\bchmod\s+-[a-z]*r[a-z]*\b|\bchown\s+-[a-z]*r[a-z]*\b", "recursive permission change"),
     (r"\bgit\s+(push\s+.*--force|reset\s+--hard|clean\s+-[a-z]*f)", "destructive git"),
     (r"\bqdel\s+(-u\b|'?\*'?|\"?\*\"?)", "mass job deletion"),
     (r"\bkill(all)?\s+-9\s+-1\b|\bpkill\s+-9\s+-u\b", "mass process kill"),
@@ -3486,18 +3513,44 @@ def _permission_text(fn, args):
         if args.get(key): return str(args[key])
     return " ".join(str(v) for v in args.values())
 
-def _rule_match(rules, fn, args):
-    text = _permission_text(fn, args).lower()
+# Tools whose subject is a shell command line, and so may be several commands.
+SHELL_SUBJECT = {"run_shell", "run_shell_background", "cluster_run"}
+_CMD_SPLIT = _re.compile(r"\|\||&&|[;|\n]|\$\(|`")
+
+def _rule_parts(fn, args):
+    """The pieces of the subject a rule has to cover.
+
+    `*` in fnmatch spans anything, separators included, so an allow rule of "git diff*"
+    -- which Orbit itself suggests for `git diff --stat` -- also matched
+    `git diff --stat; rm -rf ~/Documents`. A shell command line is several commands, and
+    an allow rule only covers it if it covers every one of them."""
+    text = _permission_text(fn, args)
+    if fn in SHELL_SUBJECT:
+        parts = [p.strip() for p in _CMD_SPLIT.split(text) if p.strip()]
+        if parts: return parts
+    return [text]
+
+def _rule_match(rules, fn, args, need_all=True):
+    """The first rule that covers this call, or None.
+
+    `need_all` is what an allow list means: every command on the line has to be covered.
+    A deny list is the other way round -- one denied command denies the call -- so it
+    passes need_all=False."""
+    parts = [p.lower() for p in _rule_parts(fn, args)]
     for r in rules or []:
         if not isinstance(r, dict): continue
         tool = str(r.get("tool") or "*").strip()
-        if tool not in ("*", fn): continue
+        # a rule written with different capitalisation used to match nothing at all
+        if tool != "*" and tool.lower() != fn.lower(): continue
         pat = str(r.get("pattern") or "*").strip().lower()
         # the pattern matches the subject (the command, path, url…). It used to match the
         # tool's name as well, so an allow rule of "python*" meant for `python build.py`
         # also matched the *tool* `python` and handed over arbitrary code execution. An
         # exact name with no wildcard still means "this whole tool", as it always did.
-        if fnmatch.fnmatch(text, pat) or pat == fn.lower():
+        if pat == fn.lower():
+            return {"tool": tool, "pattern": pat, "note": r.get("note") or ""}
+        covered = [fnmatch.fnmatch(t, pat) for t in parts]
+        if (all(covered) if need_all else any(covered)):
             return {"tool": tool, "pattern": pat, "note": r.get("note") or ""}
     return None
 
@@ -3568,9 +3621,10 @@ def add_project_rule(kind, tool, pattern, note="", project=None):
 
 
 def denied_by_rule(fn, args):
-    # a project may narrow, never widen: its deny is checked with the global one
-    return (_rule_match(project_rules_for("deny"), fn, args)
-            or _rule_match((S.get("permission_rules") or {}).get("deny"), fn, args))
+    # a project may narrow, never widen: its deny is checked with the global one.
+    # One denied command on a line denies the line, so a deny matches on any part.
+    return (_rule_match(project_rules_for("deny"), fn, args, need_all=False)
+            or _rule_match((S.get("permission_rules") or {}).get("deny"), fn, args, need_all=False))
 
 SESSION_RULES = {}       # sid -> [rule], in memory only: they end when the chat does
 
@@ -3664,23 +3718,34 @@ def risk_check(fn, args):
     # and the confirm-level approval the dedicated screen_* tools already get.
     # A read-only osascript query (get name of frontmost process, and so on)
     # is untouched; only the input-sending verbs trigger this.
+    if _re.search(SCREEN_VIA_OSASCRIPT, blob, _re.I) and not S.get("computer_use_enabled"):
+        return ("block", "tried to send keystrokes or clicks via osascript, but "
+                         "Screen control is switched off in Settings -> Tools")
+    # Every reason this call is destructive, not the first one found. Taking the first
+    # meant the order of the list decided the verdict: `osascript … keystroke && dd
+    # if=/dev/zero of=/dev/disk0` was "a screen action" (confirm) rather than disk
+    # destruction (block), and `sudo rm -rf <workspace>/x` was a workspace delete
+    # (auto-approvable) rather than sudo (never auto). One prefix laundered the floor.
+    hits = [why for pat, why in DESTRUCTIVE if _re.search(pat, low)]
     if _re.search(SCREEN_VIA_OSASCRIPT, blob, _re.I):
-        if not S.get("computer_use_enabled"):
-            return ("block", "tried to send keystrokes or clicks via osascript, but "
-                             "Screen control is switched off in Settings -> Tools")
-        return ("confirm", "a screen action (via osascript) on your Mac")
-    hit = None
-    for pat, why in DESTRUCTIVE:
-        if _re.search(pat, low): hit = why; break
-    if hit:
-        if hit in ALWAYS_BLOCK:
-            return ("block", f"{hit} — this is never approvable, in any mode")
+        hits.append("a screen action (via osascript) on your Mac")
+    if hits:
+        blocked = [h for h in hits if h in ALWAYS_BLOCK]
+        if blocked:
+            return ("block", f"{blocked[0]} — this is never approvable, in any mode")
         prot = _targets_protected(blob)
         if prot:
-            return ("block", f"{hit} targeting protected path {prot}")
-        if _confined_to_workspace(args):
-            return ("confirm", f"{hit} {INSIDE_WS}")
-        return ("confirm", hit)
+            return ("block", f"{hits[0]} targeting protected path {prot}")
+        # the strictest reason speaks for the call: one that never auto-approves is
+        # not softened by another that would, and only a call whose every reason is
+        # a workspace file operation may be called workspace-confined
+        never = [h for h in hits if h in NEVER_AUTO]
+        if never:
+            others = [h for h in hits if h not in never]
+            return ("confirm", never[0] + (f" (also: {', '.join(others[:2])})" if others else ""))
+        if _confined_to_workspace(args, fn):
+            return ("confirm", f"{hits[0]} {INSIDE_WS}")
+        return ("confirm", hits[0])
     if py_shell:
         return ("confirm", "python is spawning a shell")
     if fn == "self_patch":
@@ -3714,10 +3779,33 @@ INSIDE_WS = "(inside workspace)"      # said in the reason, tested as a fact -- 
 
 _PATH_TOK = _re.compile(r"""(?:^|[\s=:'"])((?:~|\.{0,2}/)[^\s'";|&)]*)""")
 
-def _paths_named(args):
+# Text whose target cannot be known by reading it: a variable, a substitution, a
+# home-relative glob. A call containing one is not "confined" to anywhere.
+_UNRESOLVABLE = _re.compile(r"\$\{?\w+|\$\(|`|\bxargs\b|--files-from|-T\s")
+
+def _shell_operands(cmd):
+    """The things a shell command line acts on: every token that is not the program
+    and not a flag, across every command on the line.
+
+    `rm -rf $HOME/Documents <ws>/tmp` and `rm -rf important_data <ws>/tmp` both named
+    exactly one path-shaped token -- the workspace one -- so a scan for path-shaped
+    text called them workspace-confined and 'auto' mode deleted the other."""
+    import shlex
+    out = []
+    for seg in _CMD_SPLIT.split(str(cmd or "")):
+        seg = seg.strip()
+        if not seg: continue
+        try: toks = shlex.split(seg)
+        except ValueError: toks = seg.split()
+        for t in toks[1:]:
+            if t.startswith("-") or "=" in t.split("/")[0][:40] and t.startswith("--"): continue
+            out.append(t)
+    return out
+
+def _paths_named(args, shell_key=None):
     """Every filesystem path this call names, resolved. Arguments that are paths are
     taken as they are; a shell command or a snippet of code is scanned for anything
-    shaped like one."""
+    shaped like one, and for a shell command every operand counts as one."""
     out, args = [], (args or {})
     for key in ("path", "file", "dest", "src", "cwd", "directory", "folder"):
         v = args.get(key)
@@ -3726,29 +3814,41 @@ def _paths_named(args):
         v = args.get(key)
         if isinstance(v, str):
             out += [m.group(1) for m in _PATH_TOK.finditer(v)]
-    return [os.path.abspath(os.path.expanduser(p)) for p in out if p]
+    if shell_key and isinstance(args.get(shell_key), str):
+        out += _shell_operands(args[shell_key])
+    # relative names resolve where the chat works, which is where the shell would run
+    # them -- not where Orbit's own process happens to have been started
+    return [_resolve_path(p) if not os.path.isabs(os.path.expanduser(p))
+            else os.path.abspath(os.path.expanduser(p)) for p in out if p]
 
-def _confined_to_workspace(args):
+def _confined_to_workspace(args, fn=None):
     """Whether everything this call names lives inside the workspace.
 
     It used to be `workspace_path in " ".join(args.values())`, which said yes to
     `rm -rf ~/Documents /…/workspace/tmp` -- one mention of the workspace anywhere in
     any argument downgraded the whole call, and 'auto' mode then ran it. Now every
-    path the call names has to resolve inside, and a call that names none does not
-    qualify at all."""
+    path the call names has to resolve inside, a call that names none does not
+    qualify at all, and a call Orbit cannot read the targets of -- one that expands a
+    variable, runs a substitution or pipes names into xargs -- does not either."""
     ws = os.path.abspath(WORKSPACE)
-    named = _paths_named(args)
+    blob = " ".join(str(v) for k, v in (args or {}).items()
+                    if k in ("command", "code", "text") and isinstance(v, str))
+    if _UNRESOLVABLE.search(blob): return False
+    named = _paths_named(args, shell_key="command" if fn in SHELL_SUBJECT else None)
     return bool(named) and all(p == ws or p.startswith(ws + os.sep) for p in named)
 
 def _never_auto(fn, reason):
     """Actions that no autonomy mode may run unattended.
 
-    The reason is a sentence shown to you, and risk_check appends "(inside workspace)"
-    to it -- so testing the whole sentence against NEVER_AUTO meant "rewriting git
-    history" was caught and "rewriting git history (inside workspace)" was not, which
-    made every never-auto action auto-approvable by naming the workspace."""
+    The reason is a sentence shown to you, and risk_check decorates it -- it appends
+    "(inside workspace)", and when a call is destructive for several reasons at once it
+    names the strictest and lists the rest as "(also: ...)". Testing the whole decorated
+    sentence against NEVER_AUTO meant "rewriting git history" was caught and "rewriting
+    git history (inside workspace)" was not, which made every never-auto action
+    auto-approvable by naming the workspace. Match the sentence it was built from."""
     base = str(reason or "")
     if base.endswith(INSIDE_WS): base = base[:-len(INSIDE_WS)].strip()
+    base = base.split(" (also: ")[0].strip()
     return fn in NEVER_AUTO_FNS or base in NEVER_AUTO
 
 ORBIT_SAYS = "[Orbit — automatic, not from the user and not approval for anything:"
@@ -3776,8 +3876,9 @@ def full_access():
     and every 'confirm'-level action runs without asking *except* NEVER_AUTO,
     which still always asks, and 'block'-level, which stays refused outright.
     Session-wide, not a one-time consent — treat enabling it like handing over
-    the keyboard."""
-    return S.get("autonomy_mode") == "full"
+    the keyboard. Per chat: a chat set back to "ask every time" is asked, whatever
+    the rest of Orbit is set to."""
+    return chat_setting("autonomy_mode") == "full"
 
 def _auto_approvable(fn, args, reason):
     """Whether a 'confirm'-level action is safe enough to run without asking,
@@ -3786,7 +3887,7 @@ def _auto_approvable(fn, args, reason):
     auto-approves everything 'confirm' except NEVER_AUTO."""
     if _never_auto(fn, reason):
         return False
-    if _confined_to_workspace(args):
+    if _confined_to_workspace(args, fn):
         return True
     if fn == "write_file":
         p = os.path.abspath(os.path.expanduser(str((args or {}).get("path", ""))))
@@ -6625,20 +6726,26 @@ def preview_undo(changes):
             safe.append({"path": p, "what": "restore"})
     return {"safe": safe, "unsafe": unsafe, "gone": gone}
 
-def undo_changes(changes, force=False):
+def undo_result(changes, force=False):
     """Put back every file an answer changed, newest first: an edited file from
     the snapshot taken just before, a created one to the bin. Each restore is
-    itself checkpointed, so undoing can be undone. Returns what it did.
+    itself checkpointed, so undoing can be undone.
 
     All of it or none of it: if any file has changed since the answer wrote it, nothing
-    is restored and the reason is returned instead, because a half-undone tree is worse
-    than an un-undone one. `force` goes ahead anyway."""
+    is restored and the reason is given instead, because a half-undone tree is worse
+    than an un-undone one. `force` goes ahead anyway.
+
+    Returns {"undone": bool, "lines": [...], "restored": [...], "refused": [...]}. The
+    flag matters: a caller that read only the lines could not tell a refusal from a
+    success, so it marked the answer undone and the snapshots became unreachable."""
     look = preview_undo(changes)
     if look["unsafe"] and not force:
-        return ([f"nothing was undone: {x['path']} {x['why']}" for x in look["unsafe"]]
-                + [f"({len(look['safe'])} other file(s) could be restored — undo with force "
-                   "to do it anyway)"])
-    done = []
+        return {"undone": False,
+                "restored": [], "refused": [x["path"] for x in look["unsafe"]],
+                "lines": [f"nothing was undone: {x['path']} {x['why']}" for x in look["unsafe"]]
+                         + [f"({len(look['safe'])} other file(s) could be restored — undo with "
+                            "force to do it anyway)"]}
+    done, restored, refused = [], [], []
     for c in reversed(changes or []):
         p = c.get("path")
         if not p: continue
@@ -6646,15 +6753,23 @@ def undo_changes(changes, force=False):
             if c.get("created"):
                 if os.path.exists(p):
                     trash_put("file", p, {"why": "undo"}); done.append(f"removed {p} (it's in the bin)")
+                    restored.append(p)
             elif c.get("snap") and os.path.exists(c["snap"]):
                 _save_checkpoint(p)
                 with open(c["snap"], "rb") as f, open(p, "wb") as out: out.write(f.read())
-                done.append(f"restored {p}")
+                done.append(f"restored {p}"); restored.append(p)
             else:
                 done.append(f"couldn't undo {p}: no snapshot (it lives outside the workspace and project folder)")
+                refused.append(p)
         except Exception as e:
             done.append(f"couldn't undo {p}: {type(e).__name__}: {e}")
-    return done
+            refused.append(p)
+    return {"undone": bool(restored), "lines": done, "restored": restored, "refused": refused}
+
+
+def undo_changes(changes, force=False):
+    """What undo_result did, as the lines it used to return."""
+    return undo_result(changes, force=force)["lines"]
 
 _WRITE_TOOLS = {"write_file", "edit_file", "multi_edit", "run_shell", "run_shell_background",
                 "stop_background", "schedule_task", "cancel_scheduled_task", "self_patch",
