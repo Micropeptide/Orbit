@@ -499,6 +499,13 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .projrow .pclaude{color:var(--acc);font-size:11px;opacity:.75}
 .projrow.over{outline:2px dashed var(--acc);outline-offset:-2px}
 /* a mode that changes what the model is handed reads as on from across the room */
+.findbar{position:fixed;top:10px;right:18px;z-index:80;display:flex;gap:6px;align-items:center;
+ background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px 8px;
+ box-shadow:0 6px 24px rgba(0,0,0,.18)}
+.findbar input{min-width:190px}
+.findcount{color:var(--dim);font-size:12px;min-width:44px;text-align:center}
+mark.findhit{background:color-mix(in srgb,var(--acc) 30%,transparent);color:inherit;border-radius:2px}
+mark.findhit.on{background:var(--acc);color:#fff}
 .toolfold>summary{color:var(--dim);font-size:12.5px;padding:2px 0}
 .toolfold[open]>summary{margin-bottom:4px}
 .toolfold .foldbody{border-left:2px solid var(--line);padding-left:8px;margin-left:2px}
@@ -1013,6 +1020,7 @@ const CMDS=[
  {c:'/plan',d:'plan mode: it may read and think but change nothing'},
  {c:'/build',d:'leave plan mode: it may make changes again'},
  {c:'/sound',d:'toggle a short beep when an answer finishes while you are away'},
+ {c:'/find',d:'find text in this chat (⌘F)'},
  {c:'/foldtools',d:'fold a finished turn\'s steps behind one line'},
  {c:'/hidetools',d:'hide or show finished tool rows'},
  {c:'/clear',d:'clear the screen only'},
@@ -2546,6 +2554,8 @@ async function runCmd(cmd,rest){
  if(cmd==='/jump'){openJump();return true}
  if(cmd==='/sound'){const on=PREF.get('beep','0')!=='1';PREF.set('beep',on?'1':'0');
   if(on)beep();toast(on?'beep on — when an answer finishes while you are away':'beep off');return true}
+ if(cmd==='/find'){openFind();if(rest){const i=FIND.bar.querySelector('input');
+   i.value=rest;findRun(rest)}return true}
  if(cmd==='/foldtools'){const on=PREF.get('foldtools','1')!=='1';
   PREF.set('foldtools',on?'1':'0');
   toast(on?'finished turns fold their steps away':'every step stays visible');return true}
@@ -6570,6 +6580,73 @@ function groupTool(row,_depth,live){
 // block on its own achieves nothing -- the unit that matters is the turn: everything
 // between your message and the answer it ended with. That run folds behind one line,
 // and the answer stays where it is.
+// Find in this conversation. The browser's own find cannot see inside a collapsed turn
+// or a closed thinking block, which is most of a long run — this opens what it has to.
+const FIND={hits:[],at:-1,bar:null,opened:[]};
+function findClose(){
+ FIND.hits.forEach(m=>{const t=document.createTextNode(m.textContent);
+  const par=m.parentNode; if(par){par.replaceChild(t,m);par.normalize()}});
+ FIND.opened.forEach(d=>{d.open=false});
+ FIND.hits=[];FIND.at=-1;FIND.opened=[];
+ if(FIND.bar){FIND.bar.remove();FIND.bar=null}}
+
+function findRun(q){
+ FIND.hits.forEach(m=>{const t=document.createTextNode(m.textContent);
+  const par=m.parentNode; if(par){par.replaceChild(t,m);par.normalize()}});
+ FIND.hits=[];FIND.at=-1;
+ if(!q)return findDraw();
+ const low=q.toLowerCase();
+ const walk=document.createTreeWalker(wrap,NodeFilter.SHOW_TEXT,{acceptNode:n=>
+   n.nodeValue&&n.nodeValue.toLowerCase().includes(low)&&!/^(SCRIPT|STYLE|MARK)$/.test(n.parentNode.nodeName)
+     ?NodeFilter.FILTER_ACCEPT:NodeFilter.FILTER_REJECT});
+ const targets=[];let n;
+ while((n=walk.nextNode()))targets.push(n);
+ targets.slice(0,400).forEach(node=>{
+  const text=node.nodeValue;const frag=document.createDocumentFragment();
+  let i=0,j;
+  while((j=text.toLowerCase().indexOf(low,i))>=0){
+   if(j>i)frag.appendChild(document.createTextNode(text.slice(i,j)));
+   const mk=document.createElement('mark');mk.className='findhit';
+   mk.textContent=text.substr(j,q.length);frag.appendChild(mk);FIND.hits.push(mk);
+   i=j+q.length}
+  if(i<text.length)frag.appendChild(document.createTextNode(text.slice(i)));
+  node.parentNode.replaceChild(frag,node)});
+ findDraw();
+ if(FIND.hits.length)findGo(0)}
+
+function findGo(k){
+ if(!FIND.hits.length)return;
+ FIND.at=(k+FIND.hits.length)%FIND.hits.length;
+ FIND.hits.forEach(m=>m.classList.remove('on'));
+ const m=FIND.hits[FIND.at];m.classList.add('on');
+ // open whatever it is hiding inside, and remember to close it again
+ let p=m.parentElement;
+ while(p&&p!==wrap){if(p.tagName==='DETAILS'&&!p.open){p.open=true;FIND.opened.push(p)}p=p.parentElement}
+ m.scrollIntoView({block:'center'});
+ findDraw()}
+
+function findDraw(){
+ if(!FIND.bar)return;
+ const c=FIND.bar.querySelector('.findcount');
+ c.textContent=FIND.hits.length?`${FIND.at+1}/${FIND.hits.length}`:(FIND.bar.querySelector('input').value?'none':'')}
+
+function openFind(){
+ if(FIND.bar){FIND.bar.querySelector('input').select();return}
+ const bar=el(`<div class=findbar><input type=search placeholder="Find in this chat" spellcheck=false>
+   <span class=findcount></span><button class=ghost data-a=prev>↑</button>
+   <button class=ghost data-a=next>↓</button><button class=ghost data-a=x>✕</button></div>`);
+ FIND.bar=bar;document.body.appendChild(bar);
+ const inp=bar.querySelector('input');
+ let t=null;
+ inp.addEventListener('input',()=>{clearTimeout(t);t=setTimeout(()=>findRun(inp.value.trim()),160)});
+ inp.addEventListener('keydown',e=>{
+  if(e.key==='Enter'){e.preventDefault();findGo(FIND.at+(e.shiftKey?-1:1))}
+  if(e.key==='Escape'){e.preventDefault();findClose()}});
+ bar.querySelector('[data-a=next]').onclick=()=>findGo(FIND.at+1);
+ bar.querySelector('[data-a=prev]').onclick=()=>findGo(FIND.at-1);
+ bar.querySelector('[data-a=x]').onclick=findClose;
+ inp.focus()}
+
 function foldTurns(){
  const kids=[...wrap.children];
  let run=[];
@@ -7141,12 +7218,30 @@ function openRewind(){
    const one=el('<button class=ghost>chat only</button>');
    one.onclick=()=>doRewind(pt.index,false);
    acts.appendChild(one);
-   if(pt.files){const both=el('<button class=ghost>chat + files</button>');
+   if(pt.files){const both=el('<button class=ghost>chat + files…</button>');
     both.title='also put back the files those answers changed';
-    both.onclick=()=>doRewind(pt.index,true);acts.appendChild(both)}
+    // "chat + files" after a long run is the scariest button in the app. Say what it
+    // would touch, and which files it would refuse to touch, before it touches anything.
+    both.onclick=async()=>{
+     const look=await apiPost('/api/rewind/preview',{sid,index:pt.index},'checking');
+     if(!look)return;
+     const safe=(look.safe||[]).length, unsafe=look.unsafe||[], gone=(look.gone||[]).length;
+     let msg=`Put back ${safe} file${safe===1?'':'s'} and drop ${look.messages} message`
+            +`${look.messages===1?'':'s'}.`;
+     if(gone)msg+=`\n${gone} file(s) have no snapshot (they live outside the workspace) and stay as they are.`;
+     if(unsafe.length){
+      msg+='\n\nThese have changed since the answer wrote them, so your own edits would be lost:\n'
+         +unsafe.slice(0,8).map(x=>'  • '+x.path).join('\n')
+         +(unsafe.length>8?`\n  …and ${unsafe.length-8} more`:'')
+         +'\n\nOK puts everything back anyway. Cancel to leave the files alone.';
+      if(!confirm(msg))return;
+      return doRewind(pt.index,true,true)}
+     if(!confirm(msg))return;
+     doRewind(pt.index,true)};
+    acts.appendChild(both)}
    r.appendChild(acts);body.appendChild(r)})})}
-async function doRewind(index,files){
- const d=await apiPost('/api/rewind',{sid,index,files},'rewinding');
+async function doRewind(index,files,force){
+ const d=await apiPost('/api/rewind',{sid,index,files,force:!!force},'rewinding');
  if(!d)return;
  closeModal();await openSession(sid);
  toast('rewound '+d.dropped+' message'+(d.dropped===1?'':'s')+
@@ -7499,7 +7594,8 @@ addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();
  if((e.metaKey||e.ctrlKey)&&e.key===','){e.preventDefault();openSettings()}
  if((e.metaKey||e.ctrlKey)&&e.shiftKey&&(e.key==='K'||e.key==='k')){e.preventDefault();newChatWith();return}
  if((e.metaKey||e.ctrlKey)&&e.key==='k'){e.preventDefault();newChat()}
- if((e.metaKey||e.ctrlKey)&&e.key==='f'){e.preventDefault();$('#search').focus()}
+ if((e.metaKey||e.ctrlKey)&&e.key==='f'){e.preventDefault();
+  if(e.shiftKey||!sid||!wrap.children.length)$('#search').focus(); else openFind()}
  if((e.metaKey||e.ctrlKey)&&e.key==='j'){e.preventDefault();showPane('files')}
  if((e.metaKey||e.ctrlKey)&&e.key==='p'){e.preventDefault();openPal()}
  const dialog=!!$('#modalhost').innerHTML;
