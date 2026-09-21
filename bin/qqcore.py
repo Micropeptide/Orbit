@@ -113,6 +113,14 @@ DEFAULTS = {
   # Orbit's 55 tool schemas cost ~9,800 tokens of every request -- three times its system
   # prompt -- and a small model chooses better from a dozen than from fifty. The lists are
   # yours to edit; "" in a list is ignored.
+  # Orbit's own side work -- titles, summaries, the auto-review of a turn's changes --
+  # goes to this model instead of the one answering. A model on this Mac answers one
+  # request at a time, so asking it to review its own turn means queueing behind that
+  # turn; pick a hosted one here and the review runs while the local model is busy.
+  # "" = whatever the chat is using.
+  "helper_model": "",
+  # Review the files an answer changed, when it changed any: "" off, "changes" on.
+  "auto_review": "",
   "easy_mode": False,
   "easy_tools": ["read_file", "edit_file", "write_file", "run_shell", "list_dir", "glob",
                  "grep_files", "python", "web_search", "fetch_url", "task", "plan", "remember"],
@@ -2014,7 +2022,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
         a summary of where things stand rather than mid-thought."""
         try:
             ask = {"role": "user", "content": (
-                f"[Orbit: {why}. Stop calling tools. In a few short paragraphs, say what has been "
+                f"{ORBIT_SAYS} {why}. Stop calling tools. In a few short paragraphs, say what has been "
                 "done, what the results are so far, and exactly what is left to do next.]")}
             m = stream_call(messages + [ask], None, emit=emit, cancel=cancel)
             m.pop("_prompt_tokens", None); m.pop("_usage", None)
@@ -2244,7 +2252,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                     seen_calls["__nudge_mark__"] = mark
                     left = "; ".join(x["text"] for x in pend[:5])
                     messages.append({"role": "user", "nudge": True, "t": time.time(), "content": (
-                        f"[Orbit: your plan still has {len(pend)} open step(s): {left}. Carry on with "
+                        f"{ORBIT_SAYS} your plan still has {len(pend)} open step(s): {left}. Carry on with "
                         "the next one now without asking. If something blocks you, call plan(note=...) "
                         "saying what, and finish with what you have.]")})
                     emit("plan_nudge", {"left": [x["text"] for x in pend],
@@ -2257,7 +2265,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                         and seen_calls.get("__go_on__", 0) < int(S.get("plan_nudges") or 3)):
                     seen_calls["__go_on__"] = seen_calls.get("__go_on__", 0) + 1
                     messages.append({"role": "user", "nudge": True, "t": time.time(), "content": (
-                        "[Orbit: yes, keep going. There is no time limit and no need to check in; "
+                        f"{ORBIT_SAYS} yes, keep going. There is no time limit and no need to check in; "
                         "carry on until the whole task is done, then report what you did.]")})
                     emit("plan_nudge", {"msg": "it asked whether to go on — told it to keep going"})
                     continue
@@ -2273,7 +2281,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                     seen_calls["__self_cont__"] = seen_calls.get("__self_cont__", 0) + 1
                     left = "; ".join(x["text"] for x in pend[:5])
                     messages.append({"role": "user", "nudge": True, "t": time.time(), "content": (
-                        f"[Orbit: your plan still has {len(pend)} open step(s): {left}. "
+                        f"{ORBIT_SAYS} your plan still has {len(pend)} open step(s): {left}. "
                         "You are not finished. Carry on with the next one now — keep working "
                         "and calling tools until every step is done or genuinely blocked, "
                         "then report what you produced.]")})
@@ -2285,12 +2293,25 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                                       "snippet": x["text"][:260]} for x in LAST_SOURCES[:6]])
                     weak = annotate_support(answer)
                     if weak: emit("weak_claims", weak[:6])
+                if S.get("auto_review") and getattr(T, "changes", None):
+                    text = review_changes(T.changes, emit=emit)
+                    if text:
+                        emit("review", {"text": text, "files": len(T.changes),
+                                        "model": helper_model() or "this chat's model"})
                 _finish(messages[-1], rnd)
                 emit("done", None)
                 return answer
             n_before = len(messages)
             for i, tc in enumerate(calls):
                 if not tc.get("id"): tc["id"] = f"call_{rnd}_{i}"
+                if cancel.is_set():
+                    # a round can hold five calls; Stop used to run all five. Every
+                    # remaining call still needs a result, or the next request carries a
+                    # tool_call with nothing answering it and the provider refuses it.
+                    messages.append({"role": "tool", "tool_call_id": tc["id"],
+                                     "name": tc["function"].get("name") or "tool",
+                                     "content": "(stopped before this ran)", "t": time.time()})
+                    continue
                 fn, args, bad = repair_call(tc["function"].get("name") or "",
                                             tc["function"].get("arguments"), tools)
                 emit("tool", {"name": fn, "args": args, "id": tc["id"], "t": time.time()})
@@ -2342,7 +2363,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                 seen_calls["__fail_warned__"] = True
                 emit("fail_streak", {"n": streak, "msg": f"{streak} tool calls failed in a row — rethinking"})
                 messages.append({"role": "user", "nudge": True, "t": time.time(), "content": (
-                    f"[Orbit: the last {streak} tool calls failed. Stop and think before the next one: "
+                    f"{ORBIT_SAYS} the last {streak} tool calls failed. Stop and think before the next one: "
                     "say what went wrong, undo anything you broke (checkpoints keep earlier versions "
                     "of edited files), then try a different approach — or finish and explain what "
                     "blocks you.]")})
@@ -2421,7 +2442,7 @@ def compact(messages, keep_tail=6, pin=None):
                + "\n\n".join(prior)[-24000:] + "\n=== End of earlier summary ===\n\n") if prior else "")
            + "=== Conversation to summarise ===\n" + text)
     summary = (stream_call([sysmsg, {"role": "user", "content": ask}], None,
-                           think=False).get("content") or "").strip()
+                           think=False, model=helper_model()).get("content") or "").strip()
     if not summary:
         return messages, "the summary came back empty, so nothing was folded away"
     note = {"role": "assistant", "compacted": True, "t": time.time(),
@@ -3467,6 +3488,16 @@ def _never_auto(fn, reason):
     if base.endswith(INSIDE_WS): base = base[:-len(INSIDE_WS)].strip()
     return fn in NEVER_AUTO_FNS or base in NEVER_AUTO
 
+ORBIT_SAYS = "[Orbit — automatic, not from the user and not approval for anything:"
+
+def _orbit_note(text):
+    """Orbit writes notes into the conversation (keep going, your plan has open steps,
+    the last three calls failed). They go in as user messages because that is the only
+    role a provider will accept mid-turn -- which means a model reading back later can
+    take "[Orbit: yes, keep going]" as the user having said it, and cite it as approval.
+    The frame says plainly whose words they are."""
+    return f"{ORBIT_SAYS} {text}]"
+
 NEVER_AUTO = {
     "sudo -- runs as administrator", "shutting the machine down",
     "removing a background service", "changing system preferences",
@@ -4477,6 +4508,77 @@ def squeeze_tool_results(messages, keep_recent=6, cap=1500):
     return out, freed
 
 
+OUTPUT_RESERVE = 21000       # the answer has to fit in the window too
+
+def _usable_window(mx):
+    """The room a request may take. The reply is written into the same window, so a
+    request that fills 80% of 131k leaves 26k for a 32k answer and the provider
+    refuses it -- which Orbit only found out afterwards, from the overflow retry."""
+    try: want = int(S.get("max_output_tokens") or 32000)
+    except (TypeError, ValueError): want = 32000
+    return max(mx - min(want, OUTPUT_RESERVE), mx // 2, 1)
+
+def helper_model(want=None):
+    """The model Orbit uses for its own work, or None for "whatever the chat uses".
+
+    Kept separate because Orbit's side work competes with the answer itself: the local
+    server takes one request at a time, so a review of a turn, asked of the model that
+    is still finishing that turn, waits for it -- and if something else is generating,
+    times out. Any model in the picker can do this work."""
+    want = str(want if want is not None else (S.get("helper_model") or "")).strip()
+    if not want: return None
+    try:
+        # current_model() falls back to the default for an id it does not know, which
+        # would quietly send the side work somewhere else; ask the catalogue instead
+        return want if any(m["id"] == want for m in model_catalogue()) else None
+    except Exception:
+        return None
+
+
+def turn_diff(changes, cap=24000):
+    """A unified diff of what this answer changed, from the snapshots it already took."""
+    import difflib
+    out, used = [], 0
+    for ch in changes or []:
+        path = ch.get("path")
+        if not path: continue
+        try: now = open(path, encoding="utf-8", errors="replace").read().splitlines(keepends=True)
+        except OSError: now = []
+        before = []
+        if not ch.get("created") and ch.get("snap"):
+            try: before = open(ch["snap"], encoding="utf-8", errors="replace").read().splitlines(keepends=True)
+            except OSError: before = []
+        d = "".join(difflib.unified_diff(before, now, fromfile=f"a/{path}", tofile=f"b/{path}", n=3))
+        if not d.strip(): continue
+        if used + len(d) > cap:
+            out.append(f"--- {path}: diff too large to include ({len(d)} chars)\n")
+            continue
+        used += len(d); out.append(d)
+    return "".join(out)
+
+
+REVIEW_ASK = ("Review this diff. Report real problems first — bugs, wrong results, data loss, "
+              "security issues, broken edge cases — each with the file and line, what goes wrong, "
+              "and a concrete fix. Then smaller issues. Skip style preferences. Say plainly if it "
+              "looks good. Do not suggest running anything; you are reading, not working.")
+
+def review_changes(changes, emit=None, model=None):
+    """Read what this answer changed and say what is wrong with it.
+
+    The same question /review asks, asked automatically, of whichever model does Orbit's
+    side work. Returns the review text, or "" when there was nothing to read."""
+    diff = turn_diff(changes)
+    if not diff.strip(): return ""
+    if emit: emit("status", {"msg": "reviewing the changes"})
+    try:
+        out = stream_call([{"role": "system", "content": "You are a careful code reviewer."},
+                           {"role": "user", "content": REVIEW_ASK + "\n\n" + diff}],
+                          None, think=False, model=model or helper_model())
+    except Exception as e:
+        return f"(the review could not run: {type(e).__name__}: {e})"
+    return (out.get("content") or "").strip()
+
+
 def _fill_pct(messages, sid=None):
     """How full the window is for what is about to be sent, erring high: the
     server's own count from this chat's last request when it reported one, or
@@ -4484,7 +4586,10 @@ def _fill_pct(messages, sid=None):
     overflowing the window halfway through a task is not."""
     st = context_state(messages)
     exact = SESSION_TOKENS.get(sid) if sid else None
-    return round(100.0 * max(st["used"], exact or 0) / max(st["max"], 1), 1)
+    return round(100.0 * max(st["used"], exact or 0) / _usable_window(max(st["max"], 1)), 1)
+
+_COMPACT_AT = {}             # sid -> (message count, when) at the last compaction
+COMPACT_COOLDOWN_MSGS = 8    # rounds of new material before summarising again
 
 COMPACTED_DIR = os.path.join(SESSIONS, ".compacted")
 
@@ -4516,6 +4621,17 @@ def _shrink(messages, sid=None, emit=None, pin=None, force=False):
     if limit <= 0 or len(messages) < 4: return False, 0.0
     first = _fill_pct(messages, sid)
     if first < limit and not force: return False, first
+    # _shrink runs before every round of an answer, and once the window is over the
+    # line it stays over: without this, a long autonomous turn paid for a fresh
+    # summarisation of the whole history on every tool round.
+    if not force:
+        # keyed on this conversation, not on "" -- a chat without a sid would otherwise
+        # share one cooldown with every other chat in the process
+        key = sid or id(messages)
+        last = _COMPACT_AT.get(key, (0, 0.0))
+        if len(messages) - last[0] < COMPACT_COOLDOWN_MSGS and time.time() - last[1] < 300:
+            return False, first
+        _COMPACT_AT[key] = (len(messages), time.time())
     under = lambda: context_state(messages)["pct"] < limit
     if S.get("squeeze_tool_results", True):
         squeezed, freed = squeeze_tool_results(messages)
@@ -5688,18 +5804,56 @@ def _auto_approvable(fn, args, reason):
 
 # ------------------------------------------------------------------ plugins
 PLUGINS_DIR = os.path.join(ROOT, "plugins")
+PLUGIN_TRUST = os.path.join(CONFIG, "plugins-trusted.json")
 _PLUGIN_CACHE = {}
+
+def plugin_digest(path):
+    """What this plugin's code is, right now."""
+    try:
+        return hashlib.sha256(open(path, "rb").read()).hexdigest()
+    except OSError:
+        return ""
+
+def plugin_trust(path=None, digest=None, trust=None):
+    """Which plugin files you have agreed to run, by content.
+
+    Reading a plugin means executing it, and `plugins/` is a folder anything can write
+    into -- a synced directory, a model that was asked to "save this script", a cloned
+    repo. Project tools already work this way (see _tool_defs); the plugin folder was
+    the one extension surface with no gate at all. Trust is keyed on the file's hash,
+    so an edited plugin is a new plugin and has to be agreed to again."""
+    store = _json_file(PLUGIN_TRUST, {})
+    if path is None: return store
+    key = os.path.basename(path)
+    if trust is None:
+        return bool(store.get(key)) and store.get(key) == (digest or plugin_digest(path))
+    if trust: store[key] = digest or plugin_digest(path)
+    else: store.pop(key, None)
+    _atomic_write(PLUGIN_TRUST, store)
+    return trust
+
+PLUGIN_PENDING = {}          # path -> digest, seen but not agreed to
 
 def plugins():
     """Python files in ROOT/plugins that hook into Orbit. Each may define
     tool_before(name, args) -> args (raise to refuse the call),
     tool_after(name, args, output) -> output, and system_transform(text) -> text.
-    A plugin that fails is skipped and logged; it never breaks an answer."""
+    A plugin that fails is skipped and logged; it never breaks an answer.
+
+    A plugin runs only once you have agreed to that exact file (plugin_trust)."""
     if not os.path.isdir(PLUGINS_DIR): return []
     out = []
     for fn in sorted(os.listdir(PLUGINS_DIR)):
         if not fn.endswith(".py") or fn.startswith("_"): continue
         path = os.path.join(PLUGINS_DIR, fn)
+        digest = plugin_digest(path)
+        if not plugin_trust(path, digest):
+            if PLUGIN_PENDING.get(path) != digest:
+                PLUGIN_PENDING[path] = digest
+                _plugin_log(fn, "not run", "new or changed since you agreed to it — "
+                                           "Settings → Tools → Plugins to look at it")
+            continue
+        PLUGIN_PENDING.pop(path, None)
         try:
             mt = os.path.getmtime(path)
             hit = _PLUGIN_CACHE.get(path)
