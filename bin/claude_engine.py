@@ -513,6 +513,15 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
     if session_id:
         argv += (["--resume", session_id] if resume else ["--session-id", session_id])
     mode = "plan" if read_only else (mode or "")
+    if mode == "auto" and kind == "local":
+        # Claude Code's "auto" asks the *model* to classify each tool call's safety.
+        # Pointed at a model on this Mac that is already busy generating the turn, the
+        # classifier waits behind it and times out at 60s -- and a classifier that times
+        # out refuses the tool: "…cannot determine the safety of Bash right now". Every
+        # Bash call in the chat fails that way. Orbit answers the same question from
+        # risk_check in microseconds through --permission-prompt-tool, so the local
+        # model gets Orbit's gate instead of Claude's.
+        mode = "default"
     if mode in PERMISSION_MODES and mode != "default":     # "default" (ask first) is Claude's own
         argv += ["--permission-mode", mode]
     dis = [t for t in (c.get("disallowed_tools") if kind == "local" else
@@ -792,7 +801,7 @@ def decide(tool, inp, ctx, req=None):
         reason = why or reason
         mode = Q.S.get("autonomy_mode", "ask")
         by_rule = Q.allowed_by_rule(fn, args)
-        auto = bool(by_rule) or (mode == "full" and fn not in Q.NEVER_AUTO_FNS and reason not in Q.NEVER_AUTO) \
+        auto = bool(by_rule) or (mode == "full" and not Q._never_auto(fn, reason)) \
             or (mode == "auto" and Q._auto_approvable(fn, args, reason))
         if auto:
             ctx["emit"]("auto_approved", {"name": tool, "args": inp, "reason": reason,
