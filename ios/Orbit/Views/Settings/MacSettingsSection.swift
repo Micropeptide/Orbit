@@ -20,6 +20,7 @@ struct MacSettingsSection: View {
                 case "general": MacGeneralView()
                 case "server": LocalServerView()
                 case "tools": ToolsRulesView()
+                case "easy": EasyModeView()
                 case "mcp": MCPServersView()
                 case "claude": ClaudeCodeSettingsView()
                 case "claude-options": ClaudeOptionsView()
@@ -53,6 +54,7 @@ struct MacSettingsSection: View {
             NavigationLink { MacGeneralView() } label: { Label("General", systemImage: "slider.horizontal.3") }
             NavigationLink { LocalServerView() } label: { Label("Local server", systemImage: "cpu") }
             NavigationLink { ToolsRulesView() } label: { Label("Tools & rules", systemImage: "wrench.and.screwdriver") }
+            NavigationLink { EasyModeView() } label: { Label("Easy mode", systemImage: "wrench") }
             NavigationLink { MCPServersView() } label: { Label("MCP servers", systemImage: "puzzlepiece.extension") }
             NavigationLink { ClaudeCodeSettingsView() } label: { Label("Claude Code", systemImage: "terminal") }
             NavigationLink { CodexSettingsView() } label: { Label("Codex", systemImage: "chevron.left.forwardslash.chevron.right") }

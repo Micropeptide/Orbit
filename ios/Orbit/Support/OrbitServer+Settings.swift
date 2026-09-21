@@ -171,6 +171,30 @@ extension OrbitServer {
         try await getJSON("/api/claude/info?sid=", as: ClaudeInfo.self, timeout: 60)
     }
 
+    /// What easy mode has to choose from: the tools Claude Code has said it has, the
+    /// ones kept, and the MCP servers. `learn` starts a short-lived claude to ask it —
+    /// it has nothing to say until it has run at least once.
+    struct EasyTools {
+        var known: [String] = []
+        var keep: [String] = []
+        var mcp: [String] = []
+        var mcpKeep: [String] = []
+    }
+
+    func claudeEasyTools(sid: String? = nil, learn: Bool = false) async throws -> EasyTools {
+        var q = [String]()
+        if learn { q.append("learn=1") }
+        if let sid, !sid.isEmpty { q.append("sid=" + OrbitServer.escaped(sid)) }
+        let path = "/api/claude/tools" + (q.isEmpty ? "" : "?" + q.joined(separator: "&"))
+        var req = try request(path)
+        req.timeoutInterval = learn ? 90 : 30      // learning starts a claude and waits
+        let data = try await run(req)
+        let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        func list(_ k: String) -> [String] { ((o[k] as? [Any]) ?? []).map { "\($0)" } }
+        return EasyTools(known: list("known"), keep: list("keep"),
+                         mcp: list("mcp"), mcpKeep: list("mcp_keep"))
+    }
+
     /// Merge options into Orbit's Claude Code settings (defaults for new chats and the rest).
     @discardableResult
     func saveClaudeOptions(_ settings: [String: Any]) async throws -> JSONValue {

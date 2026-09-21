@@ -11,6 +11,7 @@ final class ChatActionsModel: ObservableObject {
     @Published var skillName = ""
     @Published var confirmRegenerate: Bool? = nil        // false = regenerate, true = deeper
     @Published var showJump = false
+    @Published var showEasy = false
     @Published var showStats = false
     @Published var exportURL: URL?
     @Published var confirmBurn = false
@@ -205,6 +206,9 @@ struct ChatActionsHost: ViewModifier {
             .sheet(isPresented: $model.showJump) {
                 JumpSheet(messages: state.messages) { model.jumpRequest = $0 }
             }
+            .sheet(isPresented: $model.showEasy) {
+                NavigationStack { EasyModeView(sid: sid) }
+            }
             .sheet(isPresented: $model.showStats) { UsageStatsView(sid: sid) }
             .sheet(isPresented: $model.showRewind) { RewindSheet() }
             .sheet(isPresented: $model.showContext) { ContextSheet(sid: sid) }
@@ -313,6 +317,9 @@ struct ChatMenuItems: View {
         } label: {
             Label(state.chatExtras.easyMode ? "Leave easy mode" : "Easy mode — essential tools only",
                   systemImage: state.chatExtras.easyMode ? "wrench.and.screwdriver" : "wrench")
+        }
+        Button { model.showEasy = true } label: {
+            Label("Choose what easy mode keeps…", systemImage: "slider.horizontal.3")
         }
         Button { model.showJump = true } label: {
             Label("Jump to a message…", systemImage: "arrow.down.to.line")

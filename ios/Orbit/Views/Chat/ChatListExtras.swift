@@ -411,11 +411,22 @@ struct ProjectsManager: View {
                         Button(role: .destructive) { deleting = p } label: { Label("Delete", systemImage: "trash") }
                     }
                 }
+                // the order they appear in the sidebar, which is the one place a phone
+                // is better at this than a mouse
+                .onMove { from, to in
+                    items.move(fromOffsets: from, toOffset: to)
+                    let ids = items.map(\.id)
+                    Task {
+                        do { try await state.requireServer().reorderProjects(ids); await state.loadProjects() }
+                        catch { state.lastError = error.localizedDescription; await load() }
+                    }
+                }
             }
             .navigationTitle("Projects")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
+                ToolbarItem(placement: .topBarLeading) { if items.count > 1 { EditButton() } }
                 ToolbarItem(placement: .primaryAction) {
                     Button { editing = ProjectDetail() } label: { Image(systemName: "plus") }
                         .accessibilityLabel("New project")
