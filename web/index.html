@@ -498,8 +498,8 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .projrow .ct{color:var(--dim);font-size:11px}
 .projrow .pclaude{color:var(--acc);font-size:11px;opacity:.75}
 .projrow.over{outline:2px dashed var(--acc);outline-offset:-2px}
-/* a mode that changes what the model is handed should be visible while it is on */
-#easybtn{border-color:var(--acc);color:var(--acc)}
+/* a mode that changes what the model is handed reads as on from across the room */
+#easybtn.on{border-color:var(--acc);color:var(--acc);background:color-mix(in srgb,var(--acc) 12%,transparent)}
 .projrow.dragging{opacity:.5}
 .projrow[draggable=true]{cursor:grab}
 .daygroup .gsw{width:8px;height:8px;border-radius:2px;display:inline-block;margin-right:2px}
@@ -936,7 +936,7 @@ table.stbl{border-collapse:collapse;width:100%;font-size:13px;margin:2px 0 6px}
     <span class=ctx id=ctxbox style="display:none">
       <span class=bar><i id=ctxbar></i></span><span id=ctxtxt></span></span>
     <span style="margin-left:auto;display:flex;gap:7px">
-      <button class=ghost id=easybtn style="display:none">easy</button>
+      <button class=ghost id=easybtn>easy</button>
       <button class=ghost id=tempbtn title="temporary chat — nothing is saved">temp</button>
       <button class=ghost id=burnbtn style="display:none;border-color:var(--err);color:var(--err)">burn</button>
       <button class=ghost id=compact>compact</button>
@@ -7251,10 +7251,14 @@ async function setEasy(on){
 
 function drawEasyBtn(){
  const b=$('#easybtn'); if(!b)return;
- const on=!!(INFO.settings&&INFO.settings.easy_mode);
- b.style.display=on?'':'none';
- b.title=`easy mode: ${(INFO.tools||[]).length} tools offered — click to turn it off`;
- b.onclick=()=>setEasy(false)}
+ const on=!!(INFO.settings&&INFO.settings.easy_mode), n=(INFO.tools||[]).length;
+ b.classList.toggle('on',on);
+ b.textContent=on?`easy · ${n}`:'easy';
+ b.title=on?`easy mode is on — ${n} tools offered. Click to give the model all of them again `
+            +`(Settings → Tools to choose which are kept).`
+           :`easy mode is off — ${n} tools offered. Click to hand the model only the essential ones, `
+            +`which a small model chooses from better (Settings → Tools to choose which).`;
+ b.onclick=()=>setEasy(!on)}
 
 $('#more').onclick=e=>{e.stopPropagation();
  const r=$('#more').getBoundingClientRect();
