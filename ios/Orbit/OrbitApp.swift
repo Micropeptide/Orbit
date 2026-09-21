@@ -37,6 +37,7 @@ struct OrbitApp: App {
                 }
                 .onChange(of: phase) { old, new in
                     state.backgrounded = (new != .active)
+                    LiveClock.shared.awake(new == .active)
                     switch new {
                     case .active:
                         state.markOpenChatSeen()
@@ -54,6 +55,10 @@ struct OrbitApp: App {
                         }
                     case .background:
                         state.wentToBackground = true
+                        // A run waiting on an approval is blocked until you answer it,
+                        // and you have just walked away from the phone. It is announced
+                        // now rather than only when you were already elsewhere.
+                        state.announceWaitingApproval()
                         // hold the app awake briefly so an answer in flight can
                         // finish and announce itself
                         if state.streaming { state.beginBackgroundGrace() }

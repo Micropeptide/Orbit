@@ -145,7 +145,9 @@ struct CodeBlock: View {
         .sheet(isPresented: $full) {
             NavigationStack {
                 ScrollView {
-                    CodeBlock(language: language, code: code, collapsible: false)
+                    // `shown`, not `visible`: full screen is all of it, and
+                    // JSON you formatted in place stays formatted
+                    CodeBlock(language: language, code: shown, collapsible: false)
                         .padding(.horizontal, 12).padding(.vertical, 10)
                 }
                 .navigationTitle(language.isEmpty ? "Code" : language)

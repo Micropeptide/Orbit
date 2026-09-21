@@ -183,9 +183,11 @@ private struct Working: ViewModifier {
                 .opacity(dim ? 0.55 : 1)
                 .animation(.easeInOut(duration: 0.95).repeatForever(autoreverses: true), value: dim)
                 .onAppear { dim = true }
-                .onDisappear { dim = false }
+                // not onDisappear: setting the animated value while a repeatForever
+                // animation is still attached is how one gets left running on a view
+                // that has gone
         } else {
-            content
+            content.opacity(1)
         }
     }
 }
@@ -200,7 +202,25 @@ private struct Working: ViewModifier {
 
     func join() {
         watchers += 1
-        guard timer == nil else { return }
+        start()
+    }
+
+    func leave() {
+        watchers = max(0, watchers - 1)
+        if watchers == 0 { stop() }
+    }
+
+    /// Nothing to show while the app is not on screen, and a timer on the common run
+    /// loop keeps firing there. Called from the scene-phase change.
+    func awake(_ on: Bool) {
+        asleep = !on
+        if on { start() } else { stop() }
+    }
+
+    private var asleep = false
+
+    private func start() {
+        guard timer == nil, watchers > 0, !asleep else { return }
         now = Date()
         let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.now = Date() }
@@ -209,26 +229,36 @@ private struct Working: ViewModifier {
         timer = t
     }
 
-    func leave() {
-        watchers = max(0, watchers - 1)
-        if watchers == 0 { timer?.invalidate(); timer = nil }
-    }
+    private func stop() { timer?.invalidate(); timer = nil }
 }
 
 /// How long it took, or a running clock while it runs.
+///
+/// The running case is its own view on purpose: an `@ObservedObject` is a subscription,
+/// and a stored one would subscribe every finished row in the chat too — three hundred
+/// static "1.4s" labels re-rendering once a second to say the same thing. Only the rows
+/// that are actually running watch the clock.
 private struct ToolClock: View {
     let run: ToolRun
-    @ObservedObject private var clock = LiveClock.shared
 
     var body: some View {
         if run.running, let t0 = run.startedAt {
-            Text(ToolText.secs(clock.now.timeIntervalSince(t0)))
-                .font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
-                .onAppear { clock.join() }
-                .onDisappear { clock.leave() }
+            RunningFor(since: t0)
         } else if let s = run.secs, s >= 0.5 {
             Text(ToolText.secs(s)).font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
         }
+    }
+}
+
+private struct RunningFor: View {
+    let since: Date
+    @ObservedObject private var clock = LiveClock.shared
+
+    var body: some View {
+        Text(ToolText.secs(clock.now.timeIntervalSince(since)))
+            .font(.caption2.monospacedDigit()).foregroundStyle(.tertiary)
+            .onAppear { clock.join() }
+            .onDisappear { clock.leave() }
     }
 }
 
@@ -309,6 +339,8 @@ struct ThinkingBlock: View {
     @State private var showAll = false
     /// You opened or closed it yourself, so nothing opens or closes it for you again.
     @State private var userTouched = false
+    /// The answer has begun at least once, so thinking is no longer the thing to read.
+    @State private var answered = false
 
     /// Long thinking shows its first lines (the latest ones while it is written) and a
     /// "Show all"; the rest is a tap away.
@@ -322,6 +354,16 @@ struct ThinkingBlock: View {
             return "…\n" + String(tail.joined(separator: "\n").suffix(Self.lines * 140))
         }
         return text
+    }
+
+    private var thoughts: some View {
+        Text(shown)
+            .font(.caption.monospaced())
+            .foregroundStyle(.secondary)
+            .lineLimit(long && !showAll && !live ? Self.lines : nil)
+            .textSelection(.enabled)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var label: String {
@@ -345,18 +387,14 @@ struct ThinkingBlock: View {
             }
             .buttonStyle(.plain)
             if open {
-                Text(shown)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(long && !showAll && !live ? Self.lines : nil)
-                    .textSelection(.enabled)
-                    .padding(10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    // while it thinks, it may not fill the screen: the answer is what you
-                    // are waiting for, and it has to stay in view
-                    .frame(maxHeight: live && !showAll ? 240 : nil, alignment: .top)
-                    .clipped()
-                    .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 9))
+                // While it thinks it may not fill the screen — the answer is what you
+                // are waiting for. Capping it with .clipped() cut text that had no
+                // "Show all" to open (that button only exists for LONG thinking), so it
+                // scrolls inside itself instead and nothing is unreachable.
+                ScrollView { thoughts }
+                    .frame(maxHeight: live && !showAll ? 240 : .infinity)
+                    .scrollBounceBehavior(.basedOnSize)
+                    .scrollDisabled(!(live && !showAll))
                 if long {
                     Button(showAll ? "Show less" : "Show all · \(ToolText.plural(lineCount, "line", "lines"))") {
                         withAnimation(.easeInOut(duration: 0.15)) { showAll.toggle() }
@@ -370,7 +408,11 @@ struct ThinkingBlock: View {
         .onAppear { if live && !userTouched { open = true } }
         .onChange(of: live) { _, nowLive in
             guard !userTouched else { return }
-            withAnimation(.easeInOut(duration: 0.2)) { open = nowLive }
+            // "live" goes true again between the steps of one answer, so following it
+            // both ways made the box open and shut repeatedly mid-answer. It opens once
+            // and closes once: when the answer starts, it is done opening.
+            if nowLive { if !answered { withAnimation(.easeInOut(duration: 0.2)) { open = true } } }
+            else { answered = true; withAnimation(.easeInOut(duration: 0.2)) { open = false } }
         }
     }
 }

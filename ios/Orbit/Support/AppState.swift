@@ -90,6 +90,8 @@ final class AppState: ObservableObject {
     /// File edits shown while answers ran here, per chat, for /diff.
     @Published var shownDiffs: [String: [ShownDiff]] = [:]
     @Published var pendingApproval: (name: String, reason: String, id: String)?
+    /// Which chat the open approval belongs to, so it can be announced if you leave.
+    var pendingApprovalChat: String?
     /// Questions, approvals, plan mode, temporary chat, row status (AppState+Chat.swift).
     @Published var chatExtras = ChatExtras()
     /// The list's paging, /tasks and the first-pairing tips (AppState+Work.swift).
@@ -265,11 +267,17 @@ final class AppState: ObservableObject {
     /// Reload the list only if the Mac says it has changed. `force` skips the check.
     func loadChatsIfChanged(force: Bool = false) async {
         guard let server else { return }
+        var seen: String?
         if !force, let stamp = try? await server.chatsStamp() {
             if stamp == Self.chatsStamp, !chats.isEmpty { return }
-            Self.chatsStamp = stamp
+            seen = stamp
         }
+        let before = lastError
         await loadChats()
+        // Only once the list actually arrived. Storing it first meant one timed-out
+        // page on cellular froze the list for good: every later poll saw the same
+        // stamp and returned without trying again.
+        if let seen, lastError == before { Self.chatsStamp = seen }
     }
 
     func loadChats() async {
@@ -655,11 +663,29 @@ final class AppState: ObservableObject {
     /// hold it open, keep reading the stream, and post a local notification when
     /// the answer lands. If iOS suspends us first the answer is still safe on
     /// the Mac — you just find it there instead of being tapped on the shoulder.
+    /// An approval still waiting when you leave the app. It arrived while you were
+    /// looking at it, so nothing announced it — and then you locked the phone and the
+    /// run stayed blocked with nothing to say so.
+    func announceWaitingApproval() {
+        guard let a = chatExtras.approval else { return }
+        postApproval(a)
+    }
+
     /// The approval, with Allow and Deny on the notification itself.
     func notifyApproval(_ a: ApprovalPrompt) {
-        guard backgrounded, let sid = liveSid ?? openChat?.sid else { return }
+        guard let sid = liveSid ?? openChat?.sid else { return }
+        pendingApprovalChat = sid
+        guard backgrounded else { return }
+        postApproval(a)
+    }
+
+    private func postApproval(_ a: ApprovalPrompt) {
+        guard let sid = pendingApprovalChat ?? liveSid ?? openChat?.sid else { return }
         let c = UNMutableNotificationContent()
-        c.title = (openChat?.title ?? "Orbit") + " needs your approval"
+        // the chat that asked, which is not always the chat you have open
+        let name = (openChat?.sid == sid ? openChat?.title : nil)
+            ?? chats.first { $0.id == sid }?.title ?? "Orbit"
+        c.title = name + " needs your approval"
         c.body = String((a.reason.isEmpty ? a.name : a.reason).prefix(240))
         c.sound = .default
         c.categoryIdentifier = Notifications.approvalCategory
@@ -670,10 +696,33 @@ final class AppState: ObservableObject {
 
     /// Answer an approval by its id alone — what a notification action has to go on.
     func answerApproval(id: String, allow: Bool) async {
-        guard let server, !id.isEmpty else { return }
-        try? await server.approve(id, reply: ApprovalReply(allow: allow))
+        guard !id.isEmpty else { return }
+        // A cold launch from the notification runs this before the pairing has built a
+        // server, and the action was silently dropped: you believe you allowed it and
+        // the run stays blocked. Wait a moment for one.
+        for _ in 0..<40 where server == nil {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        guard let server else {
+            toast("Couldn't reach the Mac to answer that")
+            return
+        }
+        do {
+            try await server.approve(id, reply: ApprovalReply(allow: allow))
+            toast(allow ? "Allowed" : "Denied")
+        } catch {
+            toast("That approval had already been answered")
+        }
+        clearApproval(id)
+    }
+
+    /// The prompt is answered: take it off the screen and off the Lock Screen.
+    func clearApproval(_ id: String) {
         if chatExtras.approval?.id == id { chatExtras.approval = nil }
         if pendingApproval?.id == id { pendingApproval = nil }
+        let n = UNUserNotificationCenter.current()
+        n.removeDeliveredNotifications(withIdentifiers: ["approval-" + id])
+        n.removePendingNotificationRequests(withIdentifiers: ["approval-" + id])
     }
 
     func notifyIfBackgrounded(title: String, body: String, sid: String? = nil) {

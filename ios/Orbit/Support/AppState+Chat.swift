@@ -100,8 +100,7 @@ extension AppState {
         } catch {
             toast("Already answered — elsewhere, or it timed out")
         }
-        if chatExtras.approval?.id == a.id { chatExtras.approval = nil }
-        if pendingApproval?.id == a.id { pendingApproval = nil }
+        clearApproval(a.id)          // and take the banner off the Lock Screen
     }
 
     // ------------------------------------------------------------ per message
