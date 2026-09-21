@@ -621,6 +621,17 @@ class H(http.server.BaseHTTPRequestHandler):
                 "paths": {"user": q.CE.claude_settings_path("user"),
                           "skills": os.path.join(q.CE.claude_dir(), "skills")},
                 "skills": q.CE.skills_list()}))
+        if p.split("?")[0] == "/api/git":
+            # what the folder this chat works in looks like right now
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            sid_ = (qs.get("sid") or [""])[0]
+            st_ = STATES.get(sid_) if sid_ else None
+            cwd = None
+            if st_ is not None:
+                cwd = q.project_folder(st_.project) if st_.project else None
+                mk = q.CE.marker_of(st_.msgs) or {}
+                cwd = mk.get("cwd") or cwd
+            return self._send(200, jdump(q.git_state(cwd or q.WORKSPACE)))
         if p.split("?")[0] == "/api/claude/tools":
             # what Claude Code says it has, so easy mode can offer them as a choice
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}

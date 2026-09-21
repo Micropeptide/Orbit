@@ -3500,6 +3500,41 @@ def _rule_match(rules, fn, args):
             return {"tool": tool, "pattern": pat, "note": r.get("note") or ""}
     return None
 
+_GIT_CACHE = {}
+
+def git_state(folder, max_age=4.0):
+    """Branch, how much is uncommitted, and how far from the upstream -- for the dock.
+
+    Read-only and cached for a few seconds: the dock asks often, and `git status` on a
+    big repository is not free."""
+    folder = os.path.abspath(os.path.expanduser(folder or ""))
+    hit = _GIT_CACHE.get(folder)
+    if hit and time.time() - hit[0] < max_age: return dict(hit[1])
+    out = {"repo": False, "folder": folder}
+    def git(*a):
+        r = subprocess.run(["git", "-C", folder, *a], capture_output=True, text=True, timeout=8)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    try:
+        if git("rev-parse", "--is-inside-work-tree") != "true":
+            _GIT_CACHE[folder] = (time.time(), out); return dict(out)
+        out["repo"] = True
+        out["branch"] = git("rev-parse", "--abbrev-ref", "HEAD") or "?"
+        lines = [l for l in git("status", "--porcelain").splitlines() if l.strip()]
+        out["dirty"] = len(lines)
+        out["untracked"] = sum(1 for l in lines if l.startswith("??"))
+        stat = git("diff", "--shortstat")
+        out["diff"] = stat or ""
+        ab = git("rev-list", "--left-right", "--count", "@{u}...HEAD")
+        if ab and "\t" in ab:
+            behind, ahead = ab.split("\t")[:2]
+            out["ahead"], out["behind"] = int(ahead or 0), int(behind or 0)
+        out["last"] = git("log", "-1", "--pretty=%s")[:120]
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+    _GIT_CACHE[folder] = (time.time(), out)
+    return dict(out)
+
+
 def project_rules_for(kind, project=None):
     """This project's own allow/deny rules.
 
