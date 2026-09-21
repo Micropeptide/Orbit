@@ -663,7 +663,12 @@ class H(http.server.BaseHTTPRequestHandler):
             c = q.CE.cfg()
             try: servers = sorted(q.CE.user_mcp_servers())
             except Exception: servers = []
-            return self._send(200, jdump({"known": known, "keep": c.get("easy_tools") or [],
+            # a chat may keep its own list (claude_easy_tools); "keep" is what applies
+            for_sid = (qs.get("sid") or [""])[0]
+            keep = (q.chat_setting("claude_easy_tools", for_sid) if for_sid else None) \
+                   or c.get("easy_tools") or []
+            return self._send(200, jdump({"known": known, "keep": keep,
+                                          "orbit_default": c.get("easy_tools") or [],
                                           "mcp": servers, "mcp_keep": c.get("easy_mcp") or []}))
         if p == "/api/claude/plugins":
             return self._send(200, jdump({**q.CE.plugins_list(), **q.CE.marketplaces_list()}))
@@ -1135,9 +1140,18 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/compact":
             st = get_state(d.get("sid")) if d.get("sid") else S
             if st.lock.locked(): return self._send(409, jdump({"error": "that chat is answering — compact it after"}))
+            # The model call happens outside LOCK. It can take a minute on a cold local
+            # model, and LOCK is the registry's lock: holding it that long froze every
+            # other window and the phone — /api/new, /api/settings, picking a model, all
+            # of it — on the next click. Only the swap needs the lock.
+            before = len(st.msgs)
+            was = list(st.msgs)
+            new_msgs, summary = q.compact(was)
             with LOCK:
-                before = len(st.msgs)
-                st.msgs, summary = q.compact(st.msgs)
+                if st.msgs is not was and len(st.msgs) != before:
+                    return self._send(409, jdump({"error": "that chat changed while it was "
+                                                           "being compacted — try again"}))
+                st.msgs = new_msgs
                 save_session(st)
             return self._send(200, jdump({"before": before, "after": len(st.msgs), "summary": summary}))
         if p == "/api/delete":
@@ -1655,7 +1669,9 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/memory/suggest":
             try:
                 st_ = get_state(d.get("sid")) if d.get("sid") else S     # the chat named, not whichever is open
-                with LOCK: items = q.suggest_memories(st_.msgs)
+                # reads the messages and calls the model: not work to hold the registry's
+                # lock for, which froze every other window until it came back
+                items = q.suggest_memories(list(st_.msgs))
                 return self._send(200, jdump({"items": items}))
             except Exception as e:
                 return self._send(200, jdump({"items": [], "error": str(e)}))
@@ -2101,7 +2117,7 @@ class H(http.server.BaseHTTPRequestHandler):
             # a Claude Code chat's procedure becomes a Claude skill (~/.claude/skills)
             st = get_state(d.get("sid")) if d.get("sid") else S
             writer = q.CE.write_claude_skill if q.CE.is_engine(q.current_model(st.model)) else None
-            with LOCK: name = q.capture_skill(st.msgs, d.get("name") or "captured-skill", writer)
+            name = q.capture_skill(list(st.msgs), d.get("name") or "captured-skill", writer)
             return self._send(200, jdump({"ok": bool(name), "name": name}))
         if p == "/api/support":
             return self._send(200, jdump({"rows": q.support_check(d.get("answer",""),
@@ -2396,6 +2412,12 @@ class H(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(f"data: {jdump({'k':kind,'p':payload})}\n\n".encode())
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
+                # You closed the tab. The answer carries on — that is the point — but
+                # every token of it was still being put into a queue nobody would ever
+                # read, for however long the run had left. The live buffer already has
+                # everything a window that rejoins needs.
+                try: Q.deaf = True
+                except Exception: pass
                 return
             if kind == "end": return
 
@@ -2512,7 +2534,7 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                         q.LAST_IMAGES = []
                     if k == "tool_result" and (p or {}).get("name") in ("write_file", "edit_file") and q.LAST_DIFF:
                         p = dict(p or {}); p["diff"] = dict(q.LAST_DIFF); q.LAST_DIFF.clear()
-                    Q.put((k, p))
+                    if not getattr(Q, "deaf", False): Q.put((k, p))
                 q.CURRENT_SID.update(sid=st.sid, title=st.title)
                 q.ACTIVE_PROJECT["id"] = st.project
                 if not st.model:
@@ -2638,6 +2660,7 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
 
 class _Sink:
     """A stream nobody reads: a message started by the queue."""
+    deaf = True
     def put(self, item): pass
 
 
@@ -2774,7 +2797,8 @@ def _queue_add(st, text, atts=None, effort=None, at=None, repeat=None, model=Non
 
 _PREF_SHAPES = {
     "easy_mode": bool, "thinking": bool, "parallel_tools": bool,
-    "easy_tools": list, "helper_model": str, "auto_review": str, "verify_turns": str,
+    "easy_tools": list, "claude_easy_tools": list,
+    "helper_model": str, "auto_review": str, "verify_turns": str,
     "autonomy_mode": ("ask", "auto", "full"),
     "reasoning_effort": ("low", "medium", "high", "xhigh", "max"),
 }
