@@ -130,6 +130,10 @@ DEFAULTS = {
   "stream_idle_timeout_s": 120,
   # Review the files an answer changed, when it changed any: "" off, "changes" on.
   "auto_review": "",
+  # Before an answer is final, ask a model whether the request was actually carried out.
+  # "" off, "tools" = only when the turn used tools. Max two repair rounds.
+  "verify_turns": "",
+  "verify_rounds": 2,
   "easy_mode": False,
   "easy_tools": ["read_file", "edit_file", "write_file", "run_shell", "list_dir", "glob",
                  "grep_files", "python", "web_search", "fetch_url", "task", "plan", "remember"],
@@ -2033,6 +2037,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
     # what a helper started by the task tool inherits from this answer
     TURN_CTX.emit, TURN_CTX.approve, TURN_CTX.cancel, TURN_CTX.tools = emit, approve, cancel, tools
     fell_back = []                     # models this answer has moved to after failures
+    TURN_CTX.compact_key = f"turn-{os.urandom(6).hex()}"   # this turn's own compaction cooldown
     remote = not model_is_local()
     if remote:
         spec = current_model()
@@ -2370,6 +2375,19 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                                       "snippet": x["text"][:260]} for x in LAST_SOURCES[:6]])
                     weak = annotate_support(answer)
                     if weak: emit("weak_claims", weak[:6])
+                if (S.get("verify_turns") and tool_runs[0] > 0
+                        and seen_calls.get("__verified__", 0) < int(S.get("verify_rounds") or 2)):
+                    v = verify_turn(messages, user_content, emit=emit)
+                    emit("verified", {k: v[k] for k in ("passed", "reason", "next", "fail_open")})
+                    # a failure with nothing to do next came from the verifier breaking, not
+                    # from work being left: continuing on that turns its bug into a loop
+                    if not v["passed"] and v["next"]:
+                        seen_calls["__verified__"] = seen_calls.get("__verified__", 0) + 1
+                        messages.append({"role": "user", "nudge": True, "t": time.time(),
+                                         "content": _orbit_note(
+                                             f"this is not finished: {v['reason']} "
+                                             f"Next: {v['next']} Carry on and then report.")})
+                        continue
                 if S.get("auto_review") and getattr(T, "changes", None):
                     text = review_changes(T.changes, emit=emit)
                     if text:
@@ -4749,6 +4767,86 @@ REVIEW_ASK = ("Review this diff. Report real problems first — bugs, wrong resu
               "and a concrete fix. Then smaller issues. Skip style preferences. Say plainly if it "
               "looks good. Do not suggest running anything; you are reading, not working.")
 
+VERIFY_ASK = (
+    "Verify whether the request below was actually carried out. This is a verification "
+    "request only: do not continue the work, do not write files, do not call tools.\n\n"
+    "Reply with one JSON object and nothing else:\n"
+    '{"passed": true|false, "reason": "...", "next": "the next smallest useful action"}\n\n'
+    "First classify the request. If it is only conversational -- a greeting, thanks, an "
+    "acknowledgement, small talk -- it has no checklist: pass it. Do not read a coding "
+    "task into a standalone 'hi' or 'thanks'.\n\n"
+    "Otherwise pass only if the conversation shows that every explicit requirement, named "
+    "file, command, test and deliverable in the request is done. Quote the text that shows "
+    "it. Fail if any part is missing, incomplete, weakly verified, or represented only by a "
+    "plan, a checklist update, or a plausible-sounding final answer -- effort is not "
+    "completion. If the conversation does not contain clear evidence either way, fail with "
+    "the reason 'insufficient evidence in the transcript' rather than guessing.\n\n"
+    "When failing, put the next smallest useful action in 'next'.")
+
+
+def _verify_json(text):
+    """Their JSON, however it arrives: bare, fenced, or with prose around it."""
+    t = (text or "").strip()
+    if "```" in t:
+        parts = t.split("```")
+        for chunk in parts:
+            chunk = chunk.strip()
+            if chunk.startswith("json"): chunk = chunk[4:].strip()
+            if chunk.startswith("{"):
+                t = chunk; break
+    i, j = t.find("{"), t.rfind("}")
+    if i < 0 or j <= i: return None
+    try:
+        d = json.loads(t[i:j + 1])
+    except ValueError:
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def verify_turn(messages, request, emit=None, model=None):
+    """Ask a model whether the request was really carried out.
+
+    Fails open on its own failure. A verifier that returns nonsense, or tries to call a
+    tool, or cannot be reached, must not be able to trap a finished piece of work in a
+    loop -- so anything that is not a clear "no" counts as a pass, and says why."""
+    if emit: emit("status", {"msg": "checking the work against the request"})
+    convo = _transcript_for_verify(messages)
+    ask = (VERIFY_ASK + "\n\n=== The request ===\n" + str(request or "")[:4000]
+           + "\n\n=== What happened ===\n" + convo)
+    try:
+        out = stream_call([{"role": "system", "content": "You verify work. You answer in JSON."},
+                           {"role": "user", "content": ask}],
+                          None, think=False, model=model or helper_model())
+    except Exception as e:
+        return {"passed": True, "reason": f"the verifier could not run ({type(e).__name__})",
+                "next": "", "fail_open": True}
+    d = _verify_json(out.get("content") or "")
+    if not d or "passed" not in d:
+        return {"passed": True, "reason": "the verifier did not answer in JSON",
+                "next": "", "fail_open": True}
+    return {"passed": bool(d.get("passed")), "reason": str(d.get("reason") or "")[:600],
+            "next": str(d.get("next") or "")[:400], "fail_open": False}
+
+
+def _transcript_for_verify(messages, cap=20000):
+    """What happened, in the verifier's terms: who said what and which tools ran."""
+    lines = []
+    for m in messages[-60:]:
+        role = m.get("role")
+        if role == "system": continue
+        c = m.get("content")
+        if isinstance(c, list):
+            c = " ".join(x.get("text", "") for x in c if isinstance(x, dict))
+        c = str(c or "").strip()
+        if role == "tool":
+            ok = "ok" if m.get("ok", True) else "FAILED"
+            lines.append(f"[tool {m.get('name')} {ok}] {c[:600]}")
+        elif c:
+            lines.append(f"{role}: {c[:1500]}")
+    text = "\n".join(lines)
+    return text[-cap:]
+
+
 def review_changes(changes, emit=None, model=None):
     """Read what this answer changed and say what is wrong with it.
 
@@ -4813,12 +4911,15 @@ def _shrink(messages, sid=None, emit=None, pin=None, force=False):
     # summarisation of the whole history on every tool round.
     if not force:
         # keyed on this conversation, not on "" -- a chat without a sid would otherwise
-        # share one cooldown with every other chat in the process
-        key = sid or id(messages)
-        last = _COMPACT_AT.get(key, (0, 0.0))
-        if len(messages) - last[0] < COMPACT_COOLDOWN_MSGS and time.time() - last[1] < 300:
-            return False, first
-        _COMPACT_AT[key] = (len(messages), time.time())
+        # share one cooldown with every other chat in the process. Not id(messages):
+        # a list that has been collected frees its id for the next one, and the next
+        # conversation inherited the previous one's cooldown.
+        key = sid or getattr(TURN_CTX, "compact_key", "") or ""
+        if key:          # no key means no answer is in progress, so there is no loop to damp
+            last = _COMPACT_AT.get(key, (0, 0.0))
+            if len(messages) - last[0] < COMPACT_COOLDOWN_MSGS and time.time() - last[1] < 300:
+                return False, first
+            _COMPACT_AT[key] = (len(messages), time.time())
     under = lambda: context_state(messages)["pct"] < limit
     if S.get("squeeze_tool_results", True):
         squeezed, freed = squeeze_tool_results(messages)

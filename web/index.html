@@ -3983,6 +3983,12 @@ async function go(opts){
       const sn=document.createElement('div');sn.style.opacity='.8';sn.textContent=x.snippet;
       r.appendChild(sn);d.appendChild(r)});
      a.m.appendChild(d);bottom()}
+    else if(m.k==='verified'){
+     if(m.p.passed&&m.p.fail_open){sysline('the check could not run: '+(m.p.reason||''))}
+     else if(m.p.passed){sysline('checked against your request — looks done')}
+     else{const d=el('<div class=hintbar></div>');
+      d.textContent='not finished: '+(m.p.reason||'')+(m.p.next?' → '+m.p.next:'');
+      a.tools.appendChild(d);bottom()}}
     else if(m.k==='review'){
      const d=el('<details class=think style="margin-top:6px"></details>');
      d.appendChild(el(`<summary>Review of ${m.p.files} changed file${m.p.files===1?'':'s'} · ${esc(m.p.model||'')}</summary>`));
@@ -4205,6 +4211,12 @@ async function openSettings(tab){
      the local one is busy. "the model answering" keeps today's behaviour.</div>
     <label>Review what an answer changed</label><div class=sw><input type=checkbox id=g_review>
       <span class=note>when a turn writes files, read the diff back and report what is wrong with it</span></div>
+    <label>Check the work before finishing</label><div class=sw><input type=checkbox id=g_verify>
+      <span class=note>ask the side-work model whether the request was actually carried out, and carry
+       on if it was not (at most twice)</span></div>
+    <div class=hint2>It reads the transcript for evidence rather than asking the model that just
+     answered whether it is happy. A verifier that breaks passes the work — it can never trap a
+     finished answer in a loop.</div>
     <label>Quiet mode</label><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <span class=note id=g_quiet></span><button class=ghost id=g_quiet3>quiet for 3 h</button><button class=ghost id=g_quietoff>off</button></div>
     <div class=hint2>While quiet, the model server runs with fan mode "default": macOS manages the fans, with no boost while it generates. Takes effect the next time the server starts (Settings → Local server → restart). The permanent choice is "Fan mode" under Local server.</div>
@@ -4245,6 +4257,7 @@ async function openSettings(tab){
    $('#g_mins').value=draft.max_turn_minutes??0;$('#g_notice').value=draft.long_run_notice_min??30;
    $('#g_ac').value=draft.autocompact_pct??80;
    $('#g_review').checked=draft.auto_review==='changes';
+   $('#g_verify').checked=!!draft.verify_turns;
    {const sel=$('#g_helper'),cur=draft.helper_model||'';
     sel.innerHTML='<option value="">the model answering</option>'+
      (MODELS.models||[]).filter(m=>!m.switch&&m.ready!==false)
@@ -5077,7 +5090,8 @@ async function openSettings(tab){
    draft.long_run_notice_min=Number($('#g_notice').value)||0;
    draft.autocompact_pct=Number($('#g_ac').value);
    draft.helper_model=$('#g_helper')?$('#g_helper').value:(draft.helper_model||'');
-   draft.auto_review=($('#g_review')&&$('#g_review').checked)?'changes':'';draft.trash_days=Number($('#g_td').value)||30;
+   draft.auto_review=($('#g_review')&&$('#g_review').checked)?'changes':'';
+   draft.verify_turns=($('#g_verify')&&$('#g_verify').checked)?'tools':'';draft.trash_days=Number($('#g_td').value)||30;
    draft.system_prompt=$('#g_sys').value;draft.use_instructions=$('#g_useins').checked;
    draft.use_memory=$('#g_usemem').checked;
    draft.sampling={temperature:num($('#s_temp').value),top_p:num($('#s_top_p').value),
