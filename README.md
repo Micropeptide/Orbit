@@ -115,8 +115,15 @@ and the file it wrote is a card under the answer.</sub></td>
 - **Frugal with context on purpose.** A fresh Orbit-agent conversation costs about
   7.9k tokens with all its tools loaded, so a 27B local model on a 48 GB Mac runs
   everything with room to work.
+- **Its own work runs elsewhere.** Chat titles, compaction, saved memories, the review of
+  what an answer changed and the check that it was actually done go to a model you name,
+  so they do not queue behind the answer on a Mac that serves one request at a time.
+- **Every chat keeps its own settings.** Easy mode, the model doing the side work, how
+  much it may do unasked — set in one chat and the chat beside it is unaffected, and each
+  chat is as you left it when you come back to it.
 - **Guardrails that hold.** Approvals with diffs, a hard floor of refused commands,
-  writes confined to a workspace, fenced web content, keys that never leave the Mac.
+  writes confined to a workspace, fenced web content, keys that never leave the Mac, and
+  grants that can last one chat instead of forever.
 - **Plain files in one folder.** Chats, notes and settings are JSON and Markdown.
   Backed up daily to iCloud Drive (keys left out). Delete the folder and Orbit is gone.
 
@@ -452,12 +459,19 @@ stays up until that work is done, and the row turns to "Done" when it reports ba
 "Show all"; the phone does the same.
 
 **While it works.** A status line above the box: a spinner, what it is doing, how long,
-roughly how much has come back, and `esc to interrupt`. The todo list shows ☒ done,
-◼ in hand, ☐ to do (**Ctrl+T** hides it). `/tasks` lists everything running — answers
-in any chat, queued messages, shell jobs a model left running — with open and stop.
+roughly how much has come back, and `esc to interrupt`. `/tasks` lists everything running —
+answers in any chat, queued messages, shell jobs a model left running — with open and stop.
 
-**Permission prompts.** "Do you want to proceed?" with numbered choices: `1` yes, `2` yes
-and don't ask again (as a rule you can edit), `3` no — and tell it what to do instead.
+**One dock, not three.** During a long run the questions are "what is it doing", "what else
+is still running" and "what has it touched", which used to live in a dock, a chip and a
+modal. Now they are three sections of one dock, each showing its digest while folded: the
+todo list (☒ done, ◼ in hand, ☐ to do), the work (answering, queued, in the background),
+and git — the branch, how much is uncommitted, how far from upstream, the last commit
+subject. **Ctrl+T** hides it. The phone shows the git line under the chat's title.
+
+**Permission prompts.** "Do you want to proceed?" with numbered choices: yes; yes for the
+rest of this chat (Orbit's own agent — Claude Code and Codex keep their own permissions);
+yes and don't ask again, as a rule you can edit; no — and tell it what to do instead.
 Arrows and Enter work too; Esc means no. Questions a model asks come the same way.
 **Shift+Tab** cycles the permission mode (manual → accept edits → plan → auto), shown
 under the box as `⏵⏵ accept edits on`; in one of Orbit's own chats it switches plan mode.
@@ -478,6 +492,11 @@ changed files — the files too. `/fork` copies the chat and carries on in the c
 tool definitions, your messages, answers, tool results, thinking, free — with a
 *Compact now* button. The meter in the top bar measures the chat on screen, and warns
 when it is nearly full.
+
+**Finding a line.** **Ctrl+F** searches the chat on screen, marks every hit and steps
+through them with Enter and Shift+Enter; Esc closes it. Long chats fold to their answers
+with the tool calls tucked away, so you can read what was said without scrolling past
+everything it did to say it.
 
 Also: `/copy` (the last answer, or `/copy 2`), `/diff` (every change shown in the chat),
 `/usage`, `/model`, `/permissions`, `/theme`, `/help`; Ctrl+R searches what you sent
@@ -582,6 +601,37 @@ schedule tasks · screen control (off by default) · anything an MCP server adds
 be switched off in Settings → Tools; one Python file in `tools/` adds another
 ([docs/extending.md](docs/extending.md)).
 
+### Its own work runs somewhere else
+
+Naming a chat, summarising older turns, pulling a memory out of an answer, reviewing what
+that answer changed, checking it against what you asked — none of that is the answer, and
+a model on your Mac serves one request at a time. Asked of the model that is still
+finishing the turn, a review of that turn simply waits for it, and times out if something
+else is generating. **Settings → General → Orbit's own work** names a second model for all
+of it: any model in the picker, a hosted one while the local one is busy, or a CLI agent.
+Per chat, so a chat on the local 27B can send its side work to Haiku while the one next to
+it does not.
+
+Two of those are worth turning on:
+
+* **Review what an answer changed.** A second model reads the diff back and says what is
+  wrong with it — the file and line, what goes wrong, a fix — folded under the answer.
+* **Check the work before finishing.** A second model reads the transcript for evidence
+  that what you asked for was actually done. If it was not, the finding goes back to the
+  model as "this is not finished: … Next: …" and it carries on; if the check itself cannot
+  run, the work passes rather than stalling. Twice per answer at most, so a verifier
+  having a bad day cannot loop.
+
+### Easy mode
+
+Sixty-odd tools is a lot to offer a small model: the schemas alone cost most of a modest
+window, and the more there are the more often the wrong one is picked. **Easy mode** offers
+the essentials and nothing else. With the lean system prompt a local model gets, a fresh
+Claude Code turn measured ~43k tokens as it shipped, ~10.7k lean, and ~9.3k lean with easy
+mode on.
+It belongs to the chat, not to Orbit, so the chat on a small local model keeps it while the
+one beside it has everything. It is in the chat's ⋯ menu, on the Mac and on the phone.
+
 ---
 
 ## The interface
@@ -630,6 +680,16 @@ This matters when a model can run code on your machine.
   in Finder.
 - **The server refuses cross-site requests**, and remote access (the phone) is off until
   you pair a device, with a token on every request.
+- **A grant can be smaller than forever.** "Yes, and stop asking" used to mean writing a
+  permanent rule, when what you usually mean is "for the next twenty minutes". *Yes, and
+  for the rest of this chat* holds it for that chat and not one message longer, and nothing
+  is written to your settings. A rule can also belong to a **project** — "let pytest run
+  here" is the natural size of that grant — and lives with the folder rather than
+  everywhere.
+- **Undoing looks before it leaps.** *Rewind chat + files* first says what it would do to
+  each file. One you edited yourself since the answer wrote it stops the whole restore —
+  a half-undone folder is worse than one left alone — and going past that is its own
+  button.
 - **Deletes are reversible.** Chats, files and documents go to a recycle bin; config files
   keep their last 20 versions.
 
@@ -656,6 +716,10 @@ live, with the same model picker and a Files tab.
 - Photos, camera and files as attachments; plots, math and diagrams render inline;
   file cards under answers; share as PDF or image.
 - Start, stop or switch the local model server; set the default model.
+- Easy mode per chat, the review and the completion check under each answer, and the
+  approval choice that lasts only as long as the chat.
+- The branch, what is uncommitted and how far it is from upstream, under the chat's title;
+  and the file-by-file account of a rewind before it happens.
 - If the phone loses the connection mid-answer the Mac carries on and the app rejoins.
 
 Turn it on in **Settings → Phone**, choose Tailscale (anywhere, HTTPS through Tailscale
