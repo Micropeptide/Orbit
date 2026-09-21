@@ -638,6 +638,12 @@ class TestClaudeEngineOffline(unittest.TestCase):
         off = CE.build_argv({**c, "local_profile": ""}, kind="local")
         self.assertNotIn("--safe-mode", off)
 
+    def setUp(self):
+        # these build argv and compare it exactly: easy mode would add a deny list
+        saved = Q.S.get("easy_mode") if (Q := __import__("qqcore")) else None
+        Q.S["easy_mode"] = False
+        self.addCleanup(Q.S.__setitem__, "easy_mode", saved)
+
     def test_claude_code_starts_fresh_outside_the_local_model(self):
         """REGRESSION: Orbit chose a subset of MCP servers (dropping plugins' servers, whose
         hooks still redirected web fetches to them) and added local-model tweaks to every

@@ -1799,7 +1799,7 @@ def _run_one_tool(tc, fn, args, messages, emit, approve, seen_calls):
         mode = S.get("autonomy_mode", "ask")
         by_rule = allowed_by_rule(fn, args)
         auto = bool(by_rule) or \
-               (mode == "full" and fn not in NEVER_AUTO_FNS and reason not in NEVER_AUTO) or \
+               (mode == "full" and not _never_auto(fn, reason)) or \
                (mode == "auto" and _auto_approvable(fn, args, reason))
         if auto:
             emit("auto_approved", {"name": fn, "args": args, "reason": reason, "call_id": tid,
@@ -3301,7 +3301,11 @@ def _rule_match(rules, fn, args):
         tool = str(r.get("tool") or "*").strip()
         if tool not in ("*", fn): continue
         pat = str(r.get("pattern") or "*").strip().lower()
-        if fnmatch.fnmatch(text, pat) or fnmatch.fnmatch(fn.lower(), pat):
+        # the pattern matches the subject (the command, path, url…). It used to match the
+        # tool's name as well, so an allow rule of "python*" meant for `python build.py`
+        # also matched the *tool* `python` and handed over arbitrary code execution. An
+        # exact name with no wildcard still means "this whole tool", as it always did.
+        if fnmatch.fnmatch(text, pat) or pat == fn.lower():
             return {"tool": tool, "pattern": pat, "note": r.get("note") or ""}
     return None
 
@@ -3390,9 +3394,8 @@ def risk_check(fn, args):
         prot = _targets_protected(blob)
         if prot:
             return ("block", f"{hit} targeting protected path {prot}")
-        ws = os.path.abspath(WORKSPACE)
-        if ws.lower() in blob.lower():
-            return ("confirm", f"{hit} (inside workspace)")
+        if _confined_to_workspace(args):
+            return ("confirm", f"{hit} {INSIDE_WS}")
         return ("confirm", hit)
     if py_shell:
         return ("confirm", "python is spawning a shell")
@@ -3423,6 +3426,47 @@ ALWAYS_BLOCK = {
 # approval in the chat, in every autonomy mode including 'full' — they reach
 # outside the project (the machine, a shared account, a credential store, a
 # public package registry) in a way a plain file edit never does.
+INSIDE_WS = "(inside workspace)"      # said in the reason, tested as a fact -- see _never_auto
+
+_PATH_TOK = _re.compile(r"""(?:^|[\s=:'"])((?:~|\.{0,2}/)[^\s'";|&)]*)""")
+
+def _paths_named(args):
+    """Every filesystem path this call names, resolved. Arguments that are paths are
+    taken as they are; a shell command or a snippet of code is scanned for anything
+    shaped like one."""
+    out, args = [], (args or {})
+    for key in ("path", "file", "dest", "src", "cwd", "directory", "folder"):
+        v = args.get(key)
+        if isinstance(v, str) and v.strip(): out.append(v.strip())
+    for key in ("command", "code", "text"):
+        v = args.get(key)
+        if isinstance(v, str):
+            out += [m.group(1) for m in _PATH_TOK.finditer(v)]
+    return [os.path.abspath(os.path.expanduser(p)) for p in out if p]
+
+def _confined_to_workspace(args):
+    """Whether everything this call names lives inside the workspace.
+
+    It used to be `workspace_path in " ".join(args.values())`, which said yes to
+    `rm -rf ~/Documents /…/workspace/tmp` -- one mention of the workspace anywhere in
+    any argument downgraded the whole call, and 'auto' mode then ran it. Now every
+    path the call names has to resolve inside, and a call that names none does not
+    qualify at all."""
+    ws = os.path.abspath(WORKSPACE)
+    named = _paths_named(args)
+    return bool(named) and all(p == ws or p.startswith(ws + os.sep) for p in named)
+
+def _never_auto(fn, reason):
+    """Actions that no autonomy mode may run unattended.
+
+    The reason is a sentence shown to you, and risk_check appends "(inside workspace)"
+    to it -- so testing the whole sentence against NEVER_AUTO meant "rewriting git
+    history" was caught and "rewriting git history (inside workspace)" was not, which
+    made every never-auto action auto-approvable by naming the workspace."""
+    base = str(reason or "")
+    if base.endswith(INSIDE_WS): base = base[:-len(INSIDE_WS)].strip()
+    return fn in NEVER_AUTO_FNS or base in NEVER_AUTO
+
 NEVER_AUTO = {
     "sudo -- runs as administrator", "shutting the machine down",
     "removing a background service", "changing system preferences",
@@ -3446,9 +3490,9 @@ def _auto_approvable(fn, args, reason):
     under autonomy mode 'auto' (deliberately conservative: reversible, workspace-
     confined file operations only). Mode 'full' does not call this — it
     auto-approves everything 'confirm' except NEVER_AUTO."""
-    if fn in NEVER_AUTO_FNS or reason in NEVER_AUTO:
+    if _never_auto(fn, reason):
         return False
-    if reason and reason.endswith("(inside workspace)"):
+    if _confined_to_workspace(args):
         return True
     if fn == "write_file":
         p = os.path.abspath(os.path.expanduser(str((args or {}).get("path", ""))))
@@ -3754,7 +3798,9 @@ def session_meta(sid, **kw):
     except Exception: return None
     if not isinstance(raw, dict): raw = {"messages": raw, "title": None}
     raw.update(kw)
-    json.dump(raw, open(p, "w"))
+    # a truncate-in-place write of the whole transcript to set a tag: a crash or a
+    # concurrent save from the running answer left the file cut in half
+    _atomic_write(p, raw)
     _SESS_CACHE["key"] = None
     return raw
 
