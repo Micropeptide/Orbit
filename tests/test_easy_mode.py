@@ -65,6 +65,37 @@ class TestClaudeCode(unittest.TestCase):
         self.assertNotIn("Bash", deny)
         self.assertTrue(all(t in CE.known_tools() for t in deny))
 
+    def test_it_also_takes_the_mcp_servers_away(self):
+        """A server's tools are in every request whether they are ever called or not."""
+        import json, tempfile, shutil
+        tmp = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, tmp, True)
+        saved = (CE.user_mcp_servers, CE._write_json)
+        CE.user_mcp_servers = lambda: {"paper-fetch": {"command": "x"}, "wpcom": {"command": "y"}}
+        def write(name, data):
+            path = os.path.join(tmp, name)
+            with open(path, "w") as fh: json.dump(data, fh)
+            return path
+        CE._write_json = write
+        self.addCleanup(lambda: setattr(CE, "user_mcp_servers", saved[0]))
+        self.addCleanup(lambda: setattr(CE, "_write_json", saved[1]))
+        c = {**CE.DEFAULTS, "mcp_servers": ["*"]}
+
+        q.S["easy_mode"] = False
+        sp, mp = CE.launcher_files(c, "t-off")
+        self.assertIsNone(mp)                      # all of yours, no file needed
+        self.assertIsNone(sp)                      # hooks as your Claude has them
+
+        q.S["easy_mode"] = True
+        sp, mp = CE.launcher_files(c, "t-on")
+        self.assertEqual(json.load(open(mp))["mcpServers"], {})
+        self.assertEqual(json.load(open(sp)), {"disableAllHooks": True})
+        argv = CE.build_argv(c, settings_path=sp, mcp_path=mp, kind="local")
+        self.assertIn("--strict-mcp-config", argv)
+        self.assertNotIn("--plugin-dir", argv)
+
+        sp, mp = CE.launcher_files({**c, "easy_mcp": ["paper-fetch"]}, "t-keep")
+        self.assertEqual(list(json.load(open(mp))["mcpServers"]), ["paper-fetch"])
+
     def test_off_it_changes_nothing(self):
         q.S["easy_mode"] = False
         argv = CE.build_argv({**CE.DEFAULTS, "disallowed_tools": ["WebSearch"]}, kind="local")

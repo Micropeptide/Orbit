@@ -625,7 +625,11 @@ class H(http.server.BaseHTTPRequestHandler):
             # what Claude Code says it has, so easy mode can offer them as a choice
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
             known = q.CE.learn_tools() if (qs.get("learn") or [""])[0] else q.CE.known_tools()
-            return self._send(200, jdump({"known": known, "keep": q.CE.cfg().get("easy_tools") or []}))
+            c = q.CE.cfg()
+            try: servers = sorted(q.CE.user_mcp_servers())
+            except Exception: servers = []
+            return self._send(200, jdump({"known": known, "keep": c.get("easy_tools") or [],
+                                          "mcp": servers, "mcp_keep": c.get("easy_mcp") or []}))
         if p == "/api/claude/plugins":
             return self._send(200, jdump({**q.CE.plugins_list(), **q.CE.marketplaces_list()}))
         if p == "/api/claude/mcp":

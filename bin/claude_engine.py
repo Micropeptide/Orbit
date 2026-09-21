@@ -50,6 +50,9 @@ DEFAULTS = {
                          "CronList", "EnterWorktree", "ExitWorktree", "ReportFindings",
                          "SendMessage", "RemoteTrigger", "ListMcpResourcesTool",
                          "ReadMcpResourceTool", "ReadMcpResourceDirTool"],
+    # launcher: in easy mode, the only MCP servers started. [] = none of them, which is
+    # the point: each one's tools are in every request whether they are called or not.
+    "easy_mcp": [],
     # launcher: in easy mode (Settings -> Tools), the only Claude Code tools kept. The
     # rest are denied by name, which is why Orbit learns the names from Claude Code
     # itself rather than guessing: an unknown name in --disallowedTools stops the run.
@@ -523,9 +526,9 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
     if settings_path: argv += ["--settings", settings_path]
     if mcp_path:
         argv += ["--mcp-config", mcp_path]
-        if "*" not in (c.get("mcp_servers") or []) and prof != "full":
+        if easy_mode() or ("*" not in (c.get("mcp_servers") or []) and prof != "full"):
             argv.append("--strict-mcp-config")
-    if prof != "lean" and not remote:
+    if prof != "lean" and not easy_mode() and not remote:
         # plugins' own MCP servers: a Claude Code started with --print marks them failed
         # without starting them (while the plugins' hooks still run -- context-mode's then
         # send every web fetch to tools that are not there). Naming each plugin's folder,
@@ -553,14 +556,19 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
 def launcher_files(c, tag, skills=None, extra_servers=None):
     """--settings and --mcp-config files for one run (None where not needed)."""
     settings = {}
-    if c.get("hooks") in (False, "off"):
+    # A plugin's hooks expect that plugin's MCP tools to be there. Easy mode takes the
+    # servers away, so the hooks go with them rather than firing at tools that are gone.
+    if easy_mode() or c.get("hooks") in (False, "off"):
         settings["disableAllHooks"] = True
     if skills is not None and c.get("skill_routing") and (c.get("profile") or "standard") != "lean":
         keep = set(skills)
         settings["skillOverrides"] = {it["name"]: "off" for it in skill_index() if it["name"] not in keep}
         settings["skillListingBudgetFraction"] = 0.05
     settings_path = _write_json(f"settings-{tag}.json", settings) if settings else None
-    names = c.get("mcp_servers") or []
+    # Easy mode is about what the model is handed, and an MCP server hands it tools:
+    # the servers cost prompt whether or not the model ever calls them, and they are
+    # most of what a plugin-heavy setup sends.
+    names = (c.get("easy_mcp") or []) if easy_mode() else (c.get("mcp_servers") or [])
     servers = {}
     if "*" not in names:
         known = user_mcp_servers()
