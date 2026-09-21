@@ -2715,6 +2715,14 @@ function approvalBox(p){
  const pat=p.suggested_pattern||'';
  const opts=[
   {label:'Yes',act:()=>send(true)},
+  // "and stop asking" used to mean forever, written to settings. Most of the time it
+  // means "for the next twenty minutes", and a grant you cannot mean loosely is one
+  // people reach for the permanent version of instead.
+  ...(p.claude||p.codex?[]:[{label:'Yes, and for the rest of this chat'+(pat?' ('+pat+')':''),
+   act:async()=>{await fetch('/api/permissions/session',{method:'POST',
+     headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({sid,tool:p.name||'*',pattern:pat||'*'})});
+    send(true)}}]),
   {label:p.codex?'Yes, and allow this for the rest of the session'
    :p.claude?"Yes, and don't ask again"+(pat?' for '+pat:'')
    :'Yes, and always allow'+(pat?' '+pat:' this'),act:()=>alwaysRow()},
