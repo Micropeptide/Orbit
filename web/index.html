@@ -4834,6 +4834,11 @@ async function openSettings(tab){
     <div class=sec>claude-qwen launcher <small>— for the terminal command and Orbit alike</small></div><div class=grid>
     <label>Profile</label><select id=cq_profile><option value=standard>standard — Claude as you have it set up</option>
       <option value=lean>lean — built-in tools and skills only</option></select>
+    <label>On a local model</label><select id=cq_lprof><option value=lean>lean — plugins, their servers and hooks left out</option>
+      <option value="">the same profile as everything else</option></select>
+    <div class=hint2>A model on this Mac pays for the system prompt in seconds. Measured here: the
+     standard profile sent Claude Code 40k tokens of plugins, MCP servers and hooks and a single
+     file read took 179s; lean sent 10k and took 44s, for the same answer.</div>
     <label>MCP servers loaded</label><div id=cq_mcp><div class=hint2 style="margin:0 0 4px">Keep “all of them” unless you need a short prompt: a shorter list also leaves out the servers your plugins bring, while their hooks still run (context-mode, for one, then sends web fetches to tools that are not loaded).</div>${known.map(n=>`<label style="display:inline-flex;gap:4px;margin-right:10px"><input type=checkbox value="${esc(n)}"> ${esc(n)}</label>`).join('')}
       <label style="display:inline-flex;gap:4px"><input type=checkbox value="*"> all of them</label></div>
     <label>Tools turned off</label><input type=text id=cq_dis>
@@ -4917,7 +4922,8 @@ async function openSettings(tab){
     if(!(md.servers||[]).length)box.textContent=md.error||'none';
     box.appendChild(el('<div class=hint2>Add servers with <code>claude mcp add</code> in a terminal, or ask Claude to.</div>'))})();
    // launcher + Orbit options
-   $('#cq_profile').value=c.profile==='lean'?'lean':'standard';$('#cq_mode').value=c.permission_mode||'';
+   $('#cq_profile').value=c.profile==='lean'?'lean':'standard';
+   $('#cq_lprof').value=c.local_profile==='lean'?'lean':'';$('#cq_mode').value=c.permission_mode||'';
    $('#cq_unatt').value=c.unattended_mode||'';$('#cq_dest').value=c.rule_destination||'suggested';
    $('#cq_hist').checked=c.history!==false;$('#cq_histall').checked=!!c.history_all_models;
    $('#cq_dis').value=(c.disallowed_tools||[]).join(', ');
@@ -4934,7 +4940,8 @@ async function openSettings(tab){
    $('#cq_save').onclick=async()=>{
     const dm=$('#cq_dmodel').value;
     if(dm&&dm!==(MODELS.default||''))await apiPost('/api/model/default',{id:dm},'default model');
-    const r=await apiPost('/api/claude/settings',{settings:{profile:$('#cq_profile').value,permission_mode:$('#cq_mode').value,
+    const r=await apiPost('/api/claude/settings',{settings:{profile:$('#cq_profile').value,
+     local_profile:$('#cq_lprof').value,permission_mode:$('#cq_mode').value,
      default_effort:$('#cq_deffort').value,default_host:$('#cq_dhost').value,default_dir:$('#cq_ddir').value.trim(),
      unattended_mode:$('#cq_unatt').value,rule_destination:$('#cq_dest').value,history:$('#cq_hist').checked,
      history_all_models:$('#cq_histall').checked,disallowed_tools:list($('#cq_dis').value),
