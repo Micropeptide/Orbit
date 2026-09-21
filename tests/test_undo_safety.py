@@ -75,3 +75,42 @@ class TestUndo(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAFileEditedTwice(unittest.TestCase):
+    """Editing one file more than once in an answer is ordinary work. Each edit records
+    its own change, and the file on disk can only match the last of them — so the
+    earlier ones read as "you changed this since" and the whole undo was refused."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="orbit-undo2-")
+        self.p = os.path.join(self.tmp, "a.txt")
+        self.saved = q.WORKSPACE
+        q.WORKSPACE = self.tmp
+        self.addCleanup(setattr, q, "WORKSPACE", self.saved)
+
+    def change(self, before, after):
+        """One recorded change: a snapshot of `before`, the file left holding `after`."""
+        open(self.p, "w").write(before)
+        snap = os.path.join(self.tmp, f"snap{len(os.listdir(self.tmp))}.bak")
+        open(snap, "w").write(before)
+        open(self.p, "w").write(after)
+        return {"path": self.p, "snap": snap, "after_sha": q._file_sha(self.p)}
+
+    def test_two_edits_to_one_file_still_undo(self):
+        one = self.change("original\n", "first edit\n")
+        two = self.change("first edit\n", "second edit\n")
+        look = q.preview_undo([one, two])
+        self.assertEqual(look["unsafe"], [], look)
+        r = q.undo_result([one, two])
+        self.assertTrue(r["undone"], r)
+        self.assertEqual(open(self.p).read(), "original\n",
+                         "it should go back to before the answer, not to the middle of it")
+
+    def test_and_your_own_change_still_stops_it(self):
+        one = self.change("original\n", "first edit\n")
+        two = self.change("first edit\n", "second edit\n")
+        open(self.p, "w").write("what I typed myself\n")
+        r = q.undo_result([one, two])
+        self.assertFalse(r["undone"])
+        self.assertEqual(open(self.p).read(), "what I typed myself\n")
