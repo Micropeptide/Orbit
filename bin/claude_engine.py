@@ -50,6 +50,10 @@ DEFAULTS = {
                          "CronList", "EnterWorktree", "ExitWorktree", "ReportFindings",
                          "SendMessage", "RemoteTrigger", "ListMcpResourcesTool",
                          "ReadMcpResourceTool", "ReadMcpResourceDirTool"],
+    # launcher: in easy mode (Settings -> Tools), the only Claude Code tools kept. The
+    # rest are denied by name, which is why Orbit learns the names from Claude Code
+    # itself rather than guessing: an unknown name in --disallowedTools stops the run.
+    "easy_tools": ["Read", "Edit", "Write", "Bash", "Task", "Skill", "WebFetch"],
     # launcher: the profile to use when the model runs on this Mac. Its prompt costs
     # seconds there, and plugins, their MCP servers and their hooks are most of it.
     # "" keeps whatever "profile" says for every model alike.
@@ -104,6 +108,12 @@ LOCAL_MODEL_PREFIXES = ("mtplx", "local", "qwen")
 def cfg():
     s = (Q.S.get("claude_qwen") if Q else None) or {}
     return {**DEFAULTS, **s}
+
+
+def easy_mode():
+    """One switch for both engines: Orbit's own agent and Claude Code."""
+    try: return bool(Q.S.get("easy_mode"))
+    except Exception: return False
 
 
 def claude_dir():
@@ -504,6 +514,11 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
         argv += ["--permission-mode", mode]
     dis = [t for t in (c.get("disallowed_tools") if kind == "local" else
                        [] if kind == "subscription" else c.get("provider_disallowed_tools", ["WebSearch"])) or [] if t]
+    if easy_mode():
+        # keep a few, deny the rest -- but only names Claude Code has said it has, so a
+        # tool it has never heard of cannot stop the run
+        keep = {str(t) for t in (c.get("easy_tools") or []) if t}
+        dis = sorted(set(dis) | {t for t in known_tools() if t not in keep})
     if dis: argv += ["--disallowedTools", *dis]
     if settings_path: argv += ["--settings", settings_path]
     if mcp_path:
@@ -877,6 +892,28 @@ def _brief_args(inp):
     return out
 
 INIT = {}            # what the last run reported: commands, agents, models, tools, skills
+
+
+def known_tools(add=None):
+    """Every tool name Claude Code has told us it has.
+
+    Easy mode keeps a few tools and denies the rest, which means naming them --- and a
+    name Claude Code does not know stops the run before it starts ("Permission deny rule
+    X matches no known tool"). Its own init event lists exactly what it has, in this
+    version, with these plugins; that list is remembered here rather than guessed."""
+    path = os.path.join(_work_dir(), "tools-seen.json")
+    try: have = set(json.load(open(path)))
+    except Exception: have = set()
+    if add:
+        fresh = have | {str(x) for x in add if x and not str(x).startswith("mcp__")}
+        if fresh != have:
+            have = fresh
+            tmp = path + ".tmp"
+            try:
+                with open(tmp, "w") as fh: json.dump(sorted(have), fh)
+                os.replace(tmp, path)
+            except OSError: pass
+    return sorted(have)
 CONTROLS = ("set_permission_mode", "set_model", "set_max_thinking_tokens", "get_context_usage",
             "mcp_status", "mcp_toggle", "mcp_reconnect", "mcp_set_servers", "stop_task",
             "rewind_files", "reload_plugins", "get_settings", "apply_flag_settings", "interrupt")
@@ -926,6 +963,51 @@ def control(sid, subtype, timeout=15, **params):
     return w.get("response") if ev.is_set() else {"error": "no reply from Claude Code"}
 
 
+_LEARN = {"lock": threading.Lock()}
+
+
+def learn_tools(timeout=40):
+    """Ask Claude Code what tools it has, by starting a turn and stopping at the answer
+    to the first question it asks itself.
+
+    The initialize handshake does not say; the init event at the start of a turn does.
+    So a turn is started and the process killed the moment that event arrives -- before
+    the model is called, so nothing is spent and nothing is saved."""
+    with _LEARN["lock"]:
+        exe = which_claude()
+        if not exe: return known_tools()
+        c = cfg()
+        settings_path, mcp_path = launcher_files(c, "learn")
+        argv = build_argv(c, settings_path=settings_path, mcp_path=mcp_path, append=launcher_append(c))
+        proc = None
+        try:
+            proc = subprocess.Popen(argv + ["--no-session-persistence"], cwd=HOME,
+                                    env=target_env(harness_target()), stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    start_new_session=True)
+            proc.stdin.write((json.dumps({"type": "user", "message": {"role": "user", "content": "hi"}})
+                              + "\n").encode())
+            proc.stdin.flush()
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                line = proc.stdout.readline()
+                if not line: break
+                try: ev = json.loads(line)
+                except ValueError: continue
+                if ev.get("type") == "system" and ev.get("subtype") == "init" and ev.get("tools"):
+                    INIT["tools"] = ev["tools"]
+                    return known_tools(ev["tools"])
+        except Exception:
+            pass
+        finally:
+            if proc is not None: _kill(proc)
+            for f in (settings_path, mcp_path):
+                try:
+                    if f: os.remove(f)
+                except OSError: pass
+        return known_tools()
+
+
 _CATALOG = {"at": 0.0, "lock": threading.Lock()}
 
 
@@ -957,6 +1039,8 @@ def command_catalog(max_age=600):
                 if not line: break
                 try: ev = json.loads(line)
                 except ValueError: continue
+                if ev.get("type") == "system" and ev.get("subtype") == "init" and ev.get("tools"):
+                    INIT["tools"] = ev["tools"]; known_tools(ev["tools"])
                 if ev.get("type") == "control_response":
                     resp = (ev.get("response") or {}).get("response") or {}
                     for k in ("commands", "agents", "models", "output_style", "available_output_styles"):
@@ -1748,6 +1832,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                     INIT.update({k: ev.get(k) for k in ("tools", "mcp_servers", "skills", "slash_commands",
                                                         "agents", "plugins", "permissionMode", "model",
                                                         "claude_code_version", "output_style") if k in ev})
+                    if ev.get("tools"): known_tools(ev["tools"])
                     run["mode"] = ev.get("permissionMode")
                     if remote and not mk.get("remote_ready"):
                         mk["remote_ready"] = True; mk["host"] = remote["host"]
