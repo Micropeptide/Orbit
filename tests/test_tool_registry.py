@@ -73,5 +73,28 @@ class TestTheListsThatNameTools(unittest.TestCase):
             self.assertIn(n, self.known, f"{n} is treated as a writing tool but is not a tool")
 
 
+class TestTheHelperProfile(unittest.TestCase):
+    """A helper is sent to find something out. It has no plan of its own and nobody is
+    watching it, so by default it may read, search and fetch and change nothing — its
+    mistakes belong in its report, not in your tree."""
+
+    def setUp(self):
+        self.known = {t["function"]["name"] for t in q.ALL_SPECS}
+
+    def test_the_explore_profile_names_tools_that_exist(self):
+        for n in q.TASK_PROFILES["explore"]:
+            self.assertIn(n, self.known, f"a helper may use {n}, which is not a tool")
+
+    def test_and_none_of_them_writes(self):
+        for n in q.TASK_PROFILES["explore"]:
+            self.assertNotIn(n, q._WRITE_TOOLS, f"{n} can change things")
+            self.assertFalse(q._changes_things(n), n)
+
+    def test_the_task_tool_offers_the_choice(self):
+        spec = next(t for t in q.ALL_SPECS if t["function"]["name"] == "task")
+        opts = spec["function"]["parameters"]["properties"]["profile"]["enum"]
+        self.assertEqual(sorted(opts), ["build", "explore"])
+
+
 if __name__ == "__main__":
     unittest.main()
