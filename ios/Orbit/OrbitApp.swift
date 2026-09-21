@@ -17,7 +17,13 @@ struct OrbitApp: App {
                 .task {
                     // tapping "answer ready" opens that chat
                     router.open = { sid in state.deepLink = sid }
+                    // and an approval can be allowed or denied from the notification,
+                    // without unlocking into the app at all
+                    router.answer = { id, allow in
+                        Task { await state.answerApproval(id: id, allow: allow) }
+                    }
                     UNUserNotificationCenter.current().delegate = router
+                    Notifications.register()
                     #if DEBUG
                     // Development only: pair without the camera or the system's
                     // "Open in Orbit?" prompt. Never compiled into a release.
@@ -59,15 +65,46 @@ struct OrbitApp: App {
     }
 }
 
-/// Routes a tapped notification to the chat it announced.
+/// The one place that says what a notification can carry and what its buttons do.
+enum Notifications {
+    static let approvalCategory = "orbit.approval"
+    static let allow = "orbit.approval.allow"
+    static let deny = "orbit.approval.deny"
+
+    /// Registered once at launch: an approval can be answered from the Lock Screen,
+    /// which is where you are when a run stops to ask.
+    static func register() {
+        let yes = UNNotificationAction(identifier: allow, title: "Allow once", options: [])
+        let no = UNNotificationAction(identifier: deny, title: "Deny",
+                                      options: [.destructive])
+        UNUserNotificationCenter.current().setNotificationCategories([
+            UNNotificationCategory(identifier: approvalCategory, actions: [yes, no],
+                                   intentIdentifiers: [], options: [])
+        ])
+    }
+}
+
+/// Routes a tapped notification to the chat it announced, and answers an approval
+/// from the notification's own buttons.
 final class NotificationRouter: NSObject, UNUserNotificationCenterDelegate {
     var open: ((String) -> Void)?
+    /// (approval id, allow) — answered without opening the app.
+    var answer: ((String, Bool) -> Void)?
 
     func userNotificationCenter(_ center: UNUserNotificationCenter,
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler done: @escaping () -> Void) {
-        if let sid = response.notification.request.content.userInfo["sid"] as? String {
-            Task { @MainActor in self.open?(sid) }
+        let info = response.notification.request.content.userInfo
+        let approvalID = info["approvalID"] as? String ?? ""
+        switch response.actionIdentifier {
+        case Notifications.allow where !approvalID.isEmpty:
+            Task { @MainActor in self.answer?(approvalID, true) }
+        case Notifications.deny where !approvalID.isEmpty:
+            Task { @MainActor in self.answer?(approvalID, false) }
+        default:
+            if let sid = info["sid"] as? String {
+                Task { @MainActor in self.open?(sid) }
+            }
         }
         done()
     }

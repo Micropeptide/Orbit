@@ -7,10 +7,52 @@ struct EmptyChatHero: View {
     @EnvironmentObject var state: AppState
     @State private var showShortcuts = false
 
+    // ⇧Tab and ? need a keyboard, which a phone has not got: the two they replace are
+    // things you can actually reach with a thumb.
     private static let tips: [(key: String, text: String)] = [
         ("/", "commands"), ("@", "mention a file"), ("!", "run a shell command"),
-        ("#", "save to memory"), ("⇧Tab", "permission mode"), ("?", "shortcuts"),
+        ("#", "save to memory"),
     ]
+
+    /// A few things this chat could be asked — for the case the recent list does not
+    /// cover, which is the first one. They fill the box and stop there.
+    private static let suggestions: [HarnessKind: [String]] = [
+        .claude: ["Explain what this repository does and how it is laid out",
+                  "Find the bug behind this failing test and fix it",
+                  "Review my uncommitted changes",
+                  "Add tests for the file I changed last"],
+        .codex: ["Explain what this repository does and how it is laid out",
+                 "Refactor this file and keep every test passing",
+                 "Write the commit message for what is staged"],
+        .orbit: ["Search my knowledge base and summarise what it says about…",
+                 "Read this paper and tell me whether its method fits my data",
+                 "Plot this CSV and say what stands out",
+                 "Check whether this citation supports the claim"],
+    ]
+
+    private var suggested: some View {
+        let list = Self.suggestions[state.harnessMode] ?? Self.suggestions[.orbit] ?? []
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(list, id: \.self) { t in
+                    Button {
+                        Haptics.tap()
+                        state.draftPrefill = t
+                    } label: {
+                        Text(t)
+                            .font(.footnote)
+                            .lineLimit(1)
+                            .padding(.vertical, 7).padding(.horizontal, 14)
+                            .background(.quaternary.opacity(0.35), in: .capsule)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+        }
+        .scrollClipDisabled()
+    }
 
     private var recent: [ChatSummary] {
         Array(state.chats.filter { $0.id != sid && $0.archived != true }.prefix(5))
@@ -28,6 +70,7 @@ struct EmptyChatHero: View {
                 default: state.draftPrefill = key
                 }
             }
+            suggested
             HomeDashboard()
             if !recent.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {

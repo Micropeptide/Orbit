@@ -323,3 +323,37 @@ extension AppState {
         if let mode { try await server.setPermissionMode(sid: sid, mode: mode) }
     }
 }
+
+
+/// What the folder a chat works in looks like to git right now. Read-only: the
+/// phone shows it so you know what a rewind or a commit would be touching.
+struct GitState: Equatable {
+    var branch: String
+    /// Files with uncommitted changes, and how many of those git has never seen.
+    var dirty: Int
+    var untracked: Int
+    /// `git diff --shortstat`, as git words it.
+    var diff: String
+    var ahead: Int
+    var behind: Int
+    var last: String
+
+    init(_ d: [String: Any]) {
+        branch = (d["branch"] as? String) ?? "?"
+        dirty = (d["dirty"] as? Int) ?? 0
+        untracked = (d["untracked"] as? Int) ?? 0
+        diff = (d["diff"] as? String) ?? ""
+        ahead = (d["ahead"] as? Int) ?? 0
+        behind = (d["behind"] as? Int) ?? 0
+        last = (d["last"] as? String) ?? ""
+    }
+
+    /// Branch first, then only what is true: "main · 3 changed · ↑2".
+    var short: String {
+        var bits = [branch]
+        if dirty > 0 { bits.append("\(dirty) changed") }
+        if ahead > 0 { bits.append("↑\(ahead)") }
+        if behind > 0 { bits.append("↓\(behind)") }
+        return bits.joined(separator: " · ")
+    }
+}

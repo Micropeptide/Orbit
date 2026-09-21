@@ -7,22 +7,37 @@ extension AppState {
 
     // ------------------------------------------------------------ rewind
 
+    /// What rewinding with files would do to each of them, asked before doing it.
+    func rewindPreview(toUserIndex index: Int) async -> OrbitServer.UndoPreview? {
+        guard let server, let sid = openChat?.sid else { return nil }
+        do { return try await server.rewindPreview(sid: sid, index: index) }
+        catch { lastError = error.localizedDescription; return nil }
+    }
+
     /// Put the open chat back to just before your `index`-th message, then reload it.
-    func rewind(toUserIndex index: Int, files: Bool) async -> Bool {
-        guard let server, let sid = openChat?.sid, !streaming else { return false }
+    /// Answers with what the Mac reported, so the caller can say what really happened.
+    @discardableResult
+    func rewind(toUserIndex index: Int, files: Bool, force: Bool = false)
+        async -> OrbitServer.RewindResult? {
+        guard let server, let sid = openChat?.sid, !streaming else { return nil }
         // the message it goes back to, found before the chat reloads without it
         let target = messages.filter(\.isUser).dropFirst(index).first
         do {
-            let r = try await server.rewind(sid: sid, index: index, files: files)
+            let r = try await server.rewind(sid: sid, index: index, files: files, force: force)
             if let target { forgetExtras(from: target) }
             await open(sid)
             var note = "Rewound \(r.dropped) message\(r.dropped == 1 ? "" : "s")"
-            if files { note += " · \(r.undone.count) file change\(r.undone.count == 1 ? "" : "s") undone" }
+            if files {
+                // a file you changed yourself since stops the restore: say that plainly
+                // rather than counting the Mac's refusals as files put back
+                note += " · \(r.restored.count) file\(r.restored.count == 1 ? "" : "s") put back"
+                if !r.refused.isEmpty { note += " · \(r.refused.count) left alone (changed since)" }
+            }
             toast(note)
-            return true
+            return r
         } catch {
             lastError = error.localizedDescription
-            return false
+            return nil
         }
     }
 

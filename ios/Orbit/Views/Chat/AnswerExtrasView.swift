@@ -33,6 +33,7 @@ struct AnswerExtrasView: View {
     @EnvironmentObject var state: AppState
     @State private var hooksOpen = false
     @State private var sourcesOpen = false
+    @State private var reviewOpen = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -46,6 +47,8 @@ struct AnswerExtrasView: View {
             if let l = extras.longRunning { sysline(l) }
             if !extras.hooks.lines.isEmpty { hooks }
             if let skill = extras.skillHint { skillHint(skill) }
+            if let c = extras.check { checked(c) }
+            if let r = extras.review { review(r) }
             if !extras.sources.isEmpty { sources }
             if !extras.weakClaims.isEmpty { weakClaims }
         }
@@ -107,6 +110,41 @@ struct AnswerExtrasView: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(.tint)
+    }
+
+    /// The completion check: one quiet line when it passed, a box when it did not.
+    @ViewBuilder private func checked(_ c: AnswerExtras.Check) -> some View {
+        if let line = c.line { sysline(line) } else {
+            Text(c.problem)
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .padding(.vertical, 6).padding(.horizontal, 9)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.orange.opacity(0.10), in: .rect(cornerRadius: 7))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// The read-back of the diff — folded away, since most of the time it says
+    /// the changes look fine and the answer itself is what you came for.
+    private func review(_ r: AnswerExtras.Review) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Button { withAnimation(.snappy) { reviewOpen.toggle() } } label: {
+                Label(r.title, systemImage: reviewOpen ? "chevron.down" : "chevron.right")
+                    .font(.caption.weight(.medium))
+                    .multilineTextAlignment(.leading)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            if reviewOpen {
+                Text(r.text)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 18)
+            }
+        }
     }
 
     private var sources: some View {

@@ -448,6 +448,22 @@ enum ToolText {
         }.joined(separator: ", ")
     }
 
+    /// The distinct things a folded run of look-ups touched, newest order kept.
+    /// "Read 3 files" says how many and not which, so finding out whether it read the
+    /// one you care about meant opening the fold.
+    static func familyNames(_ runs: [ToolRun]) -> [String] {
+        var out: [String] = []
+        for r in runs {
+            let t = r.target.trimmingCharacters(in: .whitespaces)
+            guard !t.isEmpty else { continue }
+            // a path gives its last component; a search pattern is already short
+            let name = t.contains("/") ? String(t.split(separator: "/").last ?? "") : t
+            let short = name.count > 24 ? String(name.prefix(23)) + "…" : name
+            if !short.isEmpty && !out.contains(short) { out.append(short) }
+        }
+        return out
+    }
+
     /// 0.4s, 12s, 3m 05s, 1h 02m — as the web writes durations.
     static func secs(_ s: Double) -> String {
         let s = s.isFinite ? max(0, s) : 0

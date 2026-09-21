@@ -20,6 +20,16 @@ extension OrbitServer {
     // ------------------------------------------------------------ the chat list
 
     /// One page of chats, with how many there are in all.
+    /// "Has the chat list changed?" in one cheap call: how many chats there are and
+    /// when the newest was touched. Re-reading the whole list to find out costs a page
+    /// of JSON every few seconds, which on a phone is battery and cellular data.
+    func chatsStamp() async throws -> String {
+        let obj = try await getJSON("/api/sessions/stamp") as? [String: Any] ?? [:]
+        let n = (obj["n"] as? Int) ?? 0
+        let at = (obj["at"] as? Double) ?? 0
+        return "\(n)-\(Int(at))"
+    }
+
     func chatPage(offset: Int = 0, limit: Int) async throws -> ChatList {
         try workJSON(ChatList.self, try await settingsCall("/api/sessions?offset=\(offset)&limit=\(limit)"))
     }

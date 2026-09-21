@@ -193,6 +193,49 @@ struct ApprovalCard: View {
                 Button("Deny", role: .destructive) { reply(ApprovalReply(allow: false)) }
                     .buttonStyle(.bordered)
             }
+            // "Always allow" used to be the only way to stop being asked, and it
+            // writes a rule that outlives the chat. Most of the time what you mean
+            // is "for the next few minutes", so that grant gets its own button.
+            if !prompt.claude && !prompt.codex {
+                // The pattern is the scope, and "*" means the whole tool — which was
+                // the one grant shown with no scope written on it at all, while the
+                // narrower "always allow" put its pattern in an editable field first.
+                let scope = prompt.suggestedPattern.isEmpty ? "*" : prompt.suggestedPattern
+                Button {
+                    guard !sending else { return }
+                    sending = true
+                    Haptics.press()
+                    Task { await state.allowForThisChat(prompt); sending = false }
+                } label: {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Allow for the rest of this chat")
+                        Text(scope == "*" ? "every \(prompt.name) call in this chat"
+                                          : "\(prompt.name) matching \(scope)")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .font(.callout)
+                // and the size between one chat and everywhere: "let pytest run here"
+                // belongs to the project, and used to be sayable only for every folder
+                if let pid = prompt.projectID, !pid.isEmpty {
+                    Button {
+                        guard !sending else { return }
+                        sending = true
+                        Haptics.press()
+                        Task { await state.allowInProject(prompt); sending = false }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Allow in \(prompt.projectName ?? pid)")
+                            Text(scope == "*" ? "every \(prompt.name) call in this project"
+                                              : "\(prompt.name) matching \(scope), in this project")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .font(.callout)
+                }
+            }
             HStack(spacing: 8) {
                 if prompt.codex {
                     Button("Allow for this session") { reply(ApprovalReply(allow: true, always: true)) }

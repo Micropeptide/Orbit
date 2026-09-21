@@ -42,6 +42,7 @@ struct CodeBlock: View {
     @AppStorage("orbit.codeWrap") private var wrap = false
     @State private var copied = false
     @State private var expanded = false
+    @State private var full = false
     @State private var formatted: String?
     @State private var shareURL: URL?
     @State private var preview: PreviewKind?
@@ -120,11 +121,18 @@ struct CodeBlock: View {
                     }
                 }
             }
+            .modifier(CodeTextSize())          // code keeps its own size
             .padding(.bottom, collapsible && lineCount > Self.collapseAt ? 4 : 10)
 
             if collapsible && lineCount > Self.collapseAt {
-                Button(expanded ? "Show less" : "Show all \(lineCount) lines") {
-                    withAnimation(.snappy) { expanded.toggle() }
+                HStack(spacing: 14) {
+                    Button(expanded ? "Show less" : "Show all \(lineCount) lines") {
+                        withAnimation(.snappy) { expanded.toggle() }
+                    }
+                    // A 900-line file opened in place is 900 lines of transcript, and
+                    // Copy, Save and Wrap scroll off the top the moment you start
+                    // reading. Full screen it keeps its own toolbar and its own scroll.
+                    Button("Open full screen") { full = true }
                 }
                 .font(.caption2)
                 .buttonStyle(.plain)
@@ -134,6 +142,21 @@ struct CodeBlock: View {
         }
         .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 10))
         .sheet(item: $shareURL) { ActivityView(items: [$0]).ignoresSafeArea() }
+        .sheet(isPresented: $full) {
+            NavigationStack {
+                ScrollView {
+                    CodeBlock(language: language, code: code, collapsible: false)
+                        .padding(.horizontal, 12).padding(.vertical, 10)
+                }
+                .navigationTitle(language.isEmpty ? "Code" : language)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") { full = false }
+                    }
+                }
+            }
+        }
         .sheet(item: $preview) { kind in
             switch kind {
             case .html:
