@@ -119,6 +119,9 @@ DEFAULTS = {
   # turn; pick a hosted one here and the review runs while the local model is busy.
   # "" = whatever the chat is using.
   # Name your saved skills in the system prompt, so the model knows they exist.
+  # Read-only calls in the same round run together instead of one after another.
+  "parallel_tools": True,
+  "parallel_tools_max": 6,
   "skills_in_prompt": True,
   "helper_model": "",
   # How long to wait for the first token, and then between tokens. A stalled provider
@@ -1789,6 +1792,58 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
     return msg
 
 
+# Tools that only look at things: no writes, no approval, no model call of their own,
+# and nothing another one of them could interfere with. A round that asks for five of
+# these used to take the sum of their latencies; it now takes the longest.
+PARALLEL_SAFE = {
+    "read_file", "list_dir", "glob", "grep_files", "search_knowledge", "search_chats",
+    "read_chat", "fetch_url", "web_search", "http_json", "fetch_paper_pdf",
+    "pubmed_search", "ncbi", "uniprot", "alphafold", "arabidopsis_gene", "sequence",
+    "check_citations", "list_skills", "cluster_status", "cluster_ls", "cluster_read",
+}
+
+def _parallel_ok(fn, args):
+    """Whether this call can share a round with another. Deliberately narrow: the name
+    has to be on the list, it must not be a writing tool, and its own risk check has to
+    come back clean -- an approval prompt has to be answered one at a time."""
+    if fn not in PARALLEL_SAFE or _changes_things(fn): return False
+    try:
+        # risk_check answers None for a call it has nothing to say about
+        return risk_check(fn, args)[0] in (None, "", "ok") and not denied_by_rule(fn, args)
+    except Exception:
+        return False
+
+
+def _run_batch(batch, messages, emit, approve, seen_calls):
+    """Run several read-only calls at once, and put their results in the order asked.
+
+    Each worker gets the turn's context copied into its own thread -- TURN_CTX is
+    thread-local, and a worker without it would lose the chat id, plan mode and the
+    change ledger, which is to say the safety checks would read differently inside a
+    thread than outside one."""
+    ctx = {k: getattr(TURN_CTX, k, None) for k in
+           ("sid", "project", "agent", "read_only", "emit", "approve", "cancel",
+            "tools", "changes", "usage", "model", "effort", "think")}
+    boxes = [[] for _ in batch]
+
+    def work(i, tc, fn, args):
+        for k, v in ctx.items():
+            try: setattr(TURN_CTX, k, v)
+            except Exception: pass
+        try:
+            _run_one_tool(tc, fn, args, boxes[i], emit, approve, seen_calls)
+        except Exception as e:
+            boxes[i].append({"role": "tool", "tool_call_id": tc.get("id"), "name": fn,
+                             "t": time.time(), "ok": False, "secs": 0.0,
+                             "content": f"Error: {type(e).__name__}: {e}"})
+
+    threads = [threading.Thread(target=work, args=(i, *b), daemon=True)
+               for i, b in enumerate(batch)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+    for box in boxes: messages.extend(box)
+
+
 def _run_one_tool(tc, fn, args, messages, emit, approve, seen_calls):
     global LAST_SCREEN_IMAGE
     t0 = time.time()
@@ -2324,8 +2379,37 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                 emit("done", None)
                 return answer
             n_before = len(messages)
+            # A round of nothing but reading -- five greps, three files, two fetches --
+            # used to cost the sum of their latencies. When every call in the round is
+            # read-only, approval-free and on the safe list, they run together and the
+            # round costs the longest one. Anything else in the round and the whole
+            # round stays sequential: mixing the two orders is where the bugs live.
+            batched = {}
+            cap = int(S.get("parallel_tools_max") or 6)
+            if S.get("parallel_tools", True) and 1 < len(calls) <= cap and not cancel.is_set():
+                prep = []
+                for i, tc in enumerate(calls):
+                    if not tc.get("id"): tc["id"] = f"call_{rnd}_{i}"
+                    fn, args, bad = repair_call(tc["function"].get("name") or "",
+                                                tc["function"].get("arguments"), tools)
+                    prep.append((tc, fn, args, bad))
+                if all(not bad and _parallel_ok(fn, args) for _, fn, args, bad in prep):
+                    for tc, fn, args, _ in prep:
+                        emit("tool", {"name": fn, "args": args, "id": tc["id"], "t": time.time()})
+                        tool_runs[0] += 1
+                    seen_calls.pop("__bad__", None)
+                    box = []
+                    _run_batch([(tc, fn, args) for tc, fn, args, _ in prep],
+                               box, emit, approve, seen_calls)
+                    by_id = {m.get("tool_call_id"): m for m in box}
+                    for i, (tc, _, _, _) in enumerate(prep):
+                        m = by_id.get(tc["id"])
+                        if m is not None: batched[i] = m
             for i, tc in enumerate(calls):
                 if not tc.get("id"): tc["id"] = f"call_{rnd}_{i}"
+                if i in batched:
+                    messages.append(batched[i])
+                    continue
                 if cancel.is_set():
                     # a round can hold five calls; Stop used to run all five. Every
                     # remaining call still needs a result, or the next request carries a
