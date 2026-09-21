@@ -6783,7 +6783,21 @@ def plugin_after(fn, args, out):
     return out
 
 # ------------------------------------------------------------------ helper tasks
-def t_task(prompt, description=None):
+# What a helper is allowed to touch. "explore" is deliberately reads only: most helpers
+# are sent to find something out, and a helper researching a question has no business
+# writing files — it has no plan of its own and nobody is watching it. A helper that
+# genuinely has to build something is sent with profile="build", which is what the
+# parent's own tools have always been.
+TASK_PROFILES = {
+    "explore": {"read_file", "list_dir", "glob", "grep_files", "search_knowledge",
+                "search_chats", "read_chat", "fetch_url", "web_search", "http_json",
+                "fetch_paper_pdf", "pubmed_search", "ncbi", "uniprot", "alphafold",
+                "arabidopsis_gene", "sequence", "check_citations", "list_skills",
+                "use_skill", "cluster_status", "cluster_ls", "cluster_read", "plan",
+                "ask_user"},
+}
+
+def t_task(prompt, description=None, profile=None):
     """Hand one self-contained piece of work to a fresh helper with its own,
     empty context: it researches or builds, and only its report comes back.
     Keeps a long investigation from filling this conversation's window."""
@@ -6795,6 +6809,12 @@ def t_task(prompt, description=None):
     project = current_project()
     tools = [t for t in (parent["tools"] or active_tools()[0])
              if t["function"]["name"] not in ("task", "schedule_task", "cancel_scheduled_task")]
+    # explore is the default: the tool exists for side investigations, and a helper sent
+    # to find something out has no business writing files — it has no plan of its own,
+    # nobody is watching it, and its mistakes land in your tree rather than in its report
+    allow = TASK_PROFILES.get(str(profile or "explore").strip().lower())
+    if allow:
+        tools = [t for t in tools if t["function"]["name"] in allow]
     msgs = [{"role": "system", "content": system_prompt_for(None, project) + (
         "\n\n## You are a helper\nAnother instance of you handed you one self-contained task. "
         "Do it with your tools, then reply with a concise report: what you found or did, the "
@@ -6839,13 +6859,18 @@ BUILTIN["task"] = t_task
 ALL_SPECS.append({"type": "function", "function": {
     "name": "task",
     "description": "Hand a self-contained sub-task to a helper that starts with an empty "
-                   "context and the same tools, and get back only its report. Use it for a "
-                   "side investigation that would otherwise fill this conversation with "
-                   "search results and file dumps — e.g. 'find three recent papers on X and "
-                   "report their key numbers'. The prompt must say everything the helper needs.",
+                   "context, and get back only its report. Use it for a side investigation "
+                   "that would otherwise fill this conversation with search results and file "
+                   "dumps — e.g. 'find three recent papers on X and report their key numbers'. "
+                   "The prompt must say everything the helper needs. It may read, search and "
+                   "fetch; pass profile='build' if it genuinely has to change files.",
     "parameters": {"type": "object", "properties": {
         "prompt": {"type": "string", "description": "the full task, self-contained"},
-        "description": {"type": "string", "description": "3-6 word label"}},
+        "description": {"type": "string", "description": "3-6 word label"},
+        "profile": {"type": "string", "enum": ["explore", "build"],
+                    "description": "explore (the default: it may read, search and fetch, "
+                                   "and changes nothing) or build (your whole tool set, for "
+                                   "a helper that genuinely has to write)"}},
         "required": ["prompt"]}}})
 
 # ------------------------------------------------------------------ prompt templates
