@@ -16,7 +16,12 @@ class TestWhoMayRunTogether(unittest.TestCase):
     def test_writing_is_not(self):
         self.assertFalse(q._parallel_ok("write_file", {"path": "/tmp/x", "text": "y"}))
         self.assertFalse(q._parallel_ok("edit_file", {"path": "/tmp/x"}))
-        self.assertFalse(q._parallel_ok("run_shell", {"command": "ls"}))
+        # run_shell is judged by its command line, not by its name: `ls` reads,
+        # `rm -rf` does not, and a command nobody classified claims nothing
+        self.assertTrue(q._parallel_ok("run_shell", {"command": "ls"}))
+        self.assertFalse(q._parallel_ok("run_shell", {"command": "rm -rf build"}))
+        self.assertFalse(q._parallel_ok("run_shell", {"command": "ls > out.txt"}))
+        self.assertFalse(q._parallel_ok("run_shell", {"command": "samtools sort in.bam"}))
 
     def test_a_tool_that_would_ask_you_something_is_not(self):
         """An approval prompt has to be answered one at a time."""

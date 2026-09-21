@@ -676,6 +676,9 @@ def anthropic_stream(model, messages, tools, api_key, think=True, effort="medium
     msg = {"role": "assistant", "content": "".join(text)}
     if thinking: msg["reasoning_content"] = "".join(thinking)
     if calls: msg["tool_calls"] = calls
+    # "max_tokens" means it ran out of room mid-sentence, not that it had finished;
+    # said in the OpenAI spelling, which is the shape the rest of Orbit speaks
+    if getattr(final, "stop_reason", None) == "max_tokens": msg["_finish"] = "length"
     usage = getattr(final, "usage", None)
     if usage is not None:
         read = getattr(usage, "cache_read_input_tokens", 0) or 0
