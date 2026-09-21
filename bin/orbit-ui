@@ -1055,9 +1055,12 @@ class H(http.server.BaseHTTPRequestHandler):
                                               "messages": render(shown), "n": len(msgs),
                                               "context": q.context_state(msgs, sid),
                                               "running": running, "live": live,
-                                              # what this chat remembers for itself
+                                              # what this chat remembers for itself, and
+                                              # the one setting a client needs resolved:
+                                              # a chat that never set it follows Orbit's
                                               "prefs": {k: v for k, v in (q.CE.chat_prefs(sid) or {}).items()
                                                         if k in q.PER_CHAT},
+                                              "easy_mode": bool(q.chat_setting("easy_mode", sid)),
                                               "queue": _queue_view(stt)}))
             except Exception as e:
                 return self._send(404, jdump({"error": str(e)}))
