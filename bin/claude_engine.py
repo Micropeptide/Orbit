@@ -992,9 +992,24 @@ def _set_chat_pref(sid, **kw):
     for k, v in kw.items():
         if v is None: cur.pop(k, None)
         else: cur[k] = v
-    d[sid] = cur
+    # a chat that has gone back to following Orbit for everything keeps no row of its own
+    if cur: d[sid] = cur
+    else: d.pop(sid, None)
     _write_json("chat-prefs.json", d)
     return cur
+
+
+def forget_chat_prefs(sid):
+    """Drop everything a chat remembered for itself. Called when the chat is deleted for
+    good -- not when it goes to the bin, because it can come back from there. Without it
+    every chat ever deleted left its folder, its permission mode and its extra directories
+    in the file for ever, and the file is read on a hot path."""
+    with _WRITE_LOCK:
+        d = dict(chat_prefs())
+        if sid not in d: return False
+        d.pop(sid, None)
+        _write_json("chat-prefs.json", d)
+        return True
 
 
 def control(sid, subtype, timeout=15, **params):
@@ -1562,6 +1577,18 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     try:
         if live:
             proc = live["proc"]
+            # A kept process's Orbit bridge answers on the token it was SPAWNED with: its
+            # MCP child read ORBIT_MCP_TOKEN from the environment once and there is no way
+            # to hand it a new one. Minting a fresh token each turn and revoking the old
+            # one therefore cut the bridge from the second turn onward -- every Orbit tool
+            # call came back "unknown run" for the rest of a kept chat. Take the old token
+            # over instead, with this turn's own emit, approvals and cancel behind it.
+            was = live.get("token")
+            if was and token:
+                BRIDGE[was] = BRIDGE.pop(token)
+                token = was
+            elif was:
+                BRIDGE.pop(was, None)          # this turn offers no tools; let it go
             emit("status", {"msg": f"continuing on {remote['host']}" if remote else "continuing the running session"})
         elif remote:
             import ssh_remote
@@ -2003,7 +2030,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         try:
             if kept and proc.poll() is None:
                 LIVE[sid] = {"proc": proc, "sig": sig, "lines": lines, "got": got, "err_tail": err_tail,
-                             "wlock": wlock, "host": remote["host"] if remote else None, "used": time.time()}
+                             "wlock": wlock, "host": remote["host"] if remote else None, "used": time.time(),
+                             "token": token}
                 _live_saved()
             elif proc.poll() is None:
                 try: proc.stdin.close()
@@ -2015,7 +2043,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
             if not kept: bg_ended(sid)             # its background shells and agents ended with it
         except Exception:
             pass
-        if token: BRIDGE.pop(token, None)
+        # while the process lives on, so must its token (see above); closing it revokes
+        if token and not kept: BRIDGE.pop(token, None)
         for f in (settings_path, mcp_path):      # per-run files; the MCP one holds the run's token
             try:
                 if f: os.remove(f)
@@ -2148,6 +2177,7 @@ def close_live(sid=None, why=""):
             v = LIVE.pop(k, None)
             bg_ended(k)
             if not v: continue
+            if v.get("token"): BRIDGE.pop(v["token"], None)
             try: v["proc"].stdin.close()
             except Exception: pass
             def finish(p=v["proc"]):

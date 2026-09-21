@@ -605,15 +605,28 @@ def make_handler(resolver, log=None, token=None, hooks=None):
                 headers["authorization"] = "Bearer " + key
                 headers["x-api-key"] = key
             headers.update(extra_headers or {})
+            # Only a request that cannot have reached the model is worth sending again.
+            # This used to retry timeouts and 504s as well, which are the opposite case:
+            # both mean the request DID arrive and the provider is taking its time, quite
+            # possibly generating right now. Re-posting then bills the same turn twice more
+            # and leaves the answer nowhere -- and with a 900s ceiling, three attempts kept
+            # Claude Code and this thread waiting some three quarters of an hour before
+            # saying anything at all. A provider that is slow is the user's call to make.
             for attempt in range(3):
                 req = urllib.request.Request(base + path, data=data, headers=headers, method="POST")
                 try:
                     return _opener(route.get("proxy")).open(req, timeout=float(route.get("timeout") or 900))
                 except urllib.error.HTTPError as e:
-                    # a brief upstream hiccup is retried here; anything else goes back to Claude Code
-                    if e.code not in (502, 503, 504) or attempt == 2: raise
-                except (urllib.error.URLError, ConnectionError, TimeoutError, socket.timeout):
-                    if attempt == 2: raise
+                    # a proxy in front of the model refusing the connection; 504 is not here
+                    if e.code not in (502, 503) or attempt == 2: raise
+                except (TimeoutError, socket.timeout):
+                    raise                                    # sent, and possibly answering
+                except urllib.error.URLError as e:
+                    if isinstance(e.reason, (TimeoutError, socket.timeout)) or attempt == 2: raise
+                except ConnectionRefusedError:
+                    if attempt == 2: raise                   # nothing was listening: safe
+                except ConnectionError:
+                    raise                                    # reset mid-flight: not safe
                 time.sleep(1.5 * (attempt + 1))
 
         def _relay_error(self, e):

@@ -649,10 +649,11 @@ def anthropic_stream(model, messages, tools, api_key, think=True, effort="medium
         kw["output_config"] = {"effort": eff}
 
     text, thinking, calls = [], [], []
+    stopped = False
     with client.messages.stream(**kw) as stream:
         for ev in stream:
             if cancel is not None and cancel.is_set():
-                stream.close()
+                stopped = True
                 break
             if ev.type == "content_block_delta":
                 d = ev.delta
@@ -660,7 +661,18 @@ def anthropic_stream(model, messages, tools, api_key, think=True, effort="medium
                     thinking.append(d.thinking); emit("thinking_delta", d.thinking)
                 elif d.type == "text_delta":
                     text.append(d.text); emit("content_delta", d.text)
-        final = stream.get_final_message()
+        # Pressing stop is not an error, and it does not throw away what you were
+        # already reading. This used to close the stream and then ask it for the final
+        # message, which resumes reading the socket it has just closed: the words on
+        # screen were discarded and a bare "Bad file descriptor" came out instead. The
+        # other two backends return their partial answer on cancel; so does this one
+        # now. Leaving the `with` closes the stream.
+        final = None if stopped else stream.get_final_message()
+
+    if stopped:
+        msg = {"role": "assistant", "content": "".join(text)}
+        if thinking: msg["reasoning_content"] = "".join(thinking)
+        return msg
 
     if getattr(final, "stop_reason", None) == "refusal":
         det = getattr(final, "stop_details", None)

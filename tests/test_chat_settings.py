@@ -6,6 +6,7 @@ import os, sys, tempfile, unittest
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "bin"))
 import qqcore as q
+import claude_engine as CE
 
 
 class TestPerChatSettings(unittest.TestCase):
@@ -55,6 +56,34 @@ class TestPerChatSettings(unittest.TestCase):
         q.TURN_CTX.sid = None
         q.S["easy_mode"] = True
         self.assertTrue(q.chat_setting("easy_mode"))
+
+
+
+class TestAChatsSettingsDoNotOutliveIt(unittest.TestCase):
+    """chat-prefs.json is read on a hot path -- every per-chat setting lookup and every
+    tool call asks it something. It used to keep a row for every chat that had ever set
+    anything, including chats deleted months ago."""
+
+    def setUp(self):
+        self.sid = "test-prefs-" + os.urandom(3).hex()
+        self.addCleanup(CE.forget_chat_prefs, self.sid)
+
+    def test_clearing_the_last_override_removes_the_row(self):
+        CE.set_chat_pref(self.sid, permission_mode="plan")
+        self.assertIn(self.sid, CE.chat_prefs())
+        CE.set_chat_pref(self.sid, permission_mode=None)
+        self.assertNotIn(self.sid, CE.chat_prefs(), "an empty row was left behind")
+
+    def test_one_override_of_several_leaves_the_rest(self):
+        CE.set_chat_pref(self.sid, permission_mode="plan", easy_mode=True)
+        CE.set_chat_pref(self.sid, permission_mode=None)
+        self.assertEqual(CE.chat_prefs(self.sid), {"easy_mode": True})
+
+    def test_forgetting_a_chat_is_answered_honestly(self):
+        CE.set_chat_pref(self.sid, permission_mode="plan")
+        self.assertTrue(CE.forget_chat_prefs(self.sid))
+        self.assertNotIn(self.sid, CE.chat_prefs())
+        self.assertFalse(CE.forget_chat_prefs(self.sid), "said it forgot something twice")
 
 
 if __name__ == "__main__":
