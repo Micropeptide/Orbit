@@ -3969,6 +3969,11 @@ async function go(opts){
       const sn=document.createElement('div');sn.style.opacity='.8';sn.textContent=x.snippet;
       r.appendChild(sn);d.appendChild(r)});
      a.m.appendChild(d);bottom()}
+    else if(m.k==='review'){
+     const d=el('<details class=think style="margin-top:6px"></details>');
+     d.appendChild(el(`<summary>Review of ${m.p.files} changed file${m.p.files===1?'':'s'} · ${esc(m.p.model||'')}</summary>`));
+     const b=el('<div class=body></div>');b.textContent=m.p.text;d.appendChild(b);
+     a.tools.appendChild(d);bottom()}
     else if(m.k==='weak_claims'){
      const w=el('<div class=weak></div>');
      w.appendChild(el('<b>Claims with little support in the retrieved sources</b>'));
@@ -4179,6 +4184,13 @@ async function openSettings(tab){
     <label>Auto-compact at</label><div style="display:flex;gap:8px;align-items:center">
       <input type=number id=g_ac min=0 max=100 style="max-width:110px"><span class=note>% of context (0 = off)</span></div>
     <div class=hint2>When the window fills past this, older turns are summarised automatically before your next message.</div>
+    <label>Side work goes to</label><select id=g_helper></select>
+    <div class=hint2>Titles, summaries and the review below are Orbit's own work, not the answer.
+     A model on this Mac takes one request at a time, so asking it to review the turn it just
+     finished means queueing behind that turn — pick a hosted model here and the review runs while
+     the local one is busy. "the model answering" keeps today's behaviour.</div>
+    <label>Review what an answer changed</label><div class=sw><input type=checkbox id=g_review>
+      <span class=note>when a turn writes files, read the diff back and report what is wrong with it</span></div>
     <label>Quiet mode</label><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <span class=note id=g_quiet></span><button class=ghost id=g_quiet3>quiet for 3 h</button><button class=ghost id=g_quietoff>off</button></div>
     <div class=hint2>While quiet, the model server runs with fan mode "default": macOS manages the fans, with no boost while it generates. Takes effect the next time the server starts (Settings → Local server → restart). The permanent choice is "Fan mode" under Local server.</div>
@@ -4217,7 +4229,12 @@ async function openSettings(tab){
    $('#g_think').checked=!!draft.thinking;$('#g_show').checked=!!draft.show_thinking;
    $('#g_eff').value=draft.reasoning_effort||'medium';$('#g_rounds').value=draft.max_tool_rounds??0;
    $('#g_mins').value=draft.max_turn_minutes??0;$('#g_notice').value=draft.long_run_notice_min??30;
-   $('#g_ac').value=draft.autocompact_pct??80;$('#g_td').value=draft.trash_days??30;
+   $('#g_ac').value=draft.autocompact_pct??80;
+   $('#g_review').checked=draft.auto_review==='changes';
+   {const sel=$('#g_helper'),cur=draft.helper_model||'';
+    sel.innerHTML='<option value="">the model answering</option>'+
+     (MODELS.models||[]).filter(m=>!m.switch&&m.ready!==false)
+      .map(m=>`<option value="${esc(m.id)}"${m.id===cur?' selected':''}>${esc(m.label||m.model)} · ${esc(m.provider_label||'')}</option>`).join('')}$('#g_td').value=draft.trash_days??30;
    const drawQuiet=()=>{const u=+draft.quiet_until||0;$('#g_quiet').textContent=u*1000>Date.now()?
      'on until '+new Date(u*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'off'};
    const setQuiet=async until=>{const r=await apiPost('/api/settings',{settings:{quiet_until:until}},'quiet mode');
@@ -5044,7 +5061,9 @@ async function openSettings(tab){
    draft.reasoning_effort=$('#g_eff').value;draft.max_tool_rounds=Number($('#g_rounds').value)||0;
    draft.max_turn_minutes=Number($('#g_mins').value)||0;
    draft.long_run_notice_min=Number($('#g_notice').value)||0;
-   draft.autocompact_pct=Number($('#g_ac').value);draft.trash_days=Number($('#g_td').value)||30;
+   draft.autocompact_pct=Number($('#g_ac').value);
+   draft.helper_model=$('#g_helper')?$('#g_helper').value:(draft.helper_model||'');
+   draft.auto_review=($('#g_review')&&$('#g_review').checked)?'changes':'';draft.trash_days=Number($('#g_td').value)||30;
    draft.system_prompt=$('#g_sys').value;draft.use_instructions=$('#g_useins').checked;
    draft.use_memory=$('#g_usemem').checked;
    draft.sampling={temperature:num($('#s_temp').value),top_p:num($('#s_top_p').value),

@@ -2406,12 +2406,19 @@ class TestRound1(TestLongAnswers):
 
     # --- plugins
     def test_plugins_can_rewrite_refuse_and_transform(self):
-        self.write("plugins/p.py",
+        path = self.write("plugins/p.py",
                    "def tool_before(name, args):\n"
                    "    if name == 'run_shell': raise PermissionError('no shell on Sundays')\n"
                    "    return args\n"
                    "def tool_after(name, args, out): return out + ' [seen]'\n"
                    "def system_transform(text): return text + '\\nPLUGIN WAS HERE'\n")
+        path = path or os.path.join(q.PLUGINS_DIR, "p.py")
+        saved = q.PLUGIN_TRUST                      # never the real one
+        q.PLUGIN_TRUST = os.path.join(self.tmp, "plugins-trusted.json")
+        self.addCleanup(setattr, q, "PLUGIN_TRUST", saved)
+        # reading a plugin runs it, so an untrusted file is not read at all
+        self.assertNotIn("PLUGIN WAS HERE", q.system_prompt_for())
+        q.plugin_trust(path, trust=True)
         self.assertIn("PLUGIN WAS HERE", q.system_prompt_for())
         msgs = []
         q._run_one_tool({"id": "c1"}, "run_shell", {"command": "ls"}, msgs, self.emit, None, {})
