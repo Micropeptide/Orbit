@@ -498,6 +498,13 @@ def model_catalogue():
     # other local folders you could switch to — one restart away, not a live option
     served = (local_model_name() or "").lower()
     conf = (local_model_configured() or "")
+    if conf:
+        # the served model is listed under the short name MTPLX answers with
+        # ("orcarouter-qwen3.8-27b-uncensored-mlx"), which is not what you went looking
+        # for: name it as its folder is named, like every other local model
+        for m in cat:
+            if m.get("provider") == "local" and str(m.get("id", "")).startswith("local:"):
+                m["label"] = local_dir_label(conf)
     for d in local_model_dirs():
         if d == conf: continue
         squashed = d.lower().replace("-", "").replace("_", "")
@@ -4056,9 +4063,30 @@ NAME     = "Orbit"
 VERSION  = "2.0"
 GITHUB   = "https://github.com/Micropeptide"
 
+PROJ_LOCK = threading.RLock()    # every read-modify-write of projects.json
+
 def projects_load():
     try: return json.load(open(PROJECTS))
     except Exception: return {}
+
+
+def projects_reorder(ids):
+    """Put the projects in this order, in one write.
+
+    Reordering used to be one save per project, and every read of the project list
+    runs the Claude-group sync, which reads the file, decides what to change and
+    writes it back. A sync that began before those saves finished put the old order
+    back -- the drag looked like it had done nothing. One call, one write, under the
+    lock every other writer takes."""
+    with PROJ_LOCK:
+        d = projects_load()
+        order = [pid for pid in ids if pid in d]
+        rest = sorted((k for k in d if k not in set(order)),
+                      key=lambda k: (d[k] or {}).get("order", 0))
+        for i, pid in enumerate(order + rest):
+            if isinstance(d[pid], dict): d[pid]["order"] = i
+        projects_save(d)
+        return d
 
 CONFIG_HISTORY = os.path.join(CONFIG, ".history")
 
@@ -4105,6 +4133,7 @@ def projects_save(d):
     return d
 
 def project_upsert(pid, **kw):
+  with PROJ_LOCK:
     d = projects_load()
     pid = pid or ("p" + os.urandom(4).hex())
     cur = d.get(pid, {"created": time.time(), "order": len(d)})
@@ -4118,8 +4147,9 @@ def project_upsert(pid, **kw):
     return pid, cur
 
 def project_delete(pid, move_chats_to=None):
-    d = projects_load()
-    gone = d.pop(pid, None); projects_save(d)
+    with PROJ_LOCK:
+        d = projects_load()
+        gone = d.pop(pid, None); projects_save(d)
     if isinstance(gone, dict) and gone.get("claude_group"):
         # deleted here: the Claude group it came from is not turned into a project again
         try:
@@ -5421,11 +5451,12 @@ def project_upsert(pid, **kw):
         if os.path.isdir(kw["folder"]) and not _folder_ok(kw["folder"]):
             raise ValueError("a project folder can't be /, your home folder or a top-level folder")
     elif "folder" in kw and kw["folder"] == "":
-        d = projects_load()
-        if pid in d:
-            d[pid].pop("folder", None)
-            if d[pid].get("claude_group"): d[pid]["folder_locked"] = True   # cleared on purpose
-            projects_save(d)
+        with PROJ_LOCK:
+            d = projects_load()
+            if pid in d:
+                d[pid].pop("folder", None)
+                if d[pid].get("claude_group"): d[pid]["folder_locked"] = True   # cleared on purpose
+                projects_save(d)
         kw.pop("folder")
     return _project_upsert_base(pid, **kw)
 
@@ -6437,6 +6468,11 @@ def claude_projects_sync():
     {group id: Orbit project id}."""
     if not S.get("claude_projects", True): return {}
     groups, _ = claude_app_groups()
+    with PROJ_LOCK:
+        return _claude_projects_sync(groups)
+
+
+def _claude_projects_sync(groups):
     d = projects_load()
     by = {v.get("claude_group"): k for k, v in d.items() if isinstance(v, dict) and v.get("claude_group")}
     if not groups: return by

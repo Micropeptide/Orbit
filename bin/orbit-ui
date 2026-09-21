@@ -1763,6 +1763,11 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/knowledge/project":
             q.know_set_project(d.get("name",""), d.get("project") or None)
             return self._send(200, jdump({"ok": True}))
+        if p == "/api/projects/reorder":
+            # one write: ten saves used to race the Claude-group sync and lose
+            ids = [str(x) for x in (d.get("ids") or []) if x]
+            if not ids: return self._send(400, jdump({"error": "no order given"}))
+            return self._send(200, jdump({"ok": True, "projects": q.projects_reorder(ids)}))
         if p == "/api/projects/save":
             try:
               pid, pr = q.project_upsert(d.get("id"), name=d.get("name"),
