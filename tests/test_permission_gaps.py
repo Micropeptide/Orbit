@@ -108,10 +108,16 @@ class TestTaggingAChatCannotTruncateIt(unittest.TestCase):
 
 
 class TestClaudesClassifierIsNotUsedOnALocalModel(unittest.TestCase):
-    """A chat on the local model kept answering "cannot determine the safety of Bash".
-    Claude Code's "auto" permission mode asks the *model* to classify each tool call;
-    pointed at a model on this Mac that is busy generating the very turn that is asking,
-    it waits behind it, times out at 60s, and a classifier that times out refuses."""
+    """A chat kept answering "cannot determine the safety of Bash". Claude Code's "auto"
+    permission mode asks the *model* to classify each tool call, it times out at 60s, and
+    a classifier that times out refuses the tool.
+
+    This was first read as a local-model problem -- a model on this Mac waits behind the
+    very turn that is asking it. It is not: the same thing happened on a small free model
+    reached through the harness, which is nowhere near this Mac. What the two share is
+    that the model being asked is the model doing the work. A real Claude subscription is
+    the exception, because there the classifying is done for you and quickly, so that one
+    keeps Claude's own."""
 
     def modes(self, kind):
         argv = q.CE.build_argv(dict(q.CE.DEFAULTS), kind=kind, mode="auto")
@@ -120,8 +126,27 @@ class TestClaudesClassifierIsNotUsedOnALocalModel(unittest.TestCase):
     def test_a_local_model_gets_orbits_own_gate_instead(self):
         self.assertEqual(self.modes("local"), "default")
 
-    def test_a_hosted_model_still_gets_the_mode_you_chose(self):
-        self.assertEqual(self.modes("provider"), "auto")
+    def test_and_so_does_a_model_reached_through_the_harness(self):
+        self.assertEqual(self.modes("provider"), "default")
+
+    def test_but_a_claude_subscription_keeps_claudes_own(self):
+        self.assertEqual(self.modes("subscription"), "auto")
+
+    def test_orbits_own_gate_is_attached_whichever_way(self):
+        """Replacing Claude's classifier only helps because something else answers the
+        question. Orbit's does, in microseconds, and it is on the command line either way."""
+        for kind in ("local", "provider", "subscription"):
+            with self.subTest(kind=kind):
+                argv = q.CE.build_argv(dict(q.CE.DEFAULTS), kind=kind, mode="auto")
+                self.assertIn("--permission-prompt-tool", argv)
+
+    def test_the_modes_you_chose_yourself_are_untouched(self):
+        """Only "auto" is the model's own judgement; the rest are the user's."""
+        for kind in ("local", "provider"):
+            for mode in ("plan", "acceptEdits", "bypassPermissions"):
+                with self.subTest(kind=kind, mode=mode):
+                    argv = q.CE.build_argv(dict(q.CE.DEFAULTS), kind=kind, mode=mode)
+                    self.assertEqual(argv[argv.index("--permission-mode") + 1], mode)
 
     def test_other_modes_are_untouched_on_the_local_model(self):
         for mode in ("plan", "acceptEdits", "bypassPermissions"):
