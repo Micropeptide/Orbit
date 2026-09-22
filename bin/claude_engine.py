@@ -526,14 +526,19 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
     if session_id:
         argv += (["--resume", session_id] if resume else ["--session-id", session_id])
     mode = "plan" if read_only else (mode or "")
-    if mode == "auto" and kind == "local":
-        # Claude Code's "auto" asks the *model* to classify each tool call's safety.
-        # Pointed at a model on this Mac that is already busy generating the turn, the
-        # classifier waits behind it and times out at 60s -- and a classifier that times
-        # out refuses the tool: "…cannot determine the safety of Bash right now". Every
-        # Bash call in the chat fails that way. Orbit answers the same question from
-        # risk_check in microseconds through --permission-prompt-tool, so the local
-        # model gets Orbit's gate instead of Claude's.
+    if mode == "auto" and kind != "subscription":
+        # Claude Code's "auto" asks the *model* to classify each tool call's safety, and
+        # a classifier that times out refuses the tool: "…cannot determine the safety of
+        # Bash right now". Every Bash call in the chat fails that way.
+        #
+        # This used to be swapped only for a model on this Mac, where the classifier
+        # queues behind the answer the same server is still generating. But the trouble
+        # is not where the model runs, it is that the model being asked is the one doing
+        # the work -- a small or free model reached through the harness is just as slow
+        # to answer it, and no better at it. Orbit answers the same question from
+        # risk_check in microseconds, through --permission-prompt-tool, which is attached
+        # either way. Only a real Claude subscription keeps Claude's own classifier,
+        # where it is fast and worth having.
         mode = "default"
     if mode in PERMISSION_MODES and mode != "default":     # "default" (ask first) is Claude's own
         argv += ["--permission-mode", mode]
