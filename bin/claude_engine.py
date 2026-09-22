@@ -540,7 +540,13 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
         # either way. Only a real Claude subscription keeps Claude's own classifier,
         # where it is fast and worth having.
         mode = "default"
-    if mode in PERMISSION_MODES and mode != "default":     # "default" (ask first) is Claude's own
+    # A mode Orbit has settled on is stated, "default" included. It used to be left off,
+    # on the reasoning that off means Claude's own -- but Claude's own is whatever
+    # `permissions.defaultMode` says in ~/.claude/settings.json, and that says "auto"
+    # here. So dropping --permission-mode auto changed nothing at all: the classifier
+    # went on refusing Bash on the local model. Saying no has to be said out loud.
+    # Wanting Claude's own setting is still expressible: it is the empty mode.
+    if mode in PERMISSION_MODES:
         argv += ["--permission-mode", mode]
     dis = [t for t in (c.get("disallowed_tools") if kind == "local" else
                        [] if kind == "subscription" else c.get("provider_disallowed_tools", ["WebSearch"])) or [] if t]

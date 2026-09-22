@@ -121,7 +121,23 @@ class TestClaudesClassifierIsNotUsedOnALocalModel(unittest.TestCase):
 
     def modes(self, kind):
         argv = q.CE.build_argv(dict(q.CE.DEFAULTS), kind=kind, mode="auto")
-        return argv[argv.index("--permission-mode") + 1] if "--permission-mode" in argv else "default"
+        return argv[argv.index("--permission-mode") + 1] if "--permission-mode" in argv else None
+
+    def test_saying_nothing_is_not_saying_no(self):
+        """The first attempt at this dropped the flag instead of setting it, on the
+        reasoning that no flag means Claude's own default. It does -- and Claude's own
+        default is whatever `permissions.defaultMode` says in ~/.claude/settings.json.
+        Where that says "auto", dropping the flag changed nothing whatsoever and the
+        classifier went on refusing Bash. Checked against the real binary: with no flag
+        it reports permissionMode "auto"; with the flag it reports "default"."""
+        argv = q.CE.build_argv(dict(q.CE.DEFAULTS), kind="local", mode="auto")
+        self.assertIn("--permission-mode", argv, "nothing on the command line says no")
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
+
+    def test_wanting_claudes_own_setting_is_still_sayable(self):
+        """The empty mode is how you ask for whatever your Claude settings say."""
+        self.assertNotIn("--permission-mode",
+                         q.CE.build_argv(dict(q.CE.DEFAULTS), kind="local", mode=""))
 
     def test_a_local_model_gets_orbits_own_gate_instead(self):
         self.assertEqual(self.modes("local"), "default")
