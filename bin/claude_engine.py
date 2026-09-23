@@ -840,6 +840,17 @@ def decide(tool, inp, ctx, req=None):
             return False, f"REFUSED: {why}. This is blocked and cannot be approved.", None, None
         if not level and tool in ("Bash", "Write", "Edit", "MultiEdit"):
             return True, "", inp, None
+        # A tool from an MCP server is somebody else's code, so Orbit cannot tell from
+        # the name what it does. It can read what is being handed to it, and does:
+        # risk_check scans every argument of every call, so `rm -rf /`, `sudo` or a
+        # download piped into a shell inside an MCP tool's `code` is caught exactly as
+        # it is inside Bash's `command` -- same verdicts, checked. Stopping anyway for
+        # a call the rules have read and found nothing in is what made auto mode feel
+        # switched off: a long session asks about every single ctx_execute. In "ask"
+        # this still asks, because there the point is to see everything.
+        if not level and tool.startswith("mcp__") \
+                and Q.S.get("autonomy_mode", "ask") in ("auto", "full"):
+            return True, "", inp, None
         reason = why or reason
         mode = Q.S.get("autonomy_mode", "ask")
         by_rule = Q.allowed_by_rule(fn, args)
