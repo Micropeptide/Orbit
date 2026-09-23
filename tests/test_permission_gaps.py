@@ -170,5 +170,53 @@ class TestClaudesClassifierIsNotUsedOnALocalModel(unittest.TestCase):
             self.assertEqual(argv[argv.index("--permission-mode") + 1], mode)
 
 
+
+class TestTakingTheJudgeAwayIsNotJudging(unittest.TestCase):
+    """REGRESSION: Orbit stopped Claude Code classifying its own tool calls, and put
+    nothing in its place. The handler only applied Orbit's rules when `orbit_rules` was
+    on, which is off by default, so every call -- `ls -la` included -- went to the user
+    one at a time. Auto-approve looked broken because it was."""
+
+    def setUp(self):
+        self.saved = q.S.get("autonomy_mode")
+        q.S["autonomy_mode"] = "auto"
+        self.addCleanup(lambda: q.S.__setitem__("autonomy_mode", self.saved))
+        self.asked = []
+
+    def ctx(self, gate):
+        return {"cfg": dict(q.CE.DEFAULTS), "read_only": False, "emit": lambda *a: None,
+                "approve": lambda *a, **k: (self.asked.append(a[0]), (False, "asked"))[1],
+                "ask": None, "roots": [q.WORKSPACE], "orbit_gate": gate}
+
+    def verdict(self, tool, inp, gate=True):
+        allow, msg, *_ = q.CE.decide(tool, inp, self.ctx(gate), req={})
+        if allow: return "allow"
+        return "refused" if "REFUSED" in (msg or "") else "asks"
+
+    def test_the_harmless_goes_through_without_asking(self):
+        for tool, inp in (("Read", {"file_path": "/tmp/x"}), ("Grep", {"pattern": "x"}),
+                          ("Bash", {"command": "ls -la"}), ("Bash", {"command": "git status"})):
+            with self.subTest(tool=tool, inp=inp):
+                self.assertEqual(self.verdict(tool, inp), "allow")
+
+    def test_and_the_dangerous_still_does_not(self):
+        self.assertEqual(self.verdict("Bash", {"command": "rm -rf /"}), "refused")
+        # never-auto: approvable, but only by a person
+        self.assertEqual(self.verdict("Bash", {"command": "sudo rm -rf /etc"}), "asks")
+
+    def test_the_gate_is_what_makes_the_difference(self):
+        """Without it, and with orbit_rules off, even a directory listing is a prompt."""
+        self.assertEqual(self.verdict("Bash", {"command": "ls -la"}, gate=False), "asks")
+
+    def test_the_command_line_and_the_handler_agree(self):
+        """They are the same question, so they ask the same function."""
+        for kind, expect in (("local", True), ("provider", True), ("subscription", False)):
+            with self.subTest(kind=kind):
+                self.assertEqual(q.CE.orbit_is_the_gate("auto", kind), expect)
+                argv = q.CE.build_argv(dict(q.CE.DEFAULTS), kind=kind, mode="auto")
+                took_over = argv[argv.index("--permission-mode") + 1] == "default"
+                self.assertEqual(took_over, expect)
+
+
 if __name__ == "__main__":
     unittest.main()

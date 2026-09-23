@@ -498,6 +498,20 @@ def route_skills(text, limit=6):
 
 # ------------------------------------------------------------------ arguments
 
+def orbit_is_the_gate(mode, kind, read_only=False):
+    """True when Orbit has taken Claude Code's own classifier off this run, and so has
+    to answer the permission questions itself.
+
+    Both halves of that have to agree, which is why they ask the same function. They did
+    not, once: the classifier was removed from the command line and nothing took its
+    place, because the handler only applied Orbit's rules when `orbit_rules` was on --
+    off by default. Every tool call then went to the user, one at a time, which read as
+    auto-approve having stopped working. It had: taking the judge away is not the same
+    as judging."""
+    m = "plan" if read_only else (mode or "")
+    return m == "auto" and kind != "subscription"
+
+
 def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None, mode=None,
                settings_path=None, mcp_path=None, append=None, sdk=True, add_dirs=None, model=None,
                kind="local", remote=False, sid=None, **_):
@@ -526,7 +540,7 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
     if session_id:
         argv += (["--resume", session_id] if resume else ["--session-id", session_id])
     mode = "plan" if read_only else (mode or "")
-    if mode == "auto" and kind != "subscription":
+    if orbit_is_the_gate(mode, kind):
         # Claude Code's "auto" asks the *model* to classify each tool call's safety, and
         # a classifier that times out refuses the tool: "…cannot determine the safety of
         # Bash right now". Every Bash call in the chat fails that way.
@@ -807,7 +821,7 @@ def decide(tool, inp, ctx, req=None):
         return False, "Plan mode is on, so nothing may be changed. Describe the change instead.", None, None
     fn, args = orbit_view(tool, inp)
     reason = f"Claude Code wants to use {tool}" + (f": {req['description']}" if req.get("description") else "")
-    if c.get("orbit_rules"):
+    if c.get("orbit_rules") or ctx.get("orbit_gate"):
         if _glob_match(tool, c.get("auto_allow")):
             return True, "", inp, None
         try:
@@ -1660,7 +1674,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     except Exception:
         pass
     ctx = {"cfg": c, "read_only": bool(read_only), "emit": emit, "approve": approve,
-           "ask": getattr(T, "ask", None), "roots": roots}
+           "ask": getattr(T, "ask", None), "roots": roots,
+           "orbit_gate": orbit_is_the_gate(mode, kind, read_only)}
 
     # state of the stream
     cur = None                         # the Orbit assistant message being written
