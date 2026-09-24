@@ -6665,9 +6665,43 @@ def dispatch(fn, args):
     return _dispatch_base(fn, args)
 
 _risk_check_base = risk_check
+# Files where a write changes how this Mac or its accounts behave rather than the work
+# in hand: credentials, the shells that run at login, services that start by themselves,
+# and the agents' own settings. PROTECTED, above, is about what a destructive COMMAND
+# points at; this is about what a WRITE lands on, and nothing was checking that at all --
+# `write_file ~/.ssh/id_rsa` drew no comment from any rule. It was covered only by
+# accident, by the chat-folder limit, which is a different thing wearing the same hat.
+SENSITIVE_WRITE = ("~/.ssh/", "~/.aws/", "~/.gnupg/", "~/.config/gh/", "~/.netrc",
+                   "~/.npmrc", "~/.pypirc", "~/.kube/", "~/.docker/config.json",
+                   "~/.zshrc", "~/.zshenv", "~/.zprofile", "~/.bashrc", "~/.bash_profile",
+                   "~/.profile", "~/Library/LaunchAgents/", "/Library/LaunchAgents/",
+                   "/Library/LaunchDaemons/", "/etc/", "~/.claude/", "~/.codex/")
+
+
+def sensitive_write(path):
+    """Which sensitive location a write lands in, or None."""
+    if not path: return None
+    try:
+        p = os.path.realpath(os.path.expanduser(str(path)))
+    except (TypeError, ValueError):
+        return None
+    for pat in SENSITIVE_WRITE:
+        want = os.path.expanduser(pat).rstrip(os.sep)
+        try: want = os.path.realpath(want)      # /etc is /private/etc on a Mac
+        except (TypeError, ValueError): pass
+        if p == want or p.startswith(want + os.sep):
+            return pat
+    return None
+
+
 def risk_check(fn, args):
     level, reason = _risk_check_base(fn, args)
     if level: return level, reason
+    if fn in _WRITE_TOOLS:
+        a = args or {}
+        hit = sensitive_write(a.get("path") or a.get("file_path") or a.get("notebook_path"))
+        if hit:
+            return ("confirm", f"writing inside {hit} — keys, login shells and services live there")
     ft = file_tool(fn) if fn not in BUILTIN else None
     if ft and not ft["safe"]:
         return ("confirm", f"run the custom tool {fn} ({os.path.basename(ft['path'])})")

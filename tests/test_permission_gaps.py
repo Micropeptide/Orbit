@@ -266,5 +266,64 @@ class TestAnMcpToolIsJudgedByWhatIsPassedToIt(unittest.TestCase):
                                  q.risk_check("run_shell", {"command": code})[0])
 
 
+
+class TestTheFolderLimitIsAPolicyNotASafetyRule(unittest.TestCase):
+    """REGRESSION: keeping a chat inside its own folders rides with `orbit_rules`, which
+    is opt-in. Taking Claude's classifier off a run turned it on for everybody, so a chat
+    building something in another directory stopped at every single Write -- which is
+    what auto mode felt like it had stopped doing. It was the only thing being asked."""
+
+    def setUp(self):
+        self.saved = q.S.get("autonomy_mode")
+        q.S["autonomy_mode"] = "auto"
+        self.addCleanup(lambda: q.S.__setitem__("autonomy_mode", self.saved))
+
+    def ctx(self, rules):
+        c = dict(q.CE.DEFAULTS); c["orbit_rules"] = rules
+        return {"cfg": c, "read_only": False, "emit": lambda *a: None,
+                "approve": lambda *a, **k: (False, "asked"), "ask": None,
+                "roots": [q.WORKSPACE], "orbit_gate": True}
+
+    def wrote(self, path, rules=False):
+        allow, msg, *_ = q.CE.decide("Write", {"file_path": path, "content": "x"},
+                                     self.ctx(rules), req={})
+        return "runs" if allow else ("refused" if "REFUSED" in (msg or "") else "asks")
+
+    def test_ordinary_work_elsewhere_is_not_a_question(self):
+        for p in ("/tmp/scratch/a.md", os.path.expanduser("~/Rdirectory/tools/x/run.sh"),
+                  os.path.expanduser("~/Documents/notes.md")):
+            with self.subTest(path=p):
+                self.assertEqual(self.wrote(p), "runs")
+
+    def test_turning_the_limit_on_brings_it_back(self):
+        self.assertEqual(self.wrote("/tmp/scratch/a.md", rules=True), "asks")
+
+
+class TestWritingSomewhereSensitiveStillAsks(unittest.TestCase):
+    """What the folder limit had been providing by accident. Nothing examined what a
+    write LANDED on -- `write_file ~/.ssh/id_rsa` drew no comment from any rule -- so
+    dropping the limit would have left keys, login shells and launch agents open."""
+
+    def level(self, path):
+        return q.risk_check("write_file", {"path": path})[0]
+
+    def test_keys_shells_services_and_the_agents_own_settings(self):
+        for p in ("~/.ssh/id_rsa", "~/.ssh/config", "~/.aws/credentials", "~/.zshrc",
+                  "~/.claude/settings.json", "~/Library/LaunchAgents/x.plist", "/etc/hosts"):
+            with self.subTest(path=p):
+                self.assertEqual(self.level(os.path.expanduser(p)), "confirm", p)
+
+    def test_and_ordinary_files_are_left_alone(self):
+        for p in ("/tmp/a.txt", os.path.expanduser("~/Documents/notes.md"),
+                  os.path.expanduser("~/Rdirectory/tools/x/run.sh")):
+            with self.subTest(path=p):
+                self.assertIsNone(self.level(p), p)
+
+    def test_it_is_about_where_the_write_lands_not_the_spelling(self):
+        """/etc is /private/etc on a Mac, and a relative ~ is a real place."""
+        self.assertEqual(self.level("/private/etc/hosts"), "confirm")
+        self.assertEqual(self.level("~/.ssh/id_rsa"), "confirm")
+
+
 if __name__ == "__main__":
     unittest.main()

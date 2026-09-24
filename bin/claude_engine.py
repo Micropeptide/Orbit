@@ -828,8 +828,16 @@ def decide(tool, inp, ctx, req=None):
             level, why = Q.risk_check(fn, args)
         except Exception:
             level, why = "confirm", f"use {tool}"
-        if not level and tool in WRITE_TOOLS:
-            # Orbit's write tool keeps itself to the chat's folders; Claude's does not
+        if not level and tool in WRITE_TOOLS and c.get("orbit_rules"):
+            # Orbit's write tool keeps itself to the chat's folders; Claude's does not.
+            #
+            # Only when you asked for it. Keeping a chat inside its own folders is a
+            # policy, not a safety rule -- plenty of ordinary work writes elsewhere, and
+            # this stops at every new file when it does. It rides with `orbit_rules`,
+            # which is where you turn it on. Taking Claude's classifier off a run is not
+            # a request for it: doing both together meant a chat building something in
+            # another directory asked about every single Write, which is what auto mode
+            # felt like it had stopped doing. The risk rules above still apply either way.
             path = os.path.realpath(os.path.expanduser(str(args.get("path") or "")))
             roots = [os.path.realpath(r) for r in ctx.get("roots") or [] if r]
             if path and not any(path == r or path.startswith(r.rstrip(os.sep) + os.sep) for r in roots):
