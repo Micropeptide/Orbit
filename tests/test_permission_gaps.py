@@ -142,8 +142,12 @@ class TestClaudesClassifierIsNotUsedOnALocalModel(unittest.TestCase):
     def test_a_local_model_gets_orbits_own_gate_instead(self):
         self.assertEqual(self.modes("local"), "default")
 
-    def test_and_so_does_a_model_reached_through_the_harness(self):
-        self.assertEqual(self.modes("provider"), "default")
+    def test_a_hosted_model_keeps_it(self):
+        """This was widened to every non-subscription model on the strength of one free
+        harness model being slow. That is a different argument: a hosted model is not
+        queued behind the answer that is asking it, so the classifier works there. The
+        local server is the case that cannot work, and it is the case this is for."""
+        self.assertEqual(self.modes("provider"), "auto")
 
     def test_but_a_claude_subscription_keeps_claudes_own(self):
         self.assertEqual(self.modes("subscription"), "auto")
@@ -205,12 +209,13 @@ class TestTakingTheJudgeAwayIsNotJudging(unittest.TestCase):
         self.assertEqual(self.verdict("Bash", {"command": "sudo rm -rf /etc"}), "asks")
 
     def test_the_gate_is_what_makes_the_difference(self):
+        # (the gate is a local-chat thing now; the ctx here sets it directly)
         """Without it, and with orbit_rules off, even a directory listing is a prompt."""
         self.assertEqual(self.verdict("Bash", {"command": "ls -la"}, gate=False), "asks")
 
     def test_the_command_line_and_the_handler_agree(self):
         """They are the same question, so they ask the same function."""
-        for kind, expect in (("local", True), ("provider", True), ("subscription", False)):
+        for kind, expect in (("local", True), ("provider", False), ("subscription", False)):
             with self.subTest(kind=kind):
                 self.assertEqual(q.CE.orbit_is_the_gate("auto", kind), expect)
                 argv = q.CE.build_argv(dict(q.CE.DEFAULTS), kind=kind, mode="auto")
@@ -323,6 +328,87 @@ class TestWritingSomewhereSensitiveStillAsks(unittest.TestCase):
         """/etc is /private/etc on a Mac, and a relative ~ is a real place."""
         self.assertEqual(self.level("/private/etc/hosts"), "confirm")
         self.assertEqual(self.level("~/.ssh/id_rsa"), "confirm")
+
+
+
+class TestASecondOpinionForTheLocalModel(unittest.TestCase):
+    """The local server cannot judge its own actions -- one request at a time, so the
+    question queues behind the answer that asked it and times out into refusing. So for
+    a local chat the question goes to a model that is somewhere else, before it goes to
+    the person. Every other kind of model keeps Claude Code's own classifier, which is
+    fast and fine when the judge is not the one being judged."""
+
+    def setUp(self):
+        self.saved = (q.S.get("autonomy_mode"), q.review_action, q.review_model)
+        q.S["autonomy_mode"] = "auto"
+        def restore():
+            q.S["autonomy_mode"] = self.saved[0]
+            q.review_action, q.review_model = self.saved[1], self.saved[2]
+        self.addCleanup(restore)
+        self.seen = []
+
+    def reviewer(self, says, why="because"):
+        q.review_model = lambda: "harness:claude/haiku"
+        def fake(fn, args, reason, model=None):
+            self.seen.append((fn, reason))
+            return (says, why)
+        q.review_action = fake
+
+    def ctx(self):
+        return {"cfg": dict(q.CE.DEFAULTS), "read_only": False, "emit": lambda *a: None,
+                "approve": lambda *a, **k: (False, "asked"), "ask": None,
+                "roots": [q.WORKSPACE], "orbit_gate": True}
+
+    def verdict(self, tool, inp):
+        allow, msg, *_ = q.CE.decide(tool, inp, self.ctx(), req={})
+        return "runs" if allow else ("refused" if "REFUSED" in (msg or "") else "asks")
+
+    def test_a_yes_from_the_reviewer_runs_it(self):
+        self.reviewer(True, "ordinary development")
+        self.assertEqual(self.verdict("Bash", {"command": "rm -rf /tmp/scratch"}), "runs")
+        self.assertTrue(self.seen, "the reviewer was never asked")
+
+    def test_a_no_leaves_it_with_you(self):
+        self.reviewer(False, "could destroy work")
+        self.assertEqual(self.verdict("Bash", {"command": "rm -rf /tmp/scratch"}), "asks")
+
+    def test_what_only_a_person_may_allow_is_never_put_to_a_model(self):
+        """The action being judged is also text the judge reads, so `sudo` and rewriting
+        history are not up for review however persuasive the arguments in them are."""
+        self.reviewer(True, "looks fine to me")
+        for cmd in ("sudo rm -rf /etc", "git push --force origin main", "git reset --hard HEAD~3"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(self.verdict("Bash", {"command": cmd}), "asks")
+        self.assertEqual(self.seen, [], "a never-auto action was sent to the reviewer")
+
+    def test_the_never_approvable_never_reaches_it_either(self):
+        self.reviewer(True, "fine")
+        self.assertEqual(self.verdict("Bash", {"command": "rm -rf /"}), "refused")
+        self.assertEqual(self.seen, [])
+
+    def test_a_reviewer_on_this_mac_is_refused(self):
+        """It exists to be somewhere else; a local one is the problem, not the fix."""
+        self.assertTrue(q._model_is_local("local:orcarouter-qwen3.8-27b-uncensored-mlx"))
+        self.assertTrue(q._model_is_local("a-model-nobody-has-heard-of"))
+        self.assertFalse(q._model_is_local("harness:claude/haiku"))
+
+    def test_with_no_reviewer_set_nothing_changes(self):
+        q.review_model = lambda: None
+        self.assertEqual(self.verdict("Bash", {"command": "rm -rf /tmp/scratch"}), "asks")
+
+
+class TestOnlyTheLocalModelLosesItsClassifier(unittest.TestCase):
+    def test_hosted_models_keep_claudes_own(self):
+        for kind in ("provider", "subscription"):
+            with self.subTest(kind=kind):
+                argv = q.CE.build_argv(dict(q.CE.DEFAULTS), kind=kind, mode="auto")
+                self.assertEqual(argv[argv.index("--permission-mode") + 1], "auto")
+                self.assertFalse(q.CE.orbit_is_the_gate("auto", kind))
+
+    def test_and_the_local_one_does_not(self):
+        argv = q.CE.build_argv(dict(q.CE.DEFAULTS), kind="local", mode="auto")
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
+        self.assertTrue(q.CE.orbit_is_the_gate("auto", "local"))
 
 
 if __name__ == "__main__":

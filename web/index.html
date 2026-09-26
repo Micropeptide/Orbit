@@ -4446,6 +4446,12 @@ async function openSettings(tab){
     <label>Auto-compact at</label><div style="display:flex;gap:8px;align-items:center">
       <input type=number id=g_ac min=0 max=100 style="max-width:110px"><span class=note>% of context (0 = off)</span></div>
     <div class=hint2>When the window fills past this, older turns are summarised automatically before your next message.</div>
+    <label>Reviews a local chat's actions</label><select id=g_review></select>
+    <div class=hint2>Only for chats on the model running on this Mac. That model answers one
+     request at a time, so it cannot be asked whether its own next action is safe — the question
+     queues behind the answer and times out. A model somewhere else can be. It sees the action and
+     the rule's concern, and anything but a clear yes still comes to you; <b>sudo</b>, rewriting
+     history and forced pushes are never put to it at all. Off = you are asked, as now.</div>
     <label>Side work goes to</label><select id=g_helper></select>
     <div class=hint2>Chat titles, compaction summaries, saved-memory extraction, the skill writer,
      the review and the completion check are Orbit's own work, not the answer.
@@ -4503,6 +4509,15 @@ async function openSettings(tab){
    $('#g_ac').value=draft.autocompact_pct??80;
    $('#g_review').checked=draft.auto_review==='changes';
    $('#g_verify').checked=!!draft.verify_turns;
+   {const sel=$('#g_review'),cur=draft.review_model||'';
+    // a reviewer has to be somewhere else: a local one is the problem, not the fix
+    const away=(MODELS.models||[]).filter(m=>!m.switch&&m.ready!==false&&m.provider!=='local'&&m.provider!=='bionic');
+    const g2={};away.forEach(m=>{(g2[m.provider_label||'other']=g2[m.provider_label||'other']||[]).push(m)});
+    sel.innerHTML='<option value="">off — ask me</option>'+
+     Object.entries(g2).map(([g,list])=>`<optgroup label="${esc(g)}">`+list.map(m=>{
+      const cli=/cli$/i.test(m.kind||'')||/ · CLI$/.test(m.label||'');
+      return `<option value="${esc(m.id)}"${m.id===cur?' selected':''}>${esc(m.label||m.model)}`
+        +(cli?' — spawns the CLI, slow for this':'')+`</option>`}).join('')+'</optgroup>').join('')}
    {const sel=$('#g_helper'),cur=draft.helper_model||'';
     // grouped by provider, and a CLI-backed choice says what it costs: those spawn a
     // whole coding agent per call, which is a lot of machinery to name a chat
@@ -5342,6 +5357,7 @@ async function openSettings(tab){
    draft.long_run_notice_min=Number($('#g_notice').value)||0;
    draft.autocompact_pct=Number($('#g_ac').value);
    draft.helper_model=$('#g_helper')?$('#g_helper').value:(draft.helper_model||'');
+   draft.review_model=$('#g_review')?$('#g_review').value:(draft.review_model||'');
    draft.auto_review=($('#g_review')&&$('#g_review').checked)?'changes':'';
    draft.verify_turns=($('#g_verify')&&$('#g_verify').checked)?'tools':'';draft.trash_days=Number($('#g_td').value)||30;
    draft.system_prompt=$('#g_sys').value;draft.use_instructions=$('#g_useins').checked;

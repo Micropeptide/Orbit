@@ -507,9 +507,17 @@ def orbit_is_the_gate(mode, kind, read_only=False):
     place, because the handler only applied Orbit's rules when `orbit_rules` was on --
     off by default. Every tool call then went to the user, one at a time, which read as
     auto-approve having stopped working. It had: taking the judge away is not the same
-    as judging."""
+    as judging.
+
+    Only the model on this Mac. Claude's classifier is a reasonable judge and a fast one
+    when the model answering is not the one being asked; that is true of every hosted
+    model, and it was widened to all of them on the strength of one free harness model
+    being slow, which is not the same argument. The local server is the case that cannot
+    work: one request at a time, so the classifier queues behind the very answer that is
+    asking it, and times out into refusing. There, Orbit judges -- with a reviewer model
+    that is anywhere but here, when one is set."""
     m = "plan" if read_only else (mode or "")
-    return m == "auto" and kind != "subscription"
+    return m == "auto" and kind == "local"
 
 
 def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None, mode=None,
@@ -869,6 +877,20 @@ def decide(tool, inp, ctx, req=None):
                                           "rule": (by_rule.get("note") or by_rule.get("pattern")) if by_rule else None})
             Q.LOG_SAFETY(tool, args, "auto-approved", reason)
             return True, "", inp, None
+        # No fixed rule could clear it. Before the question goes to you, it can go to a
+        # model that is not the one doing the work -- which is the part the local server
+        # could never play for itself. Never for the things a person alone may allow
+        # (`sudo`, rewriting history, a forced push): no model is asked to sign those off,
+        # however sure it sounds, because the action being judged is also text it can
+        # read. Silence, a timeout or anything short of a clear yes leaves it with you.
+        if Q.review_model() and not Q._never_auto(fn, reason):
+            ok, why = Q.review_action(fn, args, reason)
+            if ok:
+                ctx["emit"]("auto_approved", {"name": tool, "args": inp,
+                                              "reason": f"{reason} — reviewed: {why}", "rule": None})
+                Q.LOG_SAFETY(tool, args, "reviewed", f"{reason} -> allowed: {why}")
+                return True, "", inp, None
+            Q.LOG_SAFETY(tool, args, "reviewed", f"{reason} -> asking you: {why}")
     approve = ctx.get("approve")
     if not approve:
         return False, ("Nobody is watching this run, so actions that need approval are refused. "
