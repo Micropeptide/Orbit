@@ -4446,7 +4446,7 @@ async function openSettings(tab){
     <label>Auto-compact at</label><div style="display:flex;gap:8px;align-items:center">
       <input type=number id=g_ac min=0 max=100 style="max-width:110px"><span class=note>% of context (0 = off)</span></div>
     <div class=hint2>When the window fills past this, older turns are summarised automatically before your next message.</div>
-    <label>Reviews a local chat's actions</label><select id=g_review></select>
+    <label>Reviews a local chat's actions</label><select id=g_reviewer></select>
     <div class=hint2>Only for chats on the model running on this Mac. That model answers one
      request at a time, so it cannot be asked whether its own next action is safe — the question
      queues behind the answer and times out. A model somewhere else can be. It sees the action and
@@ -4509,7 +4509,7 @@ async function openSettings(tab){
    $('#g_ac').value=draft.autocompact_pct??80;
    $('#g_review').checked=draft.auto_review==='changes';
    $('#g_verify').checked=!!draft.verify_turns;
-   {const sel=$('#g_review'),cur=draft.review_model||'';
+   {const sel=$('#g_reviewer'),cur=draft.review_model||'';
     // a reviewer has to be somewhere else: a local one is the problem, not the fix
     const away=(MODELS.models||[]).filter(m=>!m.switch&&m.ready!==false&&m.provider!=='local'&&m.provider!=='bionic');
     const g2={};away.forEach(m=>{(g2[m.provider_label||'other']=g2[m.provider_label||'other']||[]).push(m)});
@@ -5357,7 +5357,9 @@ async function openSettings(tab){
    draft.long_run_notice_min=Number($('#g_notice').value)||0;
    draft.autocompact_pct=Number($('#g_ac').value);
    draft.helper_model=$('#g_helper')?$('#g_helper').value:(draft.helper_model||'');
-   draft.review_model=$('#g_review')?$('#g_review').value:(draft.review_model||'');
+   // its own id: g_review is the auto-review checkbox, and sharing it meant $() found
+   // the select, so that switch could never be ticked and every save cleared it
+   draft.review_model=$('#g_reviewer')?$('#g_reviewer').value:(draft.review_model||'');
    draft.auto_review=($('#g_review')&&$('#g_review').checked)?'changes':'';
    draft.verify_turns=($('#g_verify')&&$('#g_verify').checked)?'tools':'';draft.trash_days=Number($('#g_td').value)||30;
    draft.system_prompt=$('#g_sys').value;draft.use_instructions=$('#g_useins').checked;
