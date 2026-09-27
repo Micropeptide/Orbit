@@ -129,6 +129,7 @@ class State:
         # one before it has been answered (unless sent "now", as a note mid-answer)
         self.queue = []
         self.queue_paused = False  # Stop pauses what is queued
+        self.handing = None        # a queued message on its way into the chat (see _drain)
     def reset(self):
         self.sid   = new_sid()
         self.msgs  = [{"role": "system", "content": q.system_prompt_for(self.agent, self.project)}]
@@ -147,6 +148,7 @@ class State:
         self.model = None
         self.queue = []
         self.queue_paused = False
+        self.handing = None
         self.refresh_tools()       # a new chat id means its own settings, not the last chat's
     def refresh_tools(self):
         specs, self.tool_errors = q.active_tools(self.project)
@@ -244,7 +246,7 @@ def get_state(sid=None, create=True):
                     st.plan_mode = bool(raw.get("plan_mode"))
                     st.title_auto = raw.get("title_auto")
                     st.model = raw.get("model") or None
-                    st.queue = list(raw.get("queue") or [])
+                    st.queue = _disk_queue(raw)
                     st.queue_paused = bool(raw.get("queue_paused"))
             except Exception:
                 pass
@@ -417,7 +419,8 @@ def jdump(o): return json.dumps(o, default=str)
 # What save_session writes itself, from the chat as it is in memory. Everything else in
 # the file belongs to someone else and is carried over untouched.
 _SAVE_OWNS = {"schema", "title", "messages", "saved", "model", "sys_override", "project",
-              "running_since", "plan", "plan_mode", "title_auto", "host", "queue", "queue_paused"}
+              "running_since", "plan", "plan_mode", "title_auto", "host", "queue", "queue_paused",
+              "handing"}
 
 def save_session(st=None):
     """No-op for temporary chats — they must leave no trace."""
@@ -458,7 +461,22 @@ def save_session(st=None):
     if getattr(st, "queue", None):
         extra["queue"] = st.queue
         if st.queue_paused: extra["queue_paused"] = True
+    # taken off the queue but not yet in the chat: written down, so a restart in between
+    # puts it back rather than losing it
+    if getattr(st, "handing", None): extra["handing"] = st.handing
+    if getattr(st, "clear_pickups", False):          # an answer finished: the count starts again
+        extra.pop("restart_pickups", None); st.clear_pickups = False
     q.session_save(st.sid, st.msgs, st.title, extra)
+
+
+def _disk_queue(raw):
+    """The queue as a chat file holds it, with a message that was being handed in when
+    Orbit stopped put back at the front."""
+    out = list(raw.get("queue") or [])
+    h = raw.get("handing")
+    if isinstance(h, dict) and h.get("id") and not any(x.get("id") == h["id"] for x in out):
+        out.insert(0, h)
+    return out
 
 # Files from the workspace and from uploads are whatever the agent fetched or wrote. An
 # SVG is a document that can carry script, and served on Orbit's own origin, opened
@@ -1126,7 +1144,7 @@ class H(http.server.BaseHTTPRequestHandler):
                         stt.plan_mode = bool(isinstance(raw, dict) and raw.get("plan_mode"))
                         stt.model = raw.get("model") if isinstance(raw, dict) else None
                         if isinstance(raw, dict):
-                            stt.queue = list(raw.get("queue") or [])
+                            stt.queue = _disk_queue(raw)
                             stt.queue_paused = bool(raw.get("queue_paused"))
                     except Exception: stt.project, stt.model = None, None
                 globals()["S"] = stt               # the chat the browser is looking at
@@ -2221,7 +2239,14 @@ class H(http.server.BaseHTTPRequestHandler):
             jid = d.get("id")
             job = next((j for j in q.sched_load().get("jobs", []) if j["id"] == jid), None)
             if not job: return self._send(404, jdump({"error": "no such job"}))
-            threading.Thread(target=run_job, args=(job,), daemon=True).start()
+            # claimed like a scheduled start, so the scheduler cannot start it alongside
+            with DRAIN_LOCK:
+                if jid in JOBS_INFLIGHT: return self._send(409, jdump({"error": "that task is already running"}))
+                JOBS_INFLIGHT.add(jid)
+            def _go():
+                try: run_job(job, manual=True)
+                finally: JOBS_INFLIGHT.discard(jid)
+            threading.Thread(target=_go, daemon=True).start()
             return self._send(200, jdump({"started": jid}))
         if p == "/api/skill/capture":
             # a Claude Code chat's procedure becomes a Claude skill (~/.claude/skills)
@@ -2316,9 +2341,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 if it.get("repeat") in REPEATS and it.get("at"):
                     # sending a repeating one early keeps the series, whichever way it goes in
                     st.queue.append(dict(it, id=uuid.uuid4().hex[:10], at=_next_time(float(it["at"]), it["repeat"])))
-                if st.lock.locked() and not it.get("attachments"):
+                if not it.get("attachments") and _note_if_answering(st, it["text"]):
                     _queue_saved(st)
-                    st.inbox.append({"text": it["text"], "t": time.time()}); st.interrupt.set()
                     return self._send(200, jdump({"ok": True, "interjected": True, "queue": _queue_view(st)}))
                 it = {k: v for k, v in it.items() if k not in ("at", "repeat", "missed", "skipped")}
                 st.queue.insert(0, it); st.queue_paused = False; _queue_saved(st)
@@ -2356,10 +2380,8 @@ class H(http.server.BaseHTTPRequestHandler):
             st = STATES.get(d.get("sid") or S.sid)
             text = (d.get("message") or "").strip()
             if not text: return self._send(400, jdump({"error": "empty note"}))
-            if st is None or not st.lock.locked():
+            if st is None or not _note_if_answering(st, text):
                 return self._send(200, jdump({"ok": False, "running": False}))
-            st.inbox.append({"text": text, "t": time.time()})
-            st.interrupt.set()
             return self._send(200, jdump({"ok": True, "queued": len(st.inbox)}))
         if p == "/api/cancel":
             if d.get("sid") in JOB_RUNS:           # a scheduled run in its own chat
@@ -2501,8 +2523,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if busy or full or _due_items(st):
             # it waits its turn: after the answer running now (and anything queued
             # before it), or for a free slot when many chats are answering
-            if d.get("now") and busy and not atts:
-                st.inbox.append({"text": text, "t": time.time()}); st.interrupt.set()
+            if d.get("now") and busy and not atts and _note_if_answering(st, text):
                 return _stream_once([("interjected", {"text": text}), ("end", {"sid": st.sid, "interjected": True})])
             item = _queue_add(st, text, atts, effort)
             _drain()
@@ -2536,6 +2557,33 @@ class H(http.server.BaseHTTPRequestHandler):
                 return
             if kind == "end": return
 
+INBOX_LOCK = threading.Lock()
+PICKUP_WAIT = {}        # chat id -> until when its queue waits for a restart pick-up
+
+def _note_if_answering(st, text):
+    """Hand a note to the answer running in this chat. False when none is running.
+
+    The check and the append used to be separate: an answer ending between them had
+    already read its inbox for the last time, and the note sat unread -- unsaved, so a
+    restart lost it -- while you had been told it was delivered."""
+    with INBOX_LOCK:
+        if not st.lock.locked(): return False
+        st.inbox.append({"text": text, "t": time.time()}); st.interrupt.set()
+        return True
+
+def _release_chat(st):
+    """Free the chat, and queue any note that came too late for its answer."""
+    with INBOX_LOCK:
+        try: st.lock.release()
+        except RuntimeError: pass
+        left = list(st.inbox); st.inbox.clear()
+    if left:
+        for n in reversed(left):
+            st.queue.insert(0, {"id": uuid.uuid4().hex[:10], "text": n.get("text", ""),
+                                "attachments": [], "effort": None, "t": n.get("t") or time.time()})
+        _queue_saved(st)
+
+
 def start_turn(st, text, atts=None, effort=None, Q=None):
     """Run one message in a chat on its own thread. The chat's lock must already be
     held (it is released when the answer ends). Events go to Q (a browser's stream)
@@ -2552,6 +2600,7 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
 
     def work():
         slotted = [False]
+        failed = [None]                  # why the answer did not get through, if it did not
         try:
             parts, notes = [], []
             for a in atts:
@@ -2676,6 +2725,7 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                 # it, this one waits in line (and says so) rather than running
                 # alongside -- two at once made both crawl
                 if not q.slot_enter(_emit, st.cancel, st.sid, st.model):
+                    st.handing = None                # it is in the chat now
                     st.msgs.append({"role": "user", "content": content, "t": time.time()})
                     st.running = False; save_session(st)
                     Q.put(("end", {"sid": st.sid, "title": st.title})); return
@@ -2692,6 +2742,7 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                 n0 = len(st.msgs)
                 st.interrupt.clear()
                 q.TURN_CTX.ask = _ask
+                st.handing = None      # turn() writes it into the chat as its first act
                 q.turn(st.msgs, content, st.tools, emit=_emit, approve=_approve,
                        cancel=st.cancel, inbox=st.inbox, interrupt=st.interrupt, sid=st.sid,
                        checkpoint=lambda: save_session(st), project=st.project,
@@ -2717,6 +2768,7 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                     spent["usage"] = {k: (spent.get("usage") or {}).get(k, 0) + (more.get("usage") or {}).get(k, 0)
                                       for k in ("prompt_tokens", "completion_tokens")}
                 q.LAST_TURN[st.sid] = spent
+                failed[0] = spent.get("failed")
                 try:
                     u = (q.LAST_TURN.get(st.sid) or {}).get("usage") or {}
                     stats = u if any(u.values()) else (q.server_status().get("last") or {})
@@ -2729,10 +2781,17 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                     if tot: q.SESSION_TOKENS[st.sid] = tot
                 except Exception: pass
                 st.running = False
+                if not failed[0]: st.clear_pickups = True
                 save_session(st)
                 if not st.temp:
                     job = limits.check(st, n0, cancelled=st.cancel.is_set())
-                    if job: Q.put(("notice", {"msg": _limit_note(job), "kind": "limit"}))
+                    if job:
+                        failed[0] = "limit"
+                        Q.put(("notice", {"msg": _limit_note(job), "kind": "limit"}))
+                if failed[0] and _due_items(st) and not st.cancel.is_set():
+                    # every queued message would fail the same way, one after another
+                    _emit("notice", {"msg": "The queue is paused until the model is back — resume it "
+                                            "from the queue when you are ready.", "kind": "queue_paused"})
                 if not _is_engine_chat(st): _learn_later(st, n0)     # Claude keeps its own memory
             asked = sum(1 for m in st.msgs if m.get("role") == "user" and not m.get("nudge") and not m.get("bang"))
             if (first or (asked == 3 and getattr(st, "title_auto", False))) and not st.cancel.is_set():
@@ -2756,6 +2815,7 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                            **{k: v for k, v in (q.LAST_TURN.get(st.sid) or {}).items()
                               if k in ("secs", "usage", "tool_runs", "rounds", "changes", "t")}}))
         except Exception as e:
+            failed[0] = "error"
             Q.put(("error", f"{type(e).__name__}: {e}")); Q.put(("end", {}))
         finally:
             if slotted[0]: q.slot_exit()
@@ -2769,11 +2829,16 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
             if st.temp:
                 try: q.redact_server_log()
                 except Exception: pass
-            try: st.lock.release()
-            except RuntimeError: pass
-            # Stop pauses the chat's queue (the rest waits for you); otherwise the next
-            # queued message starts, and chats waiting for a free slot get one
-            if st.cancel.is_set() and _due_items(st): st.queue_paused = True; _queue_saved(st)
+            if st.handing:
+                # it never reached the chat: back to the front of the queue
+                st.queue.insert(0, st.handing); st.handing = None; failed[0] = failed[0] or "error"
+            _release_chat(st)
+            # Stop pauses the chat's queue (the rest waits for you), and so does an answer
+            # that failed -- the provider down, the allowance used up -- or every queued
+            # message is spent on the same failure. Otherwise the next one starts, and
+            # chats waiting for a free slot get one.
+            if (st.cancel.is_set() or failed[0]) and _due_items(st):
+                st.queue_paused = True; _queue_saved(st)
             threading.Thread(target=_drain, daemon=True).start()
     threading.Thread(target=work, daemon=True).start()
     return Q
@@ -2850,7 +2915,7 @@ def _queue_saved(st):
             idx = {}
             try: idx = json.load(open(QUEUE_INDEX))
             except Exception: pass
-            if st.queue: idx[st.sid] = len(st.queue)
+            if st.queue or st.handing: idx[st.sid] = len(st.queue) + bool(st.handing)
             else: idx.pop(st.sid, None)
             tmp = QUEUE_INDEX + ".tmp"
             json.dump(idx, open(tmp, "w")); os.replace(tmp, QUEUE_INDEX)
@@ -2953,6 +3018,9 @@ def _drain():
         now = time.time()
         for st in list(STATES.values()):
             if not st.queue: continue
+            # a chat Orbit is about to pick up after a restart: its queued messages come
+            # after the pick-up, not before (a new message also clears the chat's plan)
+            if PICKUP_WAIT.get(st.sid, 0) > now: continue
             if _catch_up_schedules(st, now): _queue_saved(st)
             # Stop pauses the waiting messages; one you scheduled still goes at its time
             due = [it for it in _due_items(st, now) if it.get("at") or not st.queue_paused]
@@ -2982,6 +3050,7 @@ def _drain():
                     # a message scheduled for a model: the chat moves to it, as if you had
                     # picked it in the model menu and then sent the message
                     st.model = item["model"]
+                st.handing = item
             except Exception as e:
                 print(f"  ! queue in {st.sid}: {type(e).__name__}: {e}")
                 try: st.lock.release()
@@ -2994,6 +3063,10 @@ def _drain():
             start_turn(st, item["text"], item.get("attachments") or [], item.get("effort"))
         except Exception as e:
             print(f"  ! queued message in {st.sid}: {type(e).__name__}: {e}")
+            # it goes back where it was, and the queue waits: it was dropped here
+            if st.handing is item: st.handing = None
+            st.queue.insert(0, item); st.queue_paused = True
+            _queue_saved(st)
             try: st.lock.release()
             except RuntimeError: pass
 
@@ -3471,13 +3544,22 @@ def render(msgs):
 
 JOBS_INFLIGHT = set()
 
-def _stamp_started(job_id):
+def _stamp_started(job_id, manual=False):
     """Claim the job before running it. last_run was only written on completion,
-    so a job that was still running when the UI restarted fired all over again."""
+    so a job that was still running when the UI restarted fired all over again.
+
+    The last run's result is replaced at the same moment: a run cut off by a restart
+    never records one, and the task went on showing the run before it as its latest.
+    A one-off started by hand keeps its own time -- "run now" to try a task set for
+    tomorrow used to count as its run, and it never fired when it was meant to."""
+    now = time.time()
     def stamp(cfg):
         for j in cfg.get("jobs", []):
             if j.get("id") == job_id:
-                j["last_run"] = time.time()
+                if not (manual and j.get("every") == "once"): j["last_run"] = now
+                j["last_ok"] = None
+                j["last_result"] = (f"started {time.strftime('%H:%M', time.localtime(now))} and "
+                                    "recorded no result — Orbit may have stopped during it")
     q.sched_update(stamp)
 
 def schedule_save(fields):
@@ -3555,9 +3637,10 @@ def _limit_attempt(job):
     itself carrying on after a limit counts one more, so a limit that never lifts stops."""
     return int(job.get("attempt") or 0) + 1 if job.get("kind") == "limit_resume" else 0
 
-def run_job(job):
+def run_job(job, manual=False):
     """Execute one scheduled prompt — in the chat it was scheduled from, with
-    that chat's history and context, or else in its own throwaway session."""
+    that chat's history and context, or else in its own throwaway session.
+    `manual`: started with "run now", not by the schedule."""
     sid = job.get("sid")
     st = get_state(sid) if sid and os.path.exists(q.session_path(sid)) else None
     if st is not None and not st.lock.acquire(blocking=False):
@@ -3566,7 +3649,7 @@ def run_job(job):
         return "skipped: that chat is busy"
     started = time.time()
     try:
-        _stamp_started(job.get("id"))
+        _stamp_started(job.get("id"), manual)
     except Exception:
         # never leave the chat locked: a crash here used to hold its lock for
         # good, so the chat read as "running" forever and nothing could run in it
@@ -3605,9 +3688,14 @@ def run_job(job):
                              checkpoint=lambda: save_session(st), project=st.project,
                              max_minutes=_job_minutes(job), read_only=st.plan_mode)
                 st.running = False
+                st.clear_pickups = True
                 save_session(st)
                 limit_job = limits.check(st, n0, model=job.get("model") or st.model,
                                          attempt=_limit_attempt(job), cancelled=st.cancel.is_set())
+                if (job.get("kind") == "limit_resume" and not limit_job and not st.cancel.is_set()
+                        and st.queue_paused and not (q.LAST_TURN.get(st.sid) or {}).get("failed")):
+                    st.queue_paused = False       # the model is back: what waited can go
+                    _queue_saved(st)
                 if not _is_engine_chat(st): _learn_later(st, n0)     # Claude keeps its own memory
                 result_sid = st.sid
             finally:
@@ -3616,8 +3704,8 @@ def run_job(job):
                     st.running = False
                     try: save_session(st)
                     except Exception: pass
-                try: st.lock.release()
-                except RuntimeError: pass
+                PICKUP_WAIT.pop(st.sid, None)
+                _release_chat(st)
                 threading.Thread(target=_drain, daemon=True).start()   # messages queued meanwhile
         else:
             pid = job.get("project") or None
@@ -3631,11 +3719,13 @@ def run_job(job):
             result_sid = "sched-" + time.strftime("%Y%m%d-%H%M%S")
             stop = JOB_RUNS[result_sid] = threading.Event()
             limits = _LimitWatch()
+            # marked as running while it runs, like any chat, so a restart in the middle
+            # repairs it and says so instead of leaving half an answer that looks finished
+            running = {"running_since": started, **({"project": pid} if pid else {})}
             try:
                 out = q.turn(msgs, _job_prompt(job), tools, approve=lambda *a: False, cancel=stop, emit=limits.see,
                              sid=result_sid, project=pid, max_minutes=_job_minutes(job),
-                             checkpoint=lambda: q.session_save(result_sid, msgs, f"[scheduled] {label}",
-                                                               {"project": pid} if pid else None))
+                             checkpoint=lambda: q.session_save(result_sid, msgs, f"[scheduled] {label}", running))
             finally:
                 JOB_RUNS.pop(result_sid, None)
                 # filed under its project, so a project's scheduled runs sit with its chats
@@ -3656,9 +3746,12 @@ def run_job(job):
     def record(cfg):
         for j in cfg.get("jobs", []):
             if j.get("id") == job.get("id"):
-                j["last_run"] = time.time(); j["last_ok"] = ok
+                if not (manual and j.get("every") == "once"): j["last_run"] = time.time()
+                j["last_ok"] = ok
                 j["last_result"] = result; j["last_sid"] = result_sid
                 j["seconds"] = round(time.time() - started, 1)
+                if manual and j.get("every") == "once":
+                    continue                              # still to run at its own time
                 # a one-off has had its run, and a repeat past its end is finished
                 if j.get("every") == "once" or (j.get("until") and time.time() > float(j["until"])):
                     j["enabled"] = False
@@ -3804,6 +3897,7 @@ if __name__ == "__main__":
     # before the scheduler starts, so a pick-up run it books is there to find
     try:
         for _sid, _resumed in q.recover_interrupted_sessions():
+            if _resumed: PICKUP_WAIT[_sid] = time.time() + 600   # its queue waits for the pick-up
             print(f"  ! {_sid} was mid-answer when Orbit stopped — "
                   + ("picking it up again in a minute" if _resumed else "repaired, not restarted"))
     except Exception as e:
