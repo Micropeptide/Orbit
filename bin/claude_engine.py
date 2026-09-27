@@ -883,7 +883,10 @@ def decide(tool, inp, ctx, req=None):
         # (`sudo`, rewriting history, a forced push): no model is asked to sign those off,
         # however sure it sounds, because the action being judged is also text it can
         # read. Silence, a timeout or anything short of a clear yes leaves it with you.
-        if Q.review_model() and not Q._never_auto(fn, reason):
+        # Only where you have handed decisions over at all. "ask" means you want to see
+        # every one of these, and a model saying yes on your behalf is exactly what that
+        # setting refuses -- it did, once, because this line forgot to look.
+        if mode in ("auto", "full") and Q.review_model() and not Q._never_auto(fn, reason):
             ok, why = Q.review_action(fn, args, reason)
             if ok:
                 ctx["emit"]("auto_approved", {"name": tool, "args": inp,

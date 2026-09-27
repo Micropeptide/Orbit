@@ -392,6 +392,16 @@ class TestASecondOpinionForTheLocalModel(unittest.TestCase):
         self.assertTrue(q._model_is_local("a-model-nobody-has-heard-of"))
         self.assertFalse(q._model_is_local("harness:claude/haiku"))
 
+    def test_ask_mode_is_never_answered_for_you(self):
+        """REGRESSION: "ask" means you want to see every one of these. The reviewer was
+        consulted whatever the autonomy mode said, so with one configured a model could
+        approve a call in ask mode that you never saw. No test noticed until a reviewer
+        was actually set -- then this one's neighbours started failing."""
+        self.reviewer(True, "looks fine")
+        q.S["autonomy_mode"] = "ask"
+        self.assertEqual(self.verdict("Bash", {"command": "rm -rf /tmp/scratch"}), "asks")
+        self.assertEqual(self.seen, [], "the reviewer was consulted in ask mode")
+
     def test_with_no_reviewer_set_nothing_changes(self):
         q.review_model = lambda: None
         self.assertEqual(self.verdict("Bash", {"command": "rm -rf /tmp/scratch"}), "asks")
