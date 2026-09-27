@@ -4804,7 +4804,18 @@ async function openSettings(tab){
        </div></div>`
       :'<div class=note style="margin-top:12px">Turn on a mode above, then restart, to pair a device.</div>'}
     <div class=hint2 style="margin-top:14px">Changing the mode needs a restart —
-     use <b>Save &amp; restart server</b> below, or the Restart button in the sidebar.</div>`;
+     use <b>Save &amp; restart server</b> below, or the Restart button in the sidebar.</div>
+    <div class=sec style="margin-top:16px">Push when the app is closed</div>
+    <div class=grid>
+     <label>ntfy address</label><input type=url id=p_ntfy placeholder="https://ntfy.sh/your-private-topic">
+     <label>Only say "open Orbit"</label><div class=sw><input type=checkbox id=p_priv>
+      <span class=note>the push never carries the text of an answer, a command or a chat name</span></div>
+    </div>
+    <div class=note style="margin-top:6px">The phone only shows its own notifications while the app is running. With an
+     <a href="https://ntfy.sh" target=_blank rel=noopener>ntfy</a> topic (install the ntfy app and subscribe to it), a goal
+     that finishes overnight, or an approval nobody is watching, reaches the phone anyway. It sends that text to the ntfy
+     server you name — pick a long, private topic, or run your own. Empty: nothing is sent. Save to apply.</div>`;
+   $('#p_ntfy').value=draft.push_ntfy_url||'';$('#p_priv').checked=!!draft.push_private;
    body.querySelectorAll('input[name=rmode]').forEach(b=>b.onchange=async()=>{
     const d=await apiPost('/api/remote/mode',{mode:b.value},'changing phone access');
     if(d){toast('saved — restart to apply');render('phone')}
@@ -5584,6 +5595,7 @@ async function openSettings(tab){
    thermal_poll:$('#v_therm').checked,depth:Number($('#v_depth').value),
    prefill_chunk_tokens:Number($('#v_pre').value),reasoning:$('#v_reason').value,
    scheduler_mode:$('#v_sched').value});draft.idle_min=Number($('#v_idle').value)}
+  if($('#p_ntfy')){draft.push_ntfy_url=$('#p_ntfy').value.trim();draft.push_private=$('#p_priv').checked}
   if($('#t_shell')){draft.shell_enabled=$('#t_shell').checked;draft.write_any=$('#t_wany').checked;
    draft.code_execution=$('#t_code').checked;draft.cluster_write=$('#t_h2').checked;
    draft.computer_use_enabled=$('#t_screen').checked;
