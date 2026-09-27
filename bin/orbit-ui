@@ -43,7 +43,40 @@ def _max_parallel():
     try: n = int(q.S.get("max_parallel") or 0)
     except (TypeError, ValueError): n = 0
     return n if n > 0 else 10**6
-_APPROVE_SEQ = [0]
+# Approval and question ids. `_APPROVE_SEQ[0] += 1` is a read and a write, and permission
+# prompts arrive on a thread each: two could take the same id, and then one waiter was
+# never released and an answer went to the wrong request. next() on a count is atomic.
+import itertools as _it
+_APPROVE_IDS = _it.count(1)
+# Guards st.live: the running answer writes it token by token on its own thread while
+# /api/live serialises it for a window. Re-entrant, because the prompt helpers below take
+# it and the live recorder may be reached from inside them.
+_ANSWER_LOCK = threading.RLock()
+
+
+def _prompt_id(prefix):
+    return f"{prefix}{next(_APPROVE_IDS)}-{uuid.uuid4().hex[:6]}"
+
+
+def _pending_put(st, kind, req):
+    """Show a prompt in the chat's live buffer. Every pending one is kept (by id), and the
+    single slot the clients read points at the oldest -- it used to BE the only record,
+    so a second prompt overwrote the first, and answering the first deleted the second."""
+    with _ANSWER_LOCK:
+        st.live.setdefault(kind + "s", {})[req["id"]] = req
+        if kind not in st.live: st.live[kind] = req
+
+
+def _pending_done(st, kind, rid, outcome, Q):
+    with _ANSWER_LOCK:
+        waiting = st.live.get(kind + "s") or {}
+        waiting.pop(rid, None)
+        if (st.live.get(kind) or {}).get("id") == rid:
+            nxt = next(iter(waiting.values()), None)
+            if nxt: st.live[kind] = nxt
+            else: st.live.pop(kind, None)
+    # every window, not just the one that answered, can retire the card
+    Q.put((kind + "_resolved", {"id": rid, **outcome}))
 
 
 def parse_multipart(rfile, ctype, length):
@@ -152,19 +185,24 @@ def code_is_stale():
     return {"stale": bool(stale), "files": stale, "page_mtime": page,
             "loaded_at": LOADED_AT, "newest": newest, "newest_file": who}
 
-def fresh_state(temp=False):
+def fresh_state(temp=False, leaving=True):
     """A new chat gets its own State object. Resetting the global one in place
     used to yank the state out from under a turn that was still generating, so
-    its answer was written into the new chat -- or lost."""
+    its answer was written into the new chat -- or lost.
+
+    `leaving` is False when the new chat was asked for by another device. The server has
+    one "current" chat, and the phone starting a chat moved it; if the Mac was in a
+    temporary chat, that chat -- which is never saved -- was dropped from memory and its
+    Claude Code traces erased, so the Mac's next message there had nothing to resume."""
     global S
     old = S
-    if old.temp and not old.lock.locked(): erase_temp_traces(old)      # leaving a temporary chat
+    if leaving and old.temp and not old.lock.locked(): erase_temp_traces(old)
     st = State()
     st.agent, st.project = old.agent, old.project
     st.msgs = [{"role": "system", "content": q.system_prompt_for(st.agent, st.project)}]
     st.temp = temp
-    if old.lock.locked():
-        STATES.setdefault(old.sid, old)   # keep it reachable until it finishes
+    if old.lock.locked() or (old.temp and not leaving):
+        STATES.setdefault(old.sid, old)   # keep it reachable: it is answering, or still in use
     STATES[st.sid] = st
     S = st
     prune_states()
@@ -431,6 +469,11 @@ _INERT = {"Content-Security-Policy": "sandbox; default-src 'none'; img-src data:
 
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    # A connection that sends nothing for two minutes between requests is let go. Without
+    # this a phone that left the network mid keep-alive held a thread in readline() for
+    # ever, and threads and descriptors piled up until the next restart. A running answer
+    # waits on its own queue, not on the socket, so this never cuts one off.
+    timeout = 120
     def log_message(self, *a): pass
 
     def _send(self, code, body, ctype="application/json", headers=None):
@@ -1151,7 +1194,7 @@ class H(http.server.BaseHTTPRequestHandler):
         d = self._body()
         if p == "/api/new":
             with LOCK: q.reload_settings()
-            fresh_state()
+            fresh_state(leaving=self._from_loopback())
             # the project you are looking at in the sidebar, not whichever chat the
             # server last had open -- a new chat from "All chats" was landing in
             # the project of the chat you'd been in, with its rules and folder
@@ -1861,6 +1904,10 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/answer":                   # the reply to an ask_user question
             rec = PENDING.get(d.get("id"))
             if not rec or "answer" not in rec: return self._send(404, jdump({"error": "no such question"}))
+            with _ANSWER_LOCK:
+                if rec.get("answered"):
+                    return self._send(409, jdump({"error": "already answered"}))
+                rec["answered"] = True
             ans = d.get("answer")
             rec["answer"] = ", ".join(map(str, ans)) if isinstance(ans, list) else str(ans or "").strip()[:2000]
             rec["event"].set()
@@ -1895,6 +1942,13 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/approve":
             rec = PENDING.get(d.get("id"))
             if not rec: return self._send(404, jdump({"error": "no such request"}))
+            # The first answer is the answer. With the Mac and the phone both showing the
+            # card, a Deny and an Allow a moment apart both "succeeded", and which one the
+            # waiter read depended on thread timing.
+            with _ANSWER_LOCK:
+                if rec.get("answered"):
+                    return self._send(409, jdump({"error": "already answered", "allow": rec.get("allow")}))
+                rec["answered"] = True
             rec["allow"] = bool(d.get("allow"))
             rec["always"] = bool(d.get("always"))
             rec["pattern"] = (d.get("pattern") or "").strip()
@@ -2519,8 +2573,7 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                 def _approve(fn, a, reason, info=None):
                     # info: a prompt raised by Claude Code (claude_engine) -- its
                     # "always allow" becomes a Claude permission rule, not Orbit's
-                    _APPROVE_SEQ[0] += 1
-                    rid = f"ap{_APPROVE_SEQ[0]}"
+                    rid = _prompt_id("ap")
                     ev = threading.Event()
                     PENDING[rid] = {"event": ev, "allow": False, "fn": fn, "args": a}
                     req = {"id": rid, "name": (info or {}).get("tool") or fn, "args": a, "reason": reason,
@@ -2544,11 +2597,12 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                     # also in the live buffer, so any window that opens this chat
                     # can see the prompt and answer it — it used to exist only in
                     # the tab that sent the message, and time out unseen
-                    st.live["approval"] = req
+                    _pending_put(st, "approval", req)
                     q.notify("Orbit needs your approval", f"{fn}: {reason}")
                     ok = ev.wait(timeout=900)
-                    st.live.pop("approval", None)
                     rec = PENDING.pop(rid, {})
+                    _pending_done(st, "approval", rid, {"allow": bool(ok and rec.get("allow")),
+                                                        "expired": not ok}, Q)
                     if info:
                         return {"allow": bool(rec.get("allow")) if ok else False,
                                 "always": bool(ok and rec.get("always")),
@@ -2565,17 +2619,16 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                     return (allow, note) if note else allow
 
                 def _ask(question, options, multiple):
-                    _APPROVE_SEQ[0] += 1
-                    rid = f"qa{_APPROVE_SEQ[0]}"
+                    rid = _prompt_id("qa")
                     ev = threading.Event()
                     PENDING[rid] = {"event": ev, "answer": None}
                     req = {"id": rid, "question": question, "options": options, "multiple": multiple}
                     Q.put(("question", req))
-                    st.live["question"] = req          # any window can answer it
+                    _pending_put(st, "question", req)  # any window can answer it
                     q.notify("Orbit has a question", question)
                     ok = ev.wait(timeout=1800)
-                    st.live.pop("question", None)
                     rec = PENDING.pop(rid, {})
+                    _pending_done(st, "question", rid, {"expired": not ok}, Q)
                     return rec.get("answer") if ok else None
 
                 limits = _LimitWatch()
@@ -2954,6 +3007,11 @@ def _status_text(k, p):
     return p.get("msg") or k.replace("_", " ")
 
 def _live_record(st, k, p):
+    with _ANSWER_LOCK:
+        return _live_record_unlocked(st, k, p)
+
+
+def _live_record_unlocked(st, k, p):
     """Keep what a running answer is doing in st.live, so a window that opens
     the chat mid-answer can show it.
 
@@ -3168,8 +3226,14 @@ def _claude_sync(sid):
         print(f"  ! claude sync {sid}: {type(e).__name__}: {e}")
 
 def _live_view(st):
-    """st.live as sent to a browser: without the private bookkeeping."""
-    return {k: v for k, v in st.live.items() if not k.startswith("_")}
+    """st.live as sent to a browser: without the private bookkeeping.
+
+    A detached copy, taken under the same lock the recorder writes with. It used to hand
+    back the live dicts themselves, which the answer went on filling while the response
+    was being serialised -- "dictionary changed size during iteration", a 500, and the
+    web page, which stops following on one failed poll, stopped showing the answer."""
+    with _ANSWER_LOCK:
+        return json.loads(jdump({k: v for k, v in st.live.items() if not k.startswith("_")}))
 
 class _LimitWatch:
     """Listens to an answer's events for a used-up plan allowance, so the chat can carry on
@@ -3639,6 +3703,19 @@ def scheduler_loop():
 class Srv(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
+
+    def get_request(self):
+        """TCP keepalive, so a peer that vanished without closing is noticed in about a
+        minute instead of when a write finally fails."""
+        import socket as _so
+        sock, addr = super().get_request()
+        try:
+            sock.setsockopt(_so.SOL_SOCKET, _so.SO_KEEPALIVE, 1)
+            for opt, val in (("TCP_KEEPALIVE", 30), ("TCP_KEEPINTVL", 10), ("TCP_KEEPCNT", 3)):
+                if hasattr(_so, opt): sock.setsockopt(_so.IPPROTO_TCP, getattr(_so, opt), val)
+        except OSError:
+            pass
+        return sock, addr
 
     def handle_error(self, request, client_address):
         # Browsers, health probes, and curl routinely close keep-alive sockets
