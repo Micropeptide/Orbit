@@ -1047,8 +1047,13 @@ class H(http.server.BaseHTTPRequestHandler):
         if p.startswith("/api/skill/"):
             n = p.rsplit("/",1)[-1]
             return self._send(200, jdump({"name": n, "text": q.skill_read(n)}))
-        if p == "/api/agents":   return self._send(200, jdump({"agents": q.agents_load(),
-                                                               "active": S.agent}))
+        if p.split("?")[0] == "/api/agents":
+            # the agent of the chat asked about: the Mac's open chat is not the phone's
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            want = (qs.get("sid") or [None])[0]
+            st_ = STATES.get(want) if want else None
+            return self._send(200, jdump({"agents": q.agents_load(),
+                                          "active": (st_ if st_ is not None else S).agent}))
         if p.startswith("/vendor/"):
             fp = os.path.normpath(os.path.join(WEB, p.lstrip("/")))
             if not fp.startswith(os.path.join(WEB, "vendor")) or not os.path.exists(fp):
@@ -1159,6 +1164,7 @@ class H(http.server.BaseHTTPRequestHandler):
                     shown = msgs[:live["from"]]
                 return self._send(200, jdump({"ok": True, "sid": sid, "title": title,
                                               "plan_mode": bool(getattr(stt, "plan_mode", False)),
+                                              "agent": getattr(stt, "agent", None) or "",
                                               "messages": render(shown), "n": len(msgs),
                                               "context": q.context_state(msgs, sid),
                                               "running": running, "live": live,
@@ -2142,6 +2148,10 @@ class H(http.server.BaseHTTPRequestHandler):
             for m in res["models"]:
                 if (pid, m["model"]) not in have:
                     cfg["models"].append({**m, "provider": pid})
+            # asking the provider for its models again is how a removed one comes back:
+            # it stayed hidden for good, while the count said it had been found
+            back = {q.MODELS.model_id(pid, m["model"]) for m in res["models"]}
+            cfg["hidden"] = [h for h in cfg.get("hidden") or [] if h not in back]
             q.MODELS.save(q.ROOT, cfg)
             return self._send(200, jdump({"found": len(res["models"]),
                                           "models": q.model_catalogue()}))
@@ -2231,10 +2241,11 @@ class H(http.server.BaseHTTPRequestHandler):
             if err: return self._send(400, jdump({"error": err}))
             return self._send(200, jdump(cfg))
         if p == "/api/schedule/delete":
-            cfg = q.sched_load()
-            cfg["jobs"] = [j for j in cfg.get("jobs", []) if j.get("id") != d.get("id")]
-            q.sched_save(cfg)
-            return self._send(200, jdump(cfg))
+            # under the schedule's lock: a task added from the phone, or a run's result
+            # written, between this read and its save used to be thrown away
+            def drop(cfg):
+                cfg["jobs"] = [j for j in cfg.get("jobs", []) if j.get("id") != d.get("id")]
+            return self._send(200, jdump(q.sched_update(drop)))
         if p == "/api/schedule/run":
             jid = d.get("id")
             job = next((j for j in q.sched_load().get("jobs", []) if j["id"] == jid), None)
@@ -2543,9 +2554,16 @@ class H(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         Q = start_turn(st, text, atts, effort, queue.Queue())
         while True:
-            kind, payload = Q.get()
             try:
-                self.wfile.write(f"data: {jdump({'k':kind,'p':payload})}\n\n".encode())
+                kind, payload = Q.get(timeout=15)
+                line = f"data: {jdump({'k':kind,'p':payload})}\n\n".encode()
+            except queue.Empty:
+                # a comment line every 15 s of silence (a long tool, a slow model): the
+                # page can tell a quiet answer from a dead connection, and a peer that has
+                # gone is found by the write failing rather than never
+                kind, line = None, b": ping\n\n"
+            try:
+                self.wfile.write(line)
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 # You closed the tab. The answer carries on — that is the point — but
@@ -2649,12 +2667,15 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                         # what the change will be, so it can be judged before it's made
                         dv = q.preview_edit(fn, a)
                         if dv: req["diff"] = dv
-                    Q.put(("approval_request", req))
+                    if not getattr(Q, "deaf", False): Q.put(("approval_request", req))
                     # also in the live buffer, so any window that opens this chat
                     # can see the prompt and answer it — it used to exist only in
                     # the tab that sent the message, and time out unseen
                     _pending_put(st, "approval", req)
-                    q.notify("Orbit needs your approval", f"{fn}: {reason}")
+                    # the page that is showing this answer raises its own alert; a
+                    # Mac notification on top of it was the third for one prompt
+                    if getattr(Q, "deaf", False) or isinstance(Q, _Sink):
+                        q.notify("Orbit needs your approval", f"{fn}: {reason}")
                     ok = ev.wait(timeout=900)
                     rec = PENDING.pop(rid, {})
                     _pending_done(st, "approval", rid, {"allow": bool(ok and rec.get("allow")),
@@ -2679,9 +2700,10 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                     ev = threading.Event()
                     PENDING[rid] = {"event": ev, "answer": None}
                     req = {"id": rid, "question": question, "options": options, "multiple": multiple}
-                    Q.put(("question", req))
+                    if not getattr(Q, "deaf", False): Q.put(("question", req))
                     _pending_put(st, "question", req)  # any window can answer it
-                    q.notify("Orbit has a question", question)
+                    if getattr(Q, "deaf", False) or isinstance(Q, _Sink):
+                        q.notify("Orbit has a question", question)
                     ok = ev.wait(timeout=1800)
                     rec = PENDING.pop(rid, {})
                     _pending_done(st, "question", rid, {"expired": not ok}, Q)
@@ -2735,7 +2757,7 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                 # a Claude Code chat is compacted by Claude Code itself (Orbit's copy of it
                 # is only what you see); Orbit's compaction is for its own chats
                 engine_chat = _is_engine_chat(st)
-                st.msgs, did, pct = (st.msgs, False, 0) if engine_chat else q.maybe_autocompact(st.msgs, emit=lambda k, p: Q.put((k, p)),
+                st.msgs, did, pct = (st.msgs, False, 0) if engine_chat else q.maybe_autocompact(st.msgs, emit=_emit,
                                                         sid=st.sid)
                 if did: save_session(st)
                 _t0 = time.time()
@@ -2787,7 +2809,8 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                     job = limits.check(st, n0, cancelled=st.cancel.is_set())
                     if job:
                         failed[0] = "limit"
-                        Q.put(("notice", {"msg": _limit_note(job), "kind": "limit"}))
+                        # in the live buffer too: a window that rejoins sees why it paused
+                        _emit("notice", {"msg": _limit_note(job), "kind": "limit"})
                 if failed[0] and _due_items(st) and not st.cancel.is_set():
                     # every queued message would fail the same way, one after another
                     _emit("notice", {"msg": "The queue is paused until the model is back — resume it "

@@ -636,16 +636,36 @@ class MCP:
     def __init__(self, name, cfg):
         self.name, self.cfg, self.p, self.tools, self._id = name, cfg, None, [], 0
         self.lock = threading.Lock()
+    START_TIMEOUT = 60      # to answer `initialize`; a tool call still gets its full time
     def start(self):
+        if not self.cfg.get("command"):
+            # it used to fail with the bare word 'command'
+            raise RuntimeError("a remote server (url) — Claude Code chats connect to these; "
+                               "Orbit's own chats need a local command" if self.cfg.get("url")
+                               else "no command to start")
         env = dict(os.environ); env.update(self.cfg.get("env") or {})
-        self.p = subprocess.Popen([self.cfg["command"], *self.cfg.get("args", [])],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                text=True, bufsize=1, env=env)
-        self._rpc("initialize", {"protocolVersion":"2024-11-05","capabilities":{},
-                                 "clientInfo":{"name":"orbit","version":"2.0"}})
-        self.p.stdin.write(json.dumps({"jsonrpc":"2.0","method":"notifications/initialized","params":{}})+"\n")
-        self.p.stdin.flush()
-        self.tools = (self._rpc("tools/list", {}) or {}).get("tools", [])
+        # what the server says as it fails is the only clue to why: kept, not discarded
+        self.errlog = os.path.join(LOGS, f"mcp-{"".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in self.name)[:60]}.log")
+        err = open(self.errlog, "w")
+        try:
+            self.p = subprocess.Popen([self.cfg["command"], *self.cfg.get("args", [])],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err,
+                    text=True, bufsize=1, env=env)
+        finally:
+            err.close()
+        try:
+            self._rpc("initialize", {"protocolVersion":"2024-11-05","capabilities":{},
+                                     "clientInfo":{"name":"orbit","version":"2.0"}}, timeout=self.START_TIMEOUT)
+            self.p.stdin.write(json.dumps({"jsonrpc":"2.0","method":"notifications/initialized","params":{}})+"\n")
+            self.p.stdin.flush()
+            self.tools = (self._rpc("tools/list", {}, timeout=self.START_TIMEOUT) or {}).get("tools", [])
+        except Exception as e:
+            # a server that started and then failed was left running, orphaned, every time
+            self.stop()
+            tail = ""
+            try: tail = open(self.errlog, errors="replace").read()[-300:].strip()
+            except OSError: pass
+            raise RuntimeError(f"{e}" + (f" — it said: {tail}" if tail else "")) from None
         return self.tools
     def _rpc(self, method, params, timeout=240):
         with self.lock:
@@ -704,14 +724,24 @@ def mcp_save(cfg):
     snapshot_config(MCPCFG); _atomic_write(MCPCFG, cfg, indent=2)
     return cfg
 
-_MCP_STATE = {"hash": None, "specs": [], "errors": {}}
+_MCP_STATE = {"hash": None, "specs": [], "errors": {}, "at": 0.0}
+_MCP_LOAD_LOCK = threading.Lock()
+MCP_RETRY_S = 300       # servers that all failed are tried again after this, not on every call
 
 def load_mcp(force=False):
     """Connect to MCP servers. Cached — reconnecting costs ~800ms, so only redo it
-    when mcp.json actually changed."""
+    when mcp.json actually changed.
+
+    When every server failed, nothing was connected, and the cache (which asked for at
+    least one) never held: each Settings save, agent pick and new chat started them all
+    again and waited on each. Failures are now cached too, for a few minutes."""
+    with _MCP_LOAD_LOCK:
+        return _load_mcp(force)
+
+def _load_mcp(force):
     raw = json.dumps(mcp_config(), sort_keys=True)
     h = hashlib.sha1(raw.encode()).hexdigest()
-    if not force and _MCP_STATE["hash"] == h and MCPS:
+    if not force and _MCP_STATE["hash"] == h and (MCPS or time.time() - _MCP_STATE["at"] < MCP_RETRY_S):
         return list(_MCP_STATE["specs"]), dict(_MCP_STATE["errors"])
     for m in MCPS.values(): m.stop()
     MCPS.clear(); MCP_TOOLMAP.clear()
@@ -732,7 +762,7 @@ def load_mcp(force=False):
                     "parameters": t.get("inputSchema") or {"type":"object","properties":{}}}})
         except Exception as e:
             errors[name] = str(e)
-    _MCP_STATE.update(hash=h, specs=list(specs), errors=dict(errors))
+    _MCP_STATE.update(hash=h, specs=list(specs), errors=dict(errors), at=time.time())
     return specs, errors
 atexit.register(lambda: [m.stop() for m in MCPS.values()])
 
@@ -7511,7 +7541,11 @@ def preview_undo(changes):
         p = c.get("path")
         if not p: continue
         if c.get("created"):
-            if os.path.exists(p):
+            left = c.get("after_sha")
+            if os.path.exists(p) and left and _file_sha(p) != left:
+                # it goes to the bin either way, but your work in it is not removed unasked
+                unsafe.append({"path": p, "why": "changed since the answer created it"})
+            elif os.path.exists(p):
                 safe.append({"path": p, "what": "remove (created here)"})
             else:
                 gone.append({"path": p, "why": "created here, and already gone"})
