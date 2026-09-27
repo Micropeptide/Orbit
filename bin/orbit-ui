@@ -1801,11 +1801,7 @@ class H(http.server.BaseHTTPRequestHandler):
                     seen += 1
             if cut is None:
                 return self._send(404, jdump({"error": "that message is no longer there"}))
-            changes = []
-            for m in reversed(st.msgs[cut:]):
-                if m.get("role") == "assistant" and m.get("changes") and not m.get("changes_undone"):
-                    changes += m["changes"]
-            look = q.preview_undo(changes)
+            look = q.preview_undo(_rewind_changes(st.msgs[cut:]))
             look["messages"] = len(st.msgs) - cut
             return self._send(200, jdump(look))
         if p == "/api/rewind":
@@ -1825,6 +1821,17 @@ class H(http.server.BaseHTTPRequestHandler):
                 if cut is None:
                     return self._send(404, jdump({"error": "that message is no longer there"}))
                 undone, restored, refused = [], [], []
+                if want_files and not d.get("force"):
+                    # All of it or none of it, decided before anything moves. This undid each
+                    # answer in turn and dropped the messages whatever happened: an answer
+                    # whose undo was refused lost the very records that point at its
+                    # snapshots, its files stayed as it left them, and the tree ended up half
+                    # rewound -- the newer answers undone, the older not.
+                    look = q.preview_undo(_rewind_changes(st.msgs[cut:]))
+                    if look["unsafe"]:
+                        return self._send(409, jdump({
+                            "error": "some files changed since those answers wrote them",
+                            "refused": [x["path"] for x in look["unsafe"]]}))
                 if want_files:
                     for m in reversed(st.msgs[cut:]):
                         if m.get("role") == "assistant" and m.get("changes") and not m.get("changes_undone"):
@@ -2589,7 +2596,7 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                     elif info:
                         req.update(claude=True, suggested_pattern=info.get("suggested_pattern") or req["name"],
                                    suggestions=info.get("suggestions") or [])
-                    if fn in ("write_file", "edit_file"):
+                    if fn in ("write_file", "edit_file", "multi_edit"):
                         # what the change will be, so it can be judged before it's made
                         dv = q.preview_edit(fn, a)
                         if dv: req["diff"] = dv
@@ -2635,12 +2642,16 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                 def _emit(k, p):
                     limits.see(k, p)
                     _live_record(st, k, p)            # keep a copy so you can rejoin later
-                    if k == "tool_result" and q.LAST_IMAGES:
-                        p = dict(p or {})
-                        p["images"] = [os.path.relpath(i, q.WORKSPACE) for i in q.LAST_IMAGES]
-                        q.LAST_IMAGES = []
-                    if k == "tool_result" and (p or {}).get("name") in ("write_file", "edit_file") and q.LAST_DIFF:
-                        p = dict(p or {}); p["diff"] = dict(q.LAST_DIFF); q.LAST_DIFF.clear()
+                    if k == "tool_result":
+                        imgs = q.take_last_images(st.sid)
+                        if imgs:
+                            p = dict(p or {})
+                            p["images"] = [os.path.relpath(i, q.WORKSPACE) for i in imgs]
+                        if (p or {}).get("name") in ("write_file", "edit_file", "multi_edit"):
+                            d = q.take_last_diff(st.sid)
+                            # a failed edit shows no card, and leaves none behind for the next
+                            if d and (p or {}).get("ok", True) is not False:
+                                p = dict(p or {}); p["diff"] = d
                     if not getattr(Q, "deaf", False): Q.put((k, p))
                 q.CURRENT_SID.update(sid=st.sid, title=st.title)
                 q.ACTIVE_PROJECT["id"] = st.project
@@ -3725,6 +3736,18 @@ class Srv(socketserver.ThreadingTCPServer):
         if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
             return
         super().handle_error(request, client_address)
+
+def _rewind_changes(tail):
+    """Every file change in these messages, oldest answer first -- the order _one_per_path
+    reads as "where it started, where it ended up". This was built newest first, which
+    paired a file's newest snapshot with its oldest after-hash, so any file two answers
+    had touched looked changed by you, and the page then offered to force past the check."""
+    out = []
+    for m in tail:
+        if m.get("role") == "assistant" and m.get("changes") and not m.get("changes_undone"):
+            out += m["changes"]
+    return out
+
 
 _RESTART_WAITING = threading.Event()
 

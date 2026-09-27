@@ -75,7 +75,7 @@ class TestReadBeforeEdit(unittest.TestCase):
             q._note_read(p)
         self.assertLessEqual(len(q.READ_STATE), q.READ_STATE_MAX)
         # the newest are the ones kept
-        self.assertIn(os.path.join(self.tmp, f"f{q.READ_STATE_MAX + 39}.txt"), q.READ_STATE)
+        self.assertIn(q._read_key(os.path.join(self.tmp, f"f{q.READ_STATE_MAX + 39}.txt")), q.READ_STATE)
 
 
 class TestItDoesNotTripOverTheAnswersOwnWork(unittest.TestCase):
