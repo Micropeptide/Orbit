@@ -82,7 +82,7 @@ body.harness #title{min-width:80px;flex-shrink:1;overflow:hidden;text-overflow:e
 body{margin:0;display:flex;background:var(--bg);color:var(--fg);
  font:var(--fs-base)/1.65 ui-sans-serif,-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}
 aside{width:256px;flex:0 0 256px;background:var(--panel);border-right:1px solid var(--line);
- display:flex;flex-direction:column;height:100vh}
+ display:flex;flex-direction:column;height:100vh;height:100dvh}
 aside.hide{display:none}
 /* On a wide screen, hiding the sidebar used to remove every affordance with it: the
    nav, the new-chat button, the "answering / waiting for you" badges. Collapsed it
@@ -223,7 +223,7 @@ aside.rail #sidehide{transform:rotate(180deg)}
  display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center}
 .foot #fmodel{flex-basis:100%;font-size:var(--fs-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .foot a{color:var(--mut);cursor:pointer;text-decoration:none}.foot a:hover{color:var(--acc)}
-main{flex:1;display:flex;flex-direction:column;height:100vh;min-width:0}
+main{flex:1;display:flex;flex-direction:column;height:100vh;height:100dvh;min-width:0}
 .top{padding:9px 18px;border-bottom:1px solid var(--line);display:flex;gap:9px;align-items:center;
  font-size:var(--fs-cap);color:var(--mut)}
 .top b{color:var(--fg);font-weight:600;font-size:var(--fs-base);max-width:40ch;overflow:hidden;
@@ -409,6 +409,8 @@ details.think summary{font-style:italic}
 textarea{flex:1;resize:none;padding:11px 13px;border:1px solid var(--line);border-radius:11px;
  background:var(--card);color:var(--fg);font:inherit;max-height:200px;min-height:44px}
 textarea:focus{outline:2px solid var(--acc);outline-offset:-1px}
+/* under 16px, iPhone Safari zooms the page on focus and leaves it zoomed */
+@media (pointer:coarse){textarea,input,select{font-size:max(16px,1em)}}
 .iconbtn{width:44px;height:44px;border:1px solid var(--line);border-radius:11px;background:var(--card);
  color:var(--mut);font-size:var(--fs-lg);cursor:pointer}.iconbtn:hover{color:var(--fg);border-color:var(--acc)}
 .sendbtn{height:44px;padding:0 17px;border:0;border-radius:11px;background:var(--acc);color:#fff;
@@ -1779,14 +1781,14 @@ function insertAtCursor(text){
  q.selectionStart=q.selectionEnd=s+pad.length+text.length;q.dispatchEvent(new Event('input'))}
 async function attachExisting(f){
  if(f.host){toast('that file is on '+f.host+' — insert its path instead');return insertAtCursor(f.path)}
- const chip=el('<div class=chip><b></b><span></span></div>');chip.querySelector('b').textContent=f.name;
+ const forSid=sid;
  let att={kind:'file',name:f.name,path:f.path};
  if(f.category==='image'&&f.url&&f.size<15e6){
   try{const b=await (await fetch(f.url)).blob();const du=await new Promise(r=>{const fr=new FileReader();fr.onload=()=>r(fr.result);fr.readAsDataURL(b)});
-   att={kind:'image',name:f.name,data_url:du};const i=document.createElement('img');i.src=du;chip.prepend(i)}catch(e){}}
- chip.querySelector('span').textContent=att.kind==='image'?'image':fmtBytes(f.size);
- const x=el('<span class=x>&times;</span>');x.onclick=()=>{atts=atts.filter(a=>a!==att);chip.remove()};chip.appendChild(x);
- atts.push(att);$('#chips').appendChild(chip);q.focus();toast('attached '+f.name)}
+   att={kind:'image',name:f.name,data_url:du}}catch(e){}}
+ if(att.kind!=='image')ATT_LABEL.set(att,fmtBytes(f.size));
+ if(forSid===sid)atts.push(att);else(ATTS_BY_SID[forSid]=ATTS_BY_SID[forSid]||[]).push(att);
+ drawChips();q.focus();toast('attached '+f.name)}
 async function fileText(f,limit){
  let url=f.url;
  if(!url){const d=await fileAction('preview',f);if(!d)return null;url=d.url}
@@ -2024,7 +2026,7 @@ function addUser(text,images,ts,raw){
  const m=el('<div class="msg u"><div class=who>you<span class=acts></span></div></div>');
  const acts=m.querySelector('.acts');
  const c=el('<button>copy</button>');c.onclick=()=>copy(text);acts.appendChild(c);
- const r=el('<button>retry</button>');r.onclick=()=>regenerate(text);acts.appendChild(r);
+ const r=el('<button>retry</button>');r.onclick=()=>regenerate(m,text);acts.appendChild(r);
  const f=el('<button>fork</button>');f.title='new chat from just before this message';
  f.onclick=()=>forkAt(m,text);acts.appendChild(f);
  const rw=el('<button>rewind</button>');rw.title='put the chat back to just before this message (Esc Esc lists them all)';
@@ -2322,7 +2324,9 @@ function renderSessions(force){
  const term=($('#search').value||'').trim().toLowerCase();
  const rows=listRows();
  const sig=JSON.stringify([filterMode,GROUP_BY,term,projFilter,tagFilter,sid,[...RUNNING],[...WAITING],Object.keys(UNSEEN),
-  rows.map(s=>[s.id,s.title,s.mtime,s.pinned,s.archived,s.queued,s.n,s.project]),PREF.get('sec_ext_claude','0')]);
+  rows.map(s=>[s.id,s.title,s.mtime,s.pinned,s.archived,s.queued,s.scheduled,s.host,s.n,s.project]),sessTotal,
+  Object.entries(typeof PROJECTS==='object'&&PROJECTS||{}).map(([k,v])=>[k,v&&v.name,v&&v.color]),
+  PREF.get('sec_ext_claude','0')]);
  if(!force&&sig===LIST_SIG)return;
  LIST_SIG=sig;
  const sc=$('#sidescroll'), keep=sc?sc.scrollTop:0;
@@ -2367,6 +2371,11 @@ function renderSessions(force){
   h.onclick=()=>{const now=h.classList.contains('closed');PREF.set('sec_ext_'+src.key,now?'1':'0');renderSessions(true)};
   ext.appendChild(h);ext.appendChild(body);
   if(open)groupedRows(rs,body.firstChild,src.key+'_',term)});
+ // the list is the newest 500: past that, older chats (archived ones too) just were not
+ // there, with nothing to say so
+ if(sessTotal>SESSIONS.length){
+  const more=el(`<div class=sysline style="cursor:pointer;color:var(--acc);padding:8px 12px">show ${Math.min(500,sessTotal-SESSIONS.length)} older chats</div>`);
+  more.onclick=()=>{sessLimit+=500;LIST_SIG=null;loadSessions()};ext.appendChild(more)}
  if(sc)sc.scrollTop=keep}
 let sessTotal=0, sessLimit=500;
 let tagFilter=null;
@@ -2538,11 +2547,22 @@ function attachLive(theSid, initial){
   if(lv.content){a.bub.innerHTML=md(lv.content);a.bub.dataset.raw=lv.content}
   bottom()};
  paint(initial||{});
- livePoll=setInterval(async()=>{
+ // One request at a time, and never an older snapshot over a newer one: on a slow link
+ // the 800 ms polls used to pile up and land out of order. And one failed poll is a
+ // blip, not the end -- it used to stop following the answer for good.
+ let inflight=false, fails=0, lastSeq=-1, lastSince=null;
+ const poll=setInterval(async()=>{
+  if(livePoll!==poll)return clearInterval(poll);
   if(sid!==theSid){stopLive();stopStatus(theSid);return}          // user moved on again
+  if(inflight)return;inflight=true;
   try{
-   const lv=await (await fetch('/api/live/'+theSid)).json();
+   const r=await fetch('/api/live/'+theSid);
+   if(!r.ok)throw new Error(r.status);
+   const lv=await r.json();fails=0;
+   if(livePoll!==poll)return;
    if(!lv.known){stopLive();stopStatus(theSid);return}
+   if(lv.since!==lastSince){lastSince=lv.since;lastSeq=-1}    // the next answer counts from 0 again
+   if(lv.running&&typeof lv.seq==='number'){if(lv.seq<lastSeq)return;lastSeq=lv.seq}
    paint(lv);
    if(!lv.running){
     stopLive(); note.remove(); stopStatus(theSid);
@@ -2552,8 +2572,10 @@ function attachLive(theSid, initial){
 
     setTimeout(()=>afterTurn(theSid),300);
    }
-  }catch(e){stopLive();stopStatus(theSid)}
+  }catch(e){if(++fails>=20){stopLive();stopStatus(theSid);WATCH_N=null}}   // the chat watcher takes over
+  finally{inflight=false}
  },800);
+ livePoll=poll;
 }
 
 // Which open is the current one. Clicking a 2,000-message chat and then a small one
@@ -2570,6 +2592,7 @@ async function openSession(id){
  if(gen!==OPEN_GEN)return;                     // you opened something else while it loaded
  if(d.error)return sysline('could not open: '+d.error);
  if(sid&&sid!==d.sid){clearTimeout(draftT);saveDraft(sid)}
+ switchAtts(sid,d.sid);closeAt();closeMenu();
  sid=d.sid;$('#title').textContent=d.title||'(untitled)';wrap.innerHTML='';
  PLAN_MODE=!!d.plan_mode;drawPlanMode();drawModeHint();
  WATCH_SID=d.sid;WATCH_N=(typeof d.n==='number')?d.n:null;   // what this page now shows
@@ -2600,6 +2623,7 @@ async function openSession(id){
  d.messages.forEach((m,i)=>{if(i>=older)drawMsg(m,i,i>older)});
  if(PREF.get('foldtools','1')==='1')foldTurns();
  chatChanged(d.prefs);                        // easy mode, the branch, the find bar
+ {const sel=$('#agentsel');if(sel&&[...sel.options].some(o=>o.value===(d.agent||'')))sel.value=d.agent||''}
  try{const i=await (await fetch('/api/info?sid='+encodeURIComponent(id))).json();
   if(gen!==OPEN_GEN)return;                    // this chat's tool list, not the last one's
   if(i&&i.tools){INFO.tools=i.tools;drawEasyBtn()}}catch(e){}
@@ -2612,20 +2636,41 @@ $('#title').onclick=async()=>{
    body:JSON.stringify({id:sid,title:t.trim()})});
  $('#title').textContent=t.trim();loadSessions()};
 
+// Attachments belong to the chat they were added in, as its draft does. They used to be
+// one list for the page: files attached in one chat went out with the next message in
+// another, and an upload still running when you pressed Enter joined a later message.
+const ATTS_BY_SID={}, ATT_LABEL=new WeakMap();
+let UPLOADS=[];                                // {sid, name} still on their way up
+function uploadingHere(){return UPLOADS.some(u=>u.sid===sid)}
+function drawChips(){
+ const box=$('#chips');if(!box)return;
+ box.querySelectorAll('.chip:not([data-paste])').forEach(x=>x.remove());
+ atts.forEach(a=>{
+  const chip=el('<div class=chip></div>');
+  if(a.kind==='image'&&a.data_url){const i=document.createElement('img');i.src=a.data_url;chip.appendChild(i)}
+  const b=document.createElement('b');b.textContent=a.name||'file';chip.appendChild(b);
+  const s=document.createElement('span');
+  s.textContent=ATT_LABEL.get(a)||(a.kind==='image'?'image':a.chars!=null?a.chars+' chars':'file');chip.appendChild(s);
+  const x=el('<span class=x title="remove">&times;</span>');x.onclick=()=>{atts=atts.filter(y=>y!==a);drawChips()};
+  chip.appendChild(x);box.appendChild(chip)});
+ UPLOADS.filter(u=>u.sid===sid).forEach(u=>{
+  const chip=el('<div class=chip><b></b><span>uploading…</span></div>');
+  chip.querySelector('b').textContent=u.name;box.appendChild(chip)})}
+function switchAtts(from,to){
+ if(from===to)return;
+ if(from){if(atts.length)ATTS_BY_SID[from]=atts;else delete ATTS_BY_SID[from]}
+ atts=ATTS_BY_SID[to]||[];delete ATTS_BY_SID[to];drawChips()}
 async function upload(f){
  const fd=new FormData();fd.append('file',f);
- const chip=el('<div class=chip><b></b><span>uploading...</span></div>');
- chip.querySelector('b').textContent=f.name;$('#chips').appendChild(chip);
- try{const d=await (await fetch('/api/upload',{method:'POST',body:fd})).json();
-  if(d.error){chip.querySelector('span').textContent='failed';return}
-  atts.push(d);chip.innerHTML='';
-  if(d.kind==='image'){const i=document.createElement('img');i.src=d.data_url;chip.appendChild(i)}
-  const b=document.createElement('b');b.textContent=d.name;chip.appendChild(b);
-  const s=document.createElement('span');s.textContent=d.kind==='image'?'image':d.chars+' chars';
-  chip.appendChild(s);
-  const x=el('<span class=x>&times;</span>');x.onclick=()=>{atts=atts.filter(a=>a!==d);chip.remove()};
-  chip.appendChild(x);
- }catch(e){chip.querySelector('span').textContent='failed'}}
+ const up={sid,name:f.name};UPLOADS.push(up);drawChips();
+ let d=null;
+ try{const r=await fetch('/api/upload',{method:'POST',body:fd});d=await r.json();
+  if(!r.ok||d.error)throw new Error(d.error||r.status)}
+ catch(e){d=null;toast('could not attach '+f.name+(e&&e.message?' — '+e.message:''))}
+ finally{UPLOADS=UPLOADS.filter(x=>x!==up)}
+ // into the chat it was attached in, wherever you are now
+ if(d){if(up.sid===sid)atts.push(d);else(ATTS_BY_SID[up.sid]=ATTS_BY_SID[up.sid]||[]).push(d)}
+ drawChips()}
 $('#attach').onclick=()=>$('#file').click();
 $('#file').onchange=e=>{[...e.target.files].forEach(upload);e.target.value=''};
 let dropEl=null;
@@ -2682,9 +2727,13 @@ addEventListener('drop',async e=>{
    return}}
  [...e.dataTransfer.files].forEach(upload)});
 addEventListener('paste',e=>{const f=[...(e.clipboardData&&e.clipboardData.files||[])];
+ // an image pasted into Settings, the find bar or a queued message's editor is not an
+ // attachment for the next chat message
+ const t=e.target;
+ if(t!==q&&t&&t.closest&&t.closest('input,textarea,[contenteditable],#modalhost'))return;
  if(f.length){e.preventDefault();f.forEach(upload)}});
 
-let menu=null,msel=0;
+let menu=null,msel=0,menuTerm=null;
 function closeMenu(){if(menu){menu.remove();menu=null}}
 function allCmds(){return CMDS.concat(Object.keys(PROMPTS).map(n=>({c:'/'+n,d:PROMPTS[n].desc||'saved prompt',p:1})))
  .concat(isClaudeChat()?CQ_CMDS.filter(x=>!CMDS.some(c=>c.c===x.c)):[])}
@@ -2704,6 +2753,7 @@ function showMenu(){
   all.filter(c=>re.test(c.c.toLowerCase())).forEach(add)}
  if(!hits.length)return;
  hits.splice(14);
+ if(t!==menuTerm){msel=0;menuTerm=t}
  msel=Math.min(msel,hits.length-1);
  menu=el('<div class=menu></div>');
  hits.forEach((c,i)=>{const d=el(`<div class="${i===msel?'sel':''}"><code>${c.c}</code><small>${esc(c.d)}</small></div>`);
@@ -2798,8 +2848,9 @@ async function newChat(){
    body:JSON.stringify({project:projFilter||null})});
    d=await r.json();if(!r.ok||!d.sid)throw new Error(d.error||('the server answered '+r.status))}
   catch(e){toast('could not start a new chat — '+(e.message||e)+'. Orbit may be restarting; try again in a moment.');return}
-  stopLive(); sid=d.sid;if(q.value===typed)loadDraft(d.sid);   // typed while it opened? keep that
-  PLAN_MODE=false;drawPlanMode();wrap.innerHTML='';$('#title').textContent='New chat';atts=[];$('#chips').innerHTML='';
+  stopLive(); switchAtts(sid,d.sid);closeAt();closeMenu();
+  sid=d.sid;if(q.value===typed)loadDraft(d.sid);   // typed while it opened? keep that
+  PLAN_MODE=false;drawPlanMode();wrap.innerHTML='';$('#title').textContent='New chat';
   tempMode=false;$('#tempbtn').style.borderColor='';$('#tempbtn').style.color='';
   $('#burnbtn').style.display='none';
   chatChanged(null);                     // a new chat keeps nothing from the last one
@@ -2814,11 +2865,17 @@ async function doCompact(){
   a.think.querySelector('summary').textContent='compacted summary';
   a.think.querySelector('.body').textContent=d.summary;a.bub.remove()}
  refreshStatus()}
-async function regenerate(text){
+// Retry sends the message you clicked again, from where it was. It used to drop the
+// chat's LAST exchange and send the clicked text as a new turn -- so retry on an older
+// message destroyed the newest answer; and after a send that never arrived, the
+// previous, good one.
+async function regenerate(node,text){
  if(busy)return;
- const r=await (await fetch('/api/regenerate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sid})})).json();
- const msgs=[...wrap.querySelectorAll('.msg')];
- for(let i=msgs.length-1;i>=0;i--){msgs[i].remove();if(msgs[i].classList.contains('u'))break}
+ const users=[...wrap.querySelectorAll('.msg.u')];
+ const idx=users.indexOf(node);if(idx<0)return;
+ const head=((node.querySelector('.bub')||{}).textContent||'').trim().slice(0,80);
+ if(!await apiPost('/api/truncate',{index:idx,id:sid,check:head},'retry'))return;
+ let cur=node;while(cur){const nx=cur.nextElementSibling;cur.remove();cur=nx}
  dropEmptyFolds();
  q.value=text;go()}
 
@@ -2839,19 +2896,24 @@ async function refreshFileCache(){
  try{const k=await (await fetch('/api/knowledge')).json();
   FILECACHE=FILECACHE.concat(k.map(x=>({name:x.name,rel:'knowledge/'+x.name,area:'knowledge'})))}catch(e){}}
 refreshFileCache();
-let atMenu=null,atSel=0;
+let atMenu=null,atSel=0,atTerm=null;
 function closeAt(){if(atMenu){atMenu.remove();atMenu=null}}
 function showAt(){
  closeAt();
- const v=q.value, m=v.match(/@([^\s@]*)$/); if(!m)return;
- const term=m[1].toLowerCase();
+ // an @ that starts a word: "bob@example" is an address, not a file
+ const v=q.value, m=v.match(/(^|\s)@([^\s@]*)$/); if(!m){atTerm=null;return}
+ const term=m[2].toLowerCase();
+ if(term!==atTerm){atSel=0;atTerm=term}         // a new list starts at its top
  const hits=FILECACHE.filter(f=>!term||f.name.toLowerCase().includes(term)).slice(0,8);
  if(!hits.length)return;
  atSel=Math.min(atSel,hits.length-1);
  atMenu=el('<div class=menu></div>');
+ const forSid=sid;
  hits.forEach((f,i)=>{
   const d=el(`<div class="${i===atSel?'sel':''}"><code>@${esc(f.name)}</code><small>${esc(f.area||'')}</small></div>`);
-  d.onclick=()=>{q.value=v.replace(/@[^\s@]*$/,f.rel+' ');closeAt();q.focus()};
+  // the box as it is now, in the chat it was opened for
+  d.onclick=()=>{closeAt();if(sid!==forSid)return;
+   q.value=q.value.replace(/(^|\s)@[^\s@]*$/,(mm,pre)=>pre+f.rel+' ');q.focus();q.dispatchEvent(new Event('input'))};
   atMenu.appendChild(d)});
  $('.row').appendChild(atMenu)}
 q.addEventListener('input',()=>{fitQ();
@@ -2893,7 +2955,9 @@ q.addEventListener('keydown',e=>{
   if(e.key==='Tab'){e.preventDefault();items[msel].click();return}}
  if((e.key==='ArrowUp'||e.key==='ArrowDown')&&!e.shiftKey&&!e.altKey&&!e.metaKey&&!e.ctrlKey
     &&histWalk(e.key==='ArrowUp'?-1:1)){e.preventDefault();return}
- if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();go({now:e.metaKey||e.ctrlKey})}});
+ // on a phone's keyboard Enter is the only way to start a new line: the send button sends
+ if(e.key==='Enter'&&!e.shiftKey&&!(matchMedia('(pointer:coarse)').matches&&!e.metaKey&&!e.ctrlKey)){
+  e.preventDefault();go({now:e.metaKey||e.ctrlKey})}});
 
 // An approval prompt — from this tab's own stream, or found waiting in a chat
 // opened from another window, so it can be answered from wherever you are.
@@ -2930,18 +2994,15 @@ function approvalBox(p){
   // means "for the next twenty minutes", and a grant you cannot mean loosely is one
   // people reach for the permanent version of instead.
   ...(p.claude||p.codex?[]:[{label:'Yes, and for the rest of this chat'+(pat?' ('+pat+')':''),
-   act:async()=>{await fetch('/api/permissions/session',{method:'POST',
-     headers:{'Content-Type':'application/json'},
-     body:JSON.stringify({sid,tool:p.name||'*',pattern:pat||'*'})});
-    send(true)}}]),
+   // this once either way; the rule is only claimed when it was saved
+   act:async()=>{const ok=await apiPost('/api/permissions/session',{sid,tool:p.name||'*',pattern:pat||'*'},'the rule for this chat');
+    if(ok)toast('allowed for the rest of this chat'+(pat?': '+pat:''));send(true)}}]),
   // and the size between a chat and everywhere: "let pytest run here" belongs to
   // the project, beside its folder, and is only offered when the chat has one
   ...(p.claude||p.codex||!p.project?[]:[{label:'Yes, and allow it in '+p.project.name,
-   act:async()=>{await fetch('/api/permissions/project',{method:'POST',
-     headers:{'Content-Type':'application/json'},
-     body:JSON.stringify({kind:'allow',project:p.project.id,tool:p.name||'*',
-                          pattern:pat||'*',note:'allowed in '+p.project.name})});
-    send(true)}}]),
+   act:async()=>{const ok=await apiPost('/api/permissions/project',{kind:'allow',project:p.project.id,tool:p.name||'*',
+                          pattern:pat||'*',note:'allowed in '+p.project.name},'the project rule');
+    if(ok)toast('allowed in '+p.project.name);send(true)}}]),
   {label:p.codex?'Yes, and allow this for the rest of the session'
    :p.claude?"Yes, and don't ask again"+(pat?' for '+pat:'')
    :'Yes, and always allow'+(pat?' '+pat:' this'),act:()=>alwaysRow()},
@@ -3800,11 +3861,22 @@ async function loadQueue(forSid){
    body:JSON.stringify({sid:s_,op:'get'})})).json();
   if(d&&d.queue&&s_===sid){QUEUE=d.queue;QUEUE_SID=s_;drawQueue()}return d&&d.queue}catch(e){}}
 async function enqueue(t,raw){
- const sending=atts;atts=[];$('#chips').innerHTML='';
+ const sending=atts,pastes=PASTES,forSid=sid;atts=[];$('#chips').innerHTML='';
  q.value='';q.style.height='auto';closeMenu();closeAt();clearDraft(sid);PASTES={};
  const d=await queueOp('add',{text:t,attachments:sending});
  if(d&&d.ok)toast(busy?'queued — it starts when this answer is done (⌘Enter sends it in now)':'queued');
- else{q.value=raw||t;atts=sending}}
+ else restoreComposer(forSid,raw||t,sending,pastes)}
+// A send or a queue-add that did not get through: the text, its pasted blocks and its
+// attachments go back where they were. The text used to come back with its [Pasted #n]
+// tokens dead and the attachments invisible -- but still sent with the next message.
+function restoreComposer(forSid,raw,sending,pastes){
+ if(forSid!==sid){                       // you have moved on: it waits in its own chat
+  (ATTS_BY_SID[forSid]=ATTS_BY_SID[forSid]||[]).push(...sending);
+  try{const k='orbit_draft_'+forSid;if(!localStorage.getItem(k))localStorage.setItem(k,JSON.stringify({t:raw,p:pastes||{}}))}catch(e){}
+  return}
+ if(!q.value.trim())q.value=raw;
+ Object.entries(pastes||{}).forEach(([n,body])=>{if(PASTES[n]==null){PASTES[n]=body;pasteChip(n,body)}});
+ atts=sending.concat(atts);drawChips();fitQ();saveDraft(sid)}
 // after an answer ends: the server may already have started the next queued message
 async function afterTurn(forSid){
  const qd=await loadQueue(forSid);
@@ -3983,6 +4055,7 @@ async function go(opts){
  primeAlerts();                            // before any await: needs the keypress/click
  if(switching)await switching;             // never send into the chat you just left
  const raw=q.value.trim(), t=expandPastes(raw);if(!t&&!atts.length)return;
+ if(uploadingHere()){toast('still attaching — it can go once the upload is done');return}
  if(t)histPush(t);
  // while it answers (or has messages waiting), a new message joins the queue and
  // starts when the ones before it are answered; ⌘/Ctrl+Enter puts it in right away,
@@ -4017,7 +4090,7 @@ async function go(opts){
   q.value=t;showMenu();return}
  q.value='';q.style.height='auto';closeMenu();clearDraft(sid);
  const ubub=addUser(t,atts.filter(a=>a.kind==='image').map(a=>a.data_url),undefined,raw);
- PASTES={};
+ const sentPastes=PASTES;PASTES={};
  const sending=atts;atts=[];$('#chips').innerHTML='';
  if(opts.effort)sysline('retrying with '+opts.effort+' reasoning effort');
  const sendSid=sid;                       // this answer belongs to THIS chat
@@ -4044,11 +4117,16 @@ async function go(opts){
  a.bub.innerHTML='<span class=working>working<span class=dots></span></span>';
  let thinking='',answer='',lastRender=0,pendingRender=null,thinkPending=null,tmarks=[];
  const t0=performance.now(), trows={}, autoTags=[];      // trows: live tool rows by call id
- let tThink=0, endP=null, errored=false, queuedBy=null;
+ let tThink=0, endP=null, errored=false, queuedBy=null, lost=false, dog=null, reached=false;
  const thoughtFor=()=>'thought for '+fmtSecs((performance.now()-tThink)/1000);
  try{
   const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
    body:JSON.stringify({message:t,attachments:sending,effort:opts.effort,sid:sendSid})});
+  // a refusal or a crash on the Mac comes back as JSON, not a stream: reading it as one
+  // found no events, showed "(no answer)" and announced "Answer ready"
+  if(!r.ok||!r.body){let d={};try{d=await r.json()}catch(_){}
+   throw new Error(d.error||('the Mac answered '+r.status))}
+  reached=true;
   const mine=()=>sid===sendSid;   // user may have switched away
   // Once you open another chat this answer is off screen for good: every
   // drawing call below appends to the page's one message list, so its steps
@@ -4056,7 +4134,12 @@ async function go(opts){
   // server; opening its chat again rejoins it from the live buffer instead.
   let away=false;
   const rd=r.body.getReader(),dec=new TextDecoder();let buf='';
+  // the Mac writes at least every 15 s; a minute of nothing is a connection that died
+  // (a laptop that slept, a phone that left the network) and would say "working" for ever
+  let lastByte=Date.now();
+  dog=setInterval(()=>{if(Date.now()-lastByte>60000){clearInterval(dog);try{rd.cancel()}catch(_){}}},5000);
   while(true){const {value,done}=await rd.read();if(done)break;
+   lastByte=Date.now();
    buf+=dec.decode(value,{stream:true});
    const parts=buf.split('\n\n');buf=parts.pop();
    for(const ln of parts){ if(!ln.startsWith('data: '))continue;
@@ -4304,7 +4387,10 @@ async function go(opts){
     else if(m.k==='end'){endP=m.p||{};if(m.p&&m.p.title&&sid===sendSid){
      $('#title').textContent=m.p.title; if(m.p.sid)sid=m.p.sid}}
    }}
+  clearInterval(dog);
   if(queuedBy){SENDING.delete(sendSid);stopStatus(sendSid);await refreshRunning();syncBusy();renderSessions();return}
+  // No closing event: the connection broke, not the answer -- it carries on on the Mac
+  lost=!endP;
   if(pendingRender){clearTimeout(pendingRender);pendingRender=null}
   // thinking that came after the answer's text is folded too, now that it is done
   a.m.querySelectorAll('details.think .body').forEach(b=>{if(!b.classList.contains('clamped'))clampLong(b,b.textContent,12)});
@@ -4312,18 +4398,27 @@ async function go(opts){
  if(thinkPending){clearTimeout(thinkPending);thinkPending=null;
   renderThink(a.think.querySelector('.body'),thinking,tmarks)}
  if(thinking&&!answer){a.think.classList.remove('live');thinkLabel(a,thoughtFor())}
- if(!answer)a.bub.textContent=(stoppedSid===sendSid)?'(stopped before it wrote anything)'
-                                            :'(no answer)';
+ if(!answer)a.bub.textContent=lost?'(the connection dropped — following the answer again)'
+                              :(stoppedSid===sendSid)?'(stopped before it wrote anything)':'(no answer)';
  else {a.bub.innerHTML=md(answer);decorate(a.bub)}
  const took=endP&&endP.secs!=null?endP.secs:(performance.now()-t0)/1000;
  answerStats(a,took,endP&&endP.usage);
  // the turn is over: its steps fold away behind one line, as they do on reopening
  if(PREF.get('foldtools','1')==='1')foldTurns();
  if(endP&&(endP.changes||[]).length&&endP.t)undoButton(a,endP.t,endP.changes.length);
- if(stoppedSid!==sendSid&&!errored)
+ if(lost)sysline('the connection to the Mac dropped — the answer goes on there; following it again');
+ else if(stoppedSid!==sendSid&&!errored)
   notify(sendSid,'Answer ready',answer.replace(/\s+/g,' ').trim().slice(0,160)||'(no answer)');
- }catch(e){a.bub.innerHTML='';const x=el('<div class=err></div>');x.textContent='Error: '+e;a.m.appendChild(x);
-  notify(sendSid,'Error',String(e))}
+ }catch(e){clearInterval(dog);
+  // a network failure mid-answer is the connection, not the answer: the Mac carries on
+  if(reached&&e instanceof TypeError){lost=true;a.bub.textContent='(the connection dropped — following the answer again)'}
+  else if(!reached){
+   // it never got there: nothing to show for it, and nothing you wrote is lost
+   if(ubub&&ubub.remove)ubub.remove();a.m.remove();
+   restoreComposer(sendSid,raw,sending,sentPastes);
+   toast('not sent — '+(e&&e.message||e)+'. Your message is back in the box.')}
+  else{a.bub.innerHTML='';const x=el('<div class=err></div>');x.textContent='Error: '+(e&&e.message||e);a.m.appendChild(x);
+   notify(sendSid,'Error',String(e&&e.message||e))}}
  Object.values(trows).forEach(r=>{if(r.classList.contains('live')){finishTool(r,{stopped:true});groupTool(r)}});
  stopStatus(sendSid);
  RUNNING.delete(sendSid); SENDING.delete(sendSid); renderSessions(); syncBusy();
@@ -4331,7 +4426,8 @@ async function go(opts){
   x.tag.textContent='waiting — it reads this with your next message'});
  if($('#files').style.display!=='none')renderFiles(); refreshFileCache();
  $('#dot').classList.remove('busy');loadSessions();refreshStatus();q.focus();
- afterTurn(sendSid)}
+ if(lost&&sid===sendSid){WATCH_N=null;openSession(sendSid)}   // rejoins from the live buffer
+ else afterTurn(sendSid)}
 $('#stopgen').onclick=async()=>{
  stoppedSid=sid;
  await fetch('/api/cancel',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -4425,7 +4521,17 @@ async function openSettings(tab){
  host.querySelector('.modal').onclick=e=>{if(e.target.classList.contains('modal'))closeModal()};
  const body=$('#sbody');
  const draft=JSON.parse(JSON.stringify(st));
- async function tabs(n){host.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('on',b.dataset.t===n));RENDER_GEN++;await render(n)}
+ // what Settings showed when it opened: Save sends only what you changed here. It sent the
+ // whole snapshot, so a fallback model added a moment ago (saved at once), or anything
+ // changed from the phone meanwhile, was put back the way it was when this opened.
+ let orig=JSON.parse(JSON.stringify(st));
+ // the free-text boxes of tabs you have left: switching tabs used to drop their edits
+ let editIns=null, editMcp=null;
+ function keepText(){if($('#m_ins'))editIns=$('#m_ins').value;if($('#mcp_json'))editMcp=$('#mcp_json').value}
+ async function tabs(n){host.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('on',b.dataset.t===n));
+  keepText();collect();RENDER_GEN++;await render(n);
+  if(editIns!=null&&$('#m_ins'))$('#m_ins').value=editIns;
+  if(editMcp!=null&&$('#mcp_json'))$('#mcp_json').value=editMcp}
  host.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
   if(b.dataset.t==='library'){closeModal();showPane('lib');return}
   tabs(b.dataset.t)});
@@ -4705,7 +4811,8 @@ async function openSettings(tab){
     toast('default model set'); render('models')});
    body.querySelectorAll('[data-forget]').forEach(b=>b.onclick=async()=>{
     if(!confirm('Remove '+b.dataset.forget+' from the list?'))return;
-    await apiPost('/api/model/forget',{id:b.dataset.forget},'removing');render('models')});
+    if(await apiPost('/api/model/forget',{id:b.dataset.forget},'removing'))
+     toast('removed — fetch that provider\'s models again to bring it back');render('models')});
    body.querySelectorAll('[data-bionic]').forEach(b=>b.onclick=async()=>{
     b.textContent='starting…';b.disabled=true;
     const d=await apiPost('/api/bionic/start',{},'starting Bionic');
@@ -5045,8 +5152,8 @@ async function openSettings(tab){
     const [ed,del]=r.querySelectorAll('button');
     ed.onclick=async()=>{const d=await (await fetch('/api/skill/'+k.name)).json();
      $('#sk_name').value=k.name;$('#sk_text').value=d.text};
-    del.onclick=async()=>{await fetch('/api/skills/delete',{method:'POST',
-      headers:{'Content-Type':'application/json'},body:JSON.stringify({name:k.name})});openSettings('skills')};
+    del.onclick=async()=>{if(await apiPost('/api/skills/delete',{name:k.name},'deleting the skill'))
+      toast(k.name+' is in the bin — restore it from there');openSettings('skills')};
     sl.appendChild(r)});
    $('#sk_add').onclick=async()=>{const n=$('#sk_name').value.trim();
     if(!n||!$('#sk_text').value.trim())return;
@@ -5396,15 +5503,19 @@ async function openSettings(tab){
    if(ckeep.length)st.easy_tools=ckeep;
    if(document.querySelector('[data-mcpeasy]'))st.easy_mcp=mkeep;   // none ticked = none started
    await apiPost('/api/claude/settings',{settings:st},'saving Claude Code easy mode')}
-  if($('#m_ins'))await fetch('/api/instructions',{method:'POST',
-    headers:{'Content-Type':'application/json'},body:JSON.stringify({text:$('#m_ins').value})});
-  if($('#mcp_json')){try{const cfg=JSON.parse($('#mcp_json').value);
+  keepText();
+  if(editIns!=null&&editIns!==ins){await fetch('/api/instructions',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({text:editIns})})}
+  if(editMcp!=null&&editMcp!==JSON.stringify(mcp,null,2)){try{const cfg=JSON.parse(editMcp);
     const r=await (await fetch('/api/mcp/save',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({config:cfg})})).json();
     if($('#mcperr'))$('#mcperr').textContent=Object.entries(r.tool_errors||{}).map(([k,v])=>k+': '+v).join(' | ');
    }catch(e){if($('#mcperr'))$('#mcperr').textContent='invalid JSON: '+e;return false}}
+  const changed={};
+  Object.keys(draft).forEach(k=>{if(JSON.stringify(draft[k])!==JSON.stringify(orig[k]))changed[k]=draft[k]});
   const r=await (await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({settings:draft})})).json();
+    body:JSON.stringify({settings:changed})})).json();
+  orig=JSON.parse(JSON.stringify(draft));
   INFO.tools=r.tools;$('#tools').dataset.orbit=r.tools.length+' tools ready';if(!MODELS.harness_mode)$('#tools').textContent=r.tools.length+' tools ready';
   INFO.settings=Object.assign(INFO.settings||{},{easy_mode:!!draft.easy_mode});drawEasyBtn();
   $('#snote').textContent='saved '+new Date().toLocaleTimeString();
@@ -5744,8 +5855,8 @@ async function renderLibrary(){
    ed.onclick=async()=>{const d=await (await fetch('/api/skill/'+k.name)).json();
     $('#sk_name').value=k.name;$('#sk_text').value=d.text;$('#sk_text').scrollIntoView()};
    const del=el('<button class=ghost>delete</button>');
-   del.onclick=async()=>{await fetch('/api/skills/delete',{method:'POST',
-     headers:{'Content-Type':'application/json'},body:JSON.stringify({name:k.name})});renderLibrary()};
+   del.onclick=async()=>{if(await apiPost('/api/skills/delete',{name:k.name},'deleting the skill'))
+     toast(k.name+' is in the bin — restore it from there');renderLibrary()};
    r.appendChild(ed);r.appendChild(del);sl.appendChild(r)});
   $('#sk_add').onclick=async()=>{const n=$('#sk_name').value.trim();
    if(!n||!$('#sk_text').value.trim())return;
@@ -6148,24 +6259,31 @@ async function openPal(){
      d.querySelector('.t').textContent=h;
      d.onclick=e=>{e.stopPropagation();inp.value=h;build(h)};res.appendChild(d)})}}
   palItems.shown=shown};
+ // Each build fills its own list and shows it only if it is still the newest: an older
+ // search that answered late used to push its rows into the newer one's list.
+ let palGen=0,palT=null;
  const build=async term=>{
-  palItems=[];expanded={};
-  CMDS.filter(c=>!term||c.c.includes(term)).forEach(c=>palItems.push(
+  const gen=++palGen,items=[];
+  const publish=()=>{if(gen!==palGen)return false;palItems=items;expanded={};return true};
+  CMDS.filter(c=>!term||c.c.includes(term)).forEach(c=>items.push(
    {kind:'cmd',label:c.c,sub:c.d,go:()=>runCmd(c.c,'')}));
   SESSIONS.filter(s=>!term||(s.title||'').toLowerCase().includes(term)).slice(0,40)
-   .forEach(s=>palItems.push({kind:'chat',label:s.title||'(untitled)',sub:s.n+' msgs',
+   .forEach(s=>items.push({kind:'chat',label:s.title||'(untitled)',sub:s.n+' msgs',
     go:()=>{showPane('log');openSession(s.id)}}));
+  if(!publish())return;palSel=0;draw();          // what is known at once, shown at once
   if(term&&term.length>2){
    try{const hits=await (await fetch('/api/searchchats?q='+encodeURIComponent(term))).json();
-    hits.slice(0,40).forEach(h=>palItems.push({kind:'in chat',label:h.snippet.trim().slice(0,70),
+    hits.slice(0,40).forEach(h=>items.push({kind:'in chat',label:h.snippet.trim().slice(0,70),
      sub:h.title,go:()=>{showPane('log');openSession(h.sid)}}))}catch(e){}
    try{const fd=await (await fetch('/api/files?limit=200')).json();
     (fd.items||[]).filter(f=>f.name.toLowerCase().includes(term)).slice(0,40)
-     .forEach(f=>palItems.push({kind:'file',label:f.name,sub:f.area,
+     .forEach(f=>items.push({kind:'file',label:f.name,sub:f.area,
       // it used to switch to the Files pane and leave you to find it again
       go:()=>previewFile(f)}))}catch(e){}}
-  palSel=0;draw()};
- inp.oninput=()=>build(inp.value.trim().toLowerCase());
+  if(gen!==palGen)return;palItems=items;draw()};
+ // the full-text search waits for a pause in typing, not a server scan per keystroke
+ inp.oninput=()=>{const v=inp.value.trim().toLowerCase();clearTimeout(palT);
+  if(v.length<=2)build(v);else palT=setTimeout(()=>build(v),180)};
  inp.onkeydown=e=>{
   const rows=palItems.shown||[];
   if(e.key==='Escape')return closePal();
@@ -6327,19 +6445,20 @@ async function loadProjects(){
   r.ondragleave=()=>{r.classList.remove('over')};
   r.ondrop=async e=>{e.preventDefault();e.stopPropagation();r.classList.remove('over');dropLineOff();
    const moved=e.dataTransfer.getData('pid');
-   if(moved&&moved!==pid){await reorderProject(moved,pid);return}
+   // where the line was drawn: the lower half of a row means after it (last place too)
+   if(moved&&moved!==pid){await reorderProject(moved,pid,!aboveHalf(r,e.clientY));return}
    const sid=e.dataTransfer.getData('sid'); if(!sid)return;
    await fetch('/api/session/assign',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({id:sid,project:pid})});
    toast('moved to '+pr.name);loadSessions()};
   wrap.appendChild(r)})}
 // Put a project where it was dropped, and keep every project's place by saving the new order.
-async function reorderProject(moved,before){
+async function reorderProject(moved,target,after){
  const ids=Object.entries(PROJECTS).sort((a,b)=>(a[1].order||0)-(b[1].order||0)).map(([id])=>id);
  const from=ids.indexOf(moved);if(from<0)return;
  ids.splice(from,1);
- const to=ids.indexOf(before);
- ids.splice(to<0?ids.length:to,0,moved);
+ const to=ids.indexOf(target);
+ ids.splice(to<0?ids.length:to+(after?1:0),0,moved);
  ids.forEach((id,i)=>{if(PROJECTS[id])PROJECTS[id].order=i});
  loadProjects._local=true;await loadProjects();       // the new order shows at once
  // one call: saving each project in turn raced the Claude-group sync, which reads the
@@ -7068,12 +7187,16 @@ function diffBlock(D,label){
  // each line with its number in the file, as Claude Code shows an edit: the new
  // number for added and unchanged lines, the old one for removed lines
  const pre=document.createElement('pre');
- let oldN=0,newN=0;
+ let oldN=0,newN=0,inHunk=false;
  String(D.diff||'').split('\n').forEach(l=>{
-  if(l.startsWith('+++')||l.startsWith('---'))return;
+  // the file headers come before the first hunk; inside one, a removed "-- comment" or
+  // an added "++i" is a real line and used to vanish from the diff
+  if(!inHunk&&(l.startsWith('+++')||l.startsWith('---')))return;
   const hunk=l.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
   const sp=document.createElement('span');
-  if(hunk){oldN=+hunk[1];newN=+hunk[2];sp.className='h';sp.textContent=l;pre.appendChild(sp);return}
+  if(hunk){inHunk=true;oldN=+hunk[1];newN=+hunk[2];sp.className='h';sp.textContent=l;pre.appendChild(sp);return}
+  // a diff too long to show says so at its end
+  if(/^\.\.\. \d+ more diff lines not shown/.test(l)){sp.className='h';sp.textContent=l;pre.appendChild(sp);return}
   const kind=l.startsWith('+')?'a':l.startsWith('-')?'d':'';
   sp.className=kind;
   const num=el('<i class=ln></i>');
@@ -7215,11 +7338,16 @@ function copyAnswer(n){
   ()=>toast('could not copy'))}
 // /diff — every file change this chat has shown, newest first
 function showTurnDiff(){
- const blocks=[...wrap.querySelectorAll('.diff')];
- if(!blocks.length){toast('no file changes in this chat yet');return}
+ // what the last answer changed, as the command says; the whole chat only if it changed nothing
+ const all=[...wrap.querySelectorAll('.diff')];
+ if(!all.length){toast('no file changes in this chat yet');return}
+ const us=[...wrap.querySelectorAll('.msg.u:not(.note)')], lastU=us[us.length-1];
+ const mine=lastU?all.filter(b=>lastU.compareDocumentPosition(b)&Node.DOCUMENT_POSITION_FOLLOWING):all;
+ const blocks=mine.length?mine:all;
  openSheet('Changes',body=>{
-  body.appendChild(el('<div class=sheetnote>Every change shown in this chat, newest first.</div>'));
-  blocks.slice().reverse().forEach(b=>body.appendChild(b.cloneNode(true)))})}
+  body.appendChild(el('<div class=sheetnote>'+(mine.length?'What the last answer changed, in order.'
+   :'The last answer changed no files — every change in this chat, newest first.')+'</div>'));
+  (mine.length?blocks:blocks.slice().reverse()).forEach(b=>body.appendChild(b.cloneNode(true)))})}
 // /help — the commands, with what each does
 function showCommandHelp(){
  openSheet('Commands',body=>{
@@ -7714,6 +7842,9 @@ function histPush(t){if(!t||t.length>20000||tempMode)return;const h=histLoad();
 function histWalk(dir){
  const h=histLoad();if(!h.length)return false;
  if(!(q.value===''||(histPos>=0&&q.value===h[histPos])))return false;
+ // a recalled prompt of several lines: the arrows move through its lines first
+ if(dir<0&&q.value.lastIndexOf('\n',q.selectionStart-1)!==-1)return false;
+ if(dir>0&&q.value.indexOf('\n',q.selectionEnd)!==-1)return false;
  if(dir<0)histPos=histPos<0?h.length-1:Math.max(0,histPos-1);
  else{if(histPos<0)return false;
   if(++histPos>=h.length){histPos=-1;q.value='';return true}}
@@ -8223,7 +8354,7 @@ fetch('/api/info').then(r=>r.json()).then(d=>{
  drawEasyBtn();refreshStatus()});
 fetch('/api/prompts').then(r=>r.json()).then(d=>PROMPTS=d);
 async function loadAgents(){
- const d=await (await fetch('/api/agents')).json();
+ const d=await (await fetch('/api/agents'+(sid?'?sid='+encodeURIComponent(sid):''))).json();
  const sel=$('#agentsel');sel.innerHTML='<option value="">no agent</option>';
  Object.keys(d.agents||{}).forEach(n=>{const o=document.createElement('option');
   o.value=n;o.textContent=n;if(n===d.active)o.selected=true;sel.appendChild(o)})}
