@@ -464,6 +464,7 @@ def save_session(st=None):
     # taken off the queue but not yet in the chat: written down, so a restart in between
     # puts it back rather than losing it
     if getattr(st, "handing", None): extra["handing"] = st.handing
+    if getattr(st, "answered_at", None): extra["answered_at"] = st.answered_at   # for "unread"
     if getattr(st, "clear_pickups", False):          # an answer finished: the count starts again
         extra.pop("restart_pickups", None); st.clear_pickups = False
     q.session_save(st.sid, st.msgs, st.title, extra)
@@ -940,6 +941,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 pass
             try: ext = len(q.CE.history_items_cached()) + len(q.AGENT_SESSIONS.rows_cached(q.ROOT))
             except Exception: ext = 0
+            try: at = max(at, os.stat(q.SEEN_FILE).st_mtime)    # seen on another device
+            except OSError: pass
             return self._send(200, jdump({"n": n, "at": round(at, 3), "ext": ext,
                                           "running": len(running_sids())}))
         if p == "/api/sessions":
@@ -1751,6 +1754,10 @@ class H(http.server.BaseHTTPRequestHandler):
             with LOCK: S.refresh_tools()
             return self._send(200, jdump({"ok": True, "tool_errors": S.tool_errors,
                                           "tools": sorted(t["function"]["name"] for t in S.tools)}))
+        if p == "/api/session/seen":
+            # looked at on this device: every device stops showing it as new
+            if not d.get("id"): return self._send(400, jdump({"error": "which chat?"}))
+            return self._send(200, jdump({"ok": True, "at": q.mark_seen(str(d["id"]))}))
         if p == "/api/session/rename":
             sid, new = d.get("id") or S.sid, (d.get("title") or "").strip()[:80]
             if not new: return self._send(400, jdump({"error": "empty title"}))
@@ -2804,6 +2811,7 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                 except Exception: pass
                 st.running = False
                 if not failed[0]: st.clear_pickups = True
+                st.answered_at = time.time()
                 save_session(st)
                 if not st.temp:
                     job = limits.check(st, n0, cancelled=st.cancel.is_set())
@@ -3712,6 +3720,7 @@ def run_job(job, manual=False):
                              max_minutes=_job_minutes(job), read_only=st.plan_mode)
                 st.running = False
                 st.clear_pickups = True
+                st.answered_at = time.time()
                 save_session(st)
                 limit_job = limits.check(st, n0, model=job.get("model") or st.model,
                                          attempt=_limit_attempt(job), cancelled=st.cancel.is_set())

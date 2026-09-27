@@ -2868,8 +2868,48 @@ def _activity(meta, msgs, name, path):
     except (ValueError, IndexError): pass
     return meta.get("saved") or os.path.getmtime(path)
 
+SEEN_FILE = os.path.join(CONFIG, "seen.json")
+_SEEN = {"at": None, "data": {}}
+_SEEN_LOCK = threading.Lock()
+SEEN_KEEP = 3000
+
+def seen_load():
+    """When each chat was last looked at, on any device: {sid: time}."""
+    try: at = os.stat(SEEN_FILE).st_mtime_ns
+    except OSError: at = None
+    if at != _SEEN["at"]:
+        try: d = json.load(open(SEEN_FILE))
+        except Exception: d = {}
+        _SEEN.update(at=at, data=d if isinstance(d, dict) else {})
+    return _SEEN["data"]
+
+def mark_seen(sid, at=None):
+    """You have looked at this chat (its newest answer included), wherever you did."""
+    if not sid: return None
+    with _SEEN_LOCK:
+        d = dict(seen_load())
+        d[sid] = max(float(d.get(sid) or 0), float(at or time.time()))
+        if len(d) > SEEN_KEEP:
+            for k, _ in sorted(d.items(), key=lambda kv: kv[1])[:len(d) - SEEN_KEEP]: d.pop(k, None)
+        _atomic_write(SEEN_FILE, d)
+        _SEEN.update(at=None)
+        return d[sid]
+
 def session_list():
-    """Every saved chat, pinned first, then most recently used first."""
+    """Every saved chat, pinned first, then most recently used first -- each saying
+    whether an answer has landed since you last looked at it on any device.
+
+    Unread was guessed per page and per phone from the chat's time, which is the last
+    message YOU sent: an answer that finished after you walked away never changed it,
+    so it never showed as new -- and a chat seen on the phone stayed new on the Mac."""
+    seen = seen_load()
+    out = []
+    for r in _session_rows():
+        ans, was = r.get("answered"), seen.get(r["id"])
+        out.append(dict(r, unread=bool(ans and was and float(ans) > float(was) + 1)))
+    return out
+
+def _session_rows():
     # Key on the files themselves — a directory's mtime does NOT change when a
     # file inside it is modified, so pin/archive/tag edits were served stale.
     try:
@@ -2899,6 +2939,7 @@ def session_list():
                    "pinned": bool(meta.get("pinned")), "archived": bool(meta.get("archived")),
                    "tags": meta.get("tags") or [], "project": meta.get("project"), "order": meta.get("order"),
                    "project_set": bool(meta.get("project_set")),
+                   "answered": meta.get("answered_at"),
                    "queued": len([x for x in (meta.get("queue") or []) if not x.get("at")]),
                    "scheduled": min([x["at"] for x in (meta.get("queue") or []) if x.get("at")] or [0]) or None, "model": meta.get("model"), "host": meta.get("host"),
                    "n": len([m for m in (msgs or []) if isinstance(m, dict) and m.get("role") in ("user", "assistant")])}
