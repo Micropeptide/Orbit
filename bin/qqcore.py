@@ -2415,6 +2415,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                     continue
                 if fails >= give_up:
                     _finish(None, rnd)
+                    if sid: LAST_TURN[sid]["failed"] = kind or "error"   # the queue waits
                     emit("done", None)
                     why = {"auth": "the model provider refused the key — check it in Settings → Models",
                            "setup": "the agent could not start — check it runs in a terminal",
@@ -2617,10 +2618,12 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                                              f"Next: {v['next']} Carry on and then report.")})
                         continue
                 changed = getattr(TURN_CTX, "changes", None)
-                if chat_setting("auto_review") and changed:
+                # a helper shares its parent's list of changes: reviewing it here paid for
+                # a review nobody saw, of work the parent reviews again when it finishes
+                if not helper and chat_setting("auto_review") and changed:
                     text = review_changes(changed, emit=emit)
                     if text:
-                        emit("review", {"text": text, "files": len(changed),
+                        emit("review", {"text": text, "files": len({c.get("path") for c in changed}),
                                         "model": helper_model() or "this chat's model"})
                 _finish(messages[-1], rnd)
                 emit("done", None)
@@ -2982,6 +2985,7 @@ def session_delete(sid):
 
 CHECKPOINT_EVERY = 15      # seconds between progress saves during one long answer
 RESUME_WINDOW_H = 12       # cut off longer ago than this: repaired, but not restarted
+RESUME_MAX_TRIES = 2       # pick-ups in a row that were themselves cut off: then stop
 
 def recover_interrupted_sessions(now=None):
     """Chats whose answer was cut off because Orbit itself stopped — a crash,
@@ -3013,12 +3017,22 @@ def recover_interrupted_sessions(now=None):
                              "content": "(no result — Orbit stopped before this finished)"})
         keep = {k: v for k, v in raw.items()
                 if k not in ("schema", "title", "messages", "saved", "running_since")}
+        # A pick-up that itself brings Orbit down (out of memory, a tool that kills it)
+        # was cut off "just now" every time, so each restart booked another: a loop. The
+        # count is cleared when an answer in the chat finishes.
+        tries = int(raw.get("restart_pickups") or 0)
+        resume = (bool(S.get("resume_after_restart", True)) and now - since < RESUME_WINDOW_H * 3600
+                  and tries < RESUME_MAX_TRIES)
+        if resume: keep["restart_pickups"] = tries + 1
         session_save(sid, msgs, raw.get("title"), keep)
-        resume = bool(S.get("resume_after_restart", True)) and now - since < RESUME_WINDOW_H * 3600
+        if not resume and tries >= RESUME_MAX_TRIES:
+            notify("Orbit restarted", f"not picking up “{(raw.get('title') or sid)[:60]}” again: "
+                   f"the last {tries} pick-ups were cut off too")
         if resume:
             title = raw.get("title") or sid
             job = {"id": "job" + os.urandom(3).hex(), "every": "once", "at_ts": now + 60,
                    "sid": sid, "enabled": True, "created": now, "created_by": "orbit",
+                   "kind": "restart_resume",
                    "name": f"pick up after restart: {title[:40]}",
                    "prompt": ("Orbit restarted while you were in the middle of this. Carry on "
                               "from where you stopped — check `plan` and the latest messages "
@@ -4916,12 +4930,24 @@ def session_branch(sid, upto_user_index, new_title=None):
     msgs, title = session_load(sid)
     keep, seen = [], 0
     for m in msgs:
-        if m.get("role") == "user":
+        # counted as the page counts them: Orbit's own "carry on" notes are not messages
+        # you wrote, and counting them cut the fork earlier than the message you clicked
+        if m.get("role") == "user" and not m.get("nudge"):
             if seen == upto_user_index: break
             seen += 1
         keep.append(m)
     new_sid = time.strftime("%Y%m%d-%H%M%S") + "-br" + os.urandom(2).hex()
-    session_save(new_sid, keep, new_title or ((title or "chat") + " (branch)"))
+    # the fork is the same chat from there on: its project, model and mode come with it
+    # (a project chat forked into no project, and a Claude Code chat into the default model)
+    try: raw = json.load(open(session_path(sid)))
+    except Exception: raw = {}
+    extra = {k: raw[k] for k in ("project", "project_set", "model", "sys_override", "plan_mode")
+             if isinstance(raw, dict) and raw.get(k) is not None}
+    session_save(new_sid, keep, new_title or ((title or "chat") + " (branch)"), extra or None)
+    try:
+        own = {k: v for k, v in CE.chat_prefs(sid).items() if k in PER_CHAT}
+        if own: CE.set_chat_pref(new_sid, **own)
+    except Exception: pass
     _SESS_CACHE["key"] = None
     return new_sid
 

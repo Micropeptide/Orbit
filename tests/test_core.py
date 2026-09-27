@@ -2581,7 +2581,7 @@ class TestRound1Server(Sandbox):
 
     def test_a_failed_job_start_never_leaves_the_chat_locked(self):
         src = open(os.path.join(ROOT, "bin", "orbit-ui")).read()
-        block = src[src.index("def run_job(job):"):][:1400]
+        block = src[src.index("def run_job(job"):][:1600]
         self.assertIn("never leave the chat locked", block)
         self.assertIn("q.sched_update(", src)
 
