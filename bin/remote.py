@@ -16,7 +16,7 @@ is therefore off until you turn it on, and when it is on it holds to three rules
 Pairing is a QR code: the phone scans a URL carrying host, port and token, and
 never asks you to type a secret on a phone keyboard.
 """
-import hmac, json, os, secrets, socket, subprocess, urllib.request
+import hashlib, hmac, json, os, secrets, socket, subprocess, threading, time, urllib.request
 
 TOKEN_BYTES = 32
 TAILSCALE_BINS = ["/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale",
@@ -73,6 +73,145 @@ def token_matches(root, given):
     tok = load_token(root)
     if not tok or not given: return False
     return hmac.compare_digest(tok, given)
+
+
+# ------------------------------------------------------------------ devices
+# One token per device. The single shared token meant a lost phone could only be cut
+# off by unpairing everything, nothing said which device did what, and every device
+# could change every setting. Now the QR carries a one-time code (single use, fifteen
+# minutes); the device trades it for a token of its own, which can be revoked on its
+# own or limited to chats. The old shared token ("legacy") still works until you retire
+# it, so nothing paired before stops working.
+
+CODE_TTL = 15 * 60
+SCOPES = ("full", "chat")
+_DEV = {"at": None, "data": None}
+_DEV_LOCK = threading.RLock()
+_SEEN = {}                                   # device id -> last request, saved now and then
+
+def devices_path(root):
+    return os.path.join(root, "config", "devices.json")
+
+def _h(tok):
+    return hashlib.sha256(str(tok).encode()).hexdigest()
+
+def _dev_load(root):
+    p = devices_path(root)
+    try: at = os.stat(p).st_mtime_ns
+    except OSError: at = None
+    if at != _DEV["at"] or _DEV["data"] is None:
+        try:
+            with open(p) as f: d = json.load(f)
+        except Exception: d = {}
+        if not isinstance(d, dict): d = {}
+        d.setdefault("devices", {}); d.setdefault("codes", {})
+        _DEV.update(at=at, data=d)
+    return _DEV["data"]
+
+def _dev_save(root, d):
+    p = devices_path(root)
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    tmp = f"{p}.{os.getpid()}.tmp"
+    with open(tmp, "w") as f: json.dump(d, f, indent=1)
+    try: os.chmod(tmp, 0o600)
+    except OSError: pass
+    os.replace(tmp, p)
+    _DEV.update(at=None)
+
+def new_pair_code(root, ttl=CODE_TTL):
+    """A one-time code for the QR: good once, for fifteen minutes."""
+    with _DEV_LOCK:
+        d = _dev_load(root)
+        now = time.time()
+        d["codes"] = {h: c for h, c in d["codes"].items() if c.get("expires", 0) > now}
+        code = secrets.token_urlsafe(18)
+        d["codes"][_h(code)] = {"expires": now + ttl}
+        _dev_save(root, d)
+        return code
+
+def claim_code(root, code, name="", via="app"):
+    """Trade a pairing code for this device's own token: (token, device id), or (None, None)."""
+    if not code: return None, None
+    with _DEV_LOCK:
+        d = _dev_load(root)
+        rec = d["codes"].pop(_h(code), None)
+        if not rec or rec.get("expires", 0) < time.time():
+            _dev_save(root, d)
+            return None, None
+        tok = secrets.token_urlsafe(TOKEN_BYTES)
+        did = "d" + secrets.token_hex(4)
+        now = time.time()
+        d["devices"][did] = {"name": (str(name or "").strip() or ("Phone browser" if via == "web" else "Device"))[:60],
+                             "hash": _h(tok), "scope": "full", "created": now, "last_seen": now, "via": via}
+        _dev_save(root, d)
+        return tok, did
+
+def token_device(root, given):
+    """Which device a token belongs to: its id, "legacy" for the old shared token, or None."""
+    if not given: return None
+    if token_matches(root, given): return "legacy"
+    h = _h(given)
+    for did, dev in _dev_load(root)["devices"].items():
+        if hmac.compare_digest(dev.get("hash", ""), h):
+            return did
+    return None
+
+def device_scope(root, did):
+    if did in (None, "legacy"): return "full"
+    return (_dev_load(root)["devices"].get(did) or {}).get("scope", "full")
+
+def touch_device(root, did):
+    """Note when a device was last heard from; written at most once a minute."""
+    if not did or did == "legacy": return
+    now = time.time()
+    last = _SEEN.get(did, 0)
+    _SEEN[did] = now
+    if now - last < 60: return
+    with _DEV_LOCK:
+        d = _dev_load(root)
+        if did in d["devices"]:
+            d["devices"][did]["last_seen"] = now
+            _dev_save(root, d)
+
+def list_devices(root):
+    d = _dev_load(root)
+    out = [{"id": did, **{k: v for k, v in dev.items() if k != "hash"},
+            "last_seen": max(dev.get("last_seen", 0), _SEEN.get(did, 0))}
+           for did, dev in d["devices"].items()]
+    out.sort(key=lambda x: -(x.get("last_seen") or 0))
+    return {"devices": out, "legacy": bool(load_token(root))}
+
+def update_device(root, did, name=None, scope=None):
+    with _DEV_LOCK:
+        d = _dev_load(root)
+        dev = d["devices"].get(did)
+        if not dev: return False
+        if name is not None and str(name).strip(): dev["name"] = str(name).strip()[:60]
+        if scope is not None:
+            if scope not in SCOPES: return False
+            dev["scope"] = scope
+        _dev_save(root, d)
+        return True
+
+def revoke_device(root, did):
+    with _DEV_LOCK:
+        d = _dev_load(root)
+        gone = d["devices"].pop(did, None)
+        _dev_save(root, d)
+        return bool(gone)
+
+def retire_legacy(root):
+    """Stop honouring the old shared token: devices paired with it must pair again."""
+    try: os.remove(token_path(root)); return True
+    except OSError: return False
+
+def unpair_everything(root):
+    """Every device and the shared token: all of them must scan again."""
+    with _DEV_LOCK:
+        d = _dev_load(root)
+        d["devices"], d["codes"] = {}, {}
+        _dev_save(root, d)
+    retire_legacy(root)
 
 
 # ------------------------------------------------------------------ addresses
@@ -324,12 +463,12 @@ def status(root, mode, port):
 # ------------------------------------------------------------------ pairing
 
 def pair_payload(root, mode, port):
-    """What the QR code carries. Scanned once, stored in the Keychain."""
+    """What the QR code carries: a one-time code the device trades for its own token."""
     url = best_url(mode, port)
     if not url: return {}
-    tok = load_token(root, create=True)
-    return {"v": 1, "url": url, "token": tok, "alts": alt_urls(mode, port),
-            "web": f"{url}/?t={tok}",     # for a phone browser or the PWA
+    code = new_pair_code(root)
+    return {"v": 2, "url": url, "code": code, "alts": alt_urls(mode, port),
+            "web": f"{url}/?c={code}",    # for a phone browser or the PWA
             "name": mac_name()}
 
 
@@ -337,7 +476,7 @@ def pair_uri(root, mode, port):
     p = pair_payload(root, mode, port)
     if not p: return ""
     from urllib.parse import quote
-    uri = (f"orbit://pair?url={quote(p['url'])}&token={quote(p['token'])}"
+    uri = (f"orbit://pair?url={quote(p['url'])}&code={quote(p['code'])}"
            f"&name={quote(p['name'])}")
     if p.get("alts"):
         uri += "&alts=" + quote(",".join(p["alts"]))

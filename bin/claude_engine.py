@@ -1832,6 +1832,9 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                         + (u.get("cache_creation_input_tokens") or 0)
                     if ptok and sid: q.SESSION_TOKENS[sid] = ptok
                     usage["prompt_tokens"] += ptok
+                    # what the provider served from cache: counted apart, so a budget can see
+                    # that re-sending Claude Code's long opening is not new spending
+                    usage["cached_tokens"] = usage.get("cached_tokens", 0) + int(u.get("cache_read_input_tokens") or 0)
                     step_prompt[0] = ptok
                 elif et == "content_block_delta":
                     d = e.get("delta") or {}
@@ -1850,6 +1853,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                         + (u.get("cache_creation_input_tokens") or 0)
                     if ptok and not step_prompt[0]:
                         usage["prompt_tokens"] += ptok
+                        usage["cached_tokens"] = usage.get("cached_tokens", 0) + int(u.get("cache_read_input_tokens") or 0)
                         if sid: q.SESSION_TOKENS[sid] = ptok
                 continue
 
