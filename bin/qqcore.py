@@ -697,7 +697,9 @@ def mcp_config():
     except Exception: return {"mcpServers": {}}
 
 def mcp_save(cfg):
-    json.dump(cfg, open(MCPCFG, "w"), indent=2)
+    # atomic, with the previous version kept: an in-place write cut short left an empty
+    # file, mcp_config() then read it as "no servers", and the next Save made that final
+    snapshot_config(MCPCFG); _atomic_write(MCPCFG, cfg, indent=2)
     return cfg
 
 _MCP_STATE = {"hash": None, "specs": [], "errors": {}}
@@ -2883,14 +2885,19 @@ def redact_server_log(path=SRVLOG):
     except Exception:
         return 0
 
-def _atomic_write(path, data):
+def _atomic_write(path, data, indent=None):
     """Write via temp+rename so a crash mid-write can never truncate a chat."""
+    _atomic_text(path, json.dumps(data, indent=indent))
+
+
+def _atomic_text(path, text):
+    """The same for any text file: a crash leaves the old file or the new one, never half."""
     # a temp name of its own: two threads saving the same file shared one
     # ".tmp", and the second rename found it gone (FileNotFoundError)
     tmp = f"{path}.{os.getpid()}-{threading.get_ident()}-{os.urandom(3).hex()}.tmp"
     try:
         with open(tmp, "w") as f:
-            json.dump(data, f)
+            f.write(text)
             f.flush(); os.fsync(f.fileno())
         os.replace(tmp, path)
     finally:
@@ -3003,7 +3010,7 @@ def prompts_load():
     except Exception: return {}
 
 def prompts_save(d):
-    json.dump(d, open(PROMPTS, "w"), indent=2); return d
+    snapshot_config(PROMPTS); _atomic_write(PROMPTS, d, indent=2); return d
 
 # ------------------------------------------------------------------ knowledge base (BM25)
 import math, re as _re
@@ -3391,12 +3398,14 @@ def skill_read(name):
 
 def skill_write(name, text):
     safe = "".join(c for c in name if c.isalnum() or c in "-_") or "skill"
-    open(os.path.join(SKILLS, safe + ".md"), "w").write(text)
+    _atomic_text(os.path.join(SKILLS, safe + ".md"), text)
     return safe
 
 def skill_delete(name):
     p = os.path.join(SKILLS, os.path.basename(name) + ".md")
-    if os.path.exists(p): os.remove(p); return True
+    # to Orbit's bin, like a chat or a file: the Library button has no confirmation, and
+    # this removed a skill someone had written by hand with no way to get it back
+    if os.path.exists(p): trash_put("file", p, {"skill": os.path.basename(name)}); return True
     return False
 
 def t_use_skill(name):
@@ -4434,7 +4443,7 @@ def trash_put(kind, src, meta=None):
     idx = _trash_index()
     idx[os.path.basename(dst)] = {"kind": kind, "original": src, "deleted": time.time(),
                                   "meta": meta or {}}
-    with open(os.path.join(TRASH, "index.json"), "w") as f: json.dump(idx, f)
+    _atomic_write(os.path.join(TRASH, "index.json"), idx)   # whole or not at all
     return dst
 
 def _trash_index():
@@ -4466,7 +4475,7 @@ def trash_restore(name):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     os.replace(src, dst)
     idx.pop(name, None)
-    with open(os.path.join(TRASH, "index.json"), "w") as f: json.dump(idx, f)
+    _atomic_write(os.path.join(TRASH, "index.json"), idx)   # whole or not at all
     _SESS_CACHE["key"] = None
     if rec["kind"] == "knowledge":
         know_reindex()                     # a restored paper must be searchable again
@@ -4490,7 +4499,7 @@ def trash_purge(name=None):
                 try: CE.forget_chat_prefs(gone)
                 except Exception: pass
         idx.pop(key, None); n += 1
-    with open(os.path.join(TRASH, "index.json"), "w") as f: json.dump(idx, f)
+    _atomic_write(os.path.join(TRASH, "index.json"), idx)   # whole or not at all
     return n
 
 def session_delete(sid):                      # override: route through trash
