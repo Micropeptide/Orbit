@@ -28,7 +28,9 @@ for d in (CONFIG, SESSIONS, LOGS, MEMDIR, WORKSPACE, UPLOADS, PAPERS):
 
 CANCEL = threading.Event()
 LAST_STATS = {}
-LAST_DIFF = {}
+# What the last write, edit or plot of each chat produced, for the card under its tool
+# call. One shared slot let chat B's card show -- and clear -- chat A's diff.
+LAST_DIFF = {}      # chat id -> {"path", "added", "removed", "diff", ...}
 PROMPTS = os.path.join(CONFIG, "prompts.json")
 
 MTPLX = os.path.expanduser("~/Library/Application Support/MTPLX/runtime-venv/bin/mtplx")
@@ -869,6 +871,8 @@ def t_read_file(path):
 
 CHECKPOINTS = os.path.join(WORKSPACE, ".checkpoints")
 CHECKPOINTS_KEEP = 20
+CHECKPOINTS_KEEP_DAYS = 3       # nothing younger is pruned: a recent answer stays undoable
+CHECKPOINTS_HARD_CAP = 400      # except past this, so a runaway loop cannot fill the disk
 
 def _checkpoint_dir(rel):
     return os.path.join(CHECKPOINTS, rel)
@@ -919,7 +923,16 @@ def _save_checkpoint(p):
     # by when they were written, not by how they are named: the old unpadded names are
     # still here and still have to prune oldest-first
     snaps = sorted(os.listdir(d), key=lambda f: (_ckpt_when(d, f), f))
-    for old in snaps[:-CHECKPOINTS_KEEP]:
+    # Counting alone could not tell an old snapshot from the one a recent answer's undo
+    # points at: an answer that edited one file more than twenty times deleted its own
+    # starting point, and undo then left that file as the answer had left it. Nothing
+    # recent is pruned; past that, the newest few are kept; and a hard cap stops a loop
+    # writing one file thousands of times from filling the disk.
+    now = time.time()
+    doomed = {f for f in snaps[:-CHECKPOINTS_KEEP]
+              if now - _ckpt_when(d, f) > CHECKPOINTS_KEEP_DAYS * 86400}
+    doomed |= set(snaps[:-CHECKPOINTS_HARD_CAP]) if len(snaps) > CHECKPOINTS_HARD_CAP else set()
+    for old in doomed:
         try: os.remove(os.path.join(d, old))
         except OSError: pass
     return dest                  # which snapshot, so an answer's changes can be undone
@@ -957,10 +970,10 @@ def t_write_file(path, content):
                 ". Enable 'write anywhere' or "
                 "'Full computer access' in Settings -> Tools to override.")
     d = file_diff(p, content)
-    LAST_DIFF.clear(); LAST_DIFF.update({"path": p, **d})
     snap = _save_checkpoint(p)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     open(p, "w").write(content)
+    _set_last_diff(p, d)
     _note_change(p, snap, created=not d["existed"])
     try:
         if p.startswith(os.path.abspath(WORKSPACE)):
@@ -1207,7 +1220,20 @@ def t_fetch_paper_pdf(query, out_dir=None):
 
 
 IMG_EXT = (".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp")
-LAST_IMAGES = []
+LAST_IMAGES = {}    # chat id -> [image paths] (see LAST_DIFF)
+
+def _this_chat():
+    return getattr(TURN_CTX, "settings_sid", None) or getattr(TURN_CTX, "sid", None)
+
+def _set_last_diff(p, d):
+    LAST_DIFF[_this_chat()] = {"path": p, **d}
+
+def take_last_diff(sid):
+    """The card for this chat's latest change, once."""
+    return LAST_DIFF.pop(sid, None)
+
+def take_last_images(sid):
+    return LAST_IMAGES.pop(sid, None) or []
 
 def _ws_images(since=None):
     """Images in the workspace. With `since`, only those modified after it —
@@ -1226,7 +1252,6 @@ def _ws_images(since=None):
 
 def t_python(code, timeout=120):
     """Run Python in the workspace. Returns stdout/stderr, and surfaces any plots created."""
-    global LAST_IMAGES
     if not S.get("code_execution", True):
         return "Error: code execution is disabled in Settings -> Tools."
     import tempfile
@@ -1239,9 +1264,10 @@ def t_python(code, timeout=120):
         out = (r.stdout or "")           # _truncate_output keeps head and tail and files the rest
         if r.stderr: out += "\n--- stderr ---\n" + r.stderr
         # python code can write any file; what it touched is the answer's own work
-        READ_STATE.clear()
+        _forget_all_reads()
         fresh = list(_ws_images(since=t0).keys())
-        LAST_IMAGES = fresh
+        if fresh: LAST_IMAGES[_this_chat()] = fresh
+        else: LAST_IMAGES.pop(_this_chat(), None)
         if fresh:
             rels = [os.path.relpath(p, WORKSPACE) for p in fresh]
             for r in rels: record_file(r, "python")
@@ -1338,8 +1364,7 @@ def t_screen_look():
         pass
     data = base64.b64encode(open(path, "rb").read()).decode()
     LAST_SCREEN_IMAGE = f"data:image/png;base64,{data}"
-    global LAST_IMAGES
-    LAST_IMAGES = [path]
+    LAST_IMAGES[_this_chat()] = [path]
     record_file(os.path.relpath(path, WORKSPACE), "screen_look")
     return (f"Screenshot taken{dims}. It will appear as an image in the next message "
             "if the current model can see images -- local text-only and CLI-backed "
@@ -3807,18 +3832,27 @@ def git_state(folder, max_age=4.0):
     hit = _GIT_CACHE.get(folder)
     if hit and time.time() - hit[0] < max_age: return dict(hit[1])
     out = {"repo": False, "folder": folder}
+    # a status poll must never take the index lock: the git you run yourself, a moment
+    # later, would fail with "index.lock exists"
+    env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
     def git(*a):
-        r = subprocess.run(["git", "-C", folder, *a], capture_output=True, text=True, timeout=8)
+        r = subprocess.run(["git", "--no-optional-locks", "-C", folder, *a], capture_output=True,
+                           text=True, timeout=8, env=env)
         return r.stdout.strip() if r.returncode == 0 else ""
     try:
         if git("rev-parse", "--is-inside-work-tree") != "true":
             _GIT_CACHE[folder] = (time.time(), out); return dict(out)
         out["repo"] = True
-        out["branch"] = git("rev-parse", "--abbrev-ref", "HEAD") or "?"
+        has_head = bool(git("rev-parse", "--verify", "-q", "HEAD"))
+        # a repository with no commit yet still has a branch name
+        out["branch"] = (git("rev-parse", "--abbrev-ref", "HEAD") if has_head else
+                         git("symbolic-ref", "--short", "HEAD")) or "?"
         lines = [l for l in git("status", "--porcelain").splitlines() if l.strip()]
         out["dirty"] = len(lines)
         out["untracked"] = sum(1 for l in lines if l.startswith("??"))
-        stat = git("diff", "--shortstat")
+        out["staged"] = sum(1 for l in lines if l[:1] not in (" ", "?"))
+        # staged and unstaged together: `git diff` alone showed nothing for staged work
+        stat = git("diff", "HEAD", "--shortstat") if has_head else git("diff", "--cached", "--shortstat")
         out["diff"] = stat or ""
         ab = git("rev-list", "--left-right", "--count", "@{u}...HEAD")
         if ab and "\t" in ab:
@@ -5320,7 +5354,9 @@ def turn_diff(changes, cap=24000):
     """A unified diff of what this answer changed, from the snapshots it already took."""
     import difflib
     out, used = [], 0
-    for ch in changes or []:
+    # one entry per file, from where it was before the answer began: three edits to one
+    # file printed three overlapping diffs, each from a different midpoint
+    for ch in _one_per_path(changes):
         path = ch.get("path")
         if not path: continue
         try: now = open(path, encoding="utf-8", errors="replace").read().splitlines(keepends=True)
@@ -5770,8 +5806,11 @@ def file_diff(path, new_text):
                                   tofile=os.path.basename(p) + " (proposed)", lineterm="", n=3))
     added = sum(1 for l in d if l.startswith("+") and not l.startswith("+++"))
     removed = sum(1 for l in d if l.startswith("-") and not l.startswith("---"))
-    return {"diff": "\n".join(d[:400]), "added": added, "removed": removed,
-            "existed": os.path.exists(p)}
+    shown = d[:400]
+    if len(d) > 400:        # say so, rather than let a cut-off diff look like the whole change
+        shown.append(f"... {len(d) - 400} more diff lines not shown (+{added} -{removed} in all)")
+    return {"diff": "\n".join(shown), "added": added, "removed": removed,
+            "existed": os.path.exists(p), "truncated": len(d) > 400}
 
 
 # ==================================================================== PLAN / TODO
@@ -6184,11 +6223,18 @@ def _stat_key(p):
 
 READ_STATE_MAX = 400
 
+def _read_key(p):
+    """Each chat keeps its own record. Keyed by path alone, chat B's edit refreshed the
+    record, and chat A -- which had read the older file -- then passed the check and
+    wrote over B's work. A helper works for its chat, so it shares the chat's record."""
+    return (getattr(TURN_CTX, "settings_sid", None) or getattr(TURN_CTX, "sid", None), p)
+
 def _note_read(p):
     key = _stat_key(p)
     if not key: return
-    READ_STATE.pop(p, None)          # re-inserted last, so the oldest falls off first
-    READ_STATE[p] = key
+    k = _read_key(p)
+    READ_STATE.pop(k, None)          # re-inserted last, so the oldest falls off first
+    READ_STATE[k] = key
     while len(READ_STATE) > READ_STATE_MAX:
         READ_STATE.pop(next(iter(READ_STATE)), None)
 
@@ -6199,7 +6245,7 @@ def _changed_since_read(p):
     your editor, a build, another tool — is what this exists to catch. A run_shell that
     reformats the file (`sed -i`, `black`, `prettier`) is the answer's own work, so it
     clears the record rather than tripping over it: see `_forget_reads`."""
-    was = READ_STATE.get(p)
+    was = READ_STATE.get(_read_key(p))
     if not was: return ""
     now = _stat_key(p)
     if now is None or now == was: return ""
@@ -6215,9 +6261,18 @@ def _forget_reads(names):
     changed it itself — refusing its next edit for that would be Orbit tripping over its
     own feet. Forgetting is the safe direction: the guard then simply says nothing."""
     if not names: return
-    for p in list(READ_STATE):
-        base = os.path.basename(p)
-        if base in names or p in names: READ_STATE.pop(p, None)
+    chat = _read_key("")[0]
+    for k in list(READ_STATE):
+        if k[0] != chat: continue      # another chat read it; the change is news to it
+        base = os.path.basename(k[1])
+        if base in names or k[1] in names: READ_STATE.pop(k, None)
+
+
+def _forget_all_reads():
+    """This chat's record, all of it: the python tool can have written anything."""
+    chat = _read_key("")[0]
+    for k in [k for k in READ_STATE if k[0] == chat]:
+        READ_STATE.pop(k, None)
 
 
 def t_read_file(path, offset=None, limit=None):
@@ -6456,7 +6511,7 @@ def t_edit_file(path, old_string, new_string, replace_all=False):
     snap = _save_checkpoint(p)
     with open(p, "w", encoding="utf-8", newline="") as f: f.write(out)
     _note_change(p, snap); _note_read(p)     # what it is now is what it last read
-    LAST_DIFF.clear(); LAST_DIFF.update({"path": p, **d})
+    _set_last_diff(p, d)
     try:
         if p.startswith(os.path.abspath(WORKSPACE)): record_file(os.path.relpath(p, WORKSPACE), "edit_file")
     except Exception: pass
@@ -6475,6 +6530,15 @@ def preview_edit(fn, args):
                                         str(args.get("new_string") or ""),
                                         bool(args.get("replace_all")))
             if out is not None: return {"path": p, **file_diff(p, out)}
+        if fn == "multi_edit" and os.path.exists(p):
+            edits = args.get("edits")
+            if isinstance(edits, str): edits = json.loads(edits)
+            cur = open(p, encoding="utf-8", errors="replace").read()
+            for e in edits or []:
+                cur, _how, err = apply_edit(cur, str(e.get("old_string") or ""),
+                                            str(e.get("new_string") or ""), bool(e.get("replace_all")))
+                if err or cur is None: return None      # it will fail; the card shows no diff
+            return {"path": p, **file_diff(p, cur)}
     except Exception:
         pass
     return None
@@ -7428,7 +7492,8 @@ def preview_undo(changes):
             continue
         snap = c.get("snap")
         if not snap or not os.path.exists(snap):
-            gone.append({"path": p, "why": "no snapshot — it lives outside the workspace"})
+            gone.append({"path": p, "why": ("its earlier version is no longer kept" if snap else
+                                            "no snapshot — it lives outside the workspace")})
             continue
         if not os.path.exists(p):
             safe.append({"path": p, "what": "restore (it is gone now)"})
@@ -7479,12 +7544,18 @@ def undo_result(changes, force=False):
                 with open(c["snap"], "rb") as f, open(p, "wb") as out: out.write(f.read())
                 done.append(f"restored {p}"); restored.append(p)
             else:
-                done.append(f"couldn't undo {p}: no snapshot (it lives outside the workspace and project folder)")
+                why = ("its earlier version is no longer kept" if c.get("snap") else
+                       "no snapshot (it lives outside the workspace and project folder)")
+                done.append(f"couldn't undo {p}: {why}")
                 refused.append(p)
         except Exception as e:
             done.append(f"couldn't undo {p}: {type(e).__name__}: {e}")
             refused.append(p)
-    return {"undone": bool(restored), "lines": done, "restored": restored, "refused": refused}
+    # Undone means every file, not any file. Reporting success when one was restored and
+    # another could not be marked the whole answer undone, and a file that was never put
+    # back could no longer be undone at all.
+    return {"undone": bool(restored) and not refused, "lines": done, "restored": restored,
+            "refused": refused}
 
 
 def undo_changes(changes, force=False):
@@ -7613,7 +7684,7 @@ def t_multi_edit(path, edits):
     snap = _save_checkpoint(p)
     with open(p, "w", encoding="utf-8", newline="") as f: f.write(cur)
     _note_change(p, snap); _note_read(p)
-    LAST_DIFF.clear(); LAST_DIFF.update({"path": p, **d})
+    _set_last_diff(p, d)
     return f"Applied {len(edits)} edits to {p} (+{d['added']} −{d['removed']} lines)" + _diagnose(p)
 
 BUILTIN.update({"ask_user": t_ask_user, "glob": t_glob, "multi_edit": t_multi_edit})
