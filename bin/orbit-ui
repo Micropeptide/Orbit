@@ -130,6 +130,7 @@ class State:
         self.queue = []
         self.queue_paused = False  # Stop pauses what is queued
         self.handing = None        # a queued message on its way into the chat (see _drain)
+        self.goal = None           # what this chat is working toward, across answers
     def reset(self):
         self.sid   = new_sid()
         self.msgs  = [{"role": "system", "content": q.system_prompt_for(self.agent, self.project)}]
@@ -149,6 +150,7 @@ class State:
         self.queue = []
         self.queue_paused = False
         self.handing = None
+        self.goal = None
         self.refresh_tools()       # a new chat id means its own settings, not the last chat's
     def refresh_tools(self):
         specs, self.tool_errors = q.active_tools(self.project)
@@ -247,6 +249,7 @@ def get_state(sid=None, create=True):
                     st.title_auto = raw.get("title_auto")
                     st.model = raw.get("model") or None
                     st.queue = _disk_queue(raw)
+                    st.goal = raw.get("goal") if isinstance(raw.get("goal"), dict) else None
                     st.queue_paused = bool(raw.get("queue_paused"))
             except Exception:
                 pass
@@ -420,7 +423,7 @@ def jdump(o): return json.dumps(o, default=str)
 # the file belongs to someone else and is carried over untouched.
 _SAVE_OWNS = {"schema", "title", "messages", "saved", "model", "sys_override", "project",
               "running_since", "plan", "plan_mode", "title_auto", "host", "queue", "queue_paused",
-              "handing"}
+              "handing", "goal"}
 
 def save_session(st=None):
     """No-op for temporary chats — they must leave no trace."""
@@ -464,6 +467,7 @@ def save_session(st=None):
     # taken off the queue but not yet in the chat: written down, so a restart in between
     # puts it back rather than losing it
     if getattr(st, "handing", None): extra["handing"] = st.handing
+    if getattr(st, "goal", None): extra["goal"] = st.goal
     if getattr(st, "answered_at", None): extra["answered_at"] = st.answered_at   # for "unread"
     if getattr(st, "clear_pickups", False):          # an answer finished: the count starts again
         extra.pop("restart_pickups", None); st.clear_pickups = False
@@ -693,7 +697,10 @@ class H(http.server.BaseHTTPRequestHandler):
             # chats answering now, and those waiting on you (an approval or a question)
             waiting = [sid_ for sid_, st_ in list(STATES.items())
                        if st_.lock.locked() and (st_.live.get("approval") or st_.live.get("question"))]
-            return self._send(200, jdump({"running": running_sids(), "waiting": waiting,
+            # and since when, so each list can count the time as it runs
+            since = {sid_: round(float(st_.busy_since or 0), 1) for sid_, st_ in list(STATES.items())
+                     if st_.lock.locked() and st_.busy_since}
+            return self._send(200, jdump({"running": running_sids(), "waiting": waiting, "since": since,
                                           "max": (_max_parallel() if _max_parallel() < 10**6 else None)}))
         if p == "/api/home":
             return self._send(200, jdump(home_overview()))
@@ -727,18 +734,18 @@ class H(http.server.BaseHTTPRequestHandler):
             # SSH has no local folder to read at all, so it says so rather than reporting
             # on whatever local path happens to share the name.
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
-            sid_ = (qs.get("sid") or [""])[0]
-            st_ = STATES.get(sid_) if sid_ else None
-            prefs = q.CE.chat_prefs(sid_) if sid_ else {}
-            mk = q.CE.marker_of(st_.msgs) if st_ is not None else {}
-            host = (mk or {}).get("host") or prefs.get("host") or ""
+            cwd, host = _git_folder((qs.get("sid") or [""])[0])
             if host:
                 return self._send(200, jdump({"repo": False, "host": host,
                                               "why": "it works on " + host}))
-            cwd = (mk or {}).get("cwd") or prefs.get("cwd")
-            if not cwd and st_ is not None and st_.project:
-                cwd = q.project_folder(st_.project)
-            return self._send(200, jdump(q.git_state(cwd or q.WORKSPACE)))
+            return self._send(200, jdump(q.git_state(cwd)))
+        if p.split("?")[0] == "/api/git/diff":
+            # one changed file of the chat's folder, as a diff (the dock's file list)
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            cwd, host = _git_folder((qs.get("sid") or [""])[0])
+            if host: return self._send(409, jdump({"error": "it works on " + host}))
+            got = q.git_file_diff(cwd, (qs.get("path") or [""])[0])
+            return self._send(400 if got.get("error") else 200, jdump(got))
         if p.split("?")[0] == "/api/claude/tools":
             # what Claude Code says it has, so easy mode can offer them as a choice
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
@@ -1153,6 +1160,7 @@ class H(http.server.BaseHTTPRequestHandler):
                         stt.model = raw.get("model") if isinstance(raw, dict) else None
                         if isinstance(raw, dict):
                             stt.queue = _disk_queue(raw)
+                            stt.goal = raw.get("goal") if isinstance(raw.get("goal"), dict) else None
                             stt.queue_paused = bool(raw.get("queue_paused"))
                     except Exception: stt.project, stt.model = None, None
                 globals()["S"] = stt               # the chat the browser is looking at
@@ -1168,6 +1176,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 return self._send(200, jdump({"ok": True, "sid": sid, "title": title,
                                               "plan_mode": bool(getattr(stt, "plan_mode", False)),
                                               "agent": getattr(stt, "agent", None) or "",
+                                              "goal": getattr(stt, "goal", None),
                                               "messages": render(shown), "n": len(msgs),
                                               "context": q.context_state(msgs, sid),
                                               "running": running, "live": live,
@@ -1974,9 +1983,23 @@ class H(http.server.BaseHTTPRequestHandler):
             r = q.undo_result(m["changes"], force=bool(d.get("force")))
             if r["undone"]:
                 m["changes_undone"] = True
+                if r.get("redo"): m["redo"] = r["redo"]     # one click puts it all back
                 save_session(st)
             return self._send(200, jdump({"ok": True, "undone": r["undone"], "done": r["lines"],
-                                          "restored": r["restored"], "refused": r["refused"]}))
+                                          "restored": r["restored"], "refused": r["refused"],
+                                          "can_redo": bool(r.get("redo"))}))
+        if p == "/api/redo_changes":             # put back what an undo took away
+            st = get_state(d.get("sid")) if d.get("sid") else S
+            if st.lock.locked(): return self._send(409, jdump({"error": "that chat is still answering"}))
+            want = d.get("t")
+            m = next((x for x in reversed(st.msgs) if x.get("role") == "assistant" and x.get("redo")
+                      and (want is None or abs(float(x.get("t") or 0) - float(want)) < 0.01)), None)
+            if m is None: return self._send(404, jdump({"error": "nothing to redo there"}))
+            r = q.redo_result(m["redo"], force=bool(d.get("force")))
+            if r["redone"]:
+                m["changes_undone"] = False; m.pop("redo", None)
+                save_session(st)
+            return self._send(200, jdump({"ok": True, **r}))
         if p == "/api/approve":
             rec = PENDING.get(d.get("id"))
             if not rec: return self._send(404, jdump({"error": "no such request"}))
@@ -2414,6 +2437,9 @@ class H(http.server.BaseHTTPRequestHandler):
             st = S if want == S.sid else STATES.get(want)
             if st is None: return self._send(404, jdump({"error": "that chat is not answering"}))
             st.cancel.set()
+            if st.goal and st.goal.get("status") == "active":      # Stop pauses a goal, never ends it
+                q.goal_settle(st.goal, "paused", "you stopped it — resume to carry on")
+                save_session(st)
             return self._send(200, jdump({"ok": True, "sid": st.sid}))
         if p == "/api/running":
             return self._send(200, jdump({"running": running_sids(),
@@ -2426,6 +2452,8 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/prompts/delete":
             pr = q.prompts_load(); pr.pop(d.get("name",""), None); q.prompts_save(pr)
             return self._send(200, jdump({"ok": True, "prompts": pr}))
+        if p == "/api/goal":
+            return self._send(*_goal_route(d))
         if p == "/api/continue":
             return self._send(200, jdump({"ok": True,
                 "message": "Continue from where you stopped. Check `plan` for outstanding "
@@ -2530,6 +2558,11 @@ class H(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(f"data: {jdump({'k': k, 'p': pl})}\n\n".encode())
             except Exception: pass
         text, atts, effort = d.get("message", ""), d.get("attachments") or [], d.get("effort")
+        if d.get("goal") and str(text).strip() and not d.get("at"):
+            # this message is the objective: the chat keeps at it until it is done
+            st.goal = q.goal_new(text, d.get("token_budget"), d.get("max_turns"))
+            text = q.goal_intro(str(text).strip())
+            if not st.temp: save_session(st)
         if d.get("at"):
             # sent later: it waits in the chat's queue until its time
             try: item = _queue_add(st, text, atts, effort, at=float(d["at"]), repeat=d.get("repeat"))
@@ -2582,6 +2615,20 @@ class H(http.server.BaseHTTPRequestHandler):
                 return
             if kind == "end": return
 
+def _git_folder(sid_):
+    """(folder, host) a chat works in. The folder is the one the chat was given even
+    before it has answered once -- that lives in the chat's own prefs, not only in a
+    session marker -- and a chat that works over SSH has no local folder to read at all,
+    so it says so rather than reporting on whatever local path happens to share the name."""
+    st_ = STATES.get(sid_) if sid_ else None
+    prefs = q.CE.chat_prefs(sid_) if sid_ else {}
+    mk = q.CE.marker_of(st_.msgs) if st_ is not None else {}
+    host = (mk or {}).get("host") or prefs.get("host") or ""
+    cwd = (mk or {}).get("cwd") or prefs.get("cwd")
+    if not cwd and st_ is not None and st_.project:
+        cwd = q.project_folder(st_.project)
+    return cwd or q.WORKSPACE, host
+
 INBOX_LOCK = threading.Lock()
 PICKUP_WAIT = {}        # chat id -> until when its queue waits for a restart pick-up
 
@@ -2607,6 +2654,94 @@ def _release_chat(st):
             st.queue.insert(0, {"id": uuid.uuid4().hex[:10], "text": n.get("text", ""),
                                 "attachments": [], "effort": None, "t": n.get("t") or time.time()})
         _queue_saved(st)
+
+
+GOAL_LOCK = threading.Lock()
+
+def _goal_item(st):
+    return {"id": uuid.uuid4().hex[:10], "text": q.build_continuation(st.goal), "attachments": [],
+            "effort": None, "t": time.time(), "goal": True}
+
+def _goal_announce(st):
+    g = st.goal or {}
+    if g.get("status") in ("complete", "blocked", "budget"):
+        title = {"complete": "Goal done", "blocked": "Goal needs you", "budget": "Goal hit its budget"}[g["status"]]
+        name = (st.title or "a chat")[:60]
+        try: q.notify(title, f"{name}: {g.get('reason', '')}"[:200])
+        except Exception: pass
+        try: q.push_notify(title, f"{name}: {g.get('reason', '')}", sid=st.sid)
+        except Exception: pass
+
+def _goal_step(st, cancelled, failed, usage):
+    """After an answer in a chat with an active goal: check the work, then carry on
+    (a continuation at the head of its queue, so Stop, pause, the parallel limit and a
+    restart all apply as to anything else), or stop and say why."""
+    with GOAL_LOCK:
+        if not st.goal or st.goal.get("status") != "active" or getattr(st, "deleted", False): return
+        # your own queued messages go first; the goal is checked again after them
+        if not cancelled and not failed and _due_items(st): return
+        if st.lock.locked(): return            # something already started; its end steps again
+    verdict, g = q.goal_after_answer(st.goal, messages=list(st.msgs), usage=usage,
+                                     cancelled=cancelled, failed=failed)
+    with GOAL_LOCK:
+        st.goal = g
+        if verdict == "continue":
+            if st.lock.locked() or _due_items(st):
+                g["turns_used"] = max(0, g.get("turns_used", 1) - 1)   # not used after all
+                save_session(st); return
+            st.queue.insert(0, _goal_item(st)); st.queue_paused = False
+            _queue_saved(st)
+        else:
+            save_session(st)
+    if verdict == "continue": _drain()
+    else: _goal_announce(st)
+
+def _goal_route(d):
+    """/api/goal {sid, op: get|set|edit|pause|resume|clear, objective, token_budget, max_turns}"""
+    sid = d.get("sid")
+    if not sid: return 400, jdump({"error": "which chat?"})
+    st = get_state(sid)
+    op = d.get("op") or "get"
+    g = st.goal
+    if op == "get": return 200, jdump({"goal": g})
+    if op in ("set", "edit"):
+        obj = str(d.get("objective") or (g or {}).get("objective") or "").strip()
+        if not obj: return 400, jdump({"error": "what is the goal?"})
+        if op == "set" or not g:
+            g = q.goal_new(obj, d.get("token_budget"), d.get("max_turns"))
+            g["status"] = "paused"; g["reason"] = "set — resume to start working toward it"
+        else:
+            g["objective"] = obj[:4000]
+            if "token_budget" in d: g["token_budget"] = max(0, int(d.get("token_budget") or 0))
+            if "max_turns" in d: g["max_turns"] = max(1, int(d.get("max_turns") or q.GOAL_MAX_TURNS))
+            g["updated"] = time.time()
+        st.goal = g
+    elif op == "pause":
+        if not g: return 404, jdump({"error": "this chat has no goal"})
+        q.goal_settle(g, "paused", "paused by you")
+    elif op == "resume":
+        if not g: return 404, jdump({"error": "this chat has no goal"})
+        if "token_budget" in d: g["token_budget"] = max(0, int(d.get("token_budget") or 0))
+        if g.get("token_budget") and g.get("tokens_used", 0) >= g["token_budget"]:
+            return 409, jdump({"error": "it has used its token budget — raise the budget to resume",
+                               "goal": g})
+        g.update(status="active", reason="", blocked_streak=0, audit_fail_streak=0,
+                 updated=time.time())
+        if int(g.get("turns_used", 0)) >= int(g.get("max_turns", q.GOAL_MAX_TURNS)):
+            g["turns_used"] = 0                 # resuming gives it a fresh allowance
+    elif op == "clear":
+        st.goal = None
+    else:
+        return 400, jdump({"error": f"unknown op {op}"})
+    if not st.temp: save_session(st)
+    started = False
+    if op == "resume" and not st.lock.locked() and not _due_items(st) and not st.temp:
+        with GOAL_LOCK:
+            g["turns_used"] = int(g.get("turns_used", 0)) + 1
+            st.queue.insert(0, _goal_item(st)); st.queue_paused = False
+            _queue_saved(st)
+        _drain(); started = True
+    return 200, jdump({"goal": st.goal, "started": started})
 
 
 def start_turn(st, text, atts=None, effort=None, Q=None):
@@ -2683,6 +2818,7 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                     # Mac notification on top of it was the third for one prompt
                     if getattr(Q, "deaf", False) or isinstance(Q, _Sink):
                         q.notify("Orbit needs your approval", f"{fn}: {reason}")
+                        q.push_notify("Orbit needs your approval", f"{fn}: {reason}", sid=st.sid)
                     ok = ev.wait(timeout=900)
                     rec = PENDING.pop(rid, {})
                     _pending_done(st, "approval", rid, {"allow": bool(ok and rec.get("allow")),
@@ -2870,6 +3006,9 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
             # chats waiting for a free slot get one.
             if (st.cancel.is_set() or failed[0]) and _due_items(st):
                 st.queue_paused = True; _queue_saved(st)
+            if st.goal and st.goal.get("status") == "active":
+                threading.Thread(target=_goal_step, args=(st, st.cancel.is_set(), failed[0],
+                                 (q.LAST_TURN.get(st.sid) or {}).get("usage")), daemon=True).start()
             threading.Thread(target=_drain, daemon=True).start()
     threading.Thread(target=work, daemon=True).start()
     return Q
@@ -3569,6 +3708,7 @@ def render(msgs):
                         # files this answer changed, so the page can offer to undo them
                         "changes": [c.get("path") for c in m.get("changes") or []],
                         "changes_undone": bool(m.get("changes_undone")),
+                        "can_redo": bool(m.get("redo")),
                         "tool_runs": []})
             for tc in calls: owner[tc.get("id")] = out[-1]
     return out
@@ -3738,6 +3878,10 @@ def run_job(job, manual=False):
                     except Exception: pass
                 PICKUP_WAIT.pop(st.sid, None)
                 _release_chat(st)
+                if st.goal and st.goal.get("status") == "active":
+                    threading.Thread(target=_goal_step, args=(st, st.cancel.is_set(),
+                                     (q.LAST_TURN.get(st.sid) or {}).get("failed"),
+                                     (q.LAST_TURN.get(st.sid) or {}).get("usage")), daemon=True).start()
                 threading.Thread(target=_drain, daemon=True).start()   # messages queued meanwhile
         else:
             pid = job.get("project") or None

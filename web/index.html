@@ -655,6 +655,8 @@ mark.findhit.on{background:var(--acc);color:#fff}
 .diff pre span{display:block;padding-right:10px;white-space:pre}
 .diff pre .a{background:color-mix(in srgb,var(--ok) 13%,transparent)}
 .diff pre .d{background:color-mix(in srgb,var(--err) 13%,transparent)}
+.diff pre .a mark.wd{background:color-mix(in srgb,var(--ok) 34%,transparent);color:inherit;border-radius:2px}
+.diff pre .d mark.wd{background:color-mix(in srgb,var(--err) 34%,transparent);color:inherit;border-radius:2px}
 .diff pre .h{color:var(--dim);background:var(--panel);padding-left:10px}
 .diff pre i{font-style:normal;user-select:none;-webkit-user-select:none}
 .diff pre .ln{display:inline-block;min-width:3.2em;padding:0 8px 0 6px;text-align:right;color:var(--dim)}
@@ -987,6 +989,27 @@ pre.taskout{background:var(--panel);border-radius:8px;padding:9px 11px;font-fami
 #log:not(.verbose) .autoappr.vonly{display:none}
 body.statuson #wrap .msg.a:last-child .bub>.working:only-child{display:none}
 .approve.ccask:focus{outline:2px solid color-mix(in srgb,var(--acc) 60%,transparent);outline-offset:1px}
+.sfindwrap{position:relative;margin-left:8px}
+#sfind{width:170px;padding:4px 9px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);font:inherit;font-size:var(--fs-sm)}
+.sfindres{position:absolute;top:calc(100% + 4px);right:0;min-width:260px;z-index:30;background:var(--panel);border-radius:9px;
+ box-shadow:0 6px 24px rgba(0,0,0,.18)}
+.sfindres:empty{display:none}
+.sfindres>div{padding:6px 11px;cursor:pointer;display:flex;justify-content:space-between;gap:12px}
+.sfindres>div small{color:var(--dim)}
+.sfindres>div.sel,.sfindres>div:hover{background:color-mix(in srgb,var(--acc) 14%,transparent)}
+.sflash{outline:2px solid var(--acc);outline-offset:3px;border-radius:4px;transition:outline-color 1.4s}
+/* a goal: what this chat keeps working toward, and where it stands */
+.goalbar{font-size:var(--fs-sm);border:1px solid var(--line);border-left:3px solid var(--acc);border-radius:9px;
+ background:var(--card);padding:6px 11px;margin-bottom:7px;display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+.goalbar .gobj{flex:1 1 200px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.goalbar .gst{font-weight:600;white-space:nowrap}
+.goalbar .gmeta{color:var(--dim);font-size:var(--fs-2xs);white-space:nowrap;font-variant-numeric:tabular-nums}
+.goalbar .greason{flex-basis:100%;color:var(--mut);font-size:var(--fs-2xs)}
+.goalbar button{font-size:var(--fs-2xs);padding:2px 8px}
+.goalbar.g-active{border-left-color:var(--acc)}.goalbar.g-complete{border-left-color:var(--ok)}
+.goalbar.g-blocked,.goalbar.g-budget{border-left-color:var(--err)}.goalbar.g-paused{border-left-color:var(--dim)}
+.sitem .goalmark{color:var(--acc);font-size:var(--fs-2xs);flex:0 0 auto}
+.sitem .ago.elapsed{color:var(--acc)}
 .plandock{font-size:var(--fs-sm);border:1px solid var(--line);border-radius:9px;background:var(--card);
  padding:5px 11px;margin-bottom:7px}
 .plandock .pdh{cursor:pointer;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -1086,6 +1109,7 @@ table.stbl{border-collapse:collapse;width:100%;font-size:var(--fs-cap);margin:2p
   <div id=trash class=fileview style="display:none;overflow-y:auto"></div>
   <div class=composer><div class=cwrap>
     <div class=statusline id=statusline style="display:none"></div>
+    <div class=goalbar id=goalbar style="display:none"></div>
     <div class=plandock id=plandock style="display:none"></div>
     <div class=queuebox id=queuebox style="display:none"></div>
     <div class=chips id=chips></div>
@@ -1155,6 +1179,7 @@ const CMDS=[
  {c:'/context',d:'what is filling the context window right now'},
  {c:'/copy',d:'copy the last answer (/copy 2 for the one before)'},
  {c:'/diff',d:'every file this answer changed, as a diff'},
+ {c:'/goal',d:'keep working until it is done — /goal <what done looks like>; alone, shows the goal'},
  {c:'/verbose',d:'show every tool call in full, or fold them again (Ctrl+O)'},
  {c:'/todos',d:'show or hide the todo list (Ctrl+T)'},
  {c:'/usage',d:'cost, tokens and time — this chat and lately'},
@@ -2234,6 +2259,14 @@ function dayLabel(ts){
  if(diff<7)return 'Previous 7 days'; if(diff<30)return 'Previous 30 days';
  return d.toLocaleDateString(undefined,{month:'long',year:'numeric'})}
 // "5m", "3h", "2d": how long ago a chat was last active
+let RUN_SINCE={};
+function fmtElapsed(sec){sec=Math.max(0,Math.floor(sec));
+ if(sec<60)return sec+'s';const m=Math.floor(sec/60),s_=sec%60;
+ if(m<60)return m+'m '+String(s_).padStart(2,'0')+'s';return Math.floor(m/60)+'h '+(m%60)+'m'}
+// one tick for every counter on screen, without redrawing the list
+setInterval(()=>{if(document.hidden)return;
+ document.querySelectorAll('.sitem .ago.elapsed[data-since]').forEach(x=>{
+  x.textContent=fmtElapsed(Date.now()/1000-(+x.dataset.since))})},1000);
 function agoShort(ts){
  const s=Math.max(0,Date.now()/1000-(ts||0));
  if(s<60)return 'now';if(s<3600)return Math.floor(s/60)+'m';if(s<86400)return Math.floor(s/3600)+'h';
@@ -2259,9 +2292,13 @@ function chatRow(s,box){
  const src=extSource(s);
  const d=el(`<div class="sitem${s.id===sid?' on':''}${st.cls?' st-'+st.cls:''}${s.external?' external':''}" title="${esc(s.title||'')}">
    <span class=stc title="${esc(st.tip)}">${st.icon}</span><span class=t></span>${
+   s.goal&&s.goal!=='complete'?`<span class=goalmark title="goal: ${esc(s.goal)}">◎</span>`:''}${
    s.pinned?'<span class=pinmark title="pinned">★</span>':''}${
    s.host?`<span class=hostmark title="runs on ${esc(s.host)} over SSH">${esc(s.host)}</span>`:''}<span class=ago title="${esc(new Date((s.mtime||0)*1000).toLocaleString())} · ${s.n||0} messages">${agoShort(s.mtime)}</span><button class=more title="Actions">⋯</button></div>`);
  d.querySelector('.t').textContent=s.title||'(untitled)';
+ // answering: how long it has been at it, counting up
+ if(RUNNING.has(s.id)&&RUN_SINCE[s.id]){const ag=d.querySelector('.ago');ag.classList.add('elapsed');
+  ag.dataset.since=RUN_SINCE[s.id];ag.textContent=fmtElapsed(Date.now()/1000-RUN_SINCE[s.id]);ag.title='answering'}
  d.dataset.sid=s.id; d.dataset.pinned=s.pinned?'1':'';
  d.onclick=ev=>{
   if(ev.target.closest('.more')){ev.stopPropagation();const r=ev.target.getBoundingClientRect();
@@ -2600,6 +2637,7 @@ async function openSession(id){
  WATCH_SID=d.sid;WATCH_N=(typeof d.n==='number')?d.n:null;   // what this page now shows
  if(UNSEEN[d.sid]){delete UNSEEN[d.sid];syncUnseen()}
  markSeenOnMac(d.sid);
+ GOALS[d.sid]=d.goal||null;drawGoal();
  loadDraft(d.sid);
  // the plan tool's last output, if the server kept it with the message
  // -- only since your last message: each new request starts a fresh plan
@@ -2774,6 +2812,9 @@ async function runCmd(cmd,rest){
  if(cmd==='/context'){showContext();return true}
  if(cmd==='/copy'){copyAnswer(parseInt(rest,10)||1);return true}
  if(cmd==='/diff'){showTurnDiff();return true}
+ if(cmd==='/goal'){if(!rest){editGoal();return true}
+  if(tempMode){toast('a temporary chat cannot keep a goal');return true}
+  q.value=rest;setTimeout(()=>go({goal:true}),0);return true}
  if(cmd==='/verbose'){setVerbose(!VERBOSE);return true}
  if(cmd==='/todos'){togglePlanDock();return true}
  if(cmd==='/usage'){showStats(7);return true}
@@ -2853,7 +2894,7 @@ async function newChat(){
   catch(e){toast('could not start a new chat — '+(e.message||e)+'. Orbit may be restarting; try again in a moment.');return}
   stopLive(); switchAtts(sid,d.sid);closeAt();closeMenu();
   sid=d.sid;if(q.value===typed)loadDraft(d.sid);   // typed while it opened? keep that
-  PLAN_MODE=false;drawPlanMode();wrap.innerHTML='';$('#title').textContent='New chat';
+  PLAN_MODE=false;drawPlanMode();wrap.innerHTML='';$('#title').textContent='New chat';drawGoal();
   tempMode=false;$('#tempbtn').style.borderColor='';$('#tempbtn').style.color='';
   $('#burnbtn').style.display='none';
   chatChanged(null);                     // a new chat keeps nothing from the last one
@@ -2904,7 +2945,9 @@ function closeAt(){if(atMenu){atMenu.remove();atMenu=null}}
 function showAt(){
  closeAt();
  // an @ that starts a word: "bob@example" is an address, not a file
- const v=q.value, m=v.match(/(^|\s)@([^\s@]*)$/); if(!m){atTerm=null;return}
+ // the word being typed where the caret is -- not only at the end of the box
+ const cur=q.selectionStart??q.value.length, v=q.value.slice(0,cur), m=v.match(/(^|\s)@([^\s@]*)$/);
+ if(!m){atTerm=null;return}
  const term=m[2].toLowerCase();
  if(term!==atTerm){atSel=0;atTerm=term}         // a new list starts at its top
  const hits=FILECACHE.filter(f=>!term||f.name.toLowerCase().includes(term)).slice(0,8);
@@ -2916,7 +2959,8 @@ function showAt(){
   const d=el(`<div class="${i===atSel?'sel':''}"><code>@${esc(f.name)}</code><small>${esc(f.area||'')}</small></div>`);
   // the box as it is now, in the chat it was opened for
   d.onclick=()=>{closeAt();if(sid!==forSid)return;
-   q.value=q.value.replace(/(^|\s)@[^\s@]*$/,(mm,pre)=>pre+f.rel+' ');q.focus();q.dispatchEvent(new Event('input'))};
+   const at=Math.min(cur,q.value.length),head=q.value.slice(0,at).replace(/(^|\s)@[^\s@]*$/,(mm,pre)=>pre+f.rel+' ');
+   q.value=head+q.value.slice(at);q.selectionStart=q.selectionEnd=head.length;q.focus();q.dispatchEvent(new Event('input'))};
   atMenu.appendChild(d)});
  $('.row').appendChild(atMenu)}
 q.addEventListener('input',()=>{fitQ();
@@ -2955,7 +2999,11 @@ q.addEventListener('keydown',e=>{
   if(e.key==='ArrowDown'){e.preventDefault();msel=(msel+1)%items.length;showMenu();return}
   if(e.key==='ArrowUp'){e.preventDefault();msel=(msel-1+items.length)%items.length;showMenu();return}
   if(e.key==='Escape'){closeMenu();return}
-  if(e.key==='Tab'){e.preventDefault();items[msel].click();return}}
+  if(e.key==='Tab'){e.preventDefault();items[msel].click();return}
+  // Enter on a half-typed command takes the highlighted one, as Claude Code's menu does;
+  // a command typed out in full is simply run
+  if(e.key==='Enter'&&!e.shiftKey&&items[msel]){const typed=q.value.trim(),c=(items[msel].querySelector('code')||{}).textContent;
+   if(c&&typed!==c){e.preventDefault();items[msel].click();return}}}
  if((e.key==='ArrowUp'||e.key==='ArrowDown')&&!e.shiftKey&&!e.altKey&&!e.metaKey&&!e.ctrlKey
     &&histWalk(e.key==='ArrowUp'?-1:1)){e.preventDefault();return}
  // on a phone's keyboard Enter is the only way to start a new line: the send button sends
@@ -3798,10 +3846,23 @@ function undoButton(a,t,n){
      ' file(s) changed since this answer wrote them.\n\nPut them back anyway, '+
      'overwriting what you did to them since?')){
     const f=await apiPost('/api/undo_changes',{sid,t,force:true},'undo');
-    if(f&&f.undone){b.remove();sysline('undone: '+(f.done||[]).join('; '))}
+    if(f&&f.undone){b.remove();sysline('undone: '+(f.done||[]).join('; '));if(f.can_redo)redoButton(a,t,n)}
     else if(f)sysline((f.done||[]).join('; '))}
    return}
-  b.remove();sysline('undone: '+(d.done||[]).join('; '))};
+  b.remove();sysline('undone: '+(d.done||[]).join('; '));if(d.can_redo)redoButton(a,t,n)};
+ acts.appendChild(b)}
+// After an undo: put the answer's files back as it left them, in one click
+function redoButton(a,t,n){
+ const acts=a.m.querySelector('.acts');if(!acts||acts.querySelector('.redo'))return;
+ const b=el(`<button class="redo undobtn">redo ${n} file change${n>1?'s':''}</button>`);
+ b.onclick=async()=>{
+  let d=await apiPost('/api/redo_changes',{sid,t},'redo');if(!d)return;
+  if(!d.redone&&(d.refused||[]).length&&confirm('Nothing was redone — '+d.refused.length+
+    ' file(s) changed since the undo.\n\nRedo anyway, overwriting those changes?'))
+   d=await apiPost('/api/redo_changes',{sid,t,force:true},'redo');
+  if(!d)return;
+  sysline((d.redone?'redone: ':'')+(d.lines||[]).join('; '));
+  if(d.redone){b.remove();undoButton(a,t,n)}};
  acts.appendChild(b)}
 // Notes sent while an answer is running. The server hands each one to the
 // model at its next step, and says when in the stream ('interjection').
@@ -3882,6 +3943,7 @@ function restoreComposer(forSid,raw,sending,pastes){
  atts=sending.concat(atts);drawChips();fitQ();saveDraft(sid)}
 // after an answer ends: the server may already have started the next queued message
 async function afterTurn(forSid){
+ if(GOALS[forSid]&&GOALS[forSid].status==='active')await new Promise(r=>setTimeout(r,1500)); // its check runs first
  const qd=await loadQueue(forSid);
  if(qd&&qd.running&&forSid===sid&&!SENDING.has(forSid)){
   RUNNING.add(forSid);syncBusy();renderSessions();
@@ -4124,7 +4186,7 @@ async function go(opts){
  const thoughtFor=()=>'thought for '+fmtSecs((performance.now()-tThink)/1000);
  try{
   const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
-   body:JSON.stringify({message:t,attachments:sending,effort:opts.effort,sid:sendSid})});
+   body:JSON.stringify({message:t,attachments:sending,effort:opts.effort,sid:sendSid,goal:!!opts.goal})});
   // a refusal or a crash on the Mac comes back as JSON, not a stream: reading it as one
   // found no events, showed "(no answer)" and announced "Answer ready"
   if(!r.ok||!r.body){let d={};try{d=await r.json()}catch(_){}
@@ -4318,6 +4380,8 @@ async function go(opts){
      const d=el('<details class=think style="margin-top:6px"></details>');
      d.appendChild(el(`<summary>Review of ${m.p.files} changed file${m.p.files===1?'':'s'} · ${esc(m.p.model||'')}</summary>`));
      const b=el('<div class=body></div>');b.textContent=m.p.text;d.appendChild(b);
+     if((m.p.not_reviewed||[]).length){const n=el('<div class=note style="margin-top:6px"></div>');
+      n.textContent='Not reviewed: '+m.p.not_reviewed.join('; ');d.appendChild(n)}
      a.tools.appendChild(d);bottom()}
     else if(m.k==='weak_claims'){
      const w=el('<div class=weak></div>');
@@ -4431,7 +4495,8 @@ async function go(opts){
  if(!lost&&sid===sendSid&&!document.hidden&&document.hasFocus())markSeenOnMac(sendSid);   // you watched it land
  $('#dot').classList.remove('busy');loadSessions();refreshStatus();q.focus();
  if(lost&&sid===sendSid){WATCH_N=null;openSession(sendSid)}   // rejoins from the live buffer
- else afterTurn(sendSid)}
+ else afterTurn(sendSid);
+ if(opts.goal||GOALS[sendSid])loadGoal(sendSid)}
 $('#stopgen').onclick=async()=>{
  stoppedSid=sid;
  await fetch('/api/cancel',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -4497,6 +4562,20 @@ async function renderClaudeMemory(body,toOrbit,cwd){
   if(!f)return toast('a file name, like lab-context.md');
   const x=await apiPost('/api/claude/memory',{op:'save',cwd:d.cwd,file:f,text:t},'saving');
   if(x){toast(x.new?'memory added (and listed in MEMORY.md)':'saved');renderClaudeMemory(body,toOrbit,d.cwd)}}}
+// Settings' searchable names: section headings and field labels, taken from the tabs'
+// own drawing code (this function's source), grouped by the tab that draws them.
+function settingsIndex(){
+ if(settingsIndex.cache)return settingsIndex.cache;
+ const src=String(openSettings), names={};
+ const tabs_=[...src.matchAll(/data-t=(\w+)>([^<]+)</g)];tabs_.forEach(m=>names[m[1]]=m[2].replace('&amp;','&').replace(' →',''));
+ const out=[],seen=new Set();
+ const parts=src.split(/if\(name==='(\w+)'\)/);
+ for(let i=1;i<parts.length;i+=2){const tab=parts[i],body=parts[i+1];if(!names[tab])continue;
+  out.push({tab,text:names[tab],label:'tab'});
+  for(const m of body.matchAll(/class=sec>([^<]{3,80})|<label[^>]*>([^<]{3,60})<\/label>/g)){
+   const text=(m[1]||m[2]).trim().replace(/&amp;/g,'&');const k=tab+'|'+text;
+   if(seen.has(k)||/\$\{/.test(text))continue;seen.add(k);out.push({tab,text,label:names[tab]})}}
+ return settingsIndex.cache=out}
 async function openSettings(tab){
  MEM_ORBIT=false;
  tab=tab||(MODELS.harness_mode?'claude':(MODELS.codex_mode?'codex':'general'));   // Claude Code mode: its settings first
@@ -4516,12 +4595,30 @@ async function openSettings(tab){
    <button data-t=mcp>MCP</button><button data-t=library>Library →</button>
    <button data-t=claude>Claude Code</button><button data-t=codex>Codex</button>
    <button data-t=status>Status</button>
-  </div><button class=ghost style="margin-left:auto" id=closex>close</button></header>
+  </div><span class=sfindwrap><input type=search id=sfind placeholder="Search settings" autocomplete=off><div class=sfindres id=sfindres></div></span>
+  <button class=ghost style="margin-left:auto" id=closex>close</button></header>
   <div class=body id=sbody></div>
   <footer><button class=primary id=savebtn>Save</button>
    <button class=ghost id=restartbtn>Save &amp; restart server</button>
    <span class=note id=snote></span></footer></div></div>`;
  $('#closex').onclick=closeModal;
+ // Search: every section and field name, read from the tabs' own drawing code, so a
+ // new setting is findable the day it is added. A hit opens its tab and shows it.
+ {const inp=$('#sfind'),res=$('#sfindres'),idx=settingsIndex();let sel=0,hits=[];
+  const pick=h=>{res.innerHTML='';inp.value='';tabs(h.tab).then(()=>{
+   const want=h.text.toLowerCase();
+   const node=[...$('#sbody').querySelectorAll('.sec,label,b,.note')].find(n=>(n.textContent||'').toLowerCase().includes(want));
+   if(node){node.scrollIntoView({block:'center'});node.classList.add('sflash');setTimeout(()=>node.classList.remove('sflash'),1600)}})};
+  const draw=()=>{res.innerHTML='';hits.forEach((h,i)=>{const r=el(`<div class="${i===sel?'sel':''}"><b></b><small></small></div>`);
+   r.querySelector('b').textContent=h.text;r.querySelector('small').textContent=h.label;r.onmousedown=e=>{e.preventDefault();pick(h)};res.appendChild(r)})};
+  inp.oninput=()=>{const t=inp.value.trim().toLowerCase();sel=0;
+   hits=!t?[]:idx.filter(h=>h.text.toLowerCase().includes(t)||h.label.toLowerCase().includes(t)).slice(0,12);draw()};
+  inp.onkeydown=e=>{if(!hits.length)return;
+   if(e.key==='ArrowDown'){e.preventDefault();sel=(sel+1)%hits.length;draw()}
+   if(e.key==='ArrowUp'){e.preventDefault();sel=(sel-1+hits.length)%hits.length;draw()}
+   if(e.key==='Enter'){e.preventDefault();pick(hits[sel])}
+   if(e.key==='Escape'){e.stopPropagation();inp.value='';hits=[];draw()}};
+  inp.onblur=()=>setTimeout(()=>{res.innerHTML=''},150)}
  host.querySelector('.modal').onclick=e=>{if(e.target.classList.contains('modal'))closeModal()};
  const body=$('#sbody');
  const draft=JSON.parse(JSON.stringify(st));
@@ -4570,8 +4667,10 @@ async function openSettings(tab){
      A model on this Mac takes one request at a time, so asking it to review the turn it just
      finished means queueing behind that turn — pick a hosted model here and the review runs while
      the local one is busy. "the model answering" keeps today's behaviour.</div>
-    <label>Review what an answer changed</label><div class=sw><input type=checkbox id=g_review>
-      <span class=note>when a turn writes files, read the diff back and report what is wrong with it</span></div>
+    <label>Review what an answer changed</label><div class=sw><select id=g_review>
+      <option value="">off</option><option value="changes">report what is wrong</option>
+      <option value="fix">report, and have it fix what is real (up to 2 rounds)</option></select>
+      <span class=note>when a turn writes files, a second model reads the diff, with what was asked; lockfiles are skipped and anything it could not read is named</span></div>
     <label>Check the work before finishing</label><div class=sw><input type=checkbox id=g_verify>
       <span class=note>ask the side-work model whether the request was actually carried out, and carry
        on if it was not (at most twice)</span></div>
@@ -4617,7 +4716,7 @@ async function openSettings(tab){
    $('#g_eff').value=draft.reasoning_effort||'medium';$('#g_rounds').value=draft.max_tool_rounds??0;
    $('#g_mins').value=draft.max_turn_minutes??0;$('#g_notice').value=draft.long_run_notice_min??30;
    $('#g_ac').value=draft.autocompact_pct??80;
-   $('#g_review').checked=draft.auto_review==='changes';
+   $('#g_review').value=['changes','fix'].includes(draft.auto_review)?draft.auto_review:'';
    $('#g_verify').checked=!!draft.verify_turns;
    {const sel=$('#g_reviewer'),cur=draft.review_model||'';
     // a reviewer has to be somewhere else: a local one is the problem, not the fix
@@ -5474,7 +5573,7 @@ async function openSettings(tab){
    // its own id: g_review is the auto-review checkbox, and sharing it meant $() found
    // the select, so that switch could never be ticked and every save cleared it
    draft.review_model=$('#g_reviewer')?$('#g_reviewer').value:(draft.review_model||'');
-   draft.auto_review=($('#g_review')&&$('#g_review').checked)?'changes':'';
+   draft.auto_review=$('#g_review')?$('#g_review').value:(draft.auto_review||'');
    draft.verify_turns=($('#g_verify')&&$('#g_verify').checked)?'tools':'';draft.trash_days=Number($('#g_td').value)||30;
    draft.system_prompt=$('#g_sys').value;draft.use_instructions=$('#g_useins').checked;
    draft.use_memory=$('#g_usemem').checked;
@@ -5536,7 +5635,9 @@ async function refreshRunning(){
  if(document.hidden&&!RUNNING.size)return;          // a hidden tab with nothing running has nothing to learn
  try{const r=await (await fetch('/api/running')).json();
   const now=new Set(r.running||[]), wait=new Set(r.waiting||[]);
-  let changed = now.size!==RUNNING.size || [...now].some(x=>!RUNNING.has(x))
+  const since=r.since||{}, sinceMoved=JSON.stringify(since)!==JSON.stringify(RUN_SINCE);
+  if(sinceMoved){RUN_SINCE=since;LIST_SIG=null}
+  let changed = sinceMoved || now.size!==RUNNING.size || [...now].some(x=>!RUNNING.has(x))
              || wait.size!==WAITING.size || [...wait].some(x=>!WAITING.has(x));
   RUNNING=now; WAITING=wait;
   syncBusy();                                // Send / Queue always says what the Mac is doing
@@ -7189,34 +7290,67 @@ function savedAssistant(m,merge){
  if(m.secs!=null||m.usage)answerStats(a,m.secs,m.usage);
 
  if((m.changes||[]).length&&!m.changes_undone&&m.t)undoButton(a,m.t,m.changes.length);
+ if((m.changes||[]).length&&m.changes_undone&&m.can_redo&&m.t)redoButton(a,m.t,m.changes.length);
  return a}
-function diffBlock(D,label){
+// The part of a changed line that actually changed: what is left between the prefix and
+// suffix the old and new line share. A one-character edit in a long line was otherwise
+// a whole red line and a whole green one to compare by eye.
+function wordSpan(a,b){
+ let i=0;while(i<a.length&&i<b.length&&a[i]===b[i])i++;
+ let j=0;while(j<a.length-i&&j<b.length-i&&a[a.length-1-j]===b[b.length-1-j])j++;
+ return [[i,a.length-j],[i,b.length-j]]}
+function diffBlock(D,label,opts){
+ opts=opts||{};
  const box=el('<div class=diff></div>');
  box.appendChild(el(`<div class=dh><b>${esc((D.path||'').split('/').pop())}</b>
    <span class=add>+${+D.added||0}</span><span class=del>−${+D.removed||0}</span>
    <span style="margin-left:auto;color:var(--dim)">${esc(label||(D.existed?'updated':'new file'))}</span></div>`));
+ const lines=String(D.diff||'').split('\n');
+ // a very large diff waits to be asked for: drawing thousands of rows froze the page
+ if(lines.length>500&&!opts.all){
+  const more=el(`<div class=sheetnote style="padding:8px 10px">A large change — ${lines.length.toLocaleString()} diff lines. <a style="cursor:pointer;color:var(--acc)">Show it</a></div>`);
+  more.querySelector('a').onclick=()=>box.replaceWith(diffBlock(D,label,{all:true}));
+  box.appendChild(more);return box}
  // each line with its number in the file, as Claude Code shows an edit: the new
  // number for added and unchanged lines, the old one for removed lines
- const pre=document.createElement('pre');
+ const rows=[];
  let oldN=0,newN=0,inHunk=false;
- String(D.diff||'').split('\n').forEach(l=>{
+ lines.forEach(l=>{
   // the file headers come before the first hunk; inside one, a removed "-- comment" or
   // an added "++i" is a real line and used to vanish from the diff
   if(!inHunk&&(l.startsWith('+++')||l.startsWith('---')))return;
   const hunk=l.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-  const sp=document.createElement('span');
-  if(hunk){inHunk=true;oldN=+hunk[1];newN=+hunk[2];sp.className='h';sp.textContent=l;pre.appendChild(sp);return}
+  if(hunk){inHunk=true;oldN=+hunk[1];newN=+hunk[2];rows.push({kind:'h',text:l});return}
   // a diff too long to show says so at its end
-  if(/^\.\.\. \d+ more diff lines not shown/.test(l)){sp.className='h';sp.textContent=l;pre.appendChild(sp);return}
+  if(/^\.\.\. \d+ more diff lines not shown/.test(l)){rows.push({kind:'h',text:l});return}
   const kind=l.startsWith('+')?'a':l.startsWith('-')?'d':'';
-  sp.className=kind;
-  const num=el('<i class=ln></i>');
-  if(kind==='a'){num.textContent=newN++}
-  else if(kind==='d'){num.textContent=oldN++}
-  else if(l.length||oldN||newN){num.textContent=newN;oldN++;newN++}
-  sp.appendChild(num);
-  const sign=el('<i class=sg></i>');sign.textContent=kind==='a'?'+':kind==='d'?'-':' ';sp.appendChild(sign);
-  sp.appendChild(document.createTextNode(l.slice(kind||l.startsWith(' ')?1:0)));
+  let num='';
+  if(kind==='a')num=newN++;
+  else if(kind==='d')num=oldN++;
+  else if(l.length||oldN||newN){num=newN;oldN++;newN++}
+  rows.push({kind,num,text:l.slice(kind||l.startsWith(' ')?1:0)})});
+ // a run of removed lines followed by as many added ones: pair them up, line by line
+ for(let i=0;i<rows.length;){
+  if(rows[i].kind!=='d'){i++;continue}
+  let d=i;while(d<rows.length&&rows[d].kind==='d')d++;
+  let a=d;while(a<rows.length&&rows[a].kind==='a')a++;
+  if(a-d===d-i&&d-i<=12)for(let k=0;k<d-i;k++){
+   const o=rows[i+k],n=rows[d+k];if(o.text.length>400||n.text.length>400)continue;
+   const [so,sn]=wordSpan(o.text,n.text);
+   if(so[1]-so[0]<o.text.length||sn[1]-sn[0]<n.text.length){o.w=so;n.w=sn}}
+  i=Math.max(a,i+1)}
+ const pre=document.createElement('pre');
+ rows.forEach(r=>{
+  const sp=document.createElement('span');
+  if(r.kind==='h'){sp.className='h';sp.textContent=r.text;pre.appendChild(sp);return}
+  sp.className=r.kind;
+  const num=el('<i class=ln></i>');num.textContent=r.num;sp.appendChild(num);
+  const sign=el('<i class=sg></i>');sign.textContent=r.kind==='a'?'+':r.kind==='d'?'-':' ';sp.appendChild(sign);
+  if(r.w&&r.w[1]>r.w[0]){
+   sp.appendChild(document.createTextNode(r.text.slice(0,r.w[0])));
+   const m=document.createElement('mark');m.className='wd';m.textContent=r.text.slice(r.w[0],r.w[1]);sp.appendChild(m);
+   sp.appendChild(document.createTextNode(r.text.slice(r.w[1])))}
+  else sp.appendChild(document.createTextNode(r.text));
   pre.appendChild(sp)});
  box.appendChild(pre);return box}
 if(PREF.get('hidetools','0')==='1')log.classList.add('hidedone');
@@ -7348,6 +7482,60 @@ function copyAnswer(n){
  navigator.clipboard.writeText(text).then(()=>toast('copied '+(n>1?'answer '+n+' back':'the last answer')),
   ()=>toast('could not copy'))}
 // /diff — every file change this chat has shown, newest first
+/* ---------------- goals ----------------
+   What a chat keeps working toward across answers. The Mac drives it (checks the work
+   after each answer, carries on or stops); this shows where it stands and its controls. */
+const GOALS={};
+const GOAL_WORD={active:'working toward',paused:'paused',blocked:'needs you',budget:'over budget',complete:'done'};
+async function loadGoal(s){
+ try{const d=await (await fetch('/api/goal',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({sid:s,op:'get'})})).json();GOALS[s]=d.goal||null;if(s===sid)drawGoal()}catch(e){}}
+function drawGoal(){
+ const bar=$('#goalbar');if(!bar)return;
+ const g=sid&&GOALS[sid];
+ if(!g){bar.style.display='none';bar.innerHTML='';return}
+ bar.className='goalbar g-'+g.status;bar.style.display='';
+ const meta=[`${g.turns_used||0}/${g.max_turns} turns`];
+ if(g.token_budget)meta.push(`${(g.tokens_used||0).toLocaleString()}/${g.token_budget.toLocaleString()} tokens`);
+ else if(g.tokens_used)meta.push(`${g.tokens_used.toLocaleString()} tokens`);
+ bar.innerHTML=`<span class=gst>◎ ${esc(GOAL_WORD[g.status]||g.status)}</span><span class=gobj></span>
+  <span class=gmeta>${esc(meta.join(' · '))}</span>
+  ${g.status==='active'?'<button class=ghost data-g=pause>pause</button>':''}
+  ${g.status!=='active'&&g.status!=='complete'?'<button class=ghost data-g=resume>resume</button>':''}
+  <button class=ghost data-g=edit>edit</button><button class=ghost data-g=clear>clear</button>
+  ${g.reason?'<span class=greason></span>':''}`;
+ bar.querySelector('.gobj').textContent=g.objective;bar.querySelector('.gobj').title=g.objective;
+ if(g.reason)bar.querySelector('.greason').textContent=g.reason;
+ bar.querySelectorAll('[data-g]').forEach(b=>b.onclick=()=>goalOp(b.dataset.g))}
+async function goalOp(op,extra){
+ const s=sid;
+ if(op==='edit')return editGoal();
+ if(op==='clear'&&!confirm('Stop keeping this goal? The chat stays as it is.'))return;
+ let body={sid:s,op,...(extra||{})};
+ if(op==='resume'){const g=GOALS[s]||{};
+  if(g.token_budget&&g.tokens_used>=g.token_budget){
+   const nb=prompt('It has used its budget. New token budget:',String(g.token_budget*2));if(!nb)return;
+   body.token_budget=parseInt(nb,10)||0}}
+ const d=await apiPost('/api/goal',body,'the goal');if(!d)return;
+ GOALS[s]=d.goal||null;if(s===sid)drawGoal();
+ if(d.started){toast('carrying on toward the goal');setTimeout(()=>afterTurn(s),600)}
+ loadSessions()}
+function editGoal(){
+ if(!sid){toast('open a chat first');return}
+ const g=GOALS[sid];
+ openSheet(g?'Goal':'Set a goal',body=>{
+  body.appendChild(el(`<div class=sheetnote>The chat keeps working until this is done: after each answer the Mac checks the work against it and carries on, or stops and says why — done, stuck three times running, over its budget, or after its turn limit. Stop pauses it.</div>`));
+  const ta=el('<textarea class=ta style="min-height:110px" placeholder="What done looks like — e.g. every test in tests/ passes and the README documents the new flag"></textarea>');
+  ta.value=g?g.objective:'';body.appendChild(ta);
+  const row=el(`<div class=grid style="margin-top:8px"><label>Token budget</label><input type=number min=0 step=1000 id=gb placeholder="none"><label>Turn limit</label><input type=number min=1 max=200 id=gt></div>`);
+  body.appendChild(row);
+  row.querySelector('#gb').value=g&&g.token_budget?g.token_budget:'';row.querySelector('#gt').value=g?g.max_turns:20;
+  const go_=el(`<button class=primary style="margin-top:10px">${g?'Save':'Set and start'}</button>`);body.appendChild(go_);
+  go_.onclick=async()=>{const obj=ta.value.trim();if(!obj){toast('say what done looks like');return}
+   const tb=parseInt(row.querySelector('#gb').value,10)||0, mt=parseInt(row.querySelector('#gt').value,10)||20;
+   const d=await apiPost('/api/goal',{sid,op:g?'edit':'set',objective:obj,token_budget:tb,max_turns:mt},'the goal');
+   if(!d)return;GOALS[sid]=d.goal;closeModal();drawGoal();
+   if(!g)goalOp('resume')}})}
 function showTurnDiff(){
  // what the last answer changed, as the command says; the whole chat only if it changed nothing
  const all=[...wrap.querySelectorAll('.diff')];
@@ -7994,6 +8182,7 @@ function drawPlanDockInner(){
 
  if(git){
   const bits=[git.branch];
+  if(git.op)bits.push('⚠ '+git.op+' in progress'+(git.conflicts?' · '+git.conflicts+' conflict'+(git.conflicts>1?'s':''):''));
   if(git.dirty)bits.push(git.dirty+' changed');
   if(git.ahead)bits.push('↑'+git.ahead);
   if(git.behind)bits.push('↓'+git.behind);
@@ -8001,7 +8190,25 @@ function drawPlanDockInner(){
    [[git.diff||'nothing uncommitted'],[git.untracked?git.untracked+' untracked':''],
     [git.last?'last: '+git.last:'']].forEach(([t])=>{
     if(!t)return;const r=el('<div class=st></div>');
-    const sp=document.createElement('span');sp.textContent=t;r.appendChild(sp);body.appendChild(r)})})}}
+    const sp=document.createElement('span');sp.textContent=t;r.appendChild(sp);body.appendChild(r)});
+   // each changed file, and its diff on a click
+   const files=git.files||[];
+   files.slice(0,40).forEach(f=>{
+    const r=el('<div class="st gitfile" style="cursor:pointer" title="show the diff"></div>');
+    const mark={M:'M',A:'A',D:'D',R:'R','?':'new',U:'conflict'}[f.status]||f.status;
+    r.innerHTML=`<code style="min-width:3.2em;display:inline-block;color:var(--${f.status==='U'?'err':f.status==='?'||f.status==='A'?'ok':'mut'})">${esc(mark)}</code><span class=gp></span>`+
+     (f.added!=null?` <span class=add>+${f.added}</span> <span class=del>−${f.removed||0}</span>`:'');
+    r.querySelector('.gp').textContent=f.path;
+    r.onclick=()=>showGitDiff(f.path);body.appendChild(r)});
+   if(files.length>40)body.appendChild(el(`<div class=st><span>and ${files.length-40} more</span></div>`));
+   if(git.op&&git.conflicts){const b=el('<button class=ghost style="margin-top:4px">ask Orbit to resolve the conflicts</button>');
+    b.onclick=()=>{q.value=`A ${git.op} is in progress with ${git.conflicts} conflicted file(s). Look at each conflict, resolve it sensibly, and tell me what you chose — do not commit or continue the ${git.op} until I say so.`;q.focus();fitQ()};
+    body.appendChild(b)}})}}
+async function showGitDiff(path){
+ try{const r=await fetch('/api/git/diff?sid='+encodeURIComponent(sid)+'&path='+encodeURIComponent(path));
+  const d=await r.json();if(!r.ok||d.error){toast(d.error||'no diff');return}
+  openSheet(path,body=>{body.appendChild(d.diff?diffBlock(d,d.existed?'changed':'new file'):el('<div class=sheetnote>No changes to show (a binary file, or it matches the last commit).</div>'))})}
+ catch(e){toast('could not read the diff')}}
 
 /* ---------------- jump between your messages ---------------- */
 function jumpTo(n,block){

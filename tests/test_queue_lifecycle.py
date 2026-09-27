@@ -229,7 +229,7 @@ class TestRunNow(Base):
 class TestHelpersDoNotReview(unittest.TestCase):
     def test_only_the_answer_itself_reviews(self):
         src = open(os.path.join(ROOT, "bin", "qqcore.py")).read()
-        self.assertIn('if not helper and chat_setting("auto_review") and changed:', src)
+        self.assertIn('if not helper and mode and changed:', src)
 
 
 if __name__ == "__main__":
