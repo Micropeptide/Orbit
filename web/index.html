@@ -2250,7 +2250,8 @@ function rowState(s){
  if(WAITING.has(s.id))return {cls:'wait',icon:'!',tip:'waiting for you — an approval or a question'};
  if(RUNNING.has(s.id))return {cls:'run',icon:'<span class=spin></span>',tip:'answering'};
  if(s.queued)return {cls:'queue',icon:String(s.queued),tip:s.queued+' queued message'+(s.queued>1?'s':'')};
- if(UNSEEN[s.id])return {cls:'new',icon:'<span class=dotnew></span>',tip:'new since you last looked'};
+ // new here, or an answer that landed since you last looked on any device (the Mac keeps that)
+ if(UNSEEN[s.id]||s.unread)return {cls:'new',icon:'<span class=dotnew></span>',tip:'new since you last looked'};
  if(s.scheduled)return {cls:'sched',icon:'<span class=schedmark>⏱</span>',tip:'a message is scheduled: '+whenLabel(s.scheduled)};
  return {cls:'',icon:'',tip:''}}
 function chatRow(s,box){
@@ -2324,7 +2325,7 @@ function renderSessions(force){
  const term=($('#search').value||'').trim().toLowerCase();
  const rows=listRows();
  const sig=JSON.stringify([filterMode,GROUP_BY,term,projFilter,tagFilter,sid,[...RUNNING],[...WAITING],Object.keys(UNSEEN),
-  rows.map(s=>[s.id,s.title,s.mtime,s.pinned,s.archived,s.queued,s.scheduled,s.host,s.n,s.project]),sessTotal,
+  rows.map(s=>[s.id,s.title,s.mtime,s.pinned,s.archived,s.queued,s.scheduled,s.host,s.n,s.project,s.unread]),sessTotal,
   Object.entries(typeof PROJECTS==='object'&&PROJECTS||{}).map(([k,v])=>[k,v&&v.name,v&&v.color]),
   PREF.get('sec_ext_claude','0')]);
  if(!force&&sig===LIST_SIG)return;
@@ -2348,7 +2349,7 @@ function renderSessions(force){
   if(filterMode==='active')   return !s.archived;
   if(filterMode==='pinned')   return !!s.pinned;
   if(filterMode==='archived') return !!s.archived;
-  if(filterMode==='attention')return RUNNING.has(s.id)||WAITING.has(s.id)||!!s.queued||!!UNSEEN[s.id];
+  if(filterMode==='attention')return RUNNING.has(s.id)||WAITING.has(s.id)||!!s.queued||!!UNSEEN[s.id]||!!s.unread;
   return true};
  const all_=rows.filter(s=>pass(s)&&(!projFilter||s.project===projFilter)
    &&(!tagFilter||(s.tags||[]).includes(tagFilter))
@@ -2568,6 +2569,7 @@ function attachLive(theSid, initial){
     stopLive(); note.remove(); stopStatus(theSid);
     lrows.forEach(r=>{if(r.classList.contains('live'))finishTool(r,{stopped:true})});
     if(lv.content){a.bub.innerHTML=md(lv.content);decorate(a.bub)}
+    if(sid===theSid&&!document.hidden&&document.hasFocus())markSeenOnMac(theSid);
     RUNNING.delete(theSid);renderSessions();loadSessions();
 
     setTimeout(()=>afterTurn(theSid),300);
@@ -2597,6 +2599,7 @@ async function openSession(id){
  PLAN_MODE=!!d.plan_mode;drawPlanMode();drawModeHint();
  WATCH_SID=d.sid;WATCH_N=(typeof d.n==='number')?d.n:null;   // what this page now shows
  if(UNSEEN[d.sid]){delete UNSEEN[d.sid];syncUnseen()}
+ markSeenOnMac(d.sid);
  loadDraft(d.sid);
  // the plan tool's last output, if the server kept it with the message
  // -- only since your last message: each new request starts a fresh plan
@@ -4425,6 +4428,7 @@ async function go(opts){
  PENDING_NOTES.filter(x=>!x.done&&x.sid===sendSid).forEach(x=>{x.done=true;
   x.tag.textContent='waiting — it reads this with your next message'});
  if($('#files').style.display!=='none')renderFiles(); refreshFileCache();
+ if(!lost&&sid===sendSid&&!document.hidden&&document.hasFocus())markSeenOnMac(sendSid);   // you watched it land
  $('#dot').classList.remove('busy');loadSessions();refreshStatus();q.focus();
  if(lost&&sid===sendSid){WATCH_N=null;openSession(sendSid)}   // rejoins from the live buffer
  else afterTurn(sendSid)}
@@ -6603,8 +6607,15 @@ function primeAlerts(){
   if(AC.state==='suspended')AC.resume()}catch(e){}}
 function syncUnseen(){const n=Object.values(UNSEEN).reduce((a,b)=>a+b,0);
  document.title=(n?`(${n}) `:'')+'Orbit'}
-function seen(){if(sid&&UNSEEN[sid]&&!document.hidden&&document.hasFocus()){
- delete UNSEEN[sid];syncUnseen();renderSessions()}}
+function seen(){if(sid&&!document.hidden&&document.hasFocus()){
+ const row=SESSIONS.find(v=>v.id===sid);if(row&&row.unread)markSeenOnMac(sid);
+ if(UNSEEN[sid]){delete UNSEEN[sid];syncUnseen();renderSessions()}}}
+// looked at here: the phone and other windows stop showing it as new too
+function markSeenOnMac(s){
+ if(!s||tempMode)return;
+ const row=SESSIONS.find(v=>v.id===s);if(row&&row.unread){row.unread=false;renderSessions()}
+ fetch('/api/session/seen',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({id:s})}).catch(()=>{})}
 addEventListener('focus',seen);document.addEventListener('visibilitychange',seen);
 function notify(s,kind,body){
  if(!s||(!document.hidden&&document.hasFocus()&&sid===s))return;   // you are looking at it

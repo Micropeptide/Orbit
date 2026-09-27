@@ -158,5 +158,41 @@ class TestTheSessionSaysItsAgent(unittest.TestCase):
         self.assertIn('"agent": getattr(stt, "agent", None) or ""', src)
 
 
+class TestUnreadIsKeptByTheMac(Base):
+    """Unread was guessed per page and per phone from the chat's time -- the last message
+    you sent -- so an answer that finished after you left never showed as new."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="orbit-seen-"); self.addCleanup(shutil.rmtree, self.tmp, True)
+        saved = (q.SESSIONS, q.SEEN_FILE)
+        self.addCleanup(lambda: (setattr(q, "SESSIONS", saved[0]), setattr(q, "SEEN_FILE", saved[1]),
+                                 q._SESS_CACHE.update(key=None), q._SEEN.update(at=None)))
+        q.SESSIONS = os.path.join(self.tmp, "s"); os.makedirs(q.SESSIONS)
+        q.SEEN_FILE = os.path.join(self.tmp, "seen.json")
+        q._SESS_CACHE["key"] = None; q._SEEN.update(at=None)
+
+    def row(self, sid):
+        q._SESS_CACHE["key"] = None
+        return next(r for r in q.session_list() if r["id"] == sid)
+
+    def test_an_answer_after_you_looked_is_new_until_seen_anywhere(self):
+        now = time.time()
+        q.session_save("u1", [{"role": "user", "content": "hi", "t": now - 100}], "t",
+                       {"answered_at": now - 10})
+        self.assertFalse(self.row("u1")["unread"], "never looked at: not marked")
+        q.mark_seen("u1", at=now - 50)                     # looked, then it answered
+        self.assertTrue(self.row("u1")["unread"])
+        r = self.call("post", "/api/session/seen", {"id": "u1"})
+        self.assertEqual(r.code, 200)
+        self.assertFalse(self.row("u1")["unread"])
+
+    def test_a_finished_answer_is_stamped(self):
+        ui = self.ui
+        st = ui.State(); st.sid = "u2"; st.msgs = [{"role": "user", "content": "hi"}]
+        st.answered_at = 123.0
+        ui.save_session(st)
+        self.assertEqual(json.load(open(q.session_path("u2")))["answered_at"], 123.0)
+
+
 if __name__ == "__main__":
     unittest.main()
