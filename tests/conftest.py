@@ -42,3 +42,19 @@ def _the_real_bin_is_never_touched(tmp_path):
     yield
     for k, v in saved.items():
         setattr(q, k, v)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _nothing_outlives_a_test(tmp_path_factory):
+    """For the whole run, not test by test: chats go to a folder of the run's own, and the
+    goal check calls no model. A test's timers and background threads can outlive the
+    test -- an offer taken on its own two minutes later, a queue it started -- and when
+    the per-test stubs had already been put back, one of them wrote a chat into the real
+    sessions folder and asked the real side-work model to check it."""
+    import qqcore as q
+    saved = (q.SESSIONS, q.goal_audit)
+    q.SESSIONS = str(tmp_path_factory.mktemp("sessions"))
+    q._real_goal_audit = saved[1]
+    q.goal_audit = lambda *a, **k: {"status": "", "reason": "(no model calls in tests)", "next": "", "failed": True}
+    yield
+    q.SESSIONS, q.goal_audit = saved

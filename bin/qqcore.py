@@ -86,6 +86,10 @@ DEFAULTS = {
   "resume_after_restart": True,
   # where to send a push when something finishes or needs you and no screen is open --
   # an ntfy URL (https://ntfy.sh/<your-topic> or your own server). Empty: none is sent.
+  # after an answer that plainly left work undone, offer to make it a goal; an offer
+  # nobody answers is taken after this many seconds (0: it waits for you)
+  "goal_offers": True,
+  "goal_offer_wait_s": 120,
   "push_ntfy_url": "",
   "push_private": False,     # a push says only "open Orbit", never the text itself
   # an answer stopped by a used-up plan allowance (Claude's 5-hour or weekly limit, a
@@ -1902,7 +1906,11 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
     if reasoning: msg["reasoning_content"] = "".join(reasoning)
     if marks: msg["reasoning_marks"] = marks
     if usage and usage.get("prompt_tokens"): msg["_prompt_tokens"] = int(usage["prompt_tokens"])
-    if usage: msg["_usage"] = {k: int(usage.get(k) or 0) for k in ("prompt_tokens", "completion_tokens")}
+    if usage:
+        msg["_usage"] = {k: int(usage.get(k) or 0) for k in ("prompt_tokens", "completion_tokens")}
+        cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens") if isinstance(
+            usage.get("prompt_tokens_details"), dict) else None
+        if cached: msg["_usage"]["cached_tokens"] = int(cached)
     if tcalls: msg["tool_calls"] = [tcalls[k] for k in sorted(tcalls)]
     if stopped_because[0]: msg["_finish"] = stopped_because[0]
     return msg
@@ -2244,8 +2252,15 @@ def push_notify(title, text, sid=None):
     url = str(S.get("push_ntfy_url") or "").strip()
     if not url.startswith(("https://", "http://")): return False
     body = str(text)[:300] if not S.get("push_private") else "Open Orbit to see it."
+    t = str(title)[:80]
+    try: t.encode("latin-1")
+    except UnicodeEncodeError:
+        # a dash, an accent or another script: ntfy reads an RFC 2047 encoded title,
+        # where the plain header could only carry "?" in their place
+        import base64
+        t = "=?UTF-8?B?" + base64.b64encode(t.encode("utf-8")).decode() + "?="
     req = urllib.request.Request(url, data=body.encode(), method="POST",
-                                 headers={"Title": str(title)[:80].encode("ascii", "replace").decode(),
+                                 headers={"Title": t,
                                           "Tags": "orbit",
                                           **({"Click": f"orbit://chat/{sid}"} if sid else {})})
     def go():
@@ -2295,6 +2310,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
     if not helper:
         TURN_CTX.changes = []          # files this answer changes, so it can be undone
         TURN_CTX.read_secret = False   # set when it reads a key or token (see risk_check)
+        TURN_CTX.hit_limit = None      # set when it stops at its round or time limit
         TURN_CTX.read_only = bool(read_only)   # plan mode: look, think, propose -- change nothing
     # what a helper started by the task tool inherits from this answer
     TURN_CTX.emit, TURN_CTX.approve, TURN_CTX.cancel, TURN_CTX.tools = emit, approve, cancel, tools
@@ -2357,6 +2373,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
         stats page, and in LAST_TURN for the stream's closing event."""
         rec = {"secs": round(time.time() - t_start, 1), "usage": dict(usage),
                "tool_runs": tool_runs[0], "rounds": rounds}
+        if getattr(TURN_CTX, "hit_limit", None): rec["hit_limit"] = TURN_CTX.hit_limit
         ch = [dict(c) for c in (getattr(TURN_CTX, "changes", None) or [])]
         if msg is not None:
             msg.update({k: rec[k] for k in ("secs", "usage", "tool_runs")})
@@ -2397,6 +2414,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
             if max_rounds and rnd >= max_rounds:
                 pending = plan_pending()
                 emit("round_limit", {"rounds": rnd, "pending": [p["text"] for p in pending]})
+                TURN_CTX.hit_limit = "rounds"
                 summary = _wrap_up(f"the limit of {rnd} tool rounds for one answer was reached")
                 _finish(messages[-1] if summary else None, rnd)
                 emit("done", None)
@@ -2407,6 +2425,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
             if budget_min and (time.time() - t_start) / 60 > budget_min:
                 emit("round_limit", {"rounds": rnd, "reason": "time",
                                      "pending": [x["text"] for x in plan_pending()]})
+                TURN_CTX.hit_limit = "time"
                 summary = _wrap_up(f"the time limit of {budget_min:.0f} minutes for one answer was reached")
                 _finish(messages[-1] if summary else None, rnd)
                 emit("done", None)
@@ -5699,10 +5718,22 @@ def goal_new(objective, token_budget=0, max_turns=None):
             "token_budget": max(0, int(token_budget or 0)), "tokens_used": 0,
             "max_turns": max(1, int(max_turns or GOAL_MAX_TURNS)), "turns_used": 0,
             "blocked_streak": 0, "audit_fail_streak": 0,
-            "reason": "", "note": "", "created": now, "updated": now}
+            "reason": "", "note": "", "created": now, "updated": now,
+            "history": [{"t": round(now, 1), "verdict": "set", "reason": "", "turn": 0, "tokens": 0}]}
+
+GOAL_HISTORY_KEEP = 30
+
+def goal_note(goal, verdict, reason=""):
+    """One line of the goal's history: what each check said, and each stop and start."""
+    h = goal.setdefault("history", [])
+    h.append({"t": round(time.time(), 1), "verdict": verdict, "reason": str(reason or "")[:300],
+              "turn": int(goal.get("turns_used", 0)), "tokens": int(goal.get("tokens_used", 0))})
+    del h[:-GOAL_HISTORY_KEEP]
+    return goal
 
 def goal_settle(goal, status, reason=""):
     goal.update(status=status, reason=str(reason or "")[:400], updated=time.time())
+    goal_note(goal, status, reason)
     return goal
 
 GOAL_INTRO = ("This is a goal: keep working until it is actually done, across as many "
@@ -5763,14 +5794,54 @@ def goal_audit(messages, goal, model=None):
         why = "the check did not answer in the expected form"
     return {"status": "", "reason": why, "next": "", "failed": True}
 
+# Offering a goal. The signals are the conservative ones -- an offer left unanswered is
+# accepted, so a wrong one spends money: the plan still has open steps, the answer's
+# own "Remaining:" names something, or it stopped at a round or time limit. An answer
+# that ends by asking you something needs you, not more turns: no offer.
+_REMAINING = _re.compile(r"^\W*remaining\W*:[ \t]*(.*)$", _re.I | _re.M)
+_NOTHING_LEFT = _re.compile(r"^\W*(nothing|none|n/?a|no(thing)? (more|further)|all done|done)\b", _re.I)
+_STILL_TO_DO = _re.compile(r"\b(i still need to|still (has|have) to be done|(is|are) not (yet )?(finished|complete|done)|"
+                           r"haven'?t (yet )?(finished|completed)|left to do)\b", _re.I)
+
+def work_remaining(answer, plan_steps=None, hit_limit=None):
+    """Why an answer looks unfinished, or "" -- for offering to make it a goal."""
+    text = str(answer or "").strip()
+    tail = text[-2500:]
+    last_para = tail.split("\n\n")[-1].strip()
+    if last_para.endswith("?"):
+        return ""                                   # it is asking you something
+    if hit_limit:
+        return "it stopped at its " + ("time" if hit_limit == "time" else "step") + " limit"
+    open_steps = [s for s in (plan_steps or []) if not s.get("done")]
+    if open_steps:
+        return f"its plan still has {len(open_steps)} open step" + ("s" if len(open_steps) != 1 else "")
+    hits = list(_REMAINING.finditer(tail))
+    if hits:
+        what = hits[-1].group(1).strip()
+        if not what:                        # "Remaining:" with a list under it
+            what = next((l.strip(" -*•\t") for l in tail[hits[-1].end():].splitlines() if l.strip()), "")
+        if what and not _NOTHING_LEFT.match(what):
+            return "it says what remains: " + what[:140]
+    if _STILL_TO_DO.search(tail):
+        return "it says there is still work left"
+    return ""
+
+def goal_tokens(usage):
+    """What one answer spent, for a goal's budget: tokens written, and prompt tokens
+    that were not served from the provider's cache. Counting every prompt token made a
+    one-word answer in a Claude Code chat cost 43,000 -- its long opening is re-sent on
+    every turn, cached -- and a budget ran out after two short turns."""
+    u = usage or {}
+    prompt = int(u.get("prompt_tokens") or 0)
+    fresh = max(0, prompt - int(u.get("cached_tokens") or 0))
+    return fresh + int(u.get("completion_tokens") or 0)
+
 def goal_after_answer(goal, *, messages, usage=None, cancelled=False, failed=None, audit=None):
     """Advance a goal after one answer. Returns ("continue"|"stop", goal). Pure apart
     from the audit call, which can be passed in (`audit`) for tests."""
     if not goal or goal.get("status") != "active":
         return "stop", goal
-    u = usage or {}
-    goal["tokens_used"] = int(goal.get("tokens_used", 0)) + int(u.get("prompt_tokens") or 0) \
-        + int(u.get("completion_tokens") or 0)
+    goal["tokens_used"] = int(goal.get("tokens_used", 0)) + goal_tokens(usage)
     goal["updated"] = time.time()
     if cancelled:
         return "stop", goal_settle(goal, "paused", "you stopped it — resume to carry on")
@@ -5782,6 +5853,10 @@ def goal_after_answer(goal, *, messages, usage=None, cancelled=False, failed=Non
         return "stop", goal_settle(goal, "budget", f"used {goal['tokens_used']:,} of its "
                                    f"{goal['token_budget']:,}-token budget — raise it to carry on")
     v = audit if audit is not None else goal_audit(messages, goal)
+    if not v.get("failed") and v.get("status") in ("continue", "blocked"):
+        goal_note(goal, v["status"], v.get("reason") or v.get("next") or "")
+    elif v.get("failed"):
+        goal_note(goal, "check failed", v.get("reason") or "")
     if v.get("failed"):
         goal["audit_fail_streak"] = int(goal.get("audit_fail_streak", 0)) + 1
         if goal["audit_fail_streak"] >= GOAL_AUDIT_FAILS:
@@ -8009,6 +8084,11 @@ def redo_result(redo, force=False):
     for r in redo or []:
         p = r["path"]
         try:
+            # a file undo put in the bin comes back out of it: copying it left the bin
+            # still listing a file that was already back where it belonged
+            if r.get("gone") and os.path.realpath(os.path.dirname(r["from"])) == os.path.realpath(TRASH_FILE) \
+                    and trash_restore(os.path.basename(r["from"])) and os.path.exists(p):
+                done.append(f"put back {p}"); restored.append(p); continue
             if os.path.exists(p): _save_checkpoint(p)
             os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
             with open(r["from"], "rb") as f, open(p, "wb") as out: out.write(f.read())

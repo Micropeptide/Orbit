@@ -655,6 +655,10 @@ mark.findhit.on{background:var(--acc);color:#fff}
 .diff pre span{display:block;padding-right:10px;white-space:pre}
 .diff pre .a{background:color-mix(in srgb,var(--ok) 13%,transparent)}
 .diff pre .d{background:color-mix(in srgb,var(--err) 13%,transparent)}
+.diff pre .ln{cursor:pointer}.diff pre .ln:hover{color:var(--acc)}
+.diff .dnote{display:block;padding:3px 10px 5px 4.2em;background:var(--panel);white-space:normal}
+.diff .dnote input{width:100%;padding:4px 7px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);font:inherit;font-size:var(--fs-sm)}
+.diff .dnote[done]{color:var(--acc);font-family:inherit;font-size:var(--fs-sm)}
 .diff pre .a mark.wd{background:color-mix(in srgb,var(--ok) 34%,transparent);color:inherit;border-radius:2px}
 .diff pre .d mark.wd{background:color-mix(in srgb,var(--err) 34%,transparent);color:inherit;border-radius:2px}
 .diff pre .h{color:var(--dim);background:var(--panel);padding-left:10px}
@@ -1009,6 +1013,11 @@ body.statuson #wrap .msg.a:last-child .bub>.working:only-child{display:none}
 .goalbar.g-active{border-left-color:var(--acc)}.goalbar.g-complete{border-left-color:var(--ok)}
 .goalbar.g-blocked,.goalbar.g-budget{border-left-color:var(--err)}.goalbar.g-paused{border-left-color:var(--dim)}
 .sitem .goalmark{color:var(--acc);font-size:var(--fs-2xs);flex:0 0 auto}
+.goalbar.g-offer{border-left-color:var(--acc);background:color-mix(in srgb,var(--acc) 7%,var(--card))}
+.goalbar .ghist{flex-basis:100%;max-height:180px;overflow:auto;border-top:1px solid var(--line);padding-top:5px;margin-top:2px}
+.goalbar .ghrow{display:flex;gap:8px;font-size:var(--fs-2xs);color:var(--mut);padding:1px 0}
+.goalbar .ghrow b{color:var(--fg);font-weight:600;min-width:5.5em}
+.goalbar .ghrow .ght{color:var(--dim);min-width:4.5em;font-variant-numeric:tabular-nums}
 .sitem .ago.elapsed{color:var(--acc)}
 .plandock{font-size:var(--fs-sm);border:1px solid var(--line);border-radius:9px;background:var(--card);
  padding:5px 11px;margin-bottom:7px}
@@ -2633,12 +2642,14 @@ async function openSession(id){
  if(d.error)return sysline('could not open: '+d.error);
  if(sid&&sid!==d.sid){clearTimeout(draftT);saveDraft(sid)}
  switchAtts(sid,d.sid);closeAt();closeMenu();
- sid=d.sid;$('#title').textContent=d.title||'(untitled)';wrap.innerHTML='';
+ sid=d.sid;setTimeout(drawDiffNotes,0);$('#title').textContent=d.title||'(untitled)';wrap.innerHTML='';
  PLAN_MODE=!!d.plan_mode;drawPlanMode();drawModeHint();
  WATCH_SID=d.sid;WATCH_N=(typeof d.n==='number')?d.n:null;   // what this page now shows
  if(UNSEEN[d.sid]){delete UNSEEN[d.sid];syncUnseen()}
  markSeenOnMac(d.sid);
- GOALS[d.sid]=d.goal||null;drawGoal();
+ GOALS[d.sid]=d.goal||null;
+ GOAL_OFFERS[d.sid]=d.goal_offer?{...d.goal_offer,deadline:d.goal_offer.remaining!=null?Date.now()+d.goal_offer.remaining*1000:null}:null;
+ drawGoal();
  loadDraft(d.sid);
  // the plan tool's last output, if the server kept it with the message
  // -- only since your last message: each new request starts a fresh plan
@@ -2686,7 +2697,7 @@ let UPLOADS=[];                                // {sid, name} still on their way
 function uploadingHere(){return UPLOADS.some(u=>u.sid===sid)}
 function drawChips(){
  const box=$('#chips');if(!box)return;
- box.querySelectorAll('.chip:not([data-paste])').forEach(x=>x.remove());
+ box.querySelectorAll('.chip:not([data-paste]):not(.notechip)').forEach(x=>x.remove());
  atts.forEach(a=>{
   const chip=el('<div class=chip></div>');
   if(a.kind==='image'&&a.data_url){const i=document.createElement('img');i.src=a.data_url;chip.appendChild(i)}
@@ -2814,7 +2825,6 @@ async function runCmd(cmd,rest){
  if(cmd==='/copy'){copyAnswer(parseInt(rest,10)||1);return true}
  if(cmd==='/diff'){showTurnDiff();return true}
  if(cmd==='/goal'){if(!rest){editGoal();return true}
-  if(tempMode){toast('a temporary chat cannot keep a goal');return true}
   q.value=rest;setTimeout(()=>go({goal:true}),0);return true}
  if(cmd==='/verbose'){setVerbose(!VERBOSE);return true}
  if(cmd==='/todos'){togglePlanDock();return true}
@@ -4157,9 +4167,10 @@ async function go(opts){
  q.value='';q.style.height='auto';closeMenu();clearDraft(sid);
  const ubub=addUser(t,atts.filter(a=>a.kind==='image').map(a=>a.data_url),undefined,raw);
  const sentPastes=PASTES;PASTES={};
- const sending=atts;atts=[];$('#chips').innerHTML='';
+ const sending=atts;atts=[];$('#chips').innerHTML='';drawDiffNotes();
  if(opts.effort)sysline('retrying with '+opts.effort+' reasoning effort');
  const sendSid=sid;                       // this answer belongs to THIS chat
+ if(GOAL_OFFERS[sendSid]){delete GOAL_OFFERS[sendSid];drawGoal()}   // you moved on: the Mac withdraws it too
  if(stoppedSid===sendSid)stoppedSid=null;  // a Stop applies to the answer it stopped, not the next
  if(!/^continue\b/i.test(t)&&PLANS[sendSid]){delete PLANS[sendSid];drawPlanDock()}  // the server starts a new plan too
  // the chat moves to the top now (it is the one you used last), and a new chat has a
@@ -4223,6 +4234,7 @@ async function go(opts){
      else if(m.k==='content_delta')answer+=m.p;
      else if(m.k==='approval_request')notify(sendSid,'Needs your approval',m.p.name||'');
      else if(m.k==='question')notify(sendSid,'Orbit has a question',m.p.question||'');
+     else if(m.k==='goal_offer'){setGoalOffer(sendSid,m.p)}
      continue}
     // a finished call closes its row; the plan/diff/images branches below still run
     if(m.k==='tool_result'&&m.p&&m.p.id&&trows[m.p.id]){
@@ -4377,6 +4389,7 @@ async function go(opts){
      else{const d=el('<div class=hintbar></div>');
       d.textContent='not finished: '+(m.p.reason||'')+(m.p.next?' → '+m.p.next:'');
       a.tools.appendChild(d);bottom()}}
+    else if(m.k==='goal_offer'){setGoalOffer(sendSid,m.p)}
     else if(m.k==='review'){
      const d=el('<details class=think style="margin-top:6px"></details>');
      d.appendChild(el(`<summary>Review of ${m.p.files} changed file${m.p.files===1?'':'s'} · ${esc(m.p.model||'')}</summary>`));
@@ -4563,6 +4576,35 @@ async function renderClaudeMemory(body,toOrbit,cwd){
   if(!f)return toast('a file name, like lab-context.md');
   const x=await apiPost('/api/claude/memory',{op:'save',cwd:d.cwd,file:f,text:t},'saving');
   if(x){toast(x.new?'memory added (and listed in MEMORY.md)':'saved');renderClaudeMemory(body,toOrbit,d.cwd)}}}
+// Settings -> Phone: each paired device, when it was last heard from, what it may do,
+// and revoking it alone. "Chats only" keeps it out of settings, keys and pairing.
+async function drawDevices(data){
+ const box=$('#devlist');if(!box)return;
+ let d=data;
+ if(!d){try{const r=await fetch('/api/devices',{method:'POST',headers:{'Content-Type':'application/json'},body:'{"op":"list"}'});
+  d=await r.json();if(!r.ok)throw 0}catch(e){box.textContent='This device cannot list devices.';return}}
+ box.innerHTML='';
+ const ago=t=>t?agoShort(t)+' ago':'never';
+ (d.devices||[]).forEach(v=>{
+  const r=el(`<div class=memrow style="align-items:center;gap:10px;flex-wrap:wrap"><b class=dn style="cursor:pointer" title="rename"></b>
+   <span class=sub></span><select class=ds><option value=full>everything</option><option value=chat>chats only</option></select>
+   <button class=ghost data-a=revoke>revoke</button></div>`);
+  r.querySelector('.dn').textContent=v.name+(v.id===d.you?' (this one)':'');
+  r.querySelector('.sub').textContent=`${v.via==='web'?'browser':'app'} · paired ${new Date(v.created*1000).toLocaleDateString()} · last seen ${ago(v.last_seen)}`;
+  r.querySelector('.ds').value=v.scope||'full';
+  const op=async(body,what)=>{const x=await apiPost('/api/devices',{id:v.id,...body},what);if(x)drawDevices(x)};
+  r.querySelector('.ds').onchange=e=>op({op:'scope',scope:e.target.value},'changing what it may do');
+  r.querySelector('.dn').onclick=()=>{const n=prompt('Name this device',v.name);if(n&&n.trim())op({op:'rename',name:n.trim()},'renaming')};
+  r.querySelector('[data-a=revoke]').onclick=()=>{if(confirm('Revoke '+v.name+'? It must scan the QR again to come back.'))op({op:'revoke'},'revoking')};
+  box.appendChild(r)});
+ if(d.legacy){
+  const r=el(`<div class=memrow style="align-items:center;gap:10px"><b>Paired before device tokens</b>
+   <span class=sub>anything paired with the old shared token${d.you==='legacy'?' — including this one':''}</span>
+   <button class=ghost>retire it</button></div>`);
+  r.querySelector('button').onclick=async()=>{if(!confirm('Stop accepting the old shared token? Anything paired with it must scan the QR again.'))return;
+   const x=await apiPost('/api/devices',{op:'retire_legacy'},'retiring the old token');if(x)drawDevices(x)};
+  box.appendChild(r)}
+ if(!(d.devices||[]).length&&!d.legacy)box.textContent='No devices paired.'}
 // Settings' searchable names: section headings and field labels, taken from the tabs'
 // own drawing code (this function's source), grouped by the tab that draws them.
 function settingsIndex(){
@@ -4672,6 +4714,9 @@ async function openSettings(tab){
       <option value="">off</option><option value="changes">report what is wrong</option>
       <option value="fix">report, and have it fix what is real (up to 2 rounds)</option></select>
       <span class=note>when a turn writes files, a second model reads the diff, with what was asked; lockfiles are skipped and anything it could not read is named</span></div>
+    <label>Offer to keep going</label><div class=sw><input type=checkbox id=g_goaloffer>
+      <span class=note>when an answer plainly leaves work undone, offer to make it a goal — and take the offer on its own after
+       <input type=number id=g_goalwait min=0 max=3600 style="width:5em"> seconds unless you answer (0: wait for you)</span></div>
     <label>Check the work before finishing</label><div class=sw><input type=checkbox id=g_verify>
       <span class=note>ask the side-work model whether the request was actually carried out, and carry
        on if it was not (at most twice)</span></div>
@@ -4719,6 +4764,7 @@ async function openSettings(tab){
    $('#g_ac').value=draft.autocompact_pct??80;
    $('#g_review').value=['changes','fix'].includes(draft.auto_review)?draft.auto_review:'';
    $('#g_verify').checked=!!draft.verify_turns;
+   $('#g_goaloffer').checked=draft.goal_offers!==false;$('#g_goalwait').value=draft.goal_offer_wait_s??120;
    {const sel=$('#g_reviewer'),cur=draft.review_model||'';
     // a reviewer has to be somewhere else: a local one is the problem, not the fix
     // somewhere else, able to answer, and not a CLI agent: a reviewer judges, it must not be
@@ -4797,15 +4843,17 @@ async function openSettings(tab){
        <img src="/api/remote/qr?ts=${Date.now()}" width=190 height=190
             style="border-radius:12px;background:#fff;padding:8px">
        <div style="flex:1;min-width:220px">
-        <div class=note>Scan it with the Orbit app on your iPhone. The code carries
-         the address and a one-time pairing token; the token is stored in the
-         phone's Keychain and never typed.</div>
-        <button class=ghost id=rot style="margin-top:10px">Rotate token</button>
-        <div class=hint2>Rotating unpairs every device — use it if a phone is lost.</div>
+        <div class=note>Scan it with the Orbit app on your iPhone. The code carries the
+         address and a one-time pairing code, good once for fifteen minutes; the phone
+         trades it for a token of its own, kept in its Keychain and never typed.</div>
+        <button class=ghost id=rot style="margin-top:10px">Unpair every device</button>
+        <div class=hint2>For one lost device, revoke just that one below.</div>
        </div></div>`
       :'<div class=note style="margin-top:12px">Turn on a mode above, then restart, to pair a device.</div>'}
     <div class=hint2 style="margin-top:14px">Changing the mode needs a restart —
      use <b>Save &amp; restart server</b> below, or the Restart button in the sidebar.</div>
+    <div class=sec style="margin-top:16px">Devices <small>— each with its own token</small></div>
+    <div id=devlist class=note>…</div>
     <div class=sec style="margin-top:16px">Push when the app is closed</div>
     <div class=grid>
      <label>ntfy address</label><input type=url id=p_ntfy placeholder="https://ntfy.sh/your-private-topic">
@@ -4822,8 +4870,9 @@ async function openSettings(tab){
     if(d){toast('saved — restart to apply');render('phone')}
     else render('phone')});
    const rot=$('#rot'); if(rot)rot.onclick=async()=>{
-    if(!confirm('Rotate the pairing token? Every paired device must scan again.'))return;
-    if(await apiPost('/api/remote/rotate',{},'rotating')){toast('new token');render('phone')}};
+    if(!confirm('Unpair every device? Each one must scan the QR again.'))return;
+    if(await apiPost('/api/remote/rotate',{},'unpairing')){toast('every device unpaired');render('phone')}};
+   drawDevices();
   }
   if(name==='backup'){
    const b=await (await fetch('/api/backup/status')).json();
@@ -5586,6 +5635,7 @@ async function openSettings(tab){
    // the select, so that switch could never be ticked and every save cleared it
    draft.review_model=$('#g_reviewer')?$('#g_reviewer').value:(draft.review_model||'');
    draft.auto_review=$('#g_review')?$('#g_review').value:(draft.auto_review||'');
+   if($('#g_goaloffer')){draft.goal_offers=$('#g_goaloffer').checked;draft.goal_offer_wait_s=Math.max(0,Number($('#g_goalwait').value)||0)}
    draft.verify_turns=($('#g_verify')&&$('#g_verify').checked)?'tools':'';draft.trash_days=Number($('#g_td').value)||30;
    draft.system_prompt=$('#g_sys').value;draft.use_instructions=$('#g_useins').checked;
    draft.use_memory=$('#g_usemem').checked;
@@ -6168,7 +6218,7 @@ async function renderTasks(){
   head.querySelector('h4').textContent=j.name||j.id;
   const nxt=j.next_ts?new Date(j.next_ts*1000):null;
   head.querySelector('.sub').textContent=[jobWhen(j),j.enabled===false?'paused':(nxt?'next '+whenLabel(j.next_ts):'finished'),
-   j.stop_at?'stops by '+j.stop_at:'','on '+(modelName(j.model)||(j.sid?"its chat's model":'the default model')),
+   j.stop_at?'stops by '+j.stop_at:'',j.until_done?(j.done_at?'done':'until it is done'):'','on '+(modelName(j.model)||(j.sid?"its chat's model":'the default model')),
    j.sid?'in its chat':'new chat each run',j.agent?'agent '+j.agent:''].filter(Boolean).join(' · ');
   r.appendChild(head);
   const pr=el('<div class=sub style="margin-top:4px;white-space:pre-wrap;max-height:3.2em;overflow:hidden"></div>');pr.textContent=j.prompt||'';r.appendChild(pr);
@@ -6237,12 +6287,13 @@ function jobForm(j){
    <label>Runs in</label><select data-f=sid><option value="">a new chat each time</option>${chats.map(c=>`<option value="${esc(c.id)}">${esc((c.title||'(untitled)').slice(0,70))}</option>`).join('')}</select>
    <label>Project</label><select data-f=project><option value="">none</option>${Object.entries(PROJECTS||{}).map(([pid,p])=>`<option value="${esc(pid)}">${esc(p.name)}</option>`).join('')}</select>
    <label>Agent</label><select data-f=agent><option value="">none</option>${agents.map(a=>`<option>${esc(a)}</option>`).join('')}</select>
+   <label>Until it's done</label><div><input type=checkbox data-f=until_done> <span class=hint2>after each run, check the prompt against what happened, and stop repeating once it is met — "every night, until the tests pass"</span></div>
    <label>Enabled</label><input type=checkbox data-f=enabled style="justify-self:start">
    <div></div><div style="display:flex;gap:7px"><button class=sendbtn style="height:32px;padding:0 14px" data-a=save>${isNew?'Add task':'Save'}</button><button class=ghost data-a=cancel>Cancel</button><span class="sub fsaved"></span></div></div>`);
  const F=k=>f.querySelector(`[data-f=${k}]`);
  F('name').value=j.name||'';F('prompt').value=j.prompt||'';F('every').value=j.every||'daily';F('at').value=j.at||'09:00';
  F('weekday').value=String(j.weekday||0);F('n').value=j.n||(j.every==='hours'?6:30);F('at_ts').value=dtl(j.at_ts);
- F('stop_at').value=j.stop_at||'';F('sid').value=j.sid||'';F('project').value=j.project||'';F('agent').value=j.agent||'';F('enabled').checked=j.enabled!==false;
+ F('stop_at').value=j.stop_at||'';F('sid').value=j.sid||'';F('project').value=j.project||'';F('agent').value=j.agent||'';F('enabled').checked=j.enabled!==false;F('until_done').checked=!!j.until_done;
  const show=()=>{const e=F('every').value;
   f.querySelectorAll('.fx-time').forEach(x=>x.style.display=['daily','weekly'].includes(e)?'':'none');
   f.querySelectorAll('.fx-wd').forEach(x=>x.style.display=e==='weekly'?'':'none');
@@ -6253,7 +6304,8 @@ function jobForm(j){
  f.querySelector('[data-a=save]').onclick=async()=>{
   const e=F('every').value;
   const job={name:F('name').value.trim(),prompt:F('prompt').value.trim(),every:e,model:F('model').value||null,
-   sid:F('sid').value||null,project:F('project').value||null,agent:F('agent').value||null,stop_at:F('stop_at').value||null,enabled:F('enabled').checked};
+   sid:F('sid').value||null,project:F('project').value||null,agent:F('agent').value||null,stop_at:F('stop_at').value||null,enabled:F('enabled').checked,
+   until_done:F('until_done').checked};
   if(!isNew)job.id=j.id;
   if(e==='daily'||e==='weekly')job.at=F('at').value;
   if(e==='weekly')job.weekday=+F('weekday').value;
@@ -7312,6 +7364,30 @@ function wordSpan(a,b){
  let i=0;while(i<a.length&&i<b.length&&a[i]===b[i])i++;
  let j=0;while(j<a.length-i&&j<b.length-i&&a[a.length-1-j]===b[b.length-1-j])j++;
  return [[i,a.length-j],[i,b.length-j]]}
+// Comments on diff lines, for the model: written against a line, gathered in a chip
+// above the box, and put into your message together when you are done reading.
+let DIFF_NOTES=[];
+function diffCommentBox(after,path,r){
+ if(after.nextElementSibling&&after.nextElementSibling.classList.contains('dnote'))return after.nextElementSibling.querySelector('input').focus();
+ const box=el('<span class=dnote><input placeholder="What should change here? Enter to add, Esc to cancel"></span>');
+ after.after(box);const inp=box.querySelector('input');inp.focus();
+ inp.onkeydown=e=>{e.stopPropagation();
+  if(e.key==='Escape'){box.remove();return}
+  if(e.key==='Enter'&&inp.value.trim()){
+   DIFF_NOTES.push({sid,path,line:r.num,side:r.kind==='d'?'removed':r.kind==='a'?'added':'',code:r.text.trim().slice(0,200),text:inp.value.trim()});
+   box.replaceWith(Object.assign(el('<span class=dnote done></span>'),{textContent:'💬 '+inp.value.trim()}));
+   drawDiffNotes()}}}
+function drawDiffNotes(){
+ document.querySelectorAll('#chips .notechip').forEach(x=>x.remove());
+ const mine=DIFF_NOTES.filter(n=>n.sid===sid);if(!mine.length)return;
+ const c=el(`<div class="chip notechip"><b>💬 ${mine.length} comment${mine.length>1?'s':''} on the changes</b>
+  <button class=ghost data-n=add>add to message</button><span class=x title="discard them">&times;</span></div>`);
+ c.querySelector('[data-n=add]').onclick=()=>{
+  const lines=mine.map(n=>`- ${n.path.split('/').slice(-2).join('/')}:${n.line}${n.side?' ('+n.side+')':''} \`${n.code}\` — ${n.text}`);
+  q.value=(q.value.trim()?q.value.trim()+'\n\n':'')+'Comments on your changes:\n'+lines.join('\n');
+  DIFF_NOTES=DIFF_NOTES.filter(n=>n.sid!==sid);drawDiffNotes();closeModal();q.focus();fitQ()};
+ c.querySelector('.x').onclick=()=>{DIFF_NOTES=DIFF_NOTES.filter(n=>n.sid!==sid);drawDiffNotes()};
+ $('#chips').appendChild(c)}
 function diffBlock(D,label,opts){
  opts=opts||{};
  const box=el('<div class=diff></div>');
@@ -7357,7 +7433,8 @@ function diffBlock(D,label,opts){
   const sp=document.createElement('span');
   if(r.kind==='h'){sp.className='h';sp.textContent=r.text;pre.appendChild(sp);return}
   sp.className=r.kind;
-  const num=el('<i class=ln></i>');num.textContent=r.num;sp.appendChild(num);
+  const num=el('<i class=ln title="comment on this line"></i>');num.textContent=r.num;sp.appendChild(num);
+  if(r.num!==''&&D.path)num.onclick=e=>{e.stopPropagation();diffCommentBox(sp,D.path,r)};
   const sign=el('<i class=sg></i>');sign.textContent=r.kind==='a'?'+':r.kind==='d'?'-':' ';sp.appendChild(sign);
   if(r.w&&r.w[1]>r.w[0]){
    sp.appendChild(document.createTextNode(r.text.slice(0,r.w[0])));
@@ -7498,7 +7575,14 @@ function copyAnswer(n){
 /* ---------------- goals ----------------
    What a chat keeps working toward across answers. The Mac drives it (checks the work
    after each answer, carries on or stops); this shows where it stands and its controls. */
-const GOALS={};
+const GOALS={}, GOAL_OFFERS={};
+let GOAL_HIST_OPEN=false, OFFER_TICK=null;
+// An answer that left work undone: the Mac offers to keep going until it is done, and
+// takes the offer on its own when the countdown runs out (Settings -> General).
+function setGoalOffer(s,p){
+ GOAL_OFFERS[s]=p?{...p,deadline:p.remaining!=null?Date.now()+p.remaining*1000:null}:null;
+ if(s===sid)drawGoal();
+ if(p)notify(s,"Keep going until it's done?",p.why||'')}
 const GOAL_WORD={active:'working toward',paused:'paused',blocked:'needs you',budget:'over budget',complete:'done'};
 async function loadGoal(s){
  try{const d=await (await fetch('/api/goal',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -7513,9 +7597,30 @@ async function followGoal(s){
   if(!g||g.status!=='active'||RUNNING.has(s))break;
   await new Promise(r=>setTimeout(r,3000))}}
  finally{delete followGoal.busy[s];if(s===sid)loadSessions()}}
+function drawOffer(bar,o){
+ bar.className='goalbar g-offer';bar.style.display='';
+ bar.innerHTML=`<span class=gst>◎ Keep going until it's done?</span><span class=gobj></span>
+  <button class=primary data-o=accept>Keep going until done</button><button class=ghost data-o=decline>No thanks</button>
+  <span class=greason></span>`;
+ bar.querySelector('.gobj').textContent=o.objective;bar.querySelector('.gobj').title=o.objective;
+ const why=bar.querySelector('.greason');
+ const tick=()=>{if(!bar.isConnected||GOAL_OFFERS[sid]!==o){clearInterval(OFFER_TICK);return}
+  const left=o.deadline?Math.max(0,Math.round((o.deadline-Date.now())/1000)):null;
+  why.textContent=(o.why?o.why[0].toUpperCase()+o.why.slice(1):'')+(left!=null?
+   (left>0?` · it carries on by itself in ${Math.floor(left/60)}:${String(left%60).padStart(2,'0')}`:' · carrying on…'):'');
+  if(left===0){clearInterval(OFFER_TICK);const s=sid;
+   setTimeout(async()=>{delete GOAL_OFFERS[s];await loadGoal(s);if(GOALS[s])afterTurn(s)},2500)}};
+ clearInterval(OFFER_TICK);tick();OFFER_TICK=setInterval(tick,1000);
+ bar.querySelectorAll('[data-o]').forEach(b=>b.onclick=async()=>{
+  const s=sid,op=b.dataset.o;
+  const d=await apiPost('/api/goal',{sid:s,op},'the offer');
+  delete GOAL_OFFERS[s];
+  if(d){GOALS[s]=d.goal||GOALS[s]||null;if(d.started){toast('carrying on toward the goal');setTimeout(()=>afterTurn(s),600)}}
+  if(s===sid)drawGoal();loadSessions()})}
 function drawGoal(){
  const bar=$('#goalbar');if(!bar)return;
- const g=sid&&GOALS[sid];
+ const g=sid&&GOALS[sid], o=sid&&GOAL_OFFERS[sid];
+ if(o&&(!g||g.status==='complete'))return drawOffer(bar,o);
  if(!g){bar.style.display='none';bar.innerHTML='';return}
  bar.className='goalbar g-'+g.status;bar.style.display='';
  const meta=[`${g.turns_used||0}/${g.max_turns} turns`];
@@ -7526,10 +7631,20 @@ function drawGoal(){
   ${g.status==='active'?'<button class=ghost data-g=pause>pause</button>':''}
   ${g.status!=='active'&&g.status!=='complete'?'<button class=ghost data-g=resume>resume</button>':''}
   <button class=ghost data-g=edit>edit</button><button class=ghost data-g=clear>clear</button>
-  ${g.reason?'<span class=greason></span>':''}`;
+  ${(g.history||[]).length>1?`<button class=ghost data-g=history>${GOAL_HIST_OPEN?'hide':'history'}</button>`:''}
+  ${g.reason?'<span class=greason></span>':''}
+  ${GOAL_HIST_OPEN&&(g.history||[]).length?'<div class=ghist></div>':''}`;
  bar.querySelector('.gobj').textContent=g.objective;bar.querySelector('.gobj').title=g.objective;
  if(g.reason)bar.querySelector('.greason').textContent=g.reason;
- bar.querySelectorAll('[data-g]').forEach(b=>b.onclick=()=>goalOp(b.dataset.g))}
+ // what each check said, newest first: why it carried on, and why it stopped
+ const hist=bar.querySelector('.ghist');
+ if(hist)(g.history||[]).slice().reverse().forEach(h=>{
+  const r=el('<div class=ghrow><span class=ght></span><b></b><span></span></div>');
+  r.querySelector('.ght').textContent=new Date(h.t*1000).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
+  r.querySelector('b').textContent=h.verdict;r.querySelector('span:last-child').textContent=h.reason||'';
+  hist.appendChild(r)});
+ bar.querySelectorAll('[data-g]').forEach(b=>b.onclick=()=>{
+  if(b.dataset.g==='history'){GOAL_HIST_OPEN=!GOAL_HIST_OPEN;drawGoal();return}goalOp(b.dataset.g)})}
 async function goalOp(op,extra){
  const s=sid;
  if(op==='edit')return editGoal();

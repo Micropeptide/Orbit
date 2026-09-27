@@ -93,6 +93,9 @@ class TestAFailedAnswerStopsTheQueue(Base):
         self.patch(self.q, "slot_enter", lambda *a, **k: True)
         self.patch(self.q, "slot_exit", lambda *a, **k: None)
         self.patch(self.ui, "_learn_later", lambda *a, **k: None)
+        # the answer's end drains the queue on a thread of its own, which could start the
+        # next message after this test has put the real model back
+        self.patch(self.ui, "_drain", lambda *a, **k: None)
         self.assertTrue(st.lock.acquire(blocking=False))
         self.ui.start_turn(st, "first", [], None)
         self.wait_free(st)

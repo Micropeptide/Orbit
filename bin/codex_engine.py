@@ -628,6 +628,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
 
     old_mk = marker_of(messages) or {}
     prev_total = list((old_mk.get("usage_total") or {}).get(thread) or [0, 0]) if old_mk.get("thread") == thread else [0, 0]
+    prev_total += [0] * (3 - len(prev_total))          # older markers had no cached count
     if sid: q.LAST_TURN.pop(sid, None)
     mk = {"thread": thread, "cwd": cwd, "model": spec.get("id"), "provider": provider_key or CHATGPT, "owner": sid}
     if host: mk["host"] = host
@@ -848,7 +849,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
             elif method == "thread/tokenUsage/updated":
                 tu = p.get("tokenUsage") or {}
                 usage = tu.get("total") or usage
-                mk["usage_total"] = {thread: [int((usage or {}).get("inputTokens") or 0), int((usage or {}).get("outputTokens") or 0)]}
+                mk["usage_total"] = {thread: [int((usage or {}).get("inputTokens") or 0), int((usage or {}).get("outputTokens") or 0),
+                                              int((usage or {}).get("cachedInputTokens") or 0)]}
                 last = tu.get("last") or {}
                 mk["ctx"] = int(last.get("inputTokens") or 0)
                 mk["ctx_max"] = int(tu.get("modelContextWindow") or 0)
@@ -900,6 +902,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         # the thread's totals so far, less where they stood before this answer
         rec = {"prompt_tokens": max(0, int(usage.get("inputTokens") or 0) - prev_total[0]),
                "completion_tokens": max(0, int(usage.get("outputTokens") or 0) - prev_total[1])}
+        cached = max(0, int(usage.get("cachedInputTokens") or 0) - prev_total[2])
+        if cached: rec["cached_tokens"] = cached         # served from cache: not new spending
         for m in reversed(messages):
             if m.get("role") == "assistant" and m.get("codex_thread") == thread:
                 m["usage"], m["secs"] = rec, round(time.time() - t0, 1)

@@ -239,6 +239,8 @@ class TestRedoAfterUndo(Workspace):
         self.assertTrue(r["redone"], r["lines"])
         self.assertEqual(open(a).read(), "after\n")
         self.assertEqual(open(os.path.join(self.tmp, "new.txt")).read(), "made here\n")
+        self.assertFalse([k for k, v in q._trash_index().items() if v.get("original", "").endswith("new.txt")],
+                         "the bin still lists a file redo put back")
 
     def test_your_edits_since_the_undo_stop_it(self):
         a = self.file("b.txt", "one\n")
