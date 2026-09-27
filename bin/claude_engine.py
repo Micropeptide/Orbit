@@ -829,6 +829,14 @@ def decide(tool, inp, ctx, req=None):
         return False, "Plan mode is on, so nothing may be changed. Describe the change instead.", None, None
     fn, args = orbit_view(tool, inp)
     reason = f"Claude Code wants to use {tool}" + (f": {req['description']}" if req.get("description") else "")
+    # The chat's own autonomy, as the native loop reads it -- not Orbit's global value.
+    # Permission prompts arrive on their own thread, where TURN_CTX knows no chat, so the
+    # id comes with the run. Reading S here meant a chat set back to "ask" was still run
+    # on "full" in a Claude chat, and a chat set to "full" on a global "ask" asked anyway.
+    try:
+        mode = Q.chat_setting("autonomy_mode", ctx.get("sid"), default="ask") or "ask"
+    except Exception:
+        mode = "ask"
     if c.get("orbit_rules") or ctx.get("orbit_gate"):
         if _glob_match(tool, c.get("auto_allow")):
             return True, "", inp, None
@@ -864,13 +872,15 @@ def decide(tool, inp, ctx, req=None):
         # a call the rules have read and found nothing in is what made auto mode feel
         # switched off: a long session asks about every single ctx_execute. In "ask"
         # this still asks, because there the point is to see everything.
-        if not level and tool.startswith("mcp__") \
-                and Q.S.get("autonomy_mode", "ask") in ("auto", "full"):
+        if not level and tool.startswith("mcp__") and mode in ("auto", "full"):
             return True, "", inp, None
         reason = why or reason
-        mode = Q.S.get("autonomy_mode", "ask")
         by_rule = Q.allowed_by_rule(fn, args)
-        auto = bool(by_rule) or (mode == "full" and not Q._never_auto(fn, reason)) \
+        # A rule is a standing yes, not a way round the floor -- as the native loop has
+        # it. Orbit's own suggestion for `git push origin main` is "git push*", which
+        # also covers `git push --force`; in a Claude chat that pattern waved it through.
+        auto = (bool(by_rule) and not Q._never_auto(fn, reason)) \
+            or (mode == "full" and not Q._never_auto(fn, reason)) \
             or (mode == "auto" and Q._auto_approvable(fn, args, reason))
         if auto:
             ctx["emit"]("auto_approved", {"name": tool, "args": inp, "reason": reason,
@@ -928,8 +938,7 @@ def _answer_questions(inp, ctx):
         text = str(qd.get("question") or "")
         opts = [str(o.get("label") if isinstance(o, dict) else o) for o in qd.get("options") or []]
         if Q.asks_to_continue(text):
-            answers[text] = next((o for o in opts if re.match(r"(?i)(yes|continue|keep|proceed)", o)),
-                                 "Yes — keep going")
+            answers[text] = Q.continue_choice(text, opts)
             continue
         ans = ask(text[:600], opts[:8], bool(qd.get("multiSelect"))) if ask else None
         if ans is None or ans == "":
@@ -1719,7 +1728,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         pass
     ctx = {"cfg": c, "read_only": bool(read_only), "emit": emit, "approve": approve,
            "ask": getattr(T, "ask", None), "roots": roots,
-           "orbit_gate": orbit_is_the_gate(mode, kind, read_only)}
+           "orbit_gate": orbit_is_the_gate(mode, kind, read_only), "sid": sid}
 
     # state of the stream
     cur = None                         # the Orbit assistant message being written
@@ -3060,17 +3069,39 @@ def skill_install(source, overwrite=False, dest_base=None):
             name = re.sub(r"[^A-Za-z0-9_.-]+", "-", meta.get("name") or os.path.basename(d.rstrip(os.sep))).strip("-")
             if d == root and tmp and not meta.get("name"):
                 name = re.sub(r"\.git$", "", source.rstrip("/").split("/")[-1])
-            dest = os.path.join(dest_base, name)
+            # A name is a folder name here, and the repository chooses it. "." or ".."
+            # (dots passed the filter) made `dest` the skills folder or ~/.claude itself,
+            # and an overwrite then sent the whole of it to the Trash.
+            name = name.strip(".")
+            dest = os.path.realpath(os.path.join(dest_base, name))
+            if not name or os.path.dirname(dest) != os.path.realpath(dest_base):
+                skipped.append(name or "(unnamed)"); continue
             if os.path.exists(dest) and not overwrite:
                 skipped.append(name); continue
             if os.path.exists(dest):
                 _to_trash(dest)
-            shutil.copytree(d, dest, ignore=shutil.ignore_patterns(".git"))
+            # Links are copied as links, never followed, and only if they point inside the
+            # skill. Following them let a repository ship `x -> ~/.ssh/id_ed25519` and have
+            # the installer copy the private key into ~/.claude/skills in plain sight.
+            shutil.copytree(d, dest, symlinks=True, ignore=shutil.ignore_patterns(".git"))
+            _drop_escaping_links(dest)
             installed.append(name)
         _SKILL_INDEX["key"] = None
         return {"ok": True, "installed": installed, "skipped": skipped}
     finally:
         if tmp: shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _drop_escaping_links(root):
+    """Remove every symlink under root that points outside it."""
+    real_root = os.path.realpath(root)
+    for dp, dns, fns in os.walk(root, followlinks=False):
+        for n in dns + fns:
+            p = os.path.join(dp, n)
+            if os.path.islink(p):
+                tgt = os.path.realpath(p)
+                if tgt != real_root and not tgt.startswith(real_root + os.sep):
+                    os.unlink(p)
 
 
 def _to_trash(path):

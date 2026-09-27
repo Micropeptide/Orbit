@@ -4511,7 +4511,10 @@ async function openSettings(tab){
    $('#g_verify').checked=!!draft.verify_turns;
    {const sel=$('#g_reviewer'),cur=draft.review_model||'';
     // a reviewer has to be somewhere else: a local one is the problem, not the fix
-    const away=(MODELS.models||[]).filter(m=>!m.switch&&m.ready!==false&&m.provider!=='local'&&m.provider!=='bionic');
+    // somewhere else, able to answer, and not a CLI agent: a reviewer judges, it must not be
+    // able to act on the text it is judging
+    const away=(MODELS.models||[]).filter(m=>!m.switch&&m.ready!==false&&m.provider!=='local'&&m.provider!=='bionic'
+      &&!/cli$/i.test(m.kind||'')&&!/ · CLI$/.test(m.label||''));
     const g2={};away.forEach(m=>{(g2[m.provider_label||'other']=g2[m.provider_label||'other']||[]).push(m)});
     sel.innerHTML='<option value="">off — ask me</option>'+
      Object.entries(g2).map(([g,list])=>`<optgroup label="${esc(g)}">`+list.map(m=>{

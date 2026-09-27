@@ -1888,7 +1888,15 @@ def _git_reads(toks):
                          "--merged", "--no-merged", "--sort", "--format", sub)
                    or not t.startswith("-") and False
                    for t in toks[1:] if t != sub) or not [t for t in toks[1:] if t != sub]
-    return sub in {"status", "log", "diff", "show", "remote", "describe",
+    if sub == "remote":
+        # `git remote` and `-v` list; `get-url` and `show` read. Everything else changes
+        # something: set-url repoints where a push goes, remove/rename/add edit the
+        # config, prune deletes refs and update fetches. All of them were auto-approved
+        # as reads, and batched in parallel with the greps.
+        rest = [t for t in toks[1:] if t != "remote"]
+        verb = next((t for t in rest if not t.startswith("-")), "")
+        return all(t in ("-v", "--verbose") for t in rest) or verb in ("get-url", "show")
+    return sub in {"status", "log", "diff", "show", "describe",
                    "rev-parse", "blame", "shortlog", "ls-files", "ls-tree"}
 
 def _sed_reads(toks):
@@ -3890,6 +3898,12 @@ def _rule_pattern_suggestion(fn, args):
     args = args or {}
     text = _permission_text(fn, args).strip()
     if fn in ("run_shell", "run_shell_background", "cluster_run") and text:
+        # Something the rules flagged is offered exactly as it was run. Its first two
+        # words and a star turned `rm -rf build` into "rm -rf*", so one click on "for
+        # the rest of this chat" handed over `rm -rf ~/Documents/thesis` as well.
+        try: flagged = bool(_risk_check_base(fn, args)[0])
+        except Exception: flagged = True
+        if flagged: return text
         words = text.split()
         head = " ".join(words[:2]) if len(words) > 1 else words[0]
         return head + "*"
@@ -3929,6 +3943,66 @@ def remove_permission_rule(kind, index):
     save_settings(S)
     return lst
 
+# What the rules read, which is not always everything a call carries. A file's content
+# is being WRITTEN, not run; `grep sudo` searches for a word and `git commit -m "drop
+# sudo"` is a sentence. Reading all of it made a README that says `sudo apt install`, a
+# notes edit about shutting a VM down, a .sql migration and a commit message each a
+# never-auto prompt -- in every mode, and never shown to the reviewer. The narrowing is
+# only ever taken when it is certain; anything unrecognised is read whole, as before.
+_CONTENT_KEYS = {"content", "new_string", "old_string", "edits", "text", "new_source",
+                 "cell_source", "source"}
+_TEXT_PROGRAMS = {"grep", "egrep", "fgrep", "rg", "ag", "ack", "echo", "printf", "cat",
+                  "less", "more", "head", "tail", "wc", "sort", "uniq", "cut", "tr", "column",
+                  "jq", "yq", "ls", "stat", "file", "which", "type", "man", "diff", "cmp",
+                  "comm", "nl", "fold", "fmt", "tldr", "pbcopy"}
+# Anything that can run text as code. With one of these anywhere on the line, nothing is
+# narrowed: `echo "rm -rf /" | sh` keeps its danger in the part that looks like data.
+_RUNS_TEXT = {"bash", "sh", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "eval", "exec",
+              "source", ".", "ssh", "xargs", "sudo", "doas", "su", "env", "nohup", "time",
+              "watch", "nice", "timeout", "parallel", "osascript", "python", "python3",
+              "node", "perl", "ruby", "php", "lua", "awk", "gawk", "find", "make", "npx",
+              "script", "expect", "tclsh", "open"}
+_GIT_DATA_FLAGS = {"-m", "--message", "--grep", "-S", "-G", "--author", "--committer"}
+
+
+def _risk_blob(fn, args):
+    """The text risk_check reads for this call. See the note above."""
+    args = args or {}
+    whole = " ".join(str(v) for v in args.values())
+    if fn in ("write_file", "edit_file", "multi_edit", "notebook_edit", "create_file"):
+        return " ".join(str(v) for k, v in args.items() if k not in _CONTENT_KEYS)
+    if fn not in ("run_shell", "run_shell_background") or not isinstance(args.get("command"), str):
+        return whole
+    import shlex
+    cmd = args["command"]
+    if _re.search(r"\$\(|`|<\(|>\(|\$\{", cmd):          # it computes a command: read it all
+        return whole
+    segs, parsed = _split_commands(cmd), []
+    for seg in segs:
+        try: toks = shlex.split(seg)
+        except ValueError: return whole
+        i = 0
+        while i < len(toks) and _re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[i]): i += 1
+        if i < len(toks) and os.path.basename(toks[i]) in _RUNS_TEXT: return whole
+        parsed.append((seg, toks[i:]))
+    out = []
+    for seg, toks in parsed:
+        prog = os.path.basename(toks[0]) if toks else ""
+        if prog in _TEXT_PROGRAMS:
+            out.append(prog)                    # its arguments are text, not orders
+        elif prog == "git":
+            keep, skip = [], False
+            for t in toks:
+                if skip: skip = False; continue
+                if t in _GIT_DATA_FLAGS: skip = True; continue
+                if any(t.startswith(f + "=") for f in _GIT_DATA_FLAGS if f.startswith("--")): continue
+                keep.append(t)
+            out.append(" ".join(keep))
+        else:
+            out.append(seg)
+    return " ; ".join(out)
+
+
 def risk_check(fn, args):
     """Return (level, reason). level: 'block' | 'confirm' | None.
 
@@ -3946,7 +4020,7 @@ def risk_check(fn, args):
         return ("block", "denied by your own rule (" + (denied["note"] or
                 f"{denied['tool']}: {denied['pattern']}") +
                 ") — remove it in Settings -> Tools -> Permissions to allow this again")
-    blob = " ".join(str(v) for v in (args or {}).values())
+    blob = _risk_blob(fn, args)
     low = blob.lower()
     # The python tool runs real code, so it is also a shell if you let it be:
     # subprocess.run(cmd, shell=True) walked straight past "Enable shell: off".
@@ -4094,7 +4168,7 @@ def _never_auto(fn, reason):
     base = str(reason or "")
     if base.endswith(INSIDE_WS): base = base[:-len(INSIDE_WS)].strip()
     base = base.split(" (also: ")[0].strip()
-    return fn in NEVER_AUTO_FNS or base in NEVER_AUTO
+    return fn in NEVER_AUTO_FNS or base in NEVER_AUTO or base.startswith(NEVER_AUTO_PREFIXES)
 
 ORBIT_SAYS = "[Orbit — automatic, not from the user and not approval for anything:"
 
@@ -4114,6 +4188,12 @@ NEVER_AUTO = {
     "destructive git",
 }
 NEVER_AUTO_FNS = {"self_patch", "self_rollback"}
+# Reasons that name what they touch, so they cannot be matched whole. A write into
+# ~/.ssh, a login shell, a launch agent or an agent's own settings is a person's call
+# in every mode: the edit_file shortcut, a saved rule, "full" and the review model all
+# used to be able to wave `edit_file ~/.ssh/authorized_keys` through, because the
+# verdict was an ordinary confirm and each of them only stops at the never-auto floor.
+NEVER_AUTO_PREFIXES = ("writing inside ",)
 
 def full_access():
     """'Full computer access' — Orbit's equivalent of --dangerously-skip-permissions.
@@ -4198,8 +4278,11 @@ def _defang_fence(text):
 
 
 def wrap_untrusted(fn, output):
-    """Fence tool output so the model treats it as data, and flag injection attempts."""
-    if fn not in UNTRUSTED_TOOLS and not fn.startswith("paperfetch_"):
+    """Fence tool output so the model treats it as data, and flag injection attempts.
+
+    Every MCP tool counts: a server's result is whatever it read -- a note, a web page,
+    a message someone sent -- and was handed to the model unfenced."""
+    if fn not in UNTRUSTED_TOOLS and not fn.startswith("paperfetch_") and fn not in MCP_TOOLMAP:
         return output, []
     hits = scan_injection(output)
     safe = _defang_fence(output)
@@ -5214,8 +5297,12 @@ def helper_model(want=None):
     if not want: return None
     try:
         # current_model() falls back to the default for an id it does not know, which
-        # would quietly send the side work somewhere else; ask the catalogue instead
-        return want if any(m["id"] == want for m in model_catalogue()) else None
+        # would quietly send the side work somewhere else; ask the catalogue instead.
+        # And only if it can actually answer: a chosen model whose key was since removed
+        # stayed "chosen", and every title, compaction and check then failed instead of
+        # falling back to the chat's own model.
+        m = next((m for m in model_catalogue() if m["id"] == want), None)
+        return want if m and m.get("ready") is not False else None
     except Exception:
         return None
 
@@ -5327,6 +5414,8 @@ def _transcript_for_verify(messages, cap=20000):
     return text[-cap:]
 
 
+REVIEW_MAX_CHARS = 12000
+
 REVIEW_ACTION_ASK = """You are a safety reviewer for a coding agent. You are given one
 action the agent wants to take, and the concern an automatic rule raised about it. Decide
 whether it is safe to run without asking the person.
@@ -5364,9 +5453,15 @@ def review_model():
     want = str(chat_setting("review_model") or "").strip()
     if not want or _model_is_local(want): return None
     try:
-        return want if any(m.get("id") == want for m in model_catalogue()) else None
+        m = next((m for m in model_catalogue() if m.get("id") == want), None)
     except Exception:
         return None
+    # Not one that is signed out or has no key: every review would fail and quietly
+    # turn into a prompt. And not a CLI-backed one: that is a whole coding agent, with
+    # its own tools and a working folder, being handed text that may have been written
+    # by whoever the action came from. A reviewer judges; it must not be able to act.
+    if not m or m.get("ready") is False or m.get("kind") == "cli": return None
+    return want
 
 
 def review_action(fn, args, reason, model=None):
@@ -5377,15 +5472,33 @@ def review_action(fn, args, reason, model=None):
     is what would have happened anyway."""
     mid = model or review_model()
     if not mid: return (False, "no reviewer is set")
-    body = json.dumps({"tool": fn, "arguments": args}, default=str)[:4000]
+    body = json.dumps({"tool": fn, "arguments": args}, default=str)
+    # Refuse rather than judge half of it. This used to cut at 4,000 characters, and a
+    # reviewer shown the harmless head of a long command could say yes to the tail.
+    if len(body) > REVIEW_MAX_CHARS:
+        return (False, f"too long to review ({len(body):,} characters)")
     safe, _hits = wrap_untrusted("fetch_url", body)      # fence it: these are not orders
     ask = (f"The rule says: {reason}\n\nThe action:\n{safe}")
-    try:
-        out = stream_call([{"role": "system", "content": REVIEW_ACTION_ASK},
-                           {"role": "user", "content": ask}],
-                          None, think=False, model=mid)
-    except Exception as e:
-        return (False, f"the reviewer could not run ({type(e).__name__})")
+    # Its own deadline. Through stream_call alone a stuck reviewer could hold a
+    # permission request for the model's first-token timeout -- ten minutes and more --
+    # with nothing on screen. Past this it is simply "not a yes", and you are asked.
+    limit = float(S.get("review_timeout_s") or 20)
+    box, stop = {}, threading.Event()
+    def _ask():
+        try:
+            box["out"] = stream_call([{"role": "system", "content": REVIEW_ACTION_ASK},
+                                      {"role": "user", "content": ask}],
+                                     None, think=False, model=mid, cancel=stop)
+        except Exception as e:
+            box["err"] = e
+    t = threading.Thread(target=_ask, daemon=True, name="review-action")
+    t.start(); t.join(limit)
+    if t.is_alive():
+        stop.set()
+        return (False, f"the reviewer took longer than {limit:.0f}s")
+    if "err" in box:
+        return (False, f"the reviewer could not run ({type(box['err']).__name__})")
+    out = box.get("out") or {}
     d = _verify_json(out.get("content") or "")
     if not isinstance(d, dict) or "allow" not in d:
         return (False, "the reviewer did not answer in JSON")
@@ -6751,6 +6864,10 @@ def sensitive_write(path):
         p = os.path.realpath(os.path.expanduser(str(path)))
     except (TypeError, ValueError):
         return None
+    # A git hook is run by git itself on the next commit, in any repository: a write there
+    # is an edit to what runs next, however ordinary the file looks.
+    if (os.sep + ".git" + os.sep + "hooks" + os.sep) in p + os.sep:
+        return ".git/hooks/"
     for pat in SENSITIVE_WRITE:
         want = os.path.expanduser(pat).rstrip(os.sep)
         try: want = os.path.realpath(want)      # /etc is /private/etc on a Mac
@@ -6760,14 +6877,59 @@ def sensitive_write(path):
     return None
 
 
+_WRITES_DEST = {"cp", "install", "ln", "rsync", "scp", "ditto"}      # the last operand
+_WRITES_ALL = {"mv", "tee", "touch", "truncate", "chmod", "chown", "chgrp", "chflags",
+               "xattr", "plutil", "defaults"}                              # every operand
+_REDIRECT = _re.compile(r'(?<![<&])(?:\d?>>?|&>>?|>\|)\s*([^\s;|&<>()]+)')
+
+
+def _shell_write_targets(cmd):
+    """Where a shell command line writes: its redirections, and the destinations of the
+    commands whose job is to put something somewhere. Not where it reads -- `cat
+    ~/.zshrc` is not an edit, and calling it one would make reading a file ask.
+
+    `mv` counts every operand because it removes its source; `cp` only its last."""
+    import shlex
+    out = []
+    for seg in _split_commands(cmd or ""):
+        out += [m.group(1) for m in _REDIRECT.finditer(seg)]
+        try: toks = shlex.split(seg)
+        except ValueError: toks = seg.split()
+        i = 0
+        while i < len(toks) and (_re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", toks[i])
+                                 or toks[i] in ("sudo", "env", "nohup", "command", "exec", "time")):
+            i += 1
+        if i >= len(toks): continue
+        prog = os.path.basename(toks[i])
+        rest, skip = [], False
+        for t in toks[i + 1:]:
+            if skip: skip = False; continue
+            if _re.fullmatch(r"\d?>>?|&>>?|>\||<|<<<?", t): skip = True; continue
+            if t.startswith((">", "<")) or _re.match(r"^\d>", t) or t.startswith("-"): continue
+            rest.append(t)
+        if prog in _WRITES_ALL: out += rest
+        elif prog in _WRITES_DEST and rest: out.append(rest[-1])
+        elif prog == "sed" and any(t == "-i" or t.startswith(("-i", "--in-place")) for t in toks[i + 1:]):
+            out += rest
+        elif prog == "dd": out += [t[3:] for t in toks[i + 1:] if t.startswith("of=")]
+    return out
+
+
 def risk_check(fn, args):
     level, reason = _risk_check_base(fn, args)
     if level: return level, reason
     if fn in _WRITE_TOOLS:
         a = args or {}
-        hit = sensitive_write(a.get("path") or a.get("file_path") or a.get("notebook_path"))
-        if hit:
-            return ("confirm", f"writing inside {hit} — keys, login shells and services live there")
+        targets = [a.get("path") or a.get("file_path") or a.get("notebook_path")]
+        if fn in ("run_shell", "run_shell_background"):
+            # `echo … >> ~/.ssh/authorized_keys`, `tee -a ~/.zshrc`, `cp x
+            # ~/Library/LaunchAgents/` drew no verdict at all: only the write tools'
+            # own path argument was ever looked at.
+            targets = _shell_write_targets(a.get("command"))
+        for t in targets:
+            hit = sensitive_write(t)
+            if hit:
+                return ("confirm", f"writing inside {hit} — keys, login shells and services live there")
     ft = file_tool(fn) if fn not in BUILTIN else None
     if ft and not ft["safe"]:
         return ("confirm", f"run the custom tool {fn} ({os.path.basename(ft['path'])})")
@@ -7337,16 +7499,43 @@ PLAN_MODE_NOTE = ("## Plan mode\nThe user has switched on plan mode: read, searc
                   "tasks. Finish with a concrete plan: the steps, the files and exact changes, and how "
                   "to check the result. They switch plan mode off when they want it carried out.")
 
+# Only a check-in -- "shall I keep going?" -- and never a decision. The question has to
+# END at the verb, or at filler that names no action ("with the rest", "to the next
+# step"). This used to match "should I proceed" wherever it stood, so "Should I proceed
+# with dropping the users table?" was answered "Yes: keep going" on the user's behalf.
+_GENERIC_TAIL = (r"(?:\s+(?:with|to|on(?:\s+to)?)\s+(?:the\s+)?"
+                 r"(?:rest|remaining(?:\s+\w+)?|next(?:\s+\w+)?|task|plan|work|steps?|same|"
+                 r"remainder|others?)|\s+as\s+planned|\s+from\s+here|\s+(?:now|then|anyway))?")
 _CONTINUE_Q = _re.compile(
     r"\b(?:shall|should|can|may|do you want|would you like|want)\s+(?:me\s+to|i|us\s+to|we)\s+"
-    r"(?:continue|keep going|proceed|carry on|go on|move on|resume)\b"
-    r"|\b(?:continue|keep going|proceed|carry on|go on)\s*(?:\([^)]*\))?\s*\?\s*$"
-    r"|\bshould i stop\b|\bstop here\s*\?", _re.I)
+    r"(?:continue|keep going|proceed|carry on|go on|move on|resume)" + _GENERIC_TAIL +
+    r"\s*(?:\([^)]*\))?\s*[?.!]?\s*$"
+    r"|\b(?:continue|keep going|proceed|carry on|go on)" + _GENERIC_TAIL + r"\s*(?:\([^)]*\))?\s*\?\s*$"
+    r"|\bshould i stop(?:\s+here|\s+now)?\s*\?\s*$|\bstop here\s*\?\s*$", _re.I)
+_STOP_Q = _re.compile(r"\bstop\b", _re.I)
 
 def asks_to_continue(text):
-    """True if text (or its last few lines) asks whether to keep going."""
+    """True if text (or its last few lines) only asks whether to keep going."""
     tail = (text or "").strip()[-400:]
     return bool(_CONTINUE_Q.search(tail))
+
+
+def continue_choice(question, options):
+    """The option that means "keep going", for a question asks_to_continue() matched.
+
+    Not the first yes-shaped option: "Should I stop here?" with ["Yes, stop", "No, keep
+    going"] was answered "Yes, stop" -- the opposite of what answering it is for. The
+    option that says to carry on wins; failing that, "no" to a question about stopping
+    and "yes" to one about continuing."""
+    opts = [str(o) for o in options or []]
+    go = _re.compile(r"(?i)\b(keep|continue|proceed|carry on|go on|resume)\b")
+    for o in opts:
+        if go.search(o) and not _STOP_Q.search(o): return o
+    stop_q = bool(_STOP_Q.search(str(question or "")))
+    want = r"(?i)^\s*no\b" if stop_q else r"(?i)^\s*(yes|sure|ok)\b"
+    for o in opts:
+        if _re.match(want, o) and not (not stop_q and _STOP_Q.search(o)): return o
+    return "No — keep going" if stop_q else "Yes — keep going"
 
 def t_ask_user(question, options=None, multiple=False):
     """Ask the user something mid-task and wait for the answer -- a choice
@@ -7354,9 +7543,12 @@ def t_ask_user(question, options=None, multiple=False):
     ask = getattr(TURN_CTX, "ask", None)
     opts = [str(o)[:120] for o in (options or []) if str(o).strip()][:8]
     if asks_to_continue(str(question)):
-        # asking leaves the run waiting on someone who may be away for hours
-        return ("Yes: keep going. The user wants long tasks to run to the end without "
-                "check-ins, so don't ask this again; carry on until everything is done.")
+        # asking leaves the run waiting on someone who may be away for hours. Not "Yes":
+        # to "Should I stop here?" a yes means stop, which is the opposite of the answer.
+        pick = continue_choice(question, opts) if opts else ""
+        return ((f"{pick}. " if pick else "") + "Don't stop: keep going. The user wants long tasks "
+                "to run to the end without check-ins, so don't ask this again; carry on until "
+                "everything is done.")
     if not ask:
         return ("Nobody is watching this run, so there's no one to ask. Make the most reasonable "
                 "choice yourself, say which and why, and carry on.")
