@@ -224,5 +224,69 @@ class TestUndoSaysWhatItDid(Workspace):
         self.assertEqual(open(p).read(), "start\n")
 
 
+class TestRedoAfterUndo(Workspace):
+    def test_undo_then_redo_puts_the_answers_work_back(self):
+        a = self.file("a.txt", "before\n")
+        q.TURN_CTX.changes = []
+        q.t_read_file(a); q.t_edit_file(a, "before", "after")
+        q.t_write_file(os.path.join(self.tmp, "new.txt"), "made here\n")
+        ch = q.TURN_CTX.changes
+        u = q.undo_result(ch)
+        self.assertTrue(u["undone"])
+        self.assertEqual(open(a).read(), "before\n")
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "new.txt")))
+        r = q.redo_result(u["redo"])
+        self.assertTrue(r["redone"], r["lines"])
+        self.assertEqual(open(a).read(), "after\n")
+        self.assertEqual(open(os.path.join(self.tmp, "new.txt")).read(), "made here\n")
+
+    def test_your_edits_since_the_undo_stop_it(self):
+        a = self.file("b.txt", "one\n")
+        q.TURN_CTX.changes = []
+        q.t_read_file(a); q.t_edit_file(a, "one", "two")
+        u = q.undo_result(q.TURN_CTX.changes)
+        open(a, "w").write("mine\n")
+        r = q.redo_result(u["redo"])
+        self.assertFalse(r["redone"]); self.assertEqual(open(a).read(), "mine\n")
+        self.assertTrue(q.redo_result(u["redo"], force=True)["redone"])
+        self.assertEqual(open(a).read(), "two\n")
+
+
+class TestTheDockListsFiles(unittest.TestCase):
+    def setUp(self):
+        self.repo = tempfile.mkdtemp(prefix="orbit-gitfiles-")
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        q._GIT_CACHE.clear()
+
+    def git(self, *a):
+        subprocess.run(["git", "-C", self.repo, "-c", "user.name=t", "-c", "user.email=t@example.com", *a],
+                       check=True, capture_output=True)
+
+    def test_each_file_with_its_counts_and_its_diff(self):
+        self.git("init", "-q")
+        open(os.path.join(self.repo, "a.py"), "w").write("x = 1\n")
+        self.git("add", "a.py"); self.git("commit", "-q", "-m", "one")
+        open(os.path.join(self.repo, "a.py"), "w").write("x = 2\ny = 3\n")
+        open(os.path.join(self.repo, "new.md"), "w").write("hello\n")
+        st = q.git_state(self.repo, max_age=0)
+        byp = {f["path"]: f for f in st["files"]}
+        self.assertEqual((byp["a.py"]["status"], byp["a.py"]["added"], byp["a.py"]["removed"]), ("M", 2, 1))
+        self.assertEqual(byp["new.md"]["status"], "?")
+        d = q.git_file_diff(self.repo, "a.py")
+        self.assertIn("+x = 2", d["diff"])
+        self.assertIn("+hello", q.git_file_diff(self.repo, "new.md")["diff"])
+        self.assertIn("error", q.git_file_diff(self.repo, "../outside"))
+
+    def test_a_merge_left_half_done_is_named(self):
+        self.git("init", "-q", "-b", "main")
+        f = os.path.join(self.repo, "f.txt")
+        open(f, "w").write("base\n"); self.git("add", "."); self.git("commit", "-q", "-m", "base")
+        self.git("checkout", "-q", "-b", "other"); open(f, "w").write("other\n"); self.git("commit", "-qam", "o")
+        self.git("checkout", "-q", "main"); open(f, "w").write("main\n"); self.git("commit", "-qam", "m")
+        subprocess.run(["git", "-C", self.repo, "merge", "other"], capture_output=True)
+        st = q.git_state(self.repo, max_age=0)
+        self.assertEqual((st.get("op"), st["conflicts"]), ("merge", 1))
+
+
 if __name__ == "__main__":
     unittest.main()
