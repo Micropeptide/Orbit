@@ -376,18 +376,31 @@ def home_overview():
 
 def jdump(o): return json.dumps(o, default=str)
 
+# What save_session writes itself, from the chat as it is in memory. Everything else in
+# the file belongs to someone else and is carried over untouched.
+_SAVE_OWNS = {"schema", "title", "messages", "saved", "model", "sys_override", "project",
+              "running_since", "plan", "plan_mode", "title_auto", "host", "queue", "queue_paused"}
+
 def save_session(st=None):
     """No-op for temporary chats — they must leave no trace."""
     st = st or S
-    if st.temp: return
+    if st.temp or getattr(st, "deleted", False): return
     extra = {}
     try:
         old = json.load(open(q.session_path(st.sid)))
         if isinstance(old, dict):
-            for k in ("pinned", "archived", "tags", "order", "title_auto"):
-                if k in old: extra[k] = old[k]
+            # Every key this function does not write itself is kept as it is on disk.
+            # It used to keep five by name and drop the rest, so whatever another path
+            # wrote was lost on the next save: `project_set` from moving a chat out of a
+            # project (it went back in after one more message), and anything added since.
+            for k, v in old.items():
+                if k not in _SAVE_OWNS: extra[k] = v
+            if "title_auto" in old: extra["title_auto"] = old["title_auto"]
     except Exception: pass
-    extra.update(getattr(st, "flags", None) or {})   # pins set before the first save
+    # pins and archives set before the chat had a file; once it has one, the file is the
+    # record -- this used to win over it, so an unpin written to disk came back as a pin
+    for k, v in (getattr(st, "flags", None) or {}).items():
+        extra.setdefault(k, v)
     if getattr(st, "model", None): extra["model"] = st.model
     if st.sys_override: extra["sys_override"] = st.sys_override
     # always written, so taking a chat out of a project sticks; moving one in
@@ -409,13 +422,21 @@ def save_session(st=None):
         if st.queue_paused: extra["queue_paused"] = True
     q.session_save(st.sid, st.msgs, st.title, extra)
 
+# Files from the workspace and from uploads are whatever the agent fetched or wrote. An
+# SVG is a document that can carry script, and served on Orbit's own origin, opened
+# directly, it could read the page's token cookie and call the API. Sandboxed, it is a
+# picture and nothing more; in an <img> it looks exactly the same.
+_INERT = {"Content-Security-Policy": "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'",
+          "X-Content-Type-Options": "nosniff"}
+
 class H(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     def log_message(self, *a): pass
 
-    def _send(self, code, body, ctype="application/json"):
+    def _send(self, code, body, ctype="application/json", headers=None):
         b = body.encode() if isinstance(body, str) else body
         self.send_response(code); self.send_header("Content-Type", ctype)
+        for k, v in (headers or {}).items(): self.send_header(k, v)
         self.send_header("Content-Length", str(len(b))); self.end_headers()
         try: self.wfile.write(b)
         except (BrokenPipeError, ConnectionResetError): pass
@@ -1091,13 +1112,16 @@ class H(http.server.BaseHTTPRequestHandler):
                 return self._send(404, jdump({"error": str(e)}))
         if p.startswith("/api/ws/"):
             rel = _up.unquote(p[len("/api/ws/"):])
-            fp = os.path.normpath(os.path.join(q.WORKSPACE, rel))
-            if not fp.startswith(os.path.abspath(q.WORKSPACE)) or not os.path.exists(fp):
+            # Inside the workspace, and really inside: resolved through links, and compared
+            # as a folder. A bare startswith() also served a sibling such as workspace-old/.
+            root = os.path.realpath(q.WORKSPACE)
+            fp = os.path.realpath(os.path.join(root, rel))
+            if not (fp == root or fp.startswith(root + os.sep)) or not os.path.isfile(fp):
                 return self._send(404, b"", "text/plain")
             ext = fp.rsplit(".", 1)[-1].lower()
             ct = {"png":"image/png","jpg":"image/jpeg","jpeg":"image/jpeg","svg":"image/svg+xml",
                   "gif":"image/gif","webp":"image/webp"}.get(ext, "application/octet-stream")
-            return self._send(200, open(fp, "rb").read(), ct)
+            return self._send(200, open(fp, "rb").read(), ct, _INERT)
         if p.startswith("/api/file/"):
             name = os.path.basename(p.rsplit("/", 1)[-1])
             fp = os.path.join(q.UPLOADS, name)
@@ -1105,7 +1129,7 @@ class H(http.server.BaseHTTPRequestHandler):
             ext = name.rsplit(".", 1)[-1].lower()
             ct = {"png":"image/png","jpg":"image/jpeg","jpeg":"image/jpeg",
                   "gif":"image/gif","webp":"image/webp"}.get(ext, "application/octet-stream")
-            return self._send(200, open(fp, "rb").read(), ct)
+            return self._send(200, open(fp, "rb").read(), ct, _INERT)
         self._send(404, "{}")
 
     # ------------------------------------------------------------ POST
@@ -1160,6 +1184,14 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._send(200, jdump({"before": before, "after": len(st.msgs), "summary": summary}))
         if p == "/api/delete":
             did = d.get("id", "")
+            # A chat that is answering is stopped first and can no longer be written. Its
+            # next checkpoint used to put the file straight back, so the chat reappeared --
+            # and restoring the bin's older copy later overwrote the rest of that answer.
+            st_ = STATES.get(did) or (S if S.sid == did else None)
+            if st_ is not None:
+                st_.deleted = True
+                st_.cancel.set()
+                if st_ is not S: STATES.pop(did, None)
             q.CE.hide_history(did)          # a deleted Claude-Qwen chat stays out of the sidebar
             q.CE.close_live(did)            # and its remote session, if one is kept open
             q.AGENT_SESSIONS.hide(q.ROOT, did)      # and a Codex / OpenCode one
@@ -1659,8 +1691,10 @@ class H(http.server.BaseHTTPRequestHandler):
                 st = STATES.get(sid)
                 if st is not None: st.title_auto = False        # your name: Orbit leaves it alone
                 if os.path.exists(q.session_path(sid)):
-                    msgs, _ = q.session_load(sid)
-                    q.session_save(sid, msgs, new)
+                    # the title and nothing else. This rewrote the file from its messages
+                    # alone, so renaming a chat dropped its pin, tags, project and queue --
+                    # including any message scheduled to send later, for good.
+                    q.session_meta(sid, title=new, title_auto=False)
                 elif st is None and sid != S.sid:
                     return self._send(404, jdump({"error": "no such chat"}))
                 # a chat with nothing in it yet has no file: keep the name in memory
@@ -1689,6 +1723,12 @@ class H(http.server.BaseHTTPRequestHandler):
             # a client counting from a stale copy must not cut the wrong turn:
             # if it says what the message starts with, hold it to that
             check = str(d.get("check") or "").strip()[:80]
+            # Not while it answers, as /api/rewind and /api/compact already refuse. The turn
+            # keeps appending to the list it started with; replacing S.msgs under it meant
+            # its checkpoints saved the cut-down copy, and the answer disappeared from disk.
+            # The page guards this with its own busy flag -- which another window lacks.
+            if S.lock.locked():
+                return self._send(409, jdump({"error": "that chat is still answering"}))
             with LOCK:
                 keep, seen = [], 0
                 for m in S.msgs:
@@ -1805,11 +1845,16 @@ class H(http.server.BaseHTTPRequestHandler):
                     if k in d: st.flags[k] = bool(d[k])
                 return self._send(200, jdump({"ok": True, "pending": True}))
             try:
-                raw = json.load(open(q.session_path(sid)))
-                if not isinstance(raw, dict): raw = {"messages": raw, "title": None}
-                for k in ("pinned", "archived"):
-                    if k in d: raw[k] = bool(d[k])
-                json.dump(raw, open(q.session_path(sid), "w"))
+                # through session_meta's atomic write. This truncated the file in place and
+                # wrote it back: the sidebar's 4s poll could read it half-written and drop
+                # the row, and a crash mid-write left a chat to be repaired minus its metadata.
+                flags = {k: bool(d[k]) for k in ("pinned", "archived") if k in d}
+                if "archived" in flags: flags["archived_at"] = time.time() if flags["archived"] else None
+                if q.session_meta(sid, **flags) is None:
+                    return self._send(404, jdump({"error": "no such chat"}))
+                st = STATES.get(sid)
+                if st is not None:
+                    for k in ("pinned", "archived"): (st.flags or {}).pop(k, None)
                 return self._send(200, jdump({"ok": True}))
             except Exception as e:
                 return self._send(404, jdump({"error": str(e)}))
@@ -2262,7 +2307,10 @@ class H(http.server.BaseHTTPRequestHandler):
             # only the chat named: get_state falls back to the open chat, and a stop meant
             # for a chat that has since finished used to stop whichever chat was open
             want = d.get("sid")
-            st = S if (not want or want == S.sid) else STATES.get(want)
+            # A chat must be named. With none, this stopped whichever chat the Mac had open
+            # last -- which, with the phone in use too, is not the one anybody meant.
+            if not want: return self._send(400, jdump({"error": "which chat? (sid)"}))
+            st = S if want == S.sid else STATES.get(want)
             if st is None: return self._send(404, jdump({"error": "that chat is not answering"}))
             st.cancel.set()
             return self._send(200, jdump({"ok": True, "sid": st.sid}))
@@ -2349,7 +2397,9 @@ class H(http.server.BaseHTTPRequestHandler):
             open(path, "wb").write(raw)
             stats = q.know_reindex()
             return self._send(200, jdump({"kind": "knowledge", "name": safe, **stats}))
-        name = f"{int(time.time())}-{safe}"
+        # unique, not just timestamped: every pasted screenshot is "image.png", and two in
+        # the same second overwrote each other, so both attachments showed the second one
+        name = f"{int(time.time())}-{uuid.uuid4().hex[:6]}-{safe}"
         path = os.path.join(q.UPLOADS, name)
         q.CURRENT_SID.update(sid=S.sid, title=S.title)
         open(path, "wb").write(raw)
@@ -2624,11 +2674,14 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
             if (first or (asked == 3 and getattr(st, "title_auto", False))) and not st.cancel.is_set():
                 # the title is written alongside, not before the chat is free: a queued
                 # message used to wait for it (16 s on a reasoning model)
-                def _title(msgs=list(st.msgs), model=st.model):
+                def _title(msgs=list(st.msgs), model=st.model, before=st.title):
                     q.TURN_CTX.pin_model = model        # this chat's model, on this thread too
                     try:
                         auto = autotitle(msgs)
-                        if auto:
+                        # Only if nobody named it while this was thinking. A slow model takes
+                        # fifteen seconds and more to title a chat, and a rename made in that
+                        # window was overwritten by the name it had replaced.
+                        if auto and st.title == before and st.title_auto is not False:
                             st.title = auto
                             st.title_auto = True       # a name Orbit chose, so it may choose a better one later
                             save_session(st)

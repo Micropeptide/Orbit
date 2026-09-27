@@ -423,10 +423,18 @@ def save(root, cfg):
             # only store what differs from the built-ins
             "providers": {k: v for k, v in (cfg.get("providers") or {}).items()
                           if k not in BUILTIN_PROVIDERS or v != BUILTIN_PROVIDERS[k]}}
-    tmp = _path(root) + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(keep, f, indent=1)
-    os.replace(tmp, _path(root))
+    # a temp name of its own: two saves at once shared "models.json.tmp", and the second
+    # rename found it gone -- the race qqcore._atomic_write already fixed for chats
+    tmp = f"{_path(root)}.{os.getpid()}-{os.urandom(3).hex()}.tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(keep, f, indent=1)
+            f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, _path(root))
+    finally:
+        if os.path.exists(tmp):
+            try: os.remove(tmp)
+            except OSError: pass
     return keep
 
 
