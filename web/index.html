@@ -2607,6 +2607,7 @@ function attachLive(theSid, initial){
     lrows.forEach(r=>{if(r.classList.contains('live'))finishTool(r,{stopped:true})});
     if(lv.content){a.bub.innerHTML=md(lv.content);decorate(a.bub)}
     if(sid===theSid&&!document.hidden&&document.hasFocus())markSeenOnMac(theSid);
+    if(GOALS[theSid])followGoal(theSid);
     RUNNING.delete(theSid);renderSessions();loadSessions();
 
     setTimeout(()=>afterTurn(theSid),300);
@@ -4496,7 +4497,7 @@ async function go(opts){
  $('#dot').classList.remove('busy');loadSessions();refreshStatus();q.focus();
  if(lost&&sid===sendSid){WATCH_N=null;openSession(sendSid)}   // rejoins from the live buffer
  else afterTurn(sendSid);
- if(opts.goal||GOALS[sendSid])loadGoal(sendSid)}
+ if(opts.goal||GOALS[sendSid])followGoal(sendSid)}
 $('#stopgen').onclick=async()=>{
  stoppedSid=sid;
  await fetch('/api/cancel',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -4572,7 +4573,7 @@ function settingsIndex(){
  const parts=src.split(/if\(name==='(\w+)'\)/);
  for(let i=1;i<parts.length;i+=2){const tab=parts[i],body=parts[i+1];if(!names[tab])continue;
   out.push({tab,text:names[tab],label:'tab'});
-  for(const m of body.matchAll(/class=sec>([^<]{3,80})|<label[^>]*>([^<]{3,60})<\/label>/g)){
+  for(const m of body.matchAll(/class=sec[^>]*>([^<]{3,80})|<label[^>]*>([^<]{3,60})<\/label>/g)){
    const text=(m[1]||m[2]).trim().replace(/&amp;/g,'&');const k=tab+'|'+text;
    if(seen.has(k)||/\$\{/.test(text))continue;seen.add(k);out.push({tab,text,label:names[tab]})}}
  return settingsIndex.cache=out}
@@ -7502,6 +7503,16 @@ const GOAL_WORD={active:'working toward',paused:'paused',blocked:'needs you',bud
 async function loadGoal(s){
  try{const d=await (await fetch('/api/goal',{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify({sid:s,op:'get'})})).json();GOALS[s]=d.goal||null;if(s===sid)drawGoal()}catch(e){}}
+// After an answer the Mac checks the goal, which takes a few seconds and can end in a
+// verdict that changes nothing else on screen: keep asking until it settles, or the
+// next answer it starts takes over.
+async function followGoal(s){
+ if(followGoal.busy&&followGoal.busy[s])return;(followGoal.busy=followGoal.busy||{})[s]=true;
+ try{for(let i=0;i<20;i++){
+  await loadGoal(s);const g=GOALS[s];
+  if(!g||g.status!=='active'||RUNNING.has(s))break;
+  await new Promise(r=>setTimeout(r,3000))}}
+ finally{delete followGoal.busy[s];if(s===sid)loadSessions()}}
 function drawGoal(){
  const bar=$('#goalbar');if(!bar)return;
  const g=sid&&GOALS[sid];

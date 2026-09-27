@@ -2753,7 +2753,8 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
     st.busy_since = time.time()
     st.cancel.clear()
     st.live = {"thinking": "", "content": "", "tools": [],
-               "status": "", "done": False, "seq": 0, "user": str(text or "")[:4000]}
+               "status": "", "done": False, "seq": 0,
+               "user": str(text or "").split("\n\n" + q.ORBIT_SAYS)[0][:4000]}
     try: text = q.expand_prompt(text)       # '/name words' runs a saved prompt
     except Exception: pass
     atts = atts or []
@@ -3690,6 +3691,10 @@ def render(msgs):
         # a stopped turn can have thinking with no answer text yet -- still show
         # it, and a step that only called tools gets an entry for its tool rows
         elif c or (m.get("role") == "assistant" and (m.get("reasoning_content") or calls)):
+            if m["role"] == "user" and isinstance(c, str) and ("\n\n" + q.ORBIT_SAYS) in c:
+                # what you wrote, without the note Orbit added for the model (a goal's
+                # instructions): the model still has it, you need not read it back
+                c = c[:c.index("\n\n" + q.ORBIT_SAYS)]
             out.append({"role": m["role"], "text": c or "", "images": [],
                         "plots": [], "tools": [],
                         # which model wrote this, so a reopened chat is honest about it
