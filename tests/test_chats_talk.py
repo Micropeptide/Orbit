@@ -120,6 +120,43 @@ class TestTalking(Base):
         self.assertTrue(self.ui.CHATS.send(parent=par.sid, chain=[], target="nothing like this", message="x").startswith("Error"))
 
 
+class TestLongerWork(Base):
+    def test_a_chat_can_set_its_own_goal(self):
+        a = self.chat()
+        q.TURN_CTX.sid = q.TURN_CTX.settings_sid = a.sid
+        out = q.t_goal_set("every test passes")
+        self.assertIn("Goal set", out)
+        self.assertEqual((a.goal["status"], a.goal["objective"]), ("active", "every test passes"))
+        self.assertIn("Status: active", q.t_goal_status())
+        self.assertEqual(json.load(open(q.session_path(a.sid)))["goal"]["status"], "active")
+
+    def test_a_goal_send_waits_until_the_other_chat_is_done(self):
+        """Two chats working a long time: the other chat keeps going answer after answer,
+        and this one hears back only when its goal is met."""
+        verdicts = iter([{"status": "continue", "reason": "half done", "next": "the rest", "failed": False},
+                         {"status": "complete", "reason": "all checked", "next": "", "failed": False}])
+        saved = q.goal_audit; q.goal_audit = lambda *a, **k: next(verdicts)
+        self.addCleanup(setattr, q, "goal_audit", saved)
+        par = self.chat(); kid = self.chat(title="Worker")
+        got = self.ui.CHATS.send(parent=par.sid, chain=[], target=kid.sid, message="write the report",
+                                 as_goal=True, timeout=0.5)
+        self.assertIn("finished working on its goal — complete: all checked", got)
+        self.assertEqual(kid.goal["turns_used"], 1, "it did not carry on by itself")
+        self.assertEqual([l["role"] for l in par.links], ["messaged"])
+        self.assertEqual(kid.links[0]["sid"], par.sid)
+        # its continuations keep the chain: it cannot send work back up to the chat waiting on it
+        self.assertIn([par.sid], [c for _, _, c in self.seen])
+
+    def test_whom_a_chat_is_waiting_on_is_reported(self):
+        par = self.chat(); kid = self.chat(title="Slow one")
+        kid.lock.acquire(); self.addCleanup(kid.lock.release)       # busy: the message waits
+        t = threading.Thread(target=self.ui.CHATS.wait, kwargs=dict(parent=par.sid, target=kid.sid, timeout=0.05))
+        t.start(); time.sleep(0.3)
+        self.assertEqual(self.ui.CHATS.talking_to(par.sid)["title"], "Slow one")
+        t.join(15)                                                 # its shortest wait is six seconds
+        self.assertIsNone(self.ui.CHATS.talking_to(par.sid))
+
+
 class TestTheTools(unittest.TestCase):
     def test_offered_to_claude_code_chats_on_their_own(self):
         src = open(os.path.join(ROOT, "bin", "claude_engine.py")).read()
