@@ -1217,6 +1217,8 @@ class H(http.server.BaseHTTPRequestHandler):
                                               "agent": getattr(stt, "agent", None) or "",
                                               "goal": getattr(stt, "goal", None),
                                               "goal_offer": _offer_view(stt),
+                                              # the chat that started this one (chat_create), if any
+                                              "parent": (getattr(stt, "flags", {}) or {}).get("parent") or _disk_key(sid, "parent"),
                                               "messages": render(shown), "n": len(msgs),
                                               "context": q.context_state(msgs, sid),
                                               "running": running, "live": live,
@@ -2629,7 +2631,7 @@ class H(http.server.BaseHTTPRequestHandler):
             return _stream_once([("queued_message", {"item": item, "why": "scheduled", "queue": _queue_view(st)}),
                                  ("end", {"sid": st.sid, "queued": True, "scheduled": True})])
         busy = st.lock.locked()
-        full = len(running_sids()) >= _max_parallel()
+        full = _busy_count() >= _max_parallel()
         if busy or full or _due_items(st):
             # it waits its turn: after the answer running now (and anything queued
             # before it), or for a free slot when many chats are answering
@@ -2687,6 +2689,204 @@ def _git_folder(sid_):
     if not cwd and st_ is not None and st_.project:
         cwd = q.project_folder(st_.project)
     return cwd or q.WORKSPACE, host
+
+WAITING_ON = {}          # chat id -> the chat it is waiting for (chat_send / chat_wait)
+
+def _busy_count():
+    """Chats holding an answer slot. One that is only waiting for another chat's answer
+    does not: with a limit of one, the chat it waits on could otherwise never start."""
+    return len([s_ for s_ in running_sids() if s_ not in WAITING_ON])
+
+def _disk_key(sid_, key):
+    try: return json.load(open(q.session_path(sid_))).get(key)
+    except Exception: return None
+
+def _last_answer(st):
+    for m in reversed(st.msgs):
+        if m.get("role") == "assistant" and isinstance(m.get("content"), str) and m["content"].strip():
+            return m["content"].strip()
+    return ""
+
+_CHEAP = re.compile(r"flash|haiku|mini\b|mini-|nano|lite|luna|small|\bair\b|free\b", re.I)
+
+class _Chats:
+    """Chats talking to chats (qqcore.CHATS): what the chat_* tools do on the server."""
+
+    def __init__(self):
+        self.replies = {}          # reply token -> {"event", "answer", "sid"}
+
+    def _title(self, sid_):
+        st_ = STATES.get(sid_)
+        if st_ is not None and st_.title: return st_.title
+        try: return (json.load(open(q.session_path(sid_))).get("title")) or sid_
+        except Exception: return sid_
+
+    def _resolve(self, target):
+        """A chat by id, or by title (exact, then the only one containing it)."""
+        t = str(target or "").strip()
+        if not t: return None, "which chat? give its id or title (chat_list shows them)"
+        if re.fullmatch(r"[\w\-]+", t) and (t in STATES or os.path.exists(q.session_path(t))):
+            return get_state(t), ""
+        rows = [r for r in q.session_list() if not r.get("external")]
+        exact = [r for r in rows if (r.get("title") or "").strip().lower() == t.lower()]
+        if len(exact) == 1: return get_state(exact[0]["id"]), ""
+        some = [r for r in rows if t.lower() in (r.get("title") or "").lower()]
+        if len(some) == 1: return get_state(some[0]["id"]), ""
+        if len(exact) > 1 or len(some) > 1:
+            return None, f"more than one chat matches {t!r}: " + "; ".join(
+                f"{r['id']} “{r.get('title')}”" for r in (exact or some)[:6]) + " — use the id"
+        return None, f"no chat called {t!r} — chat_list shows them, chat_create starts one"
+
+    def _model(self, want):
+        """(id, label) for a model name or id, or (None, why)."""
+        want = str(want or "").strip()
+        if not want: return None, ""
+        cat = [m for m in q.model_catalogue() if m.get("ready")]
+        for m in cat:
+            if m["id"] == want: return m["id"], m.get("label") or m["id"]
+        low = want.lower()
+        exact = [m for m in cat if (m.get("label") or "").lower() == low or m.get("model", "").lower() == low]
+        some = exact or [m for m in cat if low in (m.get("label") or "").lower() or low in m["id"].lower()]
+        if len(some) == 1: return some[0]["id"], some[0].get("label") or some[0]["id"]
+        if some:
+            return None, (f"{want!r} matches several models: "
+                          + "; ".join(f"{m['id']}" for m in some[:8]) + " — use the id")
+        return None, f"no ready model called {want!r} — chat_list shows the ones that are"
+
+    def create(self, parent, title, model="", instructions="", project=""):
+        title = str(title or "").strip()[:120] or "Helper chat"
+        mid, label = self._model(model)
+        if model and not mid: return "Error: " + label
+        par = STATES.get(parent) if parent else None
+        st_ = State(); st_.temp = False
+        st_.title, st_.title_auto = title, False
+        st_.project = (str(project).strip() or None) if project else (par.project if par is not None else None)
+        if mid: st_.model = mid
+        else:
+            try: st_.model = (q.MODELS.load(q.ROOT).get("default") or None)
+            except Exception: st_.model = None
+        _refresh_system(st_)
+        if instructions:
+            st_.sys_override = str(instructions)[:8000]
+            base = q.system_prompt_for(st_.agent, st_.project)
+            st_.msgs[0]["content"] = base + "\n\n## This chat\n" + st_.sys_override
+            # a Claude Code or Codex chat reads its own instructions from its prefs
+            try: q.CE.set_chat_pref(st_.sid, instructions=st_.sys_override)
+            except Exception: pass
+        if parent: st_.flags["parent"] = {"sid": parent, "title": self._title(parent)}
+        STATES[st_.sid] = st_
+        save_session(st_)
+        spec = q.current_model(st_.model) or {}
+        return (f"Started the chat “{title}” (id {st_.sid}) on {spec.get('label') or st_.model or 'the default model'}. "
+                f"Send it work with chat_send(chat=\"{st_.sid}\", message=...).")
+
+    def send(self, parent, chain, target, message, wait=True, timeout=20.0, cancel=None):
+        st_, why = self._resolve(target)
+        if st_ is None: return "Error: " + why
+        if st_.sid == parent: return "Error: that is this chat — send it to another one."
+        if st_.sid in chain:
+            return ("Error: that chat is already waiting on this one (it sent the work here). "
+                    "Answer here instead; your answer goes back to it.")
+        if len(chain) >= q.CHAT_DEPTH:
+            return f"Error: work has already been handed on {len(chain)} times — do this part here."
+        text = str(message or "").strip()
+        if not text: return "Error: the message is empty."
+        par = STATES.get(parent)
+        # both on the local model, which answers one request at a time: this answer holds
+        # it, so the other could never start while this one waits
+        if wait and par is not None and q.model_is_local(par.model) and q.model_is_local(st_.model):
+            return ("Error: both chats use the local model, which answers one request at a time — "
+                    "send with wait=false, or give that chat a hosted model.")
+        token = uuid.uuid4().hex
+        rec = self.replies[token] = {"event": threading.Event(), "answer": None, "sid": st_.sid}
+        ptitle = self._title(parent) if parent else "another chat"
+        origin = {"sid": parent, "title": ptitle, "chain": chain + ([parent] if parent else []),
+                  "reply": token}
+        note = q._orbit_note(f"this message comes from the chat “{ptitle}” — another agent working for "
+                             "the same person. Do what it asks; your whole answer is passed back to it.")
+        _queue_add(st_, text + "\n\n" + note, origin=origin)
+        _drain()
+        title = st_.title or st_.sid
+        if not wait:
+            return (f"Sent to “{title}” ({st_.sid}); it starts when that chat is free. Collect the answer "
+                    f"with chat_wait(chat=\"{st_.sid}\") or read_chat.")
+        got = self._wait(parent, st_.sid, rec["event"], timeout, cancel)
+        if got == "cancel":
+            return f"Stopped waiting (this answer was stopped). “{title}” carries on; its answer stays in that chat."
+        if got == "timeout":
+            return (f"“{title}” is still working after {timeout:g} min. Its answer will be in that chat: "
+                    f"chat_wait(chat=\"{st_.sid}\") picks it up.")
+        self.replies.pop(token, None)
+        return f"Answer from “{title}” ({st_.sid}):\n\n{rec['answer']}"
+
+    def _wait(self, parent, sid_, event, timeout, cancel):
+        WAITING_ON[parent] = sid_
+        try:
+            end = time.time() + max(0.1, timeout) * 60
+            while not event.wait(0.5):
+                if cancel is not None and cancel.is_set(): return "cancel"
+                if time.time() > end: return "timeout"
+            return "done"
+        finally:
+            WAITING_ON.pop(parent, None)
+
+    def answered(self, token, st_, failed, cancelled):
+        """start_turn's end, for an answer another chat asked for."""
+        rec = self.replies.get(token)
+        if not rec: return
+        ans = _last_answer(st_)
+        if cancelled: ans = "(it was stopped before it finished)" + ("\n\n" + ans if ans else "")
+        elif failed: ans = f"(its answer failed: {failed})" + ("\n\n" + ans if ans else "")
+        rec["answer"] = ans or "(it answered with no text)"
+        rec["event"].set()
+        # nobody may be waiting any more (it timed out): do not keep it for ever
+        if len(self.replies) > 200:
+            for k in [k for k, v in self.replies.items() if v["event"].is_set()][:100]:
+                self.replies.pop(k, None)
+
+    def wait(self, parent, target, timeout=20.0, cancel=None):
+        st_, why = self._resolve(target)
+        if st_ is None: return "Error: " + why
+        if st_.sid == parent: return "Error: that is this chat."
+        WAITING_ON[parent] = st_.sid
+        try:
+            end = time.time() + max(0.1, timeout) * 60
+            while st_.lock.locked() or _due_items(st_) or st_.handing:
+                if cancel is not None and cancel.is_set():
+                    return "Stopped waiting (this answer was stopped)."
+                if time.time() > end:
+                    return f"“{st_.title or st_.sid}” is still working after {timeout:g} min."
+                time.sleep(0.5)
+        finally:
+            WAITING_ON.pop(parent, None)
+        ans = _last_answer(st_)
+        return f"Latest answer from “{st_.title or st_.sid}” ({st_.sid}):\n\n{ans or '(nothing yet)'}"
+
+    def list(self, parent, query=""):
+        rows = [r for r in q.session_list() if not r.get("external") and r["id"] != parent]
+        if query: rows = [r for r in rows if query.lower() in (r.get("title") or "").lower()]
+        running = set(running_sids())
+        out = ["Chats (newest first):"]
+        for r in rows[:25]:
+            spec = q.current_model(r.get("model")) or {}
+            par = r.get("parent")
+            out.append(f"- {r['id']} “{r.get('title')}” · {spec.get('label') or r.get('model') or 'default model'}"
+                       + (" · answering" if r["id"] in running else "")
+                       + (f" · started by “{par.get('title')}”" if par else ""))
+        cat = [m for m in q.model_catalogue() if m.get("ready")]
+        default = (q.MODELS.load(q.ROOT) or {}).get("default")
+        # the models this Mac runs its chats through now, first; cheaper ones marked
+        cat.sort(key=lambda m: (m["id"] != default, not m["id"].startswith(("harness:", "claude-cli", "codex-cli")),
+                                not _CHEAP.search(m.get("label") or m["id"])))
+        out.append("\nModels a new chat can use (cheap = likely cheaper per token):")
+        for m in cat[:45]:
+            tags = [t for t, on in (("default", m["id"] == default), ("local", q.model_is_local(m["id"])),
+                                    ("cheap", bool(_CHEAP.search(m.get("label") or m["id"])))) if on]
+            out.append(f"- {m['id']} — {m.get('label') or m['id']}" + (f" [{', '.join(tags)}]" if tags else ""))
+        return "\n".join(out)
+
+CHATS = _Chats()
+q.CHATS = CHATS
 
 INBOX_LOCK = threading.Lock()
 PICKUP_WAIT = {}        # chat id -> until when its queue waits for a restart pick-up
@@ -2874,7 +3074,7 @@ def _goal_route(d):
     return 200, jdump({"goal": st.goal, "started": started})
 
 
-def start_turn(st, text, atts=None, effort=None, Q=None):
+def start_turn(st, text, atts=None, effort=None, Q=None, origin=None):
     """Run one message in a chat on its own thread. The chat's lock must already be
     held (it is released when the answer ends). Events go to Q (a browser's stream)
     and always to the chat's live buffer, so any window can follow it; a message the
@@ -3039,6 +3239,12 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                 n0 = len(st.msgs)
                 st.interrupt.clear()
                 q.TURN_CTX.ask = _ask
+                # a message another chat sent: marked as such in this chat, and the chain of
+                # chats waiting on this answer, so none of them is sent back into a loop
+                q.TURN_CTX.user_meta = ({"from_chat": {"sid": origin.get("sid"), "title": origin.get("title")}}
+                                        if origin else None)
+                q.TURN_CTX.chat_chain = list((origin or {}).get("chain") or [])
+                q.TURN_CTX.chats_created = 0
                 st.handing = None      # turn() writes it into the chat as its first act
                 q.turn(st.msgs, content, st.tools, emit=_emit, approve=_approve,
                        cancel=st.cancel, inbox=st.inbox, interrupt=st.interrupt, sid=st.sid,
@@ -3087,7 +3293,7 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
                         failed[0] = "limit"
                         # in the live buffer too: a window that rejoins sees why it paused
                         _emit("notice", {"msg": _limit_note(job), "kind": "limit"})
-                if not failed[0] and not st.cancel.is_set() and not _due_items(st):
+                if not failed[0] and not st.cancel.is_set() and not _due_items(st) and not origin:
                     try: _maybe_offer_goal(st, text, _emit,
                                            watching=not getattr(Q, "deaf", False) and not isinstance(Q, _Sink))
                     except Exception as e: print(f"  ! goal offer: {type(e).__name__}: {e}", flush=True)
@@ -3135,6 +3341,8 @@ def start_turn(st, text, atts=None, effort=None, Q=None):
             if st.handing:
                 # it never reached the chat: back to the front of the queue
                 st.queue.insert(0, st.handing); st.handing = None; failed[0] = failed[0] or "error"
+            if origin and origin.get("reply"):
+                CHATS.answered(origin["reply"], st, failed[0], st.cancel.is_set())
             _release_chat(st)
             # Stop pauses the chat's queue (the rest waits for you), and so does an answer
             # that failed -- the provider down, the allowance used up -- or every queued
@@ -3273,9 +3481,10 @@ def queue_update(st, iid, fields):
     _queue_saved(st)
     return it, None
 
-def _queue_add(st, text, atts=None, effort=None, at=None, repeat=None, model=None):
+def _queue_add(st, text, atts=None, effort=None, at=None, repeat=None, model=None, origin=None):
     item = {"id": uuid.uuid4().hex[:10], "text": str(text or ""), "attachments": list(atts or []),
             "effort": effort, "t": time.time()}
+    if origin: item["from"] = origin          # sent by another chat (see _Chats)
     if at:
         if repeat and repeat not in REPEATS: raise ValueError(f"repeat must be one of {', '.join(REPEATS)}")
         at = float(at)
@@ -3331,7 +3540,7 @@ def _drain():
             # Stop pauses the waiting messages; one you scheduled still goes at its time
             due = [it for it in _due_items(st, now) if it.get("at") or not st.queue_paused]
             if not due: continue
-            if len(running_sids()) >= _max_parallel(): break
+            if _busy_count() >= _max_parallel(): break
             if not st.lock.acquire(blocking=False): continue
             # From here the chat's lock is held, and it is released either by the turn
             # that starts below or by this block failing. Anything that raises in between
@@ -3366,7 +3575,8 @@ def _drain():
     for st, item in started:
         _queue_saved(st)
         try:
-            start_turn(st, item["text"], item.get("attachments") or [], item.get("effort"))
+            start_turn(st, item["text"], item.get("attachments") or [], item.get("effort"),
+                       origin=item.get("from"))
         except Exception as e:
             print(f"  ! queued message in {st.sid}: {type(e).__name__}: {e}")
             # it goes back where it was, and the queue waits: it was dropped here
@@ -3832,6 +4042,8 @@ def render(msgs):
                 c = c[:c.index("\n\n" + q.ORBIT_SAYS)]
             out.append({"role": m["role"], "text": c or "", "images": [],
                         "plots": [], "tools": [],
+                        # sent by another chat (chat_send): which one
+                        **({"from_chat": m["from_chat"]} if m.get("from_chat") else {}),
                         # which model wrote this, so a reopened chat is honest about it
                         "model": m.get("model") if m["role"] == "assistant" else None,
                         # the thinking trace, kept from a normal answer or a stop mid-stream

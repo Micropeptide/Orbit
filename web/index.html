@@ -1013,6 +1013,9 @@ body.statuson #wrap .msg.a:last-child .bub>.working:only-child{display:none}
 .goalbar.g-active{border-left-color:var(--acc)}.goalbar.g-complete{border-left-color:var(--ok)}
 .goalbar.g-blocked,.goalbar.g-budget{border-left-color:var(--err)}.goalbar.g-paused{border-left-color:var(--dim)}
 .sitem .goalmark{color:var(--acc);font-size:var(--fs-2xs);flex:0 0 auto}
+.msg.u.fromchat .bub{border-left:3px solid var(--acc)}
+.msg.u.fromchat .who .chatlink{color:var(--acc);font-weight:600}
+.parentline .chatlink{color:var(--acc)}
 .goalbar.g-offer{border-left-color:var(--acc);background:color-mix(in srgb,var(--acc) 7%,var(--card))}
 .goalbar .ghist{flex-basis:100%;max-height:180px;overflow:auto;border-top:1px solid var(--line);padding-top:5px;margin-top:2px}
 .goalbar .ghrow{display:flex;gap:8px;font-size:var(--fs-2xs);color:var(--mut);padding:1px 0}
@@ -2302,6 +2305,7 @@ function chatRow(s,box){
  const d=el(`<div class="sitem${s.id===sid?' on':''}${st.cls?' st-'+st.cls:''}${s.external?' external':''}" title="${esc(s.title||'')}">
    <span class=stc title="${esc(st.tip)}">${st.icon}</span><span class=t></span>${
    s.goal&&s.goal!=='complete'?`<span class=goalmark title="goal: ${esc(s.goal)}">◎</span>`:''}${
+   s.parent?`<span class=goalmark title="started by “${esc(s.parent.title||'')}”">↳</span>`:''}${
    s.pinned?'<span class=pinmark title="pinned">★</span>':''}${
    s.host?`<span class=hostmark title="runs on ${esc(s.host)} over SSH">${esc(s.host)}</span>`:''}<span class=ago title="${esc(new Date((s.mtime||0)*1000).toLocaleString())} · ${s.n||0} messages">${agoShort(s.mtime)}</span><button class=more title="Actions">⋯</button></div>`);
  d.querySelector('.t').textContent=s.title||'(untitled)';
@@ -2647,6 +2651,9 @@ async function openSession(id){
  WATCH_SID=d.sid;WATCH_N=(typeof d.n==='number')?d.n:null;   // what this page now shows
  if(UNSEEN[d.sid]){delete UNSEEN[d.sid];syncUnseen()}
  markSeenOnMac(d.sid);
+ if(d.parent&&d.parent.sid){const pl=el('<div class="sysline parentline">started by <a class=chatlink href="#"></a> — messages marked “from” it are its work for you; you can talk here too</div>');
+  pl.querySelector('a').dataset.chat=d.parent.sid;pl.querySelector('a').textContent=d.parent.title||'another chat';
+  wrap.insertBefore(pl,wrap.firstChild)}
  GOALS[d.sid]=d.goal||null;
  GOAL_OFFERS[d.sid]=d.goal_offer?{...d.goal_offer,deadline:d.goal_offer.remaining!=null?Date.now()+d.goal_offer.remaining*1000:null}:null;
  drawGoal();
@@ -2961,7 +2968,10 @@ function showAt(){
  if(!m){atTerm=null;return}
  const term=m[2].toLowerCase();
  if(term!==atTerm){atSel=0;atTerm=term}         // a new list starts at its top
- const hits=FILECACHE.filter(f=>!term||f.name.toLowerCase().includes(term)).slice(0,8);
+ // chats too: "@" a chat to tell this one which chat to hand work to
+ const chatHits=SESSIONS.filter(c=>!c.external&&c.id!==sid&&(!term||(c.title||'').toLowerCase().includes(term)))
+  .slice(0,4).map(c=>({name:c.title||'(untitled)',rel:`chat “${(c.title||'').replace(/[“”]/g,'')}” (${c.id})`,area:'chat'}));
+ const hits=chatHits.concat(FILECACHE.filter(f=>!term||f.name.toLowerCase().includes(term))).slice(0,8);
  if(!hits.length)return;
  atSel=Math.min(atSel,hits.length-1);
  atMenu=el('<div class=menu></div>');
@@ -3885,6 +3895,11 @@ function noteBubble(text,label){
 function userNode(m){
  if(m.bang)return bangNode(m.bang,m.t??null);
  const u=addUser(m.text,m.images,m.t??null);
+ if(m.from_chat){u.classList.add('fromchat');
+  const who=u.querySelector('.who');
+  if(who){who.childNodes[0].textContent='from ';
+   const a=el('<a class=chatlink href="#"></a>');a.dataset.chat=m.from_chat.sid||'';
+   a.textContent=m.from_chat.title||'another chat';who.insertBefore(a,who.childNodes[1]||null)}}
  if(m.note){u.classList.add('note');u.appendChild(el('<div class=notetag>sent while it was working</div>'))}
  return u}
 async function steer(t){
@@ -6881,6 +6896,7 @@ function toolLabel(args){args=args||{};
    same way: what it is doing (Read, Update, Bash…), to what, and what came back.
    Names follow Claude Code so the two read alike. */
 const TOOLNAME={read_file:'Read',Read:'Read',NotebookRead:'Read',read_chat:'Read chat',
+ chat_create:'New chat',chat_send:'Message chat',chat_wait:'Wait for chat',chat_list:'List chats',
  write_file:'Write',Write:'Write',edit_file:'Update',Edit:'Update',MultiEdit:'Update',
  multi_edit:'Update',NotebookEdit:'Edit notebook',apply_patch:'Update',
  run_shell:'Bash',Bash:'Bash',shell:'Bash',BashOutput:'Bash output',KillShell:'Kill shell',
@@ -6905,7 +6921,8 @@ const FAMWORD={read:['Read','file','files'],search:['Searched for','pattern','pa
  list:['Listed','directory','directories'],fetch:['Fetched','page','pages']};
 function toolName(n){n=String(n||'tool');
  if(TOOLNAME[n])return TOOLNAME[n];
- if(n.startsWith('mcp__')){const p=n.split('__');return p[p.length-1].replace(/_/g,' ')}
+ if(n.startsWith('mcp__')){const p=n.split('__'),last=p[p.length-1];
+  return TOOLNAME[last]||last.replace(/_/g,' ')}
  if(n.includes('.'))return n.split('.').pop().replace(/_/g,' ');
  return n.replace(/_/g,' ')}
 function shortPath(s){s=String(s||'');const p=s.split('/').filter(Boolean);
@@ -6928,8 +6945,18 @@ function toolTarget(name,args){args=args||{};
    (args.path?' in '+shortPath(args.path):'');
  if(disp==='Fetch'||disp==='Web Search')return String(args.url||args.query||'').slice(0,90);
  if(disp==='Agent')return String(args.description||args.prompt||'').replace(/\s+/g,' ').slice(0,90);
+ if(disp==='New chat')return String(args.title||'')+(args.model?' · '+args.model:'');
+ if(disp==='Message chat')return chatLabel(args.chat)+': '+String(args.message||'').replace(/\s+/g,' ').slice(0,80);
+ if(disp==='Wait for chat')return chatLabel(args.chat);
  return toolLabel(args)}
 // p: a live 'tool' event {id,name,args}, or a saved run {id,name,label,secs,ok} with done=true
+// Chats talking to chats: another chat named by id or title, as the sidebar knows it
+function chatLabel(c){c=String(c||'');const r=SESSIONS.find(x=>x.id===c);return r?'“'+(r.title||c)+'”':'“'+c+'”'}
+function chatRef(c){c=String(c||'');
+ const r=SESSIONS.find(x=>x.id===c)||SESSIONS.find(x=>(x.title||'').toLowerCase()===c.toLowerCase());return r?r.id:null}
+document.addEventListener('click',e=>{const a=e.target.closest&&e.target.closest('.chatlink');if(!a)return;
+ e.preventDefault();e.stopPropagation();const id=a.dataset.chat;
+ if(id){showPane('log');openSession(id)}else toast('that chat is not in the list yet')});
 function toolRow(p,done){
  const d=el('<details class=tool><summary><div class=thead>'+
   '<span class=ttrigger><span class=tdot>⏺</span><span class=tn></span></span>'+
@@ -6956,6 +6983,9 @@ function toolRow(p,done){
  const fp=p.args&&(p.args.file_path||p.args.notebook_path||p.args.path);
  if(fp&&typeof fp==='string'&&/^(~|\/)/.test(fp)){
   const o=el('<span class="pathlink toolopen">open</span>');o.dataset.path=fp;o.title='open '+fp;
+  d.querySelector('.thead').appendChild(o)}
+ if((disp==='Message chat'||disp==='Wait for chat')&&p.args&&p.args.chat){
+  const o=el('<span class="chatlink toolopen">open chat</span>');o.dataset.chat=chatRef(p.args.chat)||'';
   d.querySelector('.thead').appendChild(o)}
  if(done)finishTool(d,p);
  else{d.classList.add('live');d._t0=Date.now();
@@ -7047,6 +7077,10 @@ function jsonSummary(j){
 // ok==null on a saved run just means an older chat that didn't record it
 function finishTool(d,p){
  d.classList.remove('live');d.classList.add('done');
+ // a chat it started: a link to it, once the id is known
+ const made=String(p.output||'').match(/^Started the chat .*?\(id ([\w-]+)\)/);
+ if(made&&!d.querySelector('.chatlink')){const o=el('<span class="chatlink toolopen">open chat</span>');
+  o.dataset.chat=made[1];d.querySelector('.thead').appendChild(o)}
  const ok=p.ok!==false&&!p.stopped;
  if(!ok)d.classList.add('bad');
  const sp=d.querySelector('.spin');

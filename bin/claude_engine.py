@@ -87,6 +87,7 @@ DEFAULTS = {
     # Orbit extras, all off: Claude alone decides and sees only what it would see
     "orbit_rules": False,            # Orbit's safety rules, autonomy mode and folder limit on top
     "orbit_tools": False,            # Orbit's own tools through an MCP bridge
+    "chat_tools": True,              # ...and, on their own, the tools for talking to other chats
     "project_tools": False,          # a trusted project's .orbit/tools through the bridge
     "orbit_tool_names": ["search_chats", "read_chat", "remember", "search_agent_memory",
                          "search_knowledge", "schedule_task", "list_scheduled_tasks",
@@ -522,7 +523,7 @@ def orbit_is_the_gate(mode, kind, read_only=False):
 
 def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None, mode=None,
                settings_path=None, mcp_path=None, append=None, sdk=True, add_dirs=None, model=None,
-               kind="local", remote=False, sid=None, **_):
+               kind="local", remote=False, sid=None, bridge=False, **_):
     """The claude command line. The same for the terminal (sdk=False) and for
     Orbit, which only adds the stream transport, the session and a chat's mode.
 
@@ -541,7 +542,15 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
     # subscription takes the model name itself
     argv += ["--model", model or "sonnet"]
     prof = c.get("profile") or "standard"
-    if prof == "lean":
+    lean_bridge = prof == "lean" and bridge and bool(mcp_path)
+    if lean_bridge:
+        # --safe-mode switches off every MCP server, and Orbit's own bridge with them: a
+        # lean chat told it could hand work to other chats had no tool to do it with, and
+        # went round calling `true`. The same leanness, spelled out: none of your settings
+        # sources (their hooks, plugins, permissions), no skills, and -- below -- only the
+        # MCP servers Orbit names, which in lean is the bridge alone.
+        argv += ["--setting-sources", "", "--disable-slash-commands"]
+    elif prof == "lean":
         argv.append("--safe-mode")
     elif prof == "focused":                     # older setting: user settings only
         argv += ["--setting-sources", "user"]
@@ -585,7 +594,7 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
     if settings_path: argv += ["--settings", settings_path]
     if mcp_path:
         argv += ["--mcp-config", mcp_path]
-        if easy_mode(sid) or ("*" not in (c.get("mcp_servers") or []) and prof != "full"):
+        if lean_bridge or easy_mode(sid) or ("*" not in (c.get("mcp_servers") or []) and prof != "full"):
             argv.append("--strict-mcp-config")
     if prof != "lean" and not easy_mode(sid) and not remote:
         # plugins' own MCP servers: a Claude Code started with --print marks them failed
@@ -714,7 +723,11 @@ def bridge_call(token, name, arguments):
     if name not in {s["function"]["name"] for s in ctx["specs"]}:
         return {"text": f"Error: {name} is not offered to this chat.", "ok": False}
     T = Q.TURN_CTX
-    T.sid, T.project, T.read_only = ctx["sid"], ctx["project"], ctx["read_only"]
+    # this thread served other runs before: every piece of "which chat" is set afresh,
+    # settings_sid included -- _this_chat() reads it first
+    T.sid, T.settings_sid, T.project, T.read_only = ctx["sid"], ctx["sid"], ctx["project"], ctx["read_only"]
+    T.chat_chain = ctx.get("chain") or []
+    T.chats_created = ctx.get("chats_created", 0)
     T.model, T.emit, T.approve, T.cancel = ctx.get("model"), ctx["emit"], ctx["approve"], ctx["cancel"]
     T.changes = ctx.setdefault("changes", [])
     T.ask = ctx.get("ask")
@@ -724,6 +737,7 @@ def bridge_call(token, name, arguments):
     tc = {"id": "orbit_" + uuid.uuid4().hex[:10], "type": "function",
           "function": {"name": name, "arguments": json.dumps(arguments or {})}}
     Q._run_one_tool(tc, name, arguments or {}, scratch, emit, ctx["approve"], ctx.setdefault("seen", {}))
+    ctx["chats_created"] = getattr(T, "chats_created", 0)
     out = next((m for m in scratch if m.get("role") == "tool"), {})
     return {"text": str(out.get("content") or ""), "ok": out.get("ok", True) is not False}
 
@@ -1406,7 +1420,9 @@ def _orbit_append(project, c, orbit_tools, chat_instructions=None, kind="local")
         extra.append("# Running inside Orbit\n- The user is chatting through Orbit, a local desktop "
                      "window onto this session.")
     if orbit_tools:
-        extra.append("- Orbit's tools are available as mcp__orbit__*.")
+        extra.append("- Orbit's tools are available as mcp__orbit__*. mcp__orbit__chat_create and "
+                     "mcp__orbit__chat_send hand work to other chats -- usually on cheaper models -- "
+                     "and return their answers; the person can open and talk to those chats too.")
     return launcher_append(c, extra, kind)
 
 
@@ -1570,7 +1586,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     mk["model"], mk["ctx_max"] = spec.get("id"), target["ctx"]
 
     now = time.time()
-    messages.append({"role": "user", "content": user_content, "t": now, "claude": dict(mk)})
+    messages.append({"role": "user", "content": user_content, "t": now, "claude": dict(mk), **q.take_user_meta()})
     umsg = messages[-1]
     if sid: q.LAST_TURN.pop(sid, None)
 
@@ -1581,6 +1597,12 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         if c.get("orbit_tools"):
             allow = set(c.get("orbit_tool_names") or [])
             specs = [x for x in (tools or []) if x.get("function", {}).get("name") in allow]
+        # talking to other chats is offered on its own, whether or not the rest of
+        # Orbit's tools are: handing work to a cheaper chat is what a Claude chat most
+        # often wants them for
+        if c.get("chat_tools", True):
+            specs += [x for x in (tools or []) if x.get("function", {}).get("name") in q.CHAT_TOOLS
+                      and x not in specs]
         if (c.get("orbit_tools") or c.get("project_tools")) and project:
             try:
                 q.file_tool_specs(project)
@@ -1594,7 +1616,9 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         token = secrets.token_hex(16)
         BRIDGE[token] = {"sid": sid, "project": project, "read_only": bool(read_only),
                          "emit": emit, "approve": approve, "cancel": cancel, "specs": specs,
-                         "ask": getattr(T, "ask", None), "model": getattr(T, "model", None)}
+                         "ask": getattr(T, "ask", None), "model": getattr(T, "model", None),
+                         # which chats are waiting on this one (chat_send's loop guard)
+                         "chain": list(getattr(T, "chat_chain", None) or [])}
         servers["orbit"] = {"type": "stdio", "command": sys.executable,
                             "args": [os.path.join(os.path.dirname(os.path.abspath(__file__)), "orbit-mcp")],
                             "env": {"ORBIT_MCP_URL": bridge_url(), "ORBIT_MCP_TOKEN": token}}
@@ -1611,7 +1635,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                       model=target.get("cli_model"), kind=kind, remote=bool(remote), sid=sid,
                       effort=getattr(T, "effort", None) or q.chat_setting("reasoning_effort", sid),
                       settings_path=settings_path, mcp_path=mcp_path, add_dirs=prefs.get("add_dirs"),
-                      append=_orbit_append(project, c, orbit_tools, prefs.get("instructions"), kind))
+                      append=_orbit_append(project, c, orbit_tools, prefs.get("instructions"), kind),
+                      bridge=orbit_tools)
     if fork: argv.append("--fork-session")
     if resume_at: argv += ["--resume-session-at", resume_at]
     env = target_env(target)
