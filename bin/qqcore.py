@@ -7955,13 +7955,27 @@ def t_chat_create(title, model="", instructions="", project=""):
     if not str(out).startswith("Error"): TURN_CTX.chats_created = made + 1
     return out
 
-def t_chat_send(chat, message, wait=True, timeout_minutes=20):
+def t_chat_send(chat, message, wait=True, timeout_minutes=None, as_goal=False):
     """Send a message to another chat; by default wait for its answer and return it."""
     err = _chats_ready()
     if err: return err
+    default = 240 if as_goal else 20
+    timeout = min(float(timeout_minutes or default), 24 * 60)
     return CHATS.send(parent=_this_chat(), chain=list(getattr(TURN_CTX, "chat_chain", None) or []),
-                      target=chat, message=message, wait=bool(wait),
-                      timeout=float(timeout_minutes or 20), cancel=getattr(TURN_CTX, "cancel", None))
+                      target=chat, message=message, wait=bool(wait), timeout=timeout,
+                      cancel=getattr(TURN_CTX, "cancel", None), as_goal=bool(as_goal))
+
+def t_goal_set(objective, token_budget=0, max_turns=None):
+    """Give this chat a goal: it keeps working, answer after answer, until it is done."""
+    err = _chats_ready()
+    if err: return err
+    return CHATS.set_goal(_this_chat(), objective, token_budget, max_turns)
+
+def t_goal_status():
+    """This chat's goal, if it has one: the objective, where it stands, what the last check said."""
+    err = _chats_ready()
+    if err: return err
+    return CHATS.goal_status(_this_chat())
 
 def t_chat_wait(chat, timeout_minutes=20):
     """Wait for another chat to finish what it is doing, then return its latest answer."""
@@ -7976,9 +7990,9 @@ def t_chat_list(query=""):
     if err: return err
     return CHATS.list(parent=_this_chat(), query=str(query or ""))
 
-CHAT_TOOLS = ("chat_create", "chat_send", "chat_wait", "chat_list", "read_chat")
+CHAT_TOOLS = ("chat_create", "chat_send", "chat_wait", "chat_list", "read_chat", "goal_set", "goal_status")
 BUILTIN.update({"chat_create": t_chat_create, "chat_send": t_chat_send, "chat_wait": t_chat_wait,
-                "chat_list": t_chat_list})
+                "chat_list": t_chat_list, "goal_set": t_goal_set, "goal_status": t_goal_status})
 ALL_SPECS += [
  {"type": "function", "function": {"name": "chat_list",
   "description": "List chats you can hand work to (id, title, model, whether it is answering, "
@@ -8009,8 +8023,26 @@ ALL_SPECS += [
   "parameters": {"type": "object", "properties": {
      "chat": {"type": "string"}, "message": {"type": "string"},
      "wait": {"type": "boolean", "description": "wait for its answer (default true)"},
-     "timeout_minutes": {"type": "number", "description": "how long to wait (default 20)"}},
+     "as_goal": {"type": "boolean", "description": "make the message that chat's goal: it keeps working, "
+                 "answer after answer, until the Mac's check finds it done, and only then replies here. "
+                 "For work that needs many steps or a high bar."},
+     "timeout_minutes": {"type": "number", "description": "how long to wait (default 20; 240 with as_goal; up to 1440)"}},
    "required": ["chat", "message"]}}},
+ {"type": "function", "function": {"name": "goal_set",
+  "description": "Give THIS chat a goal. After each answer the Mac checks the work against it and has the "
+                 "chat carry on, answer after answer, until it is done -- or stops and says why (stuck, over "
+                 "its budget, out of turns, or the person pauses it). Use it when the person asks you to keep "
+                 "going until something is done, to use goals, or when the task plainly needs many answers. "
+                 "State what done looks like, checkably. The person sees it and can pause or clear it.",
+  "parameters": {"type": "object", "properties": {
+     "objective": {"type": "string", "description": "what done looks like, e.g. 'every test in tests/ passes and the README documents the flag'"},
+     "token_budget": {"type": "integer", "description": "optional cap on new tokens (0 = none)"},
+     "max_turns": {"type": "integer", "description": "optional cap on automatic continuations (default 20)"}},
+   "required": ["objective"]}}},
+ {"type": "function", "function": {"name": "goal_status",
+  "description": "This chat's goal: the objective, whether it is active, how many turns and tokens it has "
+                 "used, and what the last check said.",
+  "parameters": {"type": "object", "properties": {}}}},
  {"type": "function", "function": {"name": "chat_wait",
   "description": "Wait until another chat has finished what it is doing (including messages queued in "
                  "it), then return its latest answer.",

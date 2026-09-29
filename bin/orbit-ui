@@ -132,6 +132,7 @@ class State:
         self.handing = None        # a queued message on its way into the chat (see _drain)
         self.goal = None           # what this chat is working toward, across answers
         self.goal_offer = None     # an offer to make the last request a goal, if one is open
+        self.links = []            # chats this one started, messaged, or works for
     def reset(self):
         self.sid   = new_sid()
         self.msgs  = [{"role": "system", "content": q.system_prompt_for(self.agent, self.project)}]
@@ -153,6 +154,7 @@ class State:
         self.handing = None
         self.goal = None
         self.goal_offer = None
+        self.links = []
         self.refresh_tools()       # a new chat id means its own settings, not the last chat's
     def refresh_tools(self):
         specs, self.tool_errors = q.active_tools(self.project)
@@ -252,6 +254,7 @@ def get_state(sid=None, create=True):
                     st.model = raw.get("model") or None
                     st.queue = _disk_queue(raw)
                     st.goal = raw.get("goal") if isinstance(raw.get("goal"), dict) else None
+                    st.links = raw.get("links") if isinstance(raw.get("links"), list) else []
                     st.queue_paused = bool(raw.get("queue_paused"))
             except Exception:
                 pass
@@ -425,7 +428,7 @@ def jdump(o): return json.dumps(o, default=str)
 # the file belongs to someone else and is carried over untouched.
 _SAVE_OWNS = {"schema", "title", "messages", "saved", "model", "sys_override", "project",
               "running_since", "plan", "plan_mode", "title_auto", "host", "queue", "queue_paused",
-              "handing", "goal"}
+              "handing", "goal", "links"}
 
 def save_session(st=None):
     """No-op for temporary chats — they must leave no trace."""
@@ -470,6 +473,7 @@ def save_session(st=None):
     # puts it back rather than losing it
     if getattr(st, "handing", None): extra["handing"] = st.handing
     if getattr(st, "goal", None): extra["goal"] = st.goal
+    if getattr(st, "links", None): extra["links"] = st.links
     if getattr(st, "answered_at", None): extra["answered_at"] = st.answered_at   # for "unread"
     if getattr(st, "clear_pickups", False):          # an answer finished: the count starts again
         extra.pop("restart_pickups", None); st.clear_pickups = False
@@ -739,7 +743,9 @@ class H(http.server.BaseHTTPRequestHandler):
             # and since when, so each list can count the time as it runs
             since = {sid_: round(float(st_.busy_since or 0), 1) for sid_, st_ in list(STATES.items())
                      if st_.lock.locked() and st_.busy_since}
+            talking = {a: CHATS.talking_to(a) for a in list(WAITING_ON)}
             return self._send(200, jdump({"running": running_sids(), "waiting": waiting, "since": since,
+                                          "talking": {k: v for k, v in talking.items() if v},
                                           "max": (_max_parallel() if _max_parallel() < 10**6 else None)}))
         if p == "/api/home":
             return self._send(200, jdump(home_overview()))
@@ -1096,6 +1102,15 @@ class H(http.server.BaseHTTPRequestHandler):
         if p.startswith("/api/skill/"):
             n = p.rsplit("/",1)[-1]
             return self._send(200, jdump({"name": n, "text": q.skill_read(n)}))
+        if p.split("?")[0] == "/api/links":
+            # the chats this one talks to, their state, and whom it is waiting on now
+            qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+            sid_ = (qs.get("sid") or [""])[0]
+            st_ = STATES.get(sid_) if sid_ else None
+            if st_ is None and sid_ and os.path.exists(q.session_path(sid_)): st_ = get_state(sid_)
+            if st_ is None: return self._send(200, jdump({"links": [], "talking_to": None}))
+            return self._send(200, jdump({"links": CHATS.links_view(st_), "talking_to": CHATS.talking_to(sid_),
+                                          "goal": st_.goal}))
         if p.split("?")[0] == "/api/agents":
             # the agent of the chat asked about: the Mac's open chat is not the phone's
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
@@ -1200,6 +1215,7 @@ class H(http.server.BaseHTTPRequestHandler):
                         if isinstance(raw, dict):
                             stt.queue = _disk_queue(raw)
                             stt.goal = raw.get("goal") if isinstance(raw.get("goal"), dict) else None
+                            stt.links = raw.get("links") if isinstance(raw.get("links"), list) else []
                             stt.queue_paused = bool(raw.get("queue_paused"))
                     except Exception: stt.project, stt.model = None, None
                 globals()["S"] = stt               # the chat the browser is looking at
@@ -1219,6 +1235,8 @@ class H(http.server.BaseHTTPRequestHandler):
                                               "goal_offer": _offer_view(stt),
                                               # the chat that started this one (chat_create), if any
                                               "parent": (getattr(stt, "flags", {}) or {}).get("parent") or _disk_key(sid, "parent"),
+                                              "links": CHATS.links_view(stt),
+                                              "talking_to": CHATS.talking_to(sid),
                                               "messages": render(shown), "n": len(msgs),
                                               "context": q.context_state(msgs, sid),
                                               "running": running, "live": live,
@@ -2776,11 +2794,14 @@ class _Chats:
         if parent: st_.flags["parent"] = {"sid": parent, "title": self._title(parent)}
         STATES[st_.sid] = st_
         save_session(st_)
+        if parent:
+            self._link(STATES.get(parent), st_.sid, "started")
+            self._link(st_, parent, "works for")
         spec = q.current_model(st_.model) or {}
         return (f"Started the chat “{title}” (id {st_.sid}) on {spec.get('label') or st_.model or 'the default model'}. "
                 f"Send it work with chat_send(chat=\"{st_.sid}\", message=...).")
 
-    def send(self, parent, chain, target, message, wait=True, timeout=20.0, cancel=None):
+    def send(self, parent, chain, target, message, wait=True, timeout=20.0, cancel=None, as_goal=False):
         st_, why = self._resolve(target)
         if st_ is None: return "Error: " + why
         if st_.sid == parent: return "Error: that is this chat — send it to another one."
@@ -2804,9 +2825,35 @@ class _Chats:
                   "reply": token}
         note = q._orbit_note(f"this message comes from the chat “{ptitle}” — another agent working for "
                              "the same person. Do what it asks; your whole answer is passed back to it.")
+        self._link(par, st_.sid, "messaged")
+        self._link(st_, parent, "works for")
+        if as_goal:
+            # the message is that chat's goal: it keeps at it, answer after answer, until the
+            # Mac's check finds it done -- and only then does this chat hear back
+            g = q.goal_new(text)
+            g["reason"] = f"set by the chat “{ptitle}”"; g["chain"] = origin["chain"]
+            q.goal_note(g, f"set by “{ptitle}”")
+            st_.goal, st_.goal_offer = g, None
+            text = q.goal_intro(text)
+            if not st_.temp: save_session(st_)
         _queue_add(st_, text + "\n\n" + note, origin=origin)
         _drain()
         title = st_.title or st_.sid
+        if as_goal:
+            self.replies.pop(token, None)
+            if not wait:
+                return (f"“{title}” ({st_.sid}) now has this as its goal and is working on it. "
+                        f"chat_wait(chat=\"{st_.sid}\") collects the result when it is done.")
+            got = self._wait_goal(parent, st_, timeout, cancel)
+            if got == "cancel":
+                return f"Stopped waiting (this answer was stopped). “{title}” carries on with its goal."
+            g = st_.goal or {}
+            if got == "timeout":
+                return (f"“{title}” is still working on its goal after {timeout:g} min "
+                        f"({g.get('turns_used', 0)} turns so far). chat_wait picks it up later.")
+            return (f"“{title}” ({st_.sid}) finished working on its goal — {g.get('status')}"
+                    + (f": {g.get('reason')}" if g.get("reason") else "")
+                    + f" ({g.get('turns_used', 0)} automatic turns).\n\nIts last answer:\n\n{_last_answer(st_)}")
         if not wait:
             return (f"Sent to “{title}” ({st_.sid}); it starts when that chat is free. Collect the answer "
                     f"with chat_wait(chat=\"{st_.sid}\") or read_chat.")
@@ -2819,6 +2866,59 @@ class _Chats:
         self.replies.pop(token, None)
         return f"Answer from “{title}” ({st_.sid}):\n\n{rec['answer']}"
 
+    # ---- links: who talks to whom, for the page and the phone
+    def _link(self, st_, other, role):
+        if st_ is None or not other: return
+        title = self._title(other)
+        links = [l for l in (st_.links or []) if l.get("sid") != other]
+        links.insert(0, {"sid": other, "title": title, "role": role, "t": round(time.time(), 1)})
+        st_.links = links[:30]
+        if not st_.temp: save_session(st_)
+
+    def links_view(self, st_):
+        out = []
+        for l in (getattr(st_, "links", None) or []):
+            o = STATES.get(l.get("sid"))
+            state = ""
+            if o is not None and o.lock.locked():
+                state = "waiting for you" if (o.live.get("approval") or o.live.get("question")) else "answering"
+            elif o is not None and _due_items(o): state = "queued"
+            g = (o.goal if o is not None else _disk_key(l.get("sid"), "goal")) or {}
+            out.append({**l, "title": (o.title if o is not None and o.title else l.get("title")),
+                        "state": state, "goal": g.get("status") if isinstance(g, dict) else None})
+        return out
+
+    def talking_to(self, sid_):
+        t = WAITING_ON.get(sid_)
+        return {"sid": t, "title": self._title(t)} if t else None
+
+    # ---- goals a chat sets itself, or another chat sets for it
+    def set_goal(self, sid_, objective, token_budget=0, max_turns=None, chain=None):
+        st_ = STATES.get(sid_) or (get_state(sid_) if sid_ else None)
+        if st_ is None: return "Error: no chat to set a goal on."
+        obj = str(objective or "").strip()
+        if not obj: return "Error: say what done looks like."
+        g = q.goal_new(obj, token_budget or 0, max_turns)
+        g["reason"] = "set by the chat itself"
+        if chain: g["chain"] = list(chain)
+        q.goal_note(g, "set by the chat")
+        st_.goal = g; st_.goal_offer = None
+        if not st_.temp: save_session(st_)
+        return ("Goal set. When this answer ends the Mac checks the work against it and has this chat carry "
+                "on until it is done (or stops and says why). You do not have to finish everything in this "
+                "answer: do a solid step, then end with Done / Verified / Remaining.")
+
+    def goal_status(self, sid_):
+        st_ = STATES.get(sid_)
+        g = getattr(st_, "goal", None) if st_ is not None else None
+        if not g: return "This chat has no goal. goal_set gives it one."
+        last = (g.get("history") or [{}])[-1]
+        return (f"Goal: {g.get('objective')}\nStatus: {g.get('status')}"
+                + (f" — {g.get('reason')}" if g.get("reason") else "")
+                + f"\nTurns: {g.get('turns_used', 0)}/{g.get('max_turns')} · tokens: {g.get('tokens_used', 0):,}"
+                + (f"/{g['token_budget']:,}" if g.get("token_budget") else "")
+                + (f"\nLast check: {last.get('verdict')} — {last.get('reason')}" if last.get("verdict") else ""))
+
     def _wait(self, parent, sid_, event, timeout, cancel):
         WAITING_ON[parent] = sid_
         try:
@@ -2827,6 +2927,25 @@ class _Chats:
                 if cancel is not None and cancel.is_set(): return "cancel"
                 if time.time() > end: return "timeout"
             return "done"
+        finally:
+            WAITING_ON.pop(parent, None)
+
+    def _wait_goal(self, parent, st_, timeout, cancel):
+        """Until the chat's goal settles and it is idle, or `timeout` minutes."""
+        WAITING_ON[parent] = st_.sid
+        try:
+            end = time.time() + max(0.1, timeout) * 60
+            while True:
+                busy = st_.lock.locked() or _due_items(st_) or st_.handing
+                g = st_.goal or {}
+                if not busy and g.get("status") != "active":
+                    # the goal step runs a moment after the answer ends: let it land
+                    time.sleep(0.5)
+                    if not (st_.lock.locked() or _due_items(st_)) and (st_.goal or {}).get("status") != "active":
+                        return "done"
+                if cancel is not None and cancel.is_set(): return "cancel"
+                if time.time() > end: return "timeout"
+                time.sleep(0.5)
         finally:
             WAITING_ON.pop(parent, None)
 
@@ -2851,7 +2970,7 @@ class _Chats:
         WAITING_ON[parent] = st_.sid
         try:
             end = time.time() + max(0.1, timeout) * 60
-            while st_.lock.locked() or _due_items(st_) or st_.handing:
+            while st_.lock.locked() or _due_items(st_) or st_.handing or (st_.goal or {}).get("status") == "active":
                 if cancel is not None and cancel.is_set():
                     return "Stopped waiting (this answer was stopped)."
                 if time.time() > end:
@@ -2918,8 +3037,10 @@ def _release_chat(st):
 GOAL_LOCK = threading.Lock()
 
 def _goal_item(st):
+    # a goal another chat set keeps that chat's chain, so none of its turns can send
+    # work back up to a chat that is waiting on it
     return {"id": uuid.uuid4().hex[:10], "text": q.build_continuation(st.goal), "attachments": [],
-            "effort": None, "t": time.time(), "goal": True}
+            "effort": None, "t": time.time(), "goal": True, "chain": list(st.goal.get("chain") or [])}
 
 def _goal_announce(st):
     g = st.goal or {}
@@ -3074,7 +3195,7 @@ def _goal_route(d):
     return 200, jdump({"goal": st.goal, "started": started})
 
 
-def start_turn(st, text, atts=None, effort=None, Q=None, origin=None):
+def start_turn(st, text, atts=None, effort=None, Q=None, origin=None, chain=None):
     """Run one message in a chat on its own thread. The chat's lock must already be
     held (it is released when the answer ends). Events go to Q (a browser's stream)
     and always to the chat's live buffer, so any window can follow it; a message the
@@ -3243,7 +3364,7 @@ def start_turn(st, text, atts=None, effort=None, Q=None, origin=None):
                 # chats waiting on this answer, so none of them is sent back into a loop
                 q.TURN_CTX.user_meta = ({"from_chat": {"sid": origin.get("sid"), "title": origin.get("title")}}
                                         if origin else None)
-                q.TURN_CTX.chat_chain = list((origin or {}).get("chain") or [])
+                q.TURN_CTX.chat_chain = list((origin or {}).get("chain") or chain or [])
                 q.TURN_CTX.chats_created = 0
                 st.handing = None      # turn() writes it into the chat as its first act
                 q.turn(st.msgs, content, st.tools, emit=_emit, approve=_approve,
@@ -3576,7 +3697,7 @@ def _drain():
         _queue_saved(st)
         try:
             start_turn(st, item["text"], item.get("attachments") or [], item.get("effort"),
-                       origin=item.get("from"))
+                       origin=item.get("from"), chain=item.get("chain"))
         except Exception as e:
             print(f"  ! queued message in {st.sid}: {type(e).__name__}: {e}")
             # it goes back where it was, and the queue waits: it was dropped here

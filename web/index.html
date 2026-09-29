@@ -1016,6 +1016,9 @@ body.statuson #wrap .msg.a:last-child .bub>.working:only-child{display:none}
 .msg.u.fromchat .bub{border-left:3px solid var(--acc)}
 .msg.u.fromchat .who .chatlink{color:var(--acc);font-weight:600}
 .parentline .chatlink{color:var(--acc)}
+.plandock .st .lrole{color:var(--dim);min-width:4.5em}
+.plandock .st .lstate{color:var(--mut);margin-left:auto;font-size:var(--fs-2xs)}
+.plandock .st.active a{font-weight:600}
 .goalbar.g-offer{border-left-color:var(--acc);background:color-mix(in srgb,var(--acc) 7%,var(--card))}
 .goalbar .ghist{flex-basis:100%;max-height:180px;overflow:auto;border-top:1px solid var(--line);padding-top:5px;margin-top:2px}
 .goalbar .ghrow{display:flex;gap:8px;font-size:var(--fs-2xs);color:var(--mut);padding:1px 0}
@@ -2271,7 +2274,7 @@ function dayLabel(ts){
  if(diff<7)return 'Previous 7 days'; if(diff<30)return 'Previous 30 days';
  return d.toLocaleDateString(undefined,{month:'long',year:'numeric'})}
 // "5m", "3h", "2d": how long ago a chat was last active
-let RUN_SINCE={};
+let RUN_SINCE={}, TALKING={};
 function fmtElapsed(sec){sec=Math.max(0,Math.floor(sec));
  if(sec<60)return sec+'s';const m=Math.floor(sec/60),s_=sec%60;
  if(m<60)return m+'m '+String(s_).padStart(2,'0')+'s';return Math.floor(m/60)+'h '+(m%60)+'m'}
@@ -2293,6 +2296,7 @@ function sideOpenSec(name,def){return PREF.get('sec_'+name,def?'1':'0')==='1'}
 let WAITING=new Set(), PENDING_ROWS={}, LIST_SIG='';
 function rowState(s){
  if(WAITING.has(s.id))return {cls:'wait',icon:'!',tip:'waiting for you — an approval or a question'};
+ if(TALKING[s.id])return {cls:'run',icon:'⇄',tip:'waiting for “'+(TALKING[s.id].title||'')+'”'};
  if(RUNNING.has(s.id))return {cls:'run',icon:'<span class=spin></span>',tip:'answering'};
  if(s.queued)return {cls:'queue',icon:String(s.queued),tip:s.queued+' queued message'+(s.queued>1?'s':'')};
  // new here, or an answer that landed since you last looked on any device (the Mac keeps that)
@@ -2620,7 +2624,7 @@ function attachLive(theSid, initial){
     lrows.forEach(r=>{if(r.classList.contains('live'))finishTool(r,{stopped:true})});
     if(lv.content){a.bub.innerHTML=md(lv.content);decorate(a.bub)}
     if(sid===theSid&&!document.hidden&&document.hasFocus())markSeenOnMac(theSid);
-    if(GOALS[theSid])followGoal(theSid);
+    loadLinks(theSid).then(()=>{if(GOALS[theSid]&&GOALS[theSid].status==='active')followGoal(theSid)});
     RUNNING.delete(theSid);renderSessions();loadSessions();
 
     setTimeout(()=>afterTurn(theSid),300);
@@ -2655,6 +2659,7 @@ async function openSession(id){
   pl.querySelector('a').dataset.chat=d.parent.sid;pl.querySelector('a').textContent=d.parent.title||'another chat';
   wrap.insertBefore(pl,wrap.firstChild)}
  GOALS[d.sid]=d.goal||null;
+ LINKS[d.sid]={links:d.links||[],talking_to:d.talking_to||null};
  GOAL_OFFERS[d.sid]=d.goal_offer?{...d.goal_offer,deadline:d.goal_offer.remaining!=null?Date.now()+d.goal_offer.remaining*1000:null}:null;
  drawGoal();
  loadDraft(d.sid);
@@ -4525,7 +4530,8 @@ async function go(opts){
  $('#dot').classList.remove('busy');loadSessions();refreshStatus();q.focus();
  if(lost&&sid===sendSid){WATCH_N=null;openSession(sendSid)}   // rejoins from the live buffer
  else afterTurn(sendSid);
- if(opts.goal||GOALS[sendSid])followGoal(sendSid)}
+ // the chat may have set itself a goal, or started other chats, during the answer
+ loadLinks(sendSid).then(()=>{if(GOALS[sendSid]&&GOALS[sendSid].status==='active')followGoal(sendSid)})}
 $('#stopgen').onclick=async()=>{
  stoppedSid=sid;
  await fetch('/api/cancel',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -5714,6 +5720,9 @@ async function refreshRunning(){
  try{const r=await (await fetch('/api/running')).json();
   const now=new Set(r.running||[]), wait=new Set(r.waiting||[]);
   const since=r.since||{}, sinceMoved=JSON.stringify(since)!==JSON.stringify(RUN_SINCE);
+  const talk=r.talking||{};
+  if(JSON.stringify(talk)!==JSON.stringify(TALKING)){TALKING=talk;LIST_SIG=null;renderSessions();
+   if(sid&&(talk[sid]||LINKS[sid]&&LINKS[sid].talking_to))loadLinks(sid)}
   if(sinceMoved){RUN_SINCE=since;LIST_SIG=null}
   let changed = sinceMoved || now.size!==RUNNING.size || [...now].some(x=>!RUNNING.has(x))
              || wait.size!==WAITING.size || [...wait].some(x=>!WAITING.has(x));
@@ -8290,6 +8299,17 @@ async function pollGit(force){
 // about 320px; beyond that the dock would push the message box off the screen. The cap
 // goes on the body, never the section, so the header stays where it is.
 const DOCK_CAP={plan:320,work:200,git:160};
+// who each chat talks to (chat_create / chat_send), kept fresh while any of them work
+const LINKS={};
+async function loadLinks(s){
+ if(!s)return;
+ try{const d=await (await fetch('/api/links?sid='+encodeURIComponent(s))).json();
+  const was=JSON.stringify(LINKS[s]||null);LINKS[s]={links:d.links||[],talking_to:d.talking_to||null};
+  if('goal' in d&&JSON.stringify(GOALS[s]||null)!==JSON.stringify(d.goal||null)){GOALS[s]=d.goal||null;if(s===sid)drawGoal()}
+  if(s===sid&&was!==JSON.stringify(LINKS[s]))drawPlanDock()}catch(e){}}
+setInterval(()=>{if(document.hidden||!sid)return;const l=LINKS[sid];
+ // while it, or any chat it talks to, is at work -- or it has a goal going
+ if(RUNNING.has(sid)||(l&&(l.talking_to||l.links.some(x=>x.state)))||(GOALS[sid]&&GOALS[sid].status==='active'))loadLinks(sid)},4000);
 function dockSection(d,key,title,digest,fill){
  const openKey='_sec_'+key;
  if(d[openKey]===undefined)d[openKey]=(key==='plan');
@@ -8322,7 +8342,8 @@ function drawPlanDockInner(){
    .filter(x=>/^(running|pending)/.test(x.status||'running'));
  const queued=qitems.length, bg=bgjobs.length;
  const git=GITSTATE&&GITSID===sid&&GITSTATE.repo?GITSTATE:null;
- const anything=open.length||running||queued||bg||(git&&git.dirty);
+ const lk=LINKS[sid]||{links:[],talking_to:null};
+ const anything=open.length||running||queued||bg||(git&&git.dirty)||lk.links.length||lk.talking_to;
  d.innerHTML='';
  if(!anything||d.dataset.hidden==='1'){d.style.display='none';return}
  d.style.display='';
@@ -8333,6 +8354,21 @@ function drawPlanDockInner(){
    steps.forEach(x=>{
     const r=el(`<div class="st${x.done?' done':''}${x.active&&!x.done?' active':''}"><span class=bx>${todoMark(x)}</span></div>`);
     const sp=document.createElement('span');sp.textContent=x.t;r.appendChild(sp);body.appendChild(r)})})}
+
+ // the chats this one talks to: which, what each is doing, and whom it waits on now
+ if(lk.links.length||lk.talking_to){
+  const busy=lk.links.filter(l=>l.state).length;
+  const digest=lk.talking_to?'⇄ waiting for “'+(lk.talking_to.title||'')+'”'
+   :lk.links.slice(0,3).map(l=>'“'+(l.title||'')+'”').join(', ')+(busy?' · '+busy+' busy':'');
+  dockSection(d,'chats',`chats ${lk.links.length}`,digest,body=>{
+   lk.links.forEach(l=>{
+    const r=el('<div class=st style="gap:6px"><span class=lrole></span><a class=chatlink href="#"></a><span class=lstate></span></div>');
+    r.querySelector('.lrole').textContent={started:'started',messaged:'asked','works for':'works for'}[l.role]||l.role;
+    const a=r.querySelector('a');a.dataset.chat=l.sid;a.textContent=l.title||l.sid;
+    r.querySelector('.lstate').textContent=[l.state,l.goal&&l.goal!=='complete'?'goal: '+(GOAL_WORD[l.goal]||l.goal):l.goal==='complete'?'goal done':'']
+     .filter(Boolean).join(' · ');
+    if(lk.talking_to&&lk.talking_to.sid===l.sid)r.classList.add('active');
+    body.appendChild(r)})})}
 
  if(running||queued||bg){
   const bits=[];
