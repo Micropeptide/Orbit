@@ -2361,7 +2361,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
     if sk: emit("skill_hint", {"name": sk["name"], "title": sk["title"]})
     # every message carries when it was written ("t"), so a reopened chat shows
     # real times rather than the moment the page drew it; stripped before sending
-    messages.append({"role": "user", "content": user_content, "t": time.time()})
+    messages.append({"role": "user", "content": user_content, "t": time.time(), **take_user_meta()})
     req = messages[-1]                      # the request this answer is for
     seen_calls, t_start = {}, time.time()
     if sid: LAST_TURN.pop(sid, None)     # never report the previous answer's cost for this one
@@ -2997,6 +2997,7 @@ def _session_rows():
                    "tags": meta.get("tags") or [], "project": meta.get("project"), "order": meta.get("order"),
                    "project_set": bool(meta.get("project_set")),
                    "answered": meta.get("answered_at"),
+                   "parent": meta.get("parent") if isinstance(meta.get("parent"), dict) else None,
                    "goal": (meta.get("goal") or {}).get("status") if isinstance(meta.get("goal"), dict) else None,
                    "queued": len([x for x in (meta.get("queue") or []) if not x.get("at")]),
                    "scheduled": min([x["at"] for x in (meta.get("queue") or []) if x.get("at")] or [0]) or None, "model": meta.get("model"), "host": meta.get("host"),
@@ -7920,6 +7921,103 @@ def t_read_chat(id, last=12):
 
 BUILTIN["search_chats"] = t_search_chats
 BUILTIN["read_chat"] = t_read_chat
+
+# ==================================================================== CHATS TALKING TO CHATS
+# One chat can start another, send it work, wait for its answer and read it -- a capable
+# model handing parts of a job to cheaper ones, each in a chat of its own that you can
+# open and talk to as well. The work runs through the other chat's queue, so everything
+# that governs a chat governs it: its model, its permissions, Stop, the parallel limit.
+# The server installs CHATS (orbit-ui); without it (a script, a test) the tools say so.
+CHATS = None
+CHAT_DEPTH = 4             # chats handing work on to chats: how deep before it refuses
+CHAT_CREATE_LIMIT = 6      # new chats one answer may start
+
+def take_user_meta():
+    """What the chat's next user message carries besides its words (who sent it), once."""
+    m = getattr(TURN_CTX, "user_meta", None) or {}
+    TURN_CTX.user_meta = None
+    return dict(m)
+
+def _chats_ready():
+    if CHATS is None: return "Error: chats can only reach each other inside the Orbit app."
+    return ""
+
+def t_chat_create(title, model="", instructions="", project=""):
+    """Start a new chat to hand work to."""
+    err = _chats_ready()
+    if err: return err
+    made = int(getattr(TURN_CTX, "chats_created", 0) or 0)
+    if made >= CHAT_CREATE_LIMIT:
+        return (f"Error: this answer has already started {made} chats. Send work to those "
+                "(chat_list shows them) rather than starting more.")
+    out = CHATS.create(parent=_this_chat(), title=title, model=model, instructions=instructions,
+                       project=project)
+    if not str(out).startswith("Error"): TURN_CTX.chats_created = made + 1
+    return out
+
+def t_chat_send(chat, message, wait=True, timeout_minutes=20):
+    """Send a message to another chat; by default wait for its answer and return it."""
+    err = _chats_ready()
+    if err: return err
+    return CHATS.send(parent=_this_chat(), chain=list(getattr(TURN_CTX, "chat_chain", None) or []),
+                      target=chat, message=message, wait=bool(wait),
+                      timeout=float(timeout_minutes or 20), cancel=getattr(TURN_CTX, "cancel", None))
+
+def t_chat_wait(chat, timeout_minutes=20):
+    """Wait for another chat to finish what it is doing, then return its latest answer."""
+    err = _chats_ready()
+    if err: return err
+    return CHATS.wait(parent=_this_chat(), target=chat, timeout=float(timeout_minutes or 20),
+                      cancel=getattr(TURN_CTX, "cancel", None))
+
+def t_chat_list(query=""):
+    """Chats that work can be sent to, and the models a new chat can use."""
+    err = _chats_ready()
+    if err: return err
+    return CHATS.list(parent=_this_chat(), query=str(query or ""))
+
+CHAT_TOOLS = ("chat_create", "chat_send", "chat_wait", "chat_list", "read_chat")
+BUILTIN.update({"chat_create": t_chat_create, "chat_send": t_chat_send, "chat_wait": t_chat_wait,
+                "chat_list": t_chat_list})
+ALL_SPECS += [
+ {"type": "function", "function": {"name": "chat_list",
+  "description": "List chats you can hand work to (id, title, model, whether it is answering, "
+                 "which chat started it) and the models a new chat can use, marked cheap/local. "
+                 "Use before chat_create or chat_send.",
+  "parameters": {"type": "object", "properties": {"query": {"type": "string",
+     "description": "only chats whose title contains this"}}}}},
+ {"type": "function", "function": {"name": "chat_create",
+  "description": "Start a new chat -- another agent working for the same person -- to hand a piece of "
+                 "work to, usually on a cheaper model. It appears in the person's chat list and they can "
+                 "talk to it too. Returns its id; then give it work with chat_send. Only start one when the "
+                 "person asks for a new chat or no existing chat fits: if they name a chat (by title, or as "
+                 "chat “Title” (id)), send to that one instead. Use the model they name, if they name one.",
+  "parameters": {"type": "object", "properties": {
+     "title": {"type": "string", "description": "short name for the chat, e.g. 'Lit search: ADCP readers'"},
+     "model": {"type": "string", "description": "a model id or name from chat_list; empty = Orbit's default"},
+     "instructions": {"type": "string", "description": "standing instructions for that chat (its role, rules, format)"},
+     "project": {"type": "string", "description": "project id; empty = this chat's project"}},
+   "required": ["title"]}}},
+ {"type": "function", "function": {"name": "chat_send",
+  "description": "Send a message to another chat (by id or exact title) and, by default, wait for its "
+                 "answer and return it. When the person names a chat -- by its title, or as chat “Title” "
+                 "(id) -- send to exactly that one, continuing its conversation; it keeps what it was told "
+                 "before. The other chat runs with its own model, tools and permissions; "
+                 "the message waits its turn if that chat is busy. wait=false returns at once -- collect "
+                 "the answer later with chat_wait or read_chat. Give complete, self-contained instructions: "
+                 "the other chat cannot see this conversation.",
+  "parameters": {"type": "object", "properties": {
+     "chat": {"type": "string"}, "message": {"type": "string"},
+     "wait": {"type": "boolean", "description": "wait for its answer (default true)"},
+     "timeout_minutes": {"type": "number", "description": "how long to wait (default 20)"}},
+   "required": ["chat", "message"]}}},
+ {"type": "function", "function": {"name": "chat_wait",
+  "description": "Wait until another chat has finished what it is doing (including messages queued in "
+                 "it), then return its latest answer.",
+  "parameters": {"type": "object", "properties": {
+     "chat": {"type": "string"}, "timeout_minutes": {"type": "number"}},
+   "required": ["chat"]}}},
+]
 ALL_SPECS += [
  {"type": "function", "function": {"name": "search_chats",
   "description": "Search earlier chats for a word or phrase — e.g. what was concluded about a market or a gene last week. Returns chat ids, titles and a snippet.",

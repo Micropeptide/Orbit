@@ -632,7 +632,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     if sid: q.LAST_TURN.pop(sid, None)
     mk = {"thread": thread, "cwd": cwd, "model": spec.get("id"), "provider": provider_key or CHATGPT, "owner": sid}
     if host: mk["host"] = host
-    messages.append({"role": "user", "content": user_content, "t": time.time(), "codex": dict(mk)})
+    messages.append({"role": "user", "content": user_content, "t": time.time(), "codex": dict(mk), **q.take_user_meta()})
     umsg = messages[-1]
     _remember_thread(thread, sid)
 
