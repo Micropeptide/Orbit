@@ -700,8 +700,10 @@ class H(http.server.BaseHTTPRequestHandler):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
+            # always asked for again: a browser (or Orbit for Mac) holding on to its old copy
+            # showed the interface from before an update until its cache let it go
             try: return self._send(200, open(os.path.join(WEB, "index.html"), "rb").read(),
-                                   "text/html; charset=utf-8")
+                                   "text/html; charset=utf-8", {"Cache-Control": "no-cache"})
             except OSError: return self._send(500, "index.html missing", "text/plain")
         if p.split("?")[0] == "/api/info":
             # with ?sid=, the tools that chat would actually be offered: easy mode and
@@ -727,7 +729,8 @@ class H(http.server.BaseHTTPRequestHandler):
                               "application/manifest+json")
         if p == "/guide.md":
             # the user guide, read by the page's Guide and by the iPhone app
-            try: return self._send(200, open(os.path.join(WEB, "guide.md"), "rb").read(), "text/markdown; charset=utf-8")
+            try: return self._send(200, open(os.path.join(WEB, "guide.md"), "rb").read(), "text/markdown; charset=utf-8",
+                                   {"Cache-Control": "no-cache"})
             except OSError: return self._send(404, b"no guide", "text/plain")
         if p.startswith("/icons/"):
             name = os.path.basename(p)          # basename: nothing escapes web/icons

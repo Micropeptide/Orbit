@@ -260,7 +260,7 @@ body{overflow:hidden}
 .top{overflow:hidden}
 /* a narrower window keeps the conversation's controls and lets the rest go to ⋯ (and the
    sidebar's Settings), rather than pushing the bar past the edge */
-@container main (max-width:1080px){#easybtn,#tempbtn,#compact,#settings2{display:none}}
+@container main (max-width:760px){#easybtn,#tempbtn,#compact,#settings2{display:none}}
 /* the chat's folder keeps a readable width; the session label (the mode chip already says
    which engine) goes first when the bar is short */
 .top>#cqbar .cqdir{flex-shrink:0;max-width:170px;min-width:0}
@@ -268,12 +268,11 @@ main .top>#cqbar select{flex:none;width:96px;min-width:96px;max-width:96px}
 main .top>#cqbar .cqdir{flex:none}
 /* the chat's folder is how you choose where it works: it stays; the model names give way */
 main .top>#cqbar{flex-shrink:0;overflow:visible}
-main .top>#hpick{flex-shrink:1;min-width:0}
 #hpick #hprov{min-width:70px;flex-shrink:1}#hpick #hmodel{min-width:96px;flex-shrink:1}
-.top>#title{min-width:72px}
+.top>#title{min-width:96px}
 @container main (max-width:1320px){#cqbar .cqi{display:none}}
 @container main (max-width:900px){#cqbar .cqdir{display:none}}
-@container main (max-width:860px){.top .ctx,#opbadge{display:none!important}}
+@container main (max-width:640px){#ctxtxt,#opbadge{display:none!important}}
 .top{padding:7px 14px 7px 18px;border-bottom:1px solid var(--line);display:flex;gap:6px;align-items:center;
  font-size:var(--fs-cap);color:var(--mut);min-height:48px;background:var(--bg)}
 .top b{color:var(--fg);font-weight:600;font-size:var(--fs-base);letter-spacing:-.005em;max-width:40ch;overflow:hidden;margin-right:4px;
@@ -290,8 +289,6 @@ main .top>#hpick{flex-shrink:1;min-width:0}
    first; the buttons and pickers keep their size */
 .top>*{flex-shrink:0}
 .top>#title{flex-shrink:1;min-width:48px}
-.top>#opbadge{flex-shrink:1;min-width:30px;overflow:hidden;text-overflow:ellipsis}
-.top>#ctxbox{flex-shrink:1;min-width:0;overflow:hidden}
 .top>#cqbar{flex-shrink:1;min-width:0;overflow:hidden}
 .top>#cqbar>*{min-width:0;flex-shrink:1}
 .top>#cqbar select{max-width:118px}
@@ -480,6 +477,26 @@ details.think summary{font-style:normal;font-weight:500}
 .termpane.on{display:block}
 .termpane .xterm{height:100%}
 .termmsg{padding:18px;color:var(--dim);font-size:var(--fs-sm)}
+/* Above the message box: who answers this chat — the engine, provider, model, agent — and
+   how full its context is. It used to share the top bar with the chat's own title, folder
+   and menu, and at a normal window width cut every one of them short. */
+.enginebar{display:flex;align-items:center;gap:2px;padding:0 4px 7px;min-height:30px;font-size:var(--fs-sm);
+ color:var(--mut);white-space:nowrap;overflow:hidden}
+.enginebar>*{flex-shrink:0}
+.enginebar #hmode,.enginebar #cmode{font-size:var(--fs-xs);padding:2px 9px}
+.enginebar #hmode{margin-right:2px}
+.enginebar select.ghost,.enginebar .ghost{background:transparent;border-color:transparent;color:var(--mut);padding:3px 6px;font-weight:500}
+.enginebar select.ghost:hover,.enginebar .ghost:hover{background:var(--hover);color:var(--fg)}
+.enginebar #hpick,.enginebar #modelsel{min-width:0;flex-shrink:1}
+.enginebar #hpick #hmodel{color:var(--fg)}
+.enginebar #modelsel{color:var(--fg)}
+.enginebar #opbadge{margin-left:4px;flex-shrink:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.enginebar .ebsp{flex:1 1 8px;min-width:8px}
+.enginebar .ctx{flex-shrink:1;min-width:0;overflow:hidden;cursor:pointer;padding:2px 6px;border-radius:var(--r-md)}
+.enginebar .ctx:hover{background:var(--hover)}
+/* the top bar: the chat's title has the room now */
+.top>#title{font-size:calc(var(--ui) + 1px);max-width:min(52ch,46%)}
+.top{min-height:50px}
 .sheet.guide{width:min(1040px,100%);height:min(86vh,860px)}
 .sheet.guide #gfind{width:220px;padding:4px 10px;border:1px solid var(--line2);border-radius:var(--r-md);background:var(--card);color:var(--fg);font:inherit;font-size:var(--fs-sm)}
 .guidebody{padding:22px 34px 60px!important;line-height:1.65;scroll-behavior:smooth}
@@ -786,7 +803,8 @@ mark.findhit.on{background:var(--acc);color:#fff}
  .top::-webkit-scrollbar{display:none}
  .top>*{flex:0 0 auto}
  .top b{max-width:16ch;flex:1 1 auto;min-width:0}
- .top .ctx,.top select{display:none}
+ .top select{display:none}
+ .enginebar{overflow-x:auto;scrollbar-width:none}
  .composer,.cwrap{padding-left:10px;padding-right:10px}
  textarea#q{min-height:62px}
  .grid{grid-template-columns:1fr;gap:6px}
@@ -1293,15 +1311,6 @@ table.stbl{border-collapse:collapse;width:100%;font-size:var(--fs-cap);margin:2p
     <b id=title title="click to rename">New chat</b>
     <span id=runbadge class=note style="color:var(--acc)"></span>
     <button class="ghost wtbadge" id=wtbadge style="display:none" onclick="openWorktree()"></button>
-    <button id=hmode title="Claude Code mode: every chat runs through the Claude Code harness, on the provider and model you pick"><span class=dot></span>Claude Code</button>
-    <button id=cmode title="Codex mode: every chat runs through Codex's own agent — on your ChatGPT account, or any provider in Orbit's list"><span class=dot></span>Codex</button>
-    <span id=hpick><select id=hprov class=ghost title="provider"></select><select id=hmodel class=ghost title="model for this chat"></select>
-      <button class=ghost id=hrefresh title="refresh this provider's model list" style="padding:2px 7px">↻</button></span>
-    <select id=modelsel class=ghost style="max-width:190px" title="model for this chat"></select>
-    <select id=agentsel class=ghost style="max-width:150px"><option value="">no agent</option></select>
-    <button id=opbadge class=opbadge style="display:none" title="cheaper hours for this model — click for details"></button>
-    <span class=ctx id=ctxbox style="display:none">
-      <span class=bar><i id=ctxbar></i></span><span id=ctxtxt></span></span>
     <span style="margin-left:auto;display:flex;gap:7px">
       <button class=ghost id=easybtn>easy</button>
       <button class=ghost id=tempbtn title="temporary chat — nothing is saved">temp</button>
@@ -1323,6 +1332,18 @@ table.stbl{border-collapse:collapse;width:100%;font-size:var(--fs-cap);margin:2p
     <div class=plandock id=plandock style="display:none"></div>
     <div class=queuebox id=queuebox style="display:none"></div>
     <div class=chips id=chips></div>
+    <div class=enginebar id=enginebar>
+    <button id=hmode title="Claude Code mode: every chat runs through the Claude Code harness, on the provider and model you pick"><span class=dot></span>Claude Code</button>
+    <button id=cmode title="Codex mode: every chat runs through Codex's own agent — on your ChatGPT account, or any provider in Orbit's list"><span class=dot></span>Codex</button>
+    <span id=hpick><select id=hprov class=ghost title="provider"></select><select id=hmodel class=ghost title="model for this chat"></select>
+      <button class=ghost id=hrefresh title="refresh this provider's model list" style="padding:2px 7px">↻</button></span>
+    <select id=modelsel class=ghost style="max-width:190px" title="model for this chat"></select>
+    <select id=agentsel class=ghost style="max-width:150px"><option value="">no agent</option></select>
+    <button id=opbadge class=opbadge style="display:none" title="cheaper hours for this model — click for details"></button>
+    <span class=ebsp></span>
+    <span class=ctx id=ctxbox style="display:none">
+      <span class=bar><i id=ctxbar></i></span><span id=ctxtxt></span></span>
+    </div>
     <div class=row>
       <button class=iconbtn id=attach title="Attach file or image">+</button>
       <textarea id=q rows=1 placeholder="Ask anything — / for commands, @ for files, drop to attach"></textarea>
