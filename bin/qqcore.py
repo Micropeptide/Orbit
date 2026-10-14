@@ -6202,6 +6202,8 @@ JOBHIST = os.path.join(LOGS, "h2-jobs.jsonl")
 
 def cluster_jobs_detailed():
     """qstat with enough columns for a dashboard."""
+    if not CLUSTER_HOSTS:
+        return {"off": True, "jobs": []}        # no cluster set up: nothing to ask
     out = _h2_ssh("qstat -u $USER 2>/dev/null | tail -n +3")
     if out.startswith("All login nodes failed"):
         return {"error": out, "jobs": []}
@@ -8068,7 +8070,7 @@ ALL_SPECS += [
                  "person asks for a new chat or no existing chat fits: if they name a chat (by title, or as "
                  "chat “Title” (id)), send to that one instead. Use the model they name, if they name one.",
   "parameters": {"type": "object", "properties": {
-     "title": {"type": "string", "description": "short name for the chat, e.g. 'Lit search: ADCP readers'"},
+     "title": {"type": "string", "description": "short name for the chat, e.g. 'Lit search: base editors'"},
      "model": {"type": "string", "description": "a model id or name from chat_list; empty = Orbit's default"},
      "instructions": {"type": "string", "description": "standing instructions for that chat (its role, rules, format)"},
      "project": {"type": "string", "description": "project id; empty = this chat's project"}},

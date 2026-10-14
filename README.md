@@ -2,52 +2,117 @@
 
 # Orbit
 
-**A research and coding assistant that lives on your own Mac.** Your chats, notes,
-papers and files stay in one folder you can open in Finder. The model that answers
-is your choice, per conversation: a local model that never leaves the machine, your
-Claude subscription, OpenCode Go, DeepSeek, Kimi, GLM, Qwen, MiniMax, any
-OpenAI-compatible endpoint, or the coding CLI you are already signed into.
+**Your own AI workspace, on your own Mac.** Run any model through the real Claude Code or
+Codex agent, let chats hand work to each other, give a chat a goal and let it keep going,
+and queue or schedule messages for later. Your chats, notes and files stay in one folder
+on the Mac. Use it as [Orbit for Mac](#the-desktop-app), in any browser, or from the
+[iPhone app](#on-your-phone).
 
-It works two ways, and you can switch at any time:
+**New to Orbit?** The [user guide](web/guide.md) walks through everything. It is also inside
+Orbit: type `/guide`, or open ⋯ More → *User guide*. In the Mac app it is under Help → *Orbit Guide*,
+and on the iPhone under Settings → *User guide*.
 
-- **Orbit's own agent** — a frugal tool-using assistant built for a 27B model on a
-  laptop: your document library, memory, projects, Python, PubMed and friends.
-- **Claude Code mode** — the real Claude Code harness in a desktop window, on *any*
-  of those models: its tools, skills, subagents, plugins, MCP servers, permission
-  modes and memory, with every step shown and every approval answered in Orbit. A
-  chat can even run on another machine over SSH.
+![Orbit for Mac: a new chat opens on a home page with what is running, what is coming up and your activity](docs/screenshots/home.png)
 
-It is a Python server and one HTML file. No account, no telemetry, no build step.
-Use it in a browser, as [Orbit for Mac](#the-desktop-app), or from the iPhone app.
+---
 
-**New to Orbit?** The [user guide](web/guide.md) walks through everything — it is also inside
-Orbit (`/guide`, or ⋯ More → *User guide*; Help → *Orbit Guide* in the Mac app; Settings →
-*User guide* on the iPhone).
+## What makes Orbit different
 
-![Orbit's home page](docs/screenshots/home.png)
+### Claude Code and Codex, on any model
 
-*A new chat opens on a home page: what is running now (with a stop button), what is
-scheduled next, two weeks of activity, and what is left of each account's 5-hour, weekly
-and monthly allowance. Below it, the chats you were last in.*
+Claude Code and Codex are excellent agents, but each is tied to one company's models.
+Orbit runs the **real Claude Code harness** on whatever model you pick:
+
+- your Claude subscription, with no API key;
+- DeepSeek, Kimi, GLM, Qwen or MiniMax;
+- OpenCode Go;
+- a local MLX model.
+
+A built-in gateway translates between the APIs. You get Claude Code's tools, skills,
+subagents, plugins, MCP servers, permission modes and `CLAUDE.md` memory, with every step
+shown and every approval answered in Orbit. **Codex mode** does the same with OpenAI's
+Codex agent, on your ChatGPT account or any provider. A chat can switch between Orbit's own
+agent, Claude Code and Codex and keep its conversation. [More](#claude-code-mode)
+
+### Chats that talk to each other
+
+A chat can **start other chats and hand them work**: a routine test run goes to a cheap,
+fast model while the expensive one keeps thinking. A chat can also message an existing
+chat, wait for its answer and set goals on the chats it started. Each chat lists the
+chats it is talking to. Messages one chat sends another are marked **from** the
+sender, with a link back, and you can join any of those chats yourself. [More](#chats-that-talk-to-each-other)
 
 <table><tr>
-<td width="50%"><img src="docs/screenshots/chat.png" alt="A Claude Code chat on DeepSeek"><br>
-<sub>Claude Code on DeepSeek V4.1 Flash: look-ups folded into one line, edits and a test
-run shown as Claude Code shows them.</sub></td>
-<td width="50%"><img src="docs/screenshots/plot.png" alt="A local model answering with a plot"><br>
-<sub>The local model fitting a dose–response curve with the Python tool. The plot shows inline,
-and the file it wrote is a card under the answer.</sub></td>
+<td width="50%"><img src="docs/screenshots/chats-talk.png" alt="A chat on Claude Sonnet hands the test run to a new chat on DeepSeek Flash and waits for its answer"><br>
+<sub>On Claude Sonnet, the release checklist hands the test run to a new chat on DeepSeek
+V4.1 Flash, updates the changelog meanwhile, then waits for the result.</sub></td>
+<td width="50%"><img src="docs/screenshots/chat-helper.png" alt="The helper chat, started by the first one, with its message marked from that chat"><br>
+<sub>The helper chat: started by the first one, its task marked <b>from</b> that chat. You can
+open it and talk to it like any other chat.</sub></td>
 </tr></table>
+
+### Goals: keep going until it is done
+
+Give a chat a **goal** (`/goal what done looks like`) and it
+carries on by itself, answer after answer. After each answer Orbit checks the work against
+the goal and either continues or stops and tells you why: done, stuck, over its token
+budget, or out of turns. A bar above the message box shows progress, each check, and
+Pause, Edit and Clear. [More](#goals)
+
+![A chat working toward a goal: fitted curves, a table and the plot inline, with the goal bar showing 3 of 20 turns used](docs/screenshots/chat.png)
+
+### A queue, and messages that go out later
+
+- **Queue messages instead of interrupting.** Send while a chat is answering and your
+  message waits its turn. You can reorder, edit or remove queued messages, or slip one
+  into the running answer now.
+- **Many chats at once.** Any number of chats can answer at the same time on hosted models.
+- **Send later.** Write a message now and have it go out at 9:00 tomorrow, or every weekday
+  at 8:30, in that chat with its model and folder: press ⏱ beside Send, or type
+  `/later fri 5pm …`.
+- **Scheduled tasks.** A prompt that runs on its own every day or week, with its result
+  in a chat.
+
+[More](#many-chats-at-once-and-the-message-queue)
+
+![The Scheduled tab: a weekly literature digest and a nightly backup, each with its model, last result and next run](docs/screenshots/scheduled.png)
+
+### A real Mac app, and an iPhone app
+
+- **Orbit for Mac** has:
+  - a menu bar icon listing the chats that are answering or waiting for you;
+  - **Quick Ask** on ⌥Space from anywhere;
+  - notifications that open the chat;
+  - tabs, a terminal in the chat's folder, and *separate copies* (git worktrees), so two
+    chats can work on one repository at once;
+  - updates that install themselves, on your schedule.
+- **The iPhone app** is a live window onto the same chats. It shows answers streaming in
+  Claude Code's style, approvals you can answer from the Lock Screen, the queue, scheduled
+  messages and plots inline.
+
+<p align="center">
+<img src="docs/screenshots/phone.png" width="200" alt="Orbit for iPhone: the chat list">&nbsp;
+<img src="docs/screenshots/phone-chat.png" width="200" alt="Orbit for iPhone: a chat with a table, a plot and its goal">
+</p>
+
+### Yours, and private
+
+- **No account, no telemetry, no build step.** Orbit is a Python server and one HTML file.
+- **Plain files.** Chats, notes and settings are JSON and Markdown in one folder, backed up
+  daily to iCloud Drive (keys left out).
+- **Keys stay on the Mac.** Keys are sent only to their own provider. With a local model,
+  nothing leaves the machine except the look-ups you ask for.
 
 ---
 
 ## Contents
 
-- [Highlights](#highlights)
+- [What makes Orbit different](#what-makes-orbit-different) · [More highlights](#more-highlights)
 - [Two ways to chat](#two-ways-to-chat)
 - [Models, providers and accounts](#models-providers-and-accounts)
 - [Claude Code mode](#claude-code-mode)
 - [Codex mode](#codex-mode)
+- [Chats that talk to each other](#chats-that-talk-to-each-other) · [Goals](#goals)
 - [Chats on another machine (SSH)](#chats-on-another-machine-ssh)
 - [Sessions from other agents](#sessions-from-other-agents)
 - [Many chats at once, and the message queue](#many-chats-at-once-and-the-message-queue)
@@ -65,78 +130,55 @@ and the file it wrote is a card under the answer.</sub></td>
 
 ---
 
-## Highlights
+## More highlights
 
-- **A home page, not a blank page.** A new chat shows what needs you (an approval, a
-  failed scheduled task, an account running low), what is running and queued, what is
-  coming up, your activity over two weeks, and what is left of every allowance. It stays
-  current while it is open, in light and dark, on the Mac and on the phone.
-- **Any model, one conversation at a time.** Pick a model per chat; two chats can use
-  two different models at once, and a chat can switch model mid-way. Each answer is
-  labelled with the model that wrote it.
-- **Codex too.** Codex's own agent — tools, sandbox, skills, plugins — on your ChatGPT
-  account or on any provider in Orbit's list, in a green Codex mode beside Claude Code's
-  orange one. A chat can move between Orbit's agent, Claude Code and Codex and keep its
-  conversation.
-- **When a provider fails, the answer carries on.** After a few failed attempts it moves
-  to the same model on another provider, or the next model on your fallback list, and
-  says so.
-- **Claude Code on any model.** Claude Code's harness driving DeepSeek, Kimi, GLM,
-  Qwen or a local MLX model — through a built-in gateway that translates Anthropic's
-  Messages API to OpenAI's chat and Responses APIs — or plainly on your own Claude
-  subscription, with no API key.
-- **One provider list, several accounts each.** Keys for every provider in one place;
-  add a second OpenCode Go account and Orbit moves to it by itself when the first is
-  used up. What is left of each account's 5-hour, weekly and monthly allowance is
-  shown next to the models.
-- **Context that follows the model.** A chat's context window is the model's own (1M
-  for DeepSeek V4, the server's setting for a local model); moving a chat to a model
-  with a smaller window compacts it first, on the model that can still hold it.
-- **Chats on a cluster.** Run a Claude Code chat on an HPC login node or a lab server
-  over SSH: it edits files and runs commands there, your models still come from the
-  Mac, and nothing is left running on the node afterwards.
-- **Reads like Claude Code.** Every model's tool calls, not only Claude's, show as
-  Claude Code shows them: `⏺ Read notes.md` with a one-line `⎿ Read 40 lines` under it,
-  runs of look-ups folded into "Read 3 files, Searched for 2 patterns", a live
-  `✻ Pondering… (12s · ↓ 1.2k tokens · esc to interrupt)` line, ☒ ◼ ☐ todos, numbered
-  permission prompts, `!` shell mode, Esc-Esc rewind, Shift+Tab modes and `/context`.
-- **Continue other agents' conversations.** Sessions from the Claude CLI, Claude's
-  desktop app, Codex and OpenCode appear in their own sidebar sections; open one and
-  keep going in that agent's own session.
-- **A queue, not interruptions.** Messages sent while a chat is answering wait their
-  turn and start by themselves; drag to reorder, edit, or push one in right away.
-  Any number of chats answer at once on hosted models.
-- **Send later.** Write a message now and have it go out at 9:00 tomorrow, or every
-  weekday at 8:30, into that chat with its model and folder.
-- **Files you can use, not just read about.** Every file an answer names or writes is a
-  link and a card under the answer: open it, preview it in Orbit (pages, PDFs, notebooks,
-  spreadsheets, Word files, images), Quick Look, show in Finder, copy the file or its
-  path, drag it out, attach it to your next message — on the Mac or from an SSH host.
-- **Answers formatted the way models write them.** Tables, math, callouts, footnotes,
-  Mermaid, highlighted code with Run / Open / Preview buttons, and copy that keeps the
-  formatting for Word, Excel and Google Docs.
-- **Your own library, searched before the web.** PDFs, Word files, spreadsheets and
-  notes indexed locally (BM25 — no embedding service, nothing uploaded) and cited.
-- **Frugal with context on purpose.** A fresh Orbit-agent conversation costs about
-  7.9k tokens with all its tools loaded, so a 27B local model on a 48 GB Mac runs
-  everything with room to work.
-- **Its own work runs elsewhere.** Chat titles, compaction, saved memories, the review of
-  what an answer changed and the check that it was actually done go to a model you name,
-  so they do not queue behind the answer on a Mac that serves one request at a time.
-- **Every chat keeps its own settings.** Easy mode, the model doing the side work, how
-  much it may do unasked — set in one chat and the chat beside it is unaffected, and each
-  chat is as you left it when you come back to it.
-- **Guardrails that hold.** Approvals with diffs, a hard floor of refused commands,
-  writes confined to a workspace, fenced web content that cannot close its own fence,
-  keys that never leave the Mac, and grants that can last one chat instead of forever.
-- **It reads the command, not the tool's name.** `ls`, `grep` and `git log` run together
-  and unasked; `sed -i`, `find -delete`, a redirect or a command nobody has classified
-  does not. A file you changed in your editor is never overwritten from what the model
-  read three steps ago.
-- **Plain files in one folder.** Chats, notes and settings are JSON and Markdown.
-  Backed up daily to iCloud Drive (keys left out). Delete the folder and Orbit is gone.
+- **A home page, not a blank page.** A new chat shows:
+  - what needs you: an approval, a failed scheduled task, an account running low;
+  - what is running and queued, and what is coming up;
+  - your activity over two weeks, and what is left of every allowance.
 
----
+  It stays current while it is open, in light and dark, on the Mac and on the phone.
+- **Any model, per chat.** Two chats can use two different models at once, and a chat can
+  switch model partway through. Each answer is labelled with the model that wrote it.
+- **When a provider fails, the answer carries on.** After a few failed attempts, Orbit
+  moves to the same model on another provider, or to the next model on your fallback list,
+  and says so.
+- **One provider list, several accounts each.** Add a second OpenCode Go account and Orbit
+  switches to it by itself when the first is used up. What is left of each account's
+  5-hour, weekly and monthly allowance is shown next to the models.
+- **Context windows that stay correct.** Each model's window comes from the newest
+  [models.dev](https://models.dev) data and from what the engine reports while working, and
+  it refreshes by itself. Moving a chat to a model with a smaller window compacts it first.
+- **Chats on a cluster.** A Claude Code chat can run on an HPC login node or a lab server
+  over SSH. It edits files and runs commands there, your models still come from the Mac,
+  and nothing is left running on the node afterwards.
+- **Reads like Claude Code.** Every model's tool calls look the way Claude Code shows them:
+  - `⏺ Read notes.md`, with a one-line `⎿ Read 40 lines` under it;
+  - runs of look-ups folded into one line;
+  - a live status line, and todos;
+  - numbered permission prompts, `!` shell mode, Esc-Esc rewind and Shift+Tab modes.
+- **Continue other agents' conversations.** Sessions from the Claude CLI, Claude's desktop
+  app, Codex and OpenCode appear in the sidebar. Open one and keep going in that agent's
+  own session.
+- **Files you can act on.** Every file or folder an answer names is a link and a card under
+  the answer. You can:
+  - open it, preview it in Orbit, or use Quick Look;
+  - show it in Finder, or copy the file or its path;
+  - drag it out, or attach it to your next message.
+
+  This works on the Mac or from an SSH host.
+- **Answers formatted the way models write them.** Tables, math, callouts, Mermaid diagrams
+  and highlighted code. Copying keeps the formatting for Word, Excel and Google Docs.
+- **Your own library, searched before the web.** PDFs, Word files, spreadsheets and notes
+  are indexed locally and cited. There is no embedding service, and nothing is uploaded.
+- **Frugal with context on purpose.** A fresh conversation with Orbit's own agent costs
+  about 7.9k tokens with all its tools loaded, so a 27B local model runs everything with
+  room to work.
+- **Every chat keeps its own settings.** Easy mode, the model doing side work and how much
+  it may do unasked are set per chat.
+- **Guardrails that hold.** Approvals show diffs. A hard floor of commands is always refused.
+  Writes stay in a workspace. Web content is fenced off, and a grant can last for one chat
+  instead of forever. [More](#safety)
 
 ## Two ways to chat
 
@@ -300,6 +342,40 @@ skills, plugins and MCP servers — with every step shown in Orbit. Turn it on w
 - **Moving between harnesses.** Switch a chat's model to Claude Code, to Orbit's own
   agent, or back to Codex: whoever answers next is given what was said since it last
   saw the conversation.
+
+---
+
+## Chats that talk to each other
+
+A chat can work with other chats, the way you would hand a task to a colleague:
+
+- **Start a chat and hand it work**: on a model you choose, in a project you choose, with
+  standing instructions. Routine jobs go to cheap, fast models, and the expensive one stays on the
+  hard part.
+- **Message an existing chat**, continuing its conversation, and **wait** for its reply.
+- **Set a goal** on a chat it started, so that chat keeps going until the job is done.
+
+What you see:
+
+- A dock above the message box lists the chats this one talks to and what each is doing.
+  A *waiting for…* line shows which chat it is waiting on.
+- A message one chat sends another is marked **from** the sender, with a link back. A chat
+  that was started by another says so at the top.
+- These are ordinary chats. Open any of them, read along, or talk to it yourself.
+
+It works in Orbit's own agent and in Claude Code mode.
+
+<a id="goals"></a>
+## Goals: keep going until it is done
+
+- `/goal what done looks like` gives a chat a goal. After each answer Orbit checks the work against the goal, then either continues
+  or stops and says why: done, stuck, over its token budget, or out of turns. Each check
+  and its reason are kept.
+- When an answer ends with work still listed as remaining, Orbit offers to make it a goal.
+  If you don't answer within two minutes, it goes ahead. You can turn this offer off in
+  Settings.
+- The goal bar above the message box shows turns and tokens used, the latest check, and
+  **Pause**, **Edit** and **Clear**.
 
 ---
 
@@ -784,8 +860,8 @@ live, with the same model picker and a Files tab.
 Turn it on in **Settings → Phone**, choose Tailscale (anywhere, HTTPS through Tailscale
 Serve) or Local network, and scan the QR.
 
-<p align="center"><img src="docs/screenshots/phone.png" width="260" alt="Orbit for iPhone: the home page">
-&nbsp;&nbsp;<img src="docs/screenshots/phone-chat.png" width="260" alt="Orbit for iPhone: a Claude Code chat"></p>
+<p align="center"><img src="docs/screenshots/phone.png" width="240" alt="Orbit for iPhone: the chat list">
+&nbsp;&nbsp;<img src="docs/screenshots/phone-chat.png" width="240" alt="Orbit for iPhone: a chat with a plot and its goal"></p>
 
 The app lives at [Micropeptide/Orbit-iOS](https://github.com/Micropeptide/Orbit-iOS), with
 an unsigned IPA in its [releases](https://github.com/Micropeptide/Orbit-iOS/releases/latest)
@@ -842,6 +918,11 @@ if you have `claude` or `codex` installed, or add a key in **Settings → Models
 4. **Try Claude Code mode.** Flip the switch in the top bar, pick a provider and model,
    choose a folder with the chip by the title, and ask it to change something there.
 5. **Make a project.** Group related chats; project instructions apply to all of them.
+6. **Hand work to another chat.** Ask it to start a chat on a cheaper model for a routine
+   part of the job and wait for the answer.
+7. **Read the guide.** Type `/guide`. It opens on a page like this one:
+
+<p align="center"><img src="docs/screenshots/guide.png" width="720" alt="The user guide inside Orbit, with its sections down the left"></p>
 
 ---
 

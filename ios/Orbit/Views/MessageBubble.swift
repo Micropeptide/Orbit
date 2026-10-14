@@ -209,7 +209,7 @@ struct MarkdownText: View {
             // only a finished answer is looked up — a live one changes 20 times a second
             guard let sid else { return }
             let names = blocks.flatMap(\.inlineTexts).flatMap { FileLinks.candidates(in: Self.attributed($0)) }
-            links.request(sid: sid, names: names)
+            links.request(sid: sid, names: names + blocks.compactMap(\.localImage))
         }
     }
 
@@ -254,6 +254,27 @@ struct MarkdownText: View {
             QuoteBlock(kind: kind, title: title.map { inline($0) }) {
                 MarkdownText(body)
             }
+        case .image(let alt, let src):
+            imageView(alt: alt, src: src)
+        }
+    }
+
+    /// A web picture loads as is; one on the Mac (`figures/plot.png`, relative to the
+    /// chat's folder, or a full path) once the Mac has said where it is -- the same
+    /// lookup that turns file names into links. Until then, or if it is not there, its name.
+    @ViewBuilder
+    private func imageView(alt: String, src: String) -> some View {
+        if src.hasPrefix("http://") || src.hasPrefix("https://"), let url = URL(string: src) {
+            AsyncImage(url: url) { img in
+                img.resizable().aspectRatio(contentMode: .fit)
+            } placeholder: { ProgressView().controlSize(.mini) }
+                .frame(maxWidth: .infinity, maxHeight: 240)
+                .clipShape(.rect(cornerRadius: 11))
+        } else if let sid, let f = links.info(sid: sid, name: src), f.exists, let url = f.url {
+            MessageImage(path: url)
+        } else {
+            Label(alt.isEmpty ? (src as NSString).lastPathComponent : alt, systemImage: "photo")
+                .font(.subheadline).foregroundStyle(.secondary)
         }
     }
 
@@ -308,6 +329,8 @@ struct MarkdownText: View {
         case list([ListItem])
         case quote(kind: String?, title: String?, body: String)
         case rule
+        /// `![alt](src)` on a line of its own: a picture, not its alt text
+        case image(alt: String, src: String)
 
         /// The inline Markdown pieces, for finding file names in them.
         var inlineTexts: [String] {
@@ -317,13 +340,21 @@ struct MarkdownText: View {
             case .list(let items): return items.map(\.text)
             case .quote(_, let title, let body):
                 return (title.map { [$0] } ?? []) + Block.parse(body).flatMap(\.inlineTexts)
-            case .code, .math, .rule: return []
+            case .code, .math, .rule, .image: return []
             }
+        }
+
+        /// A picture on the Mac this block shows, to look up like any file name.
+        var localImage: String? {
+            if case .image(_, let src) = self, !src.hasPrefix("http://"), !src.hasPrefix("https://"),
+               !src.hasPrefix("data:") { return src }
+            return nil
         }
 
         private static let headingRE = try! NSRegularExpression(pattern: #"^ {0,3}(#{1,6})\s+(.*?)\s*#*\s*$"#)
         private static let ruleRE = try! NSRegularExpression(pattern: #"^ {0,3}([-*_])(\s*\1){2,}\s*$"#)
         private static let itemRE = try! NSRegularExpression(pattern: #"^(\s*)([-*+]|\d{1,4}[.)])\s+(.*)$"#)
+        private static let imageRE = try! NSRegularExpression(pattern: #"^!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+"[^"]*")?\s*\)$"#)
         private static let calloutRE = try! NSRegularExpression(pattern: #"^\[!(\w+)\][+-]?\s*(.*)$"#)
 
         private static func groups(_ re: NSRegularExpression, _ s: String) -> [String]? {
@@ -405,6 +436,12 @@ struct MarkdownText: View {
                     blocks.append(.table(rows: rows.map {
                         $0 + Array(repeating: "", count: width - $0.count) }))
                     i = j; continue
+                }
+
+                if let g = groups(imageRE, trimmed) {
+                    flushText()
+                    blocks.append(.image(alt: g[1], src: g[2].removingPercentEncoding ?? g[2]))
+                    i += 1; continue
                 }
 
                 if let g = groups(headingRE, line) {

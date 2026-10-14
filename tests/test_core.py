@@ -195,7 +195,7 @@ class TestKnowledge(Sandbox):
         self.assertIn("tf", q.know_index_load()["chunks"][0])
 
     def test_project_scoping(self):
-        self._doc("p1.md", "phylogenomics of DUF724 domains")
+        self._doc("p1.md", "phylogenomics of kinase domains")
         self._doc("p2.md", "RdDM small RNA pathway")
         q.know_reindex()
         q.know_set_project("p1.md", "projA")

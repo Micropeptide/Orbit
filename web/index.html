@@ -6505,7 +6505,7 @@ async function renderTasks(){
   <div id=smlist></div>
   <div class=sec style="display:flex;align-items:center;gap:8px">Scheduled tasks <small>— prompts that run on their own; each result lands in a chat</small><button class=ghost id=j_new style="margin-left:auto">＋ New task</button></div>
   <div id=jobnew></div><div id=joblist></div>
-  <div class=sec>Cluster jobs <small>— live from qstat</small></div>
+  <div class=sec id=h2sec>Cluster jobs <small>— live from qstat</small></div>
   <div id=h2box><div class=note>checking…</div></div></div>`;
  // ---- messages
  const sm=$('#smlist');
@@ -6568,6 +6568,7 @@ async function renderTasks(){
    const hb=$('#h2box'); if(!hb)return;
    try{
     const r=await (await fetch('/api/h2/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
+    if(r.off){hb.remove();$('#h2sec')?.remove();return}   // no cluster set up
     if(r.error){hb.innerHTML=`<div class=note style="color:var(--err)">${esc(r.error.slice(0,140))}</div>`;return}
     if(!r.jobs.length){hb.innerHTML='<div class=note>No jobs queued or running.</div>';return}
     hb.innerHTML='';
@@ -6980,7 +6981,7 @@ function editProject(pid){
      <span class=note>let this folder's .orbit/tools run without asking when they declare themselves safe</span></label>
    </div>
    <div class=sec>Project instructions <small>— added to every chat in this project</small></div>
-   <textarea class=ta id=pr_ins style="min-height:150px" placeholder="e.g. This project is the DUF724 phylogenomics work. Always use AGI IDs, cite DOIs, and prefer the knowledge base over the web."></textarea>
+   <textarea class=ta id=pr_ins style="min-height:150px" placeholder="e.g. This project is the kinase phylogenomics work. Always use gene IDs, cite DOIs, and prefer the knowledge base over the web."></textarea>
   </div>
   <footer><button class=primary id=pr_save>Save</button>
    ${pid?'<button class=ghost id=pr_del style="color:var(--err)">Delete project</button>':''}

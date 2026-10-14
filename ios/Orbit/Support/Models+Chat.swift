@@ -164,6 +164,7 @@ extension Message {
             case .code(_, let code): return code
             case .math(let tex): return tex
             case .rule: return ""
+            case .image(let alt, let src): return alt.isEmpty ? src : alt + " (" + src + ")"
             case .table(let rows): return rows.map { $0.map(Self.strip).joined(separator: "\t") }.joined(separator: "\n")
             case .text(let s), .heading(_, let s): return Self.strip(s)
             case .list(let items):

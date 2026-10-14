@@ -42,6 +42,7 @@ enum AnswerExport {
             return "<pre><code class=\"language-\(escape(lang))\">\(escape(code))</code></pre>"
         case .math(let tex): return "<pre class=\"math\">$$\(escape(tex))$$</pre>"
         case .rule: return "<hr>"
+        case .image(let alt, let src): return "<p><img src=\"\(escape(src))\" alt=\"\(escape(alt))\"></p>"
         case .table(let rows):
             guard let head = rows.first else { return "" }
             let th = head.map { "<th>\(inlineHTML($0))</th>" }.joined()
