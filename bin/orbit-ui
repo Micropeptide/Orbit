@@ -1031,7 +1031,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/remote":
             return self._send(200, jdump(REMOTE.status(q.ROOT, remote_mode(), PORT)))
         if p == "/api/remote/weblink":
-            # a browser, an Android phone or Orbit for Windows: a link (and its QR) to open once
+            # a browser on another computer: a link (and its QR) to open once
             link, png = REMOTE.web_pair(q.ROOT, remote_mode(), PORT)
             if not link:
                 return self._send(404, jdump({"error": "no reachable address yet — turn on a mode and restart"}))

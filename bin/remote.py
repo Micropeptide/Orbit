@@ -496,8 +496,8 @@ def pair_qr_png(root, mode, port, box=8):
 
 
 def web_pair(root, mode, port, box=7):
-    """A link that pairs a browser — on Android, Windows, another Mac — or Orbit for Windows,
-    and the same link as a QR: (link, png bytes). One code for both, good once for fifteen
+    """A link that pairs a browser on another computer, and the same link as a QR:
+    (link, png bytes). One code for both, good once for fifteen
     minutes; opening it leaves the device a token of its own in a cookie."""
     p = pair_payload(root, mode, port)
     if not p: return "", b""

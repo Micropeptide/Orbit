@@ -477,6 +477,19 @@ details.think summary{font-style:normal;font-weight:500}
 .termpane.on{display:block}
 .termpane .xterm{height:100%}
 .termmsg{padding:18px;color:var(--dim);font-size:var(--fs-sm)}
+.sheet.welcome .body{padding:30px 34px 18px}
+.welcome .wtop{text-align:center;margin-bottom:22px}
+.welcome .wtop img{border-radius:18px;box-shadow:0 10px 26px -8px rgba(44,91,240,.45)}
+.welcome .wtop h2{font-size:1.6em;letter-spacing:-.02em;margin:14px 0 6px}
+.welcome .wtop p{color:var(--mut);margin:0 auto;max-width:46ch}
+.welcome .wgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.welcome .wgrid>div{display:grid;grid-template-columns:38px 1fr;column-gap:12px;row-gap:2px;padding:14px;
+ border:1px solid var(--line);border-radius:var(--r-lg);background:var(--card)}
+.welcome .wgrid i{grid-row:span 2;width:38px;height:38px;border-radius:10px;display:grid;place-items:center;color:#fff;background:var(--grad)}
+.welcome .wgrid b{font-weight:600}
+.welcome .wgrid span{color:var(--mut);font-size:var(--fs-sm);line-height:1.5}
+.welcome .wfoot{color:var(--mut);font-size:var(--fs-sm);margin:18px 0 0;text-align:center}
+@media(max-width:620px){.welcome .wgrid{grid-template-columns:1fr}}
 /* Above the message box: who answers this chat — the engine, provider, model, agent — and
    how full its context is. It used to share the top bar with the chat's own title, folder
    and menu, and at a normal window width cut every one of them short. */
@@ -5101,10 +5114,9 @@ async function openSettings(tab){
         <button class=ghost id=rot style="margin-top:10px">Unpair every device</button>
         <div class=hint2>For one lost device, revoke just that one below.</div>
        </div></div>
-      <div class=sec style="margin-top:16px">Pair a browser, Android or Windows</div>
-      <div class=note style="margin-left:0">No app needed: open the link once in Chrome on Android, a browser on another
-       computer, or Orbit for Windows (<i>Connect to another computer</i>), and it stays signed in. On Android, Chrome's
-       menu → <b>Install app</b> (or <b>Add to Home screen</b>) then gives Orbit its own icon and window.</div>
+      <div class=sec style="margin-top:16px">Pair a browser</div>
+      <div class=note style="margin-left:0">For a browser on another computer: open the link there once and it stays
+       signed in, until you revoke it below.</div>
       <button class=ghost id=weblink style="margin-top:10px">Show a pairing link</button>
       <div id=webpair style="margin-top:10px"></div>`
       :'<div class=note style="margin-top:12px">Turn on a mode above, then restart, to pair a device.</div>'}
@@ -8886,6 +8898,7 @@ $('#footmore').onclick=e=>{e.stopPropagation();const r=e.target.getBoundingClien
   {icon:'\u270E',label:'Saved prompts',run:()=>{libTab='prompts';showPane('lib')}},
   {icon:'\u2695',label:'Doctor',run:()=>showHealth()},
   {icon:'\u{1F4D6}',label:'User guide',run:()=>openGuide()},
+  {icon:'\u2726',label:'Welcome',run:()=>showOnboarding()},
   {icon:'\u2328',label:'Keyboard shortcuts',run:()=>showShortcuts()},
   {icon:'\u2139',label:'About & help',run:()=>showAbout()}])};
 // Sending a colleague the three turns where you worked something out used to mean
@@ -9433,26 +9446,29 @@ $('#agentsel').onchange=async e=>{
  INFO.tools=r.tools;$('#tools').dataset.orbit=r.tools.length+' tools ready';if(!MODELS.harness_mode)$('#tools').textContent=r.tools.length+' tools ready';
  toast(e.target.value?('agent: '+e.target.value):'agent cleared')};
 loadAgents();
+// The first time Orbit opens in a browser or in Orbit for Mac: what it is, four things worth
+// knowing, and the way into the user guide. Reopened from ⋯ More → Welcome.
 function showOnboarding(){
- $('#modalhost').innerHTML=`<div class=modal><div class="sheet auto" style="max-width:620px">
-  <header><img src="/icons/orbit-64.png?v=2" alt="" width=22 height=22
-    style="border-radius:6px;margin-right:8px;vertical-align:-5px"><b>Welcome to Orbit</b></header>
+ const done=()=>{PREF.set('onboarded','1');closeModal()};
+ $('#modalhost').innerHTML=`<div class=modal><div class="sheet auto welcome" style="max-width:640px">
   <div class=body>
-   <p style="margin-top:0;color:var(--mut)">Your own research assistant, living on this Mac.
-    Five things worth knowing:</p>
-   <div class=howto>
-    <b>1 · Just ask</b><span>It decides when to search the web, read your papers, run Python, or query NCBI. You don't name tools.</span>
-    <b>2 · Pick a model</b><span>The picker at the top of a chat chooses per conversation: the local
-     model, or Claude / Codex through the CLIs you are already signed into, or a hosted API with your key.</span>
-    <b>3 · Give it context</b><span><b>Library → Knowledge</b> for your papers, <b>Memory</b> for facts about you. Both make answers dramatically better.</span>
-    <b>4 · Organise</b><span><b>Projects</b> group chats and add shared instructions. Right-click any chat for pin, tags, archive, move.</span>
-    <b>5 · It asks before doing harm</b><span>Destructive commands need your approval; some are blocked outright. Untrusted web content is fenced and scanned.</span>
+   <div class=wtop><img src="/icons/orbit-128.png?v=2" alt="" width=72 height=72>
+    <h2>Welcome to Orbit</h2>
+    <p>Your own research assistant. It runs on this Mac — your chats, files and models stay here —
+     and answers with whichever model you choose.</p></div>
+   <div class=wgrid>
+    <div><i><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg></i><b>Just ask</b><span>It decides when to search the web, read your papers, run code or query NCBI. You don't name tools.</span></div>
+    <div><i><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 9h6v6H9zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/></svg></i><b>Choose who answers</b><span>Above the message box: Orbit's own agent, Claude Code or Codex — a local model, a hosted key or your subscription.</span></div>
+    <div><i><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M4 19V5"/></svg></i><b>Give it context</b><span><b>Library → Knowledge</b> for your papers, <b>Memory</b> for facts about you, <b>Projects</b> for shared instructions.</span></div>
+    <div><i><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg></i><b>It asks first</b><span>Anything that matters — deleting, publishing, pushing — waits for your yes. Web content is fenced and checked.</span></div>
    </div>
-   <p style="color:var(--dim);font-size:12.5px">Press <span class=kbd>?</span> for shortcuts, <span class=kbd>⌘P</span> to search everything, or open <b>About &amp; help</b> any time.</p>
+   <p class=wfoot>The user guide covers everything, step by step. It is always under <b>⋯ More → User guide</b>,
+    <code>/guide</code>${window.orbitDesktop?', and <b>Help → Orbit Guide</b>':''}.</p>
   </div>
-  <footer><button class=primary id=ob_done>Get started</button>
-   <span class=note>you can reopen this from About &amp; help</span></footer></div></div>`;
- $('#ob_done').onclick=()=>{PREF.set('onboarded','1');closeModal()};
+  <footer><button class=ghost id=ob_guide>Read the user guide</button>
+   <button class=primary id=ob_done style="margin-left:auto">Get started</button></footer></div></div>`;
+ $('#ob_done').onclick=done;
+ $('#ob_guide').onclick=()=>{PREF.set('onboarded','1');openGuide()};
 }
 try{if(!PREF.get('onboarded'))setTimeout(showOnboarding,700)}catch(e){}
 const PAGE_LOADED=Date.now()/1000;
