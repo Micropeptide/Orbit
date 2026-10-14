@@ -26,13 +26,18 @@ def squircle_mask(size, box, n=5.0):
 
 def gradient(size, top, bottom, angle_deg=115):
     """A linear gradient across the canvas, top-left (top) to bottom-right (bottom)."""
-    g = Image.linear_gradient("L").resize((size, size)).rotate(angle_deg - 90, resample=Image.BICUBIC, expand=False)
+    # drawn twice the size and cut from the middle, so the turned gradient reaches the corners
+    big = Image.linear_gradient("L").resize((size * 2, size * 2)).rotate(angle_deg - 90, resample=Image.BICUBIC)
+    g = big.crop((size // 2, size // 2, size // 2 + size, size // 2 + size))
     base = Image.new("RGB", (size, size), top)
     return Image.composite(Image.new("RGB", (size, size), bottom), base, g)
 
-def make(path, top="#5287FF", bottom="#2843E4", violet="#7A55F7"):
-    body = (100 * S, 100 * S, 924 * S, 924 * S)
-    mask = squircle_mask(N, body)
+def make(path, top="#5287FF", bottom="#2843E4", violet="#7A55F7", margin=100, square=False, size=1024):
+    """margin: the space round the squircle on the 1024 grid (100 is Apple's macOS grid;
+    small for a favicon). square: an opaque full-bleed square, for iOS and maskable icons,
+    which the system rounds itself."""
+    body = (margin * S, margin * S, (1024 - margin) * S, (1024 - margin) * S)
+    mask = Image.new("L", (N, N), 255) if square else squircle_mask(N, body)
 
     # the ground: cobalt, lighter at the top left, a breath of violet at the bottom right
     bg = gradient(N, hexc(top), hexc(bottom))
@@ -46,14 +51,16 @@ def make(path, top="#5287FF", bottom="#2843E4", violet="#7A55F7"):
     bg = Image.composite(Image.new("RGB", (N, N), (255, 255, 255)), bg, sheen)
 
     # the mark: a ring, broken where its planet passes, and the planet
-    cx, cy, r, w = 500 * S, 524 * S, 232 * S, 76 * S
+    k = (body[2] - body[0]) / (824 * S)          # the mark was designed on the 824 body
+    ox, oy = body[0] - 100 * S * k, body[1] - 100 * S * k
+    cx, cy, r, w = ox + 500 * S * k, oy + 524 * S * k, 232 * S * k, 76 * S * k
     ang = math.radians(-42)                         # upper right
-    px, py, pr = cx + r * math.cos(ang), cy + r * math.sin(ang), 80 * S
+    px, py, pr = cx + r * math.cos(ang), cy + r * math.sin(ang), 80 * S * k
     mark = Image.new("L", (N, N), 0)
     d = ImageDraw.Draw(mark)
     d.ellipse((cx - r - w / 2, cy - r - w / 2, cx + r + w / 2, cy + r + w / 2), fill=255)
     d.ellipse((cx - r + w / 2, cy - r + w / 2, cx + r - w / 2, cy + r - w / 2), fill=0)
-    gap = pr + 30 * S
+    gap = pr + 30 * S * k
     d.ellipse((px - gap, py - gap, px + gap, py + gap), fill=0)
     d.ellipse((px - pr, py - pr, px + pr, py + pr), fill=255)
 
@@ -69,6 +76,10 @@ def make(path, top="#5287FF", bottom="#2843E4", violet="#7A55F7"):
     art = Image.composite(white, art, mark)
 
     # onto the squircle, with the grid's own soft shadow below it
+    if square:
+        art.resize((size, size), Image.LANCZOS).save(path)
+        return
+    # scale the mark with the squircle when the margin is not the grid's
     out = Image.new("RGBA", (N, N), (0, 0, 0, 0))
     drop = mask.filter(ImageFilter.GaussianBlur(14 * S)).point(lambda v: int(v * 0.30))
     drop = ImageChops.offset(drop, 0, 10 * S)
@@ -80,7 +91,11 @@ def make(path, top="#5287FF", bottom="#2843E4", violet="#7A55F7"):
     edge = edge.point(lambda v: int(v * 0.22))
     hl = Image.new("RGBA", (N, N), (255, 255, 255, 0)); hl.putalpha(edge)
     out = Image.alpha_composite(out, hl)
-    out.resize((1024, 1024), Image.LANCZOS).save(path)
+    out.resize((size, size), Image.LANCZOS).save(path)
 
 if __name__ == "__main__":
-    make(sys.argv[1] if len(sys.argv) > 1 else "icon_1024.png")
+    # make-icon.py out.png [macos|small|square] [size]
+    kind = sys.argv[2] if len(sys.argv) > 2 else "macos"
+    size = int(sys.argv[3]) if len(sys.argv) > 3 else 1024
+    make(sys.argv[1] if len(sys.argv) > 1 else "icon_1024.png", size=size,
+         margin={"macos": 100, "small": 24}.get(kind, 0), square=kind == "square")

@@ -20,6 +20,10 @@ It works two ways, and you can switch at any time:
 It is a Python server and one HTML file. No account, no telemetry, no build step.
 Use it in a browser, as [Orbit for Mac](#the-desktop-app), or from the iPhone app.
 
+**New to Orbit?** The [user guide](web/guide.md) walks through everything — it is also inside
+Orbit (`/guide`, or ⋯ More → *User guide*; Help → *Orbit Guide* in the Mac app; Settings →
+*User guide* on the iPhone).
+
 ![Orbit's home page](docs/screenshots/home.png)
 
 *A new chat opens on a home page: what is running now (with a stop button), what is
@@ -966,4 +970,4 @@ newer than the running process; click *Restart interface*.
 
 ---
 
-Built by **Micropeptide** · MIT licensed · [runtianwu.com](https://runtianwu.com) · [github.com/Micropeptide](https://github.com/Micropeptide)
+Built by **Runtian Wu** · MIT licensed · [runtianwu.com](https://runtianwu.com) · [github.com/Micropeptide](https://github.com/Micropeptide)

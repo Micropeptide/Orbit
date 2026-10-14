@@ -725,6 +725,10 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/manifest.json":
             return self._send(200, open(os.path.join(WEB, "manifest.json"), "rb").read(),
                               "application/manifest+json")
+        if p == "/guide.md":
+            # the user guide, read by the page's Guide and by the iPhone app
+            try: return self._send(200, open(os.path.join(WEB, "guide.md"), "rb").read(), "text/markdown; charset=utf-8")
+            except OSError: return self._send(404, b"no guide", "text/plain")
         if p.startswith("/icons/"):
             name = os.path.basename(p)          # basename: nothing escapes web/icons
             fp = os.path.join(WEB, "icons", name)

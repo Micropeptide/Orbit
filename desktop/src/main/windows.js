@@ -12,7 +12,7 @@ const info = new WeakMap(); // win -> { ready, queue, activeSid, activeTitle, da
 let lastFocused = null;
 const lastClosedHandlers = [];
 
-const themeColor = (dark) => (dark ? '#1b1b1f' : '#ffffff');
+const themeColor = (dark) => (dark ? '#14171e' : '#f7f8fb');   // Orbit's own paper, light and dark
 
 // ---------- bounds ----------
 function visibleOnSomeDisplay(b) {

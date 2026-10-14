@@ -42,7 +42,8 @@ if (app.isPackaged) app.setAsDefaultProtocolClient('orbit');
 app.setAboutPanelOptions({
   applicationName: 'Orbit',
   applicationVersion: app.getVersion(),
-  credits: 'A native home for your local Orbit AI workspace.',
+  credits: 'Made by Runtian Wu\nruntianwu.com · github.com/Micropeptide',
+  copyright: 'MIT licensed',
   website: 'https://runtianwu.com',
 });
 

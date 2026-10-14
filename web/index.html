@@ -1,8 +1,8 @@
 <!doctype html><html><head><meta charset="utf-8">
 <title>Orbit</title>
-<link rel="icon" type="image/png" sizes="32x32" href="/icons/orbit-32.png">
-<link rel="icon" type="image/png" sizes="192x192" href="/icons/orbit-192.png">
-<link rel="apple-touch-icon" href="/icons/orbit-180.png">
+<link rel="icon" type="image/png" sizes="32x32" href="/icons/orbit-32.png?v=2">
+<link rel="icon" type="image/png" sizes="192x192" href="/icons/orbit-192.png?v=2">
+<link rel="apple-touch-icon" href="/icons/orbit-180.png?v=2">
 <link rel="stylesheet" href="/vendor/katex/dist/katex.min.css">
 <script src="/vendor/katex/dist/katex.min.js"></script>
 <script src="/vendor/marked/marked.umd.js"></script>
@@ -26,7 +26,8 @@
  --shadow-sm:0 1px 2px rgba(21,25,35,.06),0 1px 1px rgba(21,25,35,.04);
  --shadow-md:0 6px 20px -6px rgba(21,25,35,.16),0 2px 6px rgba(21,25,35,.06);
  --shadow-lg:0 24px 60px -12px rgba(21,25,35,.28),0 8px 20px rgba(21,25,35,.08);
- --hover:color-mix(in srgb,var(--fg) 6%,transparent);color-scheme:light;
+ --hover:color-mix(in srgb,var(--fg) 6%,transparent);
+ --grad:linear-gradient(135deg,#5287ff 0%,#2c5bf0 55%,#5a4cf0 100%);--violet:#6a4ff2;color-scheme:light;
  /* One interface size, and every other size derived from it. There were 25 different
     hardcoded font sizes in here and a slider in Settings that changed none of them,
     because nothing followed the size it set. Code and terminal output keep their own
@@ -260,6 +261,11 @@ body{overflow:hidden}
 /* a narrower window keeps the conversation's controls and lets the rest go to ⋯ (and the
    sidebar's Settings), rather than pushing the bar past the edge */
 @container main (max-width:1080px){#easybtn,#tempbtn,#compact,#settings2{display:none}}
+/* the chat's folder keeps a readable width; the session label (the mode chip already says
+   which engine) goes first when the bar is short */
+.top>#cqbar .cqdir{flex-shrink:0;max-width:170px;min-width:0}
+@container main (max-width:1320px){#cqbar .cqi{display:none}}
+@container main (max-width:900px){#cqbar .cqdir{display:none}}
 @container main (max-width:860px){.top .ctx,#opbadge{display:none!important}}
 .top{padding:7px 14px 7px 18px;border-bottom:1px solid var(--line);display:flex;gap:6px;align-items:center;
  font-size:var(--fs-cap);color:var(--mut);min-height:48px;background:var(--bg)}
@@ -457,7 +463,7 @@ details.think summary{font-style:normal;font-weight:500}
 .termbar .ttab.on{background:var(--panel);color:var(--fg)}
 .termbar .ttab.ended{opacity:.6}
 .termbar .ttab .tt{overflow:hidden;text-overflow:ellipsis}
-.termbar .ttab .tx{border:0;background:none;color:var(--dim);cursor:pointer;padding:0 3px;border-radius:4px;font-size:13px;line-height:1}
+.termbar .ttab .tx{border:0;background:none;color:var(--dim);cursor:pointer;width:16px;height:16px;border-radius:4px;display:grid;place-items:center;padding:0}
 .termbar .ttab .tx:hover{color:var(--fg);background:color-mix(in srgb,var(--fg) 10%,transparent)}
 .termbar .tsp{flex:1}
 .termbar .tbtn{border:0;background:none;color:var(--mut);cursor:pointer;padding:3px 7px;border-radius:6px;font:inherit}
@@ -467,6 +473,37 @@ details.think summary{font-style:normal;font-weight:500}
 .termpane.on{display:block}
 .termpane .xterm{height:100%}
 .termmsg{padding:18px;color:var(--dim);font-size:var(--fs-sm)}
+.sheet.guide{width:min(1040px,100%);height:min(86vh,860px)}
+.sheet.guide #gfind{width:220px;padding:4px 10px;border:1px solid var(--line2);border-radius:var(--r-md);background:var(--card);color:var(--fg);font:inherit;font-size:var(--fs-sm)}
+.guidebody{padding:22px 34px 60px!important;line-height:1.65;scroll-behavior:smooth}
+.guidebody>*{max-width:72ch}
+.guidebody h1{font-size:1.6em;letter-spacing:-.02em;margin:.1em 0 .4em}
+.guidebody h2{font-size:1.22em;margin:1.8em 0 .5em;padding-top:.4em;border-top:1px solid var(--line);scroll-margin-top:12px}
+.guidebody h1+p{font-size:1.05em;color:var(--mut)}
+.guidebody table{font-size:var(--fs-sm)}
+/* Orbit's icon, carried into the interface: its blue-to-violet on the few things you act on,
+   a faint wash of it behind the page's header, and the mark itself in the sidebar */
+.sendbtn,.primary{background:var(--grad);color:#fff}
+.sendbtn:disabled{background:color-mix(in srgb,var(--mut) 30%,transparent)}
+.projrow .a{opacity:0;transition:opacity .12s;padding:0 2px}
+.projrow:hover .a,.projrow.on .a{opacity:.55}
+.sugg{-webkit-mask-image:linear-gradient(to right,#000 calc(100% - 48px),transparent);mask-image:linear-gradient(to right,#000 calc(100% - 48px),transparent)}
+.brand .mark{border-radius:6px;box-shadow:0 1px 2px rgba(44,91,240,.35)}
+.tabstrip .tab.on{box-shadow:inset 0 2px 0 -0.5px #4f7cff}
+.sitem.on{box-shadow:var(--shadow-sm),0 0 0 1px var(--line),inset 2px 0 0 #4f7cff}
+.heromark{border-color:color-mix(in srgb,#4f7cff 32%,transparent)}
+.heromark i::after{background:radial-gradient(circle at 35% 30%,#fff 0,#9ab4ff 32%,#2c5bf0 72%,#5a4cf0 100%)}
+.hero::before{content:"";position:absolute;left:50%;top:-40px;width:min(720px,90%);height:260px;transform:translateX(-50%);
+ background:radial-gradient(closest-side,color-mix(in srgb,#4f7cff 12%,transparent),transparent);pointer-events:none;z-index:-1}
+.hero{position:relative;isolation:isolate}
+.u .bub{background:linear-gradient(135deg,color-mix(in srgb,#5287ff 9%,var(--card)),color-mix(in srgb,#5a4cf0 8%,var(--card)))}
+:focus-visible{outline-color:color-mix(in srgb,#4f7cff 75%,transparent)}
+.credit{display:flex;gap:14px;align-items:flex-start;padding:14px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--card)}
+.credit img{border-radius:10px;flex:none}
+.credit b{display:block;font-size:var(--fs-lg);font-weight:600;letter-spacing:-.01em}
+.credit span{display:block;color:var(--mut);font-size:var(--fs-sm);margin-top:2px}
+.credit .links{display:flex;flex-wrap:wrap;gap:4px 16px;margin-top:8px}
+.credit .links a{color:var(--acc);text-decoration:none;font-weight:500}.credit .links a:hover{text-decoration:underline}
 .top .wtbadge{font-family:var(--mono);font-size:var(--fs-xs);color:var(--acc);border-color:color-mix(in srgb,var(--acc) 40%,var(--line));max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* printed (or saved as PDF from the desktop app): the conversation alone, all of it */
 @media print{
@@ -493,7 +530,8 @@ details.think summary{font-style:normal;font-weight:500}
 .tabstrip .tab .td.wait{display:block;background:var(--warn)}
 .tabstrip .tab .td.new{display:block;background:var(--acc)}
 .tabstrip .tab .tx{border:0;background:none;color:var(--dim);cursor:pointer;width:18px;height:18px;border-radius:5px;
- font-size:14px;line-height:1;padding:0;visibility:hidden;flex:none}
+ display:grid;place-items:center;padding:0;visibility:hidden;flex:none}
+.tabstrip .tab .tx svg,.termbar .ttab .tx svg{display:block;pointer-events:none}
 .tabstrip .tab:hover .tx,.tabstrip .tab.on .tx{visibility:visible}
 .tabstrip .tab .tx:hover{background:color-mix(in srgb,var(--fg) 10%,transparent);color:var(--fg)}
 .tabstrip .tabnew{border:0;background:none;color:var(--mut);font-size:16px;line-height:1;padding:5px 9px 8px;
@@ -1194,7 +1232,7 @@ table.stbl{border-collapse:collapse;width:100%;font-size:var(--fs-cap);margin:2p
 </style></head><body>
 
 <aside id=side>
-  <div class=brand><img class=mark src="/icons/orbit-64.png" alt="" width=20 height=20>
+  <div class=brand><img class=mark src="/icons/orbit-64.png?v=2" alt="" width=20 height=20>
    <span class=wordmark>Orbit</span><span class="dot" id=dot title="model server"></span>
    <small id=badge>local</small>
    <button class=iconbtn2 id=srvmenu title="Local model server: start, stop, restart">⏻</button>
@@ -1347,6 +1385,7 @@ const CMDS=[
  {c:'/copy',d:'copy the last answer (/copy 2 for the one before)'},
  {c:'/diff',d:'every file this answer changed, as a diff'},
  {c:'/goal',d:'keep working until it is done — /goal <what done looks like>; alone, shows the goal'},
+ {c:'/guide',d:'the user guide: everything Orbit does and how to use it'},
  {c:'/worktree',d:'work in a copy of the repository on a branch of its own — merge it back or throw it away'},
  {c:'/terminal',d:'a shell in this chat\'s folder, at the foot of the window (Ctrl+`)'},
  {c:'/verbose',d:'show every tool call in full, or fold them again (Ctrl+O)'},
@@ -2986,6 +3025,7 @@ function showMenu(){
 async function runCmd(cmd,rest){
  q.value='';closeMenu();saveDraft(sid);
  if(cmd==='/help'){showCommandHelp();return true}
+ if(cmd==='/guide'){openGuide();return true}
  if(cmd==='/rewind'){openRewind();return true}
  if(cmd==='/context'){showContext();return true}
  if(cmd==='/copy'){copyAnswer(parseInt(rest,10)||1);return true}
@@ -6104,7 +6144,9 @@ function showShortcuts(){
    <span class=kbd>&#8984;G</span><span>jump to one of your messages</span>
    <span class=kbd>&#8997;&#8593; / &#8997;&#8595;</span><span>previous / next message of yours</span>
    <span class=kbd>&#8984;&#8679;K</span><span>new chat with a chosen model, folder or harness</span>
-   <span class=kbd>?</span><span>this help</span>
+   <span class=kbd>Ctrl+&#96;</span><span>terminal in the chat's folder</span>
+   <span class=kbd>Alt+1…9</span><span>go to a tab (&#8984;1…9 in Orbit for Mac)</span>
+   <span class=kbd>?</span><span>this help — and <a href="#" onclick="openGuide();return false">the user guide</a> for everything else</span>
    <span class=kbd>Esc</span><span>close / cancel menu</span>
   </div></div></div></div>`;
  $('#kx').onclick=closeModal;
@@ -6699,6 +6741,8 @@ const PREF={get:(k,d)=>{try{return localStorage.getItem('orbit_'+k)
             set:(k,v)=>{try{localStorage.setItem('orbit_'+k,v)}catch(e){}}};
 function applyTheme(t){
  document.documentElement.dataset.theme=t==='system'?'':t;
+ // Orbit for Mac paints its window (behind the page, and while it loads) the same way
+ try{const W=window.orbitDesktop;if(W&&W.setTitleBarDark)W.setTitleBarDark(t==='dark'||(t!=='light'&&matchMedia('(prefers-color-scheme: dark)').matches))}catch(e){}
  // highlight.js ships one sheet per scheme, switched by media query: pin them for a chosen theme
  document.querySelectorAll('link[href*="highlight/styles"]').forEach(l=>{
   const dark=l.href.includes('github-dark');
@@ -6766,7 +6810,7 @@ async function loadProjects(){
   const r=el(`<div class="projrow${projFilter===pid?' on':''}">
     <span class=sw style="background:${pr.color||PCOLORS[0]}"></span>
     <span class=nm></span>${pr.source==='claude'?'<span class=pclaude title="a group from the Claude app\'s sidebar — its Claude Code chats are filed here by themselves">✻</span>':''}<span class=ct>${counts[pid]||0}</span>
-    <span class=a style="opacity:.5">⋮</span></div>`);
+    <span class=a title="project menu">⋮</span></div>`);
   r.querySelector('.nm').textContent=pr.name;
   r.onclick=e=>{if(e.target.classList.contains('a'))return;
    projFilter=projFilter===pid?null:pid;loadProjects();renderSessions()};
@@ -6874,7 +6918,7 @@ async function showAbout(){
  const a=await (await fetch('/api/about')).json();
  const c=a.counts||{};
  $('#modalhost').innerHTML=`<div class=modal><div class=sheet style="max-width:760px">
-  <header><img src="/icons/orbit-64.png" alt="" width=22 height=22
+  <header><img src="/icons/orbit-64.png?v=2" alt="" width=22 height=22
     style="border-radius:6px;margin-right:8px;vertical-align:-5px"><b>Orbit · v${a.version}</b>
    <button class=ghost style="margin-left:auto" id=ax>close</button></header>
   <div class=body>
@@ -6930,15 +6974,15 @@ async function showAbout(){
   knowledge/  your documents       sessions/   chats
   workspace/  files it creates     trash/      recycle bin
   logs/       server, safety, ledger</pre>
-   <div class=sec>Author</div>
-   <p style="font-size:13.5px;margin:0 0 4px"><b>Micropeptide</b><br>
-    <span style="color:var(--mut)">Built on MTPLX and Apple&nbsp;Silicon MLX, with optional
-    hosted and CLI models. Runs entirely on your own machine.</span></p>
-   <div class=sec>Links</div>
-   <p style="font-size:13.5px"><a href="https://runtianwu.com" target=_blank rel=noopener>runtianwu.com</a>
-    &nbsp;·&nbsp; <a href="${a.github}" target=_blank>${a.github}</a>
-    &nbsp;·&nbsp; model: <code>${esc(a.model)}</code>
-    &nbsp;·&nbsp; <span style="color:var(--mut)">press <span class=kbd>?</span> for shortcuts</span></p>
+   <div class=sec>Made by</div>
+   <div class=credit>
+    <img src="/icons/orbit-128.png?v=2" alt="" width=44 height=44>
+    <div><b>Runtian Wu</b>
+     <span>Built on MTPLX and Apple&nbsp;Silicon MLX, with optional hosted and CLI models. Runs on your own machine.</span>
+     <span class=links><a href="https://runtianwu.com" target=_blank rel=noopener>runtianwu.com</a>
+      <a href="https://github.com/Micropeptide" target=_blank rel=noopener>github.com/Micropeptide</a>
+      <a href="${a.github}" target=_blank rel=noopener>Orbit's source</a></span></div></div>
+   <p class=note style="margin:10px 0 0">Model now: <code>${esc(a.model)}</code> · press <span class=kbd>?</span> for shortcuts</p>
   </div></div></div>`;
  $('#ax').onclick=closeModal;
  $('#modalhost').querySelector('.modal').onclick=e=>{if(e.target.classList.contains('modal'))closeModal()};
@@ -6975,7 +7019,7 @@ function notify(s,kind,body){
  try{if(!window.Notification||Notification.permission!=='granted')return;
   const x=SESSIONS.find(v=>v.id===s);
   const n=new Notification(kind+(x&&x.title?' — '+x.title:''),
-   {body:String(body||'').slice(0,160),tag:'orbit-'+s,icon:'/icons/orbit-192.png'});
+   {body:String(body||'').slice(0,160),tag:'orbit-'+s,icon:'/icons/orbit-192.png?v=2'});
   n.onclick=()=>{try{window.focus()}catch(e){}n.close();showPane('log');
    if(sid!==s)openSession(s);else seen()}}catch(e){}}
 
@@ -8790,6 +8834,7 @@ $('#footmore').onclick=e=>{e.stopPropagation();const r=e.target.getBoundingClien
   {icon:'\u{1F9E0}',label:'Memory & instructions',run:()=>openSettings('memory')},
   {icon:'\u270E',label:'Saved prompts',run:()=>{libTab='prompts';showPane('lib')}},
   {icon:'\u2695',label:'Doctor',run:()=>showHealth()},
+  {icon:'\u{1F4D6}',label:'User guide',run:()=>openGuide()},
   {icon:'\u2328',label:'Keyboard shortcuts',run:()=>showShortcuts()},
   {icon:'\u2139',label:'About & help',run:()=>showAbout()}])};
 // Sending a colleague the three turns where you worked something out used to mean
@@ -8964,7 +9009,7 @@ async function pruneTabs(){
  for(const id of unknown){
   // a chat the list does not show may simply be older than the page of it loaded
   try{const r=await fetch('/api/session/'+encodeURIComponent(id));const d=await r.json();
-   if(!r.ok||d.error||!(d.messages||[]).length)TABS=TABS.filter(x=>x!==id);
+   if(!r.ok||d.error||!(d.messages||[]).some(m=>m.role==='user'))TABS=TABS.filter(x=>x!==id);
    else if(d.title)TAB_TITLES[id]=d.title}catch(e){}}
  saveTabs();drawTabs()}
 function tabSaved(id){return !FRESH_TABS.has(id)||SESSIONS.some(s=>s.id===id)||RUNNING.has(id)}
@@ -8992,10 +9037,10 @@ function drawTabs(){
  bar.innerHTML='';
  TABS.forEach((id,i)=>{
   const st=WAITING.has(id)?'wait':RUNNING.has(id)?'run':UNSEEN[id]?'new':'';
-  const b=el(`<button class="tab${id===sid?' on':''}" draggable=true><span class="td ${st}"></span><span class=tt></span><span class=tx title="close tab (⌘W)">×</span></button>`);
+  const b=el(`<button class="tab${id===sid?' on':''}" draggable=true><span class="td ${st}"></span><span class=tt></span><span class=tx title="close tab (⌘W)"><svg viewBox="0 0 10 10" width="9" height="9" aria-hidden="true"><path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span></button>`);
   b.querySelector('.tt').textContent=tabTitle(id);
   b.title=tabTitle(id)+(st==='wait'?' — waiting for you':st==='run'?' — answering':st==='new'?' — new since you looked':'')+(i<9?`  ·  ${DESK?'⌘':'Alt+'}${i+1}`:'');
-  b.onclick=e=>{if(e.target.classList.contains('tx')){e.stopPropagation();closeTab(id);return}
+  b.onclick=e=>{if(e.target.closest('.tx')){e.stopPropagation();closeTab(id);return}
    if(id!==sid){showPane('log');openSession(id)}};
   b.onauxclick=e=>{if(e.button===1){e.preventDefault();closeTab(id)}};
   b.ondragstart=e=>{e.dataTransfer.setData('text/orbit-tab',id);e.dataTransfer.effectAllowed='move';b.classList.add('drag')};
@@ -9061,6 +9106,35 @@ async function drawDeskUpdates(body){
  $('#du_beta').onchange=e=>set({updateChannel:e.target.checked?'beta':'stable'});
  $('#du_check').onclick=async()=>{try{draw(await U.check())}catch(e){toast(e.message||String(e))}};
  $('#du_install').onclick=async()=>{try{draw(await U.install())}catch(e){toast(e.message||String(e))}}}
+// The user guide (web/guide.md, also read by the iPhone app): its sections down the left,
+// the text on the right, and a search that narrows the sections to the ones that match.
+let GUIDE_MD=null;
+async function openGuide(section){
+ $('#modalhost').innerHTML=`<div class=modal><div class="sheet guide">
+  <header><b>User guide</b><input type=search id=gfind placeholder="Search the guide" autocomplete=off>
+   <button class=ghost style="margin-left:auto" id=gx>Close</button></header>
+  <div class=setgrid><nav class="tabs vnav" id=gnav></nav><div class="body bub guidebody" id=gbody><div class=note>Loading…</div></div></div></div></div>`;
+ $('#gx').onclick=closeModal;
+ $('#modalhost').querySelector('.modal').onclick=e=>{if(e.target.classList.contains('modal'))closeModal()};
+ try{if(GUIDE_MD==null){const r=await fetch('/guide.md');if(!r.ok)throw new Error('the server answered '+r.status);GUIDE_MD=await r.text()}}
+ catch(e){$('#gbody').innerHTML=`<div class=note>Could not load the guide — ${esc(e.message)}</div>`;return}
+ const body=$('#gbody'),nav=$('#gnav');
+ body.innerHTML=md(GUIDE_MD);
+ const heads=[...body.querySelectorAll('h2')];
+ heads.forEach((h,i)=>{h.id='g-'+i;
+  const b=el('<button></button>');b.textContent=h.textContent;b.dataset.g=i;
+  b.onclick=()=>{h.scrollIntoView({block:'start',behavior:'smooth'})};nav.appendChild(b)});
+ // the section you are reading lights up as you scroll
+ const mark=()=>{let cur=0;heads.forEach((h,i)=>{if(h.offsetTop-body.offsetTop<=body.scrollTop+40)cur=i});
+  nav.querySelectorAll('button').forEach(b=>b.classList.toggle('on',+b.dataset.g===cur))};
+ body.addEventListener('scroll',mark);mark();
+ $('#gfind').oninput=e=>{const t=e.target.value.trim().toLowerCase();
+  heads.forEach((h,i)=>{let n=h.nextElementSibling,txt=h.textContent;
+   while(n&&n.tagName!=='H2'){txt+=' '+n.textContent;n=n.nextElementSibling}
+   nav.querySelector(`[data-g="${i}"]`).style.display=!t||txt.toLowerCase().includes(t)?'':'none'});
+  const first=[...nav.querySelectorAll('button')].find(b=>b.style.display!=='none');
+  if(t&&first)heads[+first.dataset.g].scrollIntoView({block:'start'})};
+ if(section){const h=heads.find(x=>x.textContent.toLowerCase().includes(String(section).toLowerCase()));if(h)h.scrollIntoView({block:'start'})}}
 // a question typed into the desktop app's Quick Ask: a new chat, in front or behind
 async function quickAsk(a){
  const text=String(a&&a.text||'').trim();if(!text)return;
@@ -9090,6 +9164,7 @@ if(DESK&&DESK.onCommand)DESK.onCommand((name,arg)=>{
   case 'find':if(!sid||!wrap.children.length)$('#search').focus();else openFind();break;
   case 'palette':openPal();break;
   case 'jump':openJump();break;
+  case 'guide':openGuide();break;
   case 'toggle-sidebar':{const a=$('#side');sideOpen(a.classList.contains('hide'),false);break}
   case 'toggle-terminal':toggleTerm();break;
   case 'files':showPane('files');break;
@@ -9260,9 +9335,9 @@ async function closeTerm(id){
 function drawTermBar(){
  const bar=$('#termbar');bar.innerHTML='';
  TERMS.list.forEach(t=>{
-  const b=el(`<button class="ttab${t.id===TERMS.active?' on':''}${t.ended?' ended':''}"><span class=tt></span><span class=tx title="close this terminal">×</span></button>`);
+  const b=el(`<button class="ttab${t.id===TERMS.active?' on':''}${t.ended?' ended':''}"><span class=tt></span><span class=tx title="close this terminal"><svg viewBox="0 0 10 10" width="9" height="9" aria-hidden="true"><path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span></button>`);
   b.querySelector('.tt').textContent=(t.host?'⇄ ':'')+t.title;b.title=(t.host?t.host+':':'')+t.cwd;
-  b.onclick=e=>{if(e.target.classList.contains('tx'))closeTerm(t.id);else termShow(t.id)};
+  b.onclick=e=>{if(e.target.closest('.tx'))closeTerm(t.id);else termShow(t.id)};
   b.onauxclick=e=>{if(e.button===1)closeTerm(t.id)};
   bar.appendChild(b)});
  const add=el('<button class=tbtn title="a new terminal in this chat\'s folder">+</button>');add.onclick=()=>newTerm();bar.appendChild(add);
@@ -9309,7 +9384,7 @@ $('#agentsel').onchange=async e=>{
 loadAgents();
 function showOnboarding(){
  $('#modalhost').innerHTML=`<div class=modal><div class="sheet auto" style="max-width:620px">
-  <header><img src="/icons/orbit-64.png" alt="" width=22 height=22
+  <header><img src="/icons/orbit-64.png?v=2" alt="" width=22 height=22
     style="border-radius:6px;margin-right:8px;vertical-align:-5px"><b>Welcome to Orbit</b></header>
   <div class=body>
    <p style="margin-top:0;color:var(--mut)">Your own research assistant, living on this Mac.

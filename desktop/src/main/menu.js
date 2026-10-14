@@ -150,10 +150,13 @@ function build(hooks) {
     {
       role: 'help',
       submenu: [
+        item('Orbit Guide', 'Cmd+?', 'guide'),
+        { type: 'separator' },
         { label: 'Open Orbit in Browser', click: () => links.openExternal(server.baseURL() + '/') },
         { type: 'separator' },
         { label: 'Orbit Website', click: () => links.openExternal('https://runtianwu.com') },
         { label: 'Orbit on GitHub', click: () => links.openExternal('https://github.com/Micropeptide/Orbit') },
+        { label: 'Runtian Wu on GitHub', click: () => links.openExternal('https://github.com/Micropeptide') },
       ],
     },
   ];
