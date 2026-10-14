@@ -1073,6 +1073,25 @@ def chat_prefs(sid=None):
     return dict(got) if isinstance(got, dict) else {}
 
 
+def note_context_window(sid, ev, model_hint=None):
+    """Claude Code's result says how big its model's window is (modelUsage[model].contextWindow):
+    keep it for the chat, so the meter measures against the window it really has rather than
+    a size from Orbit's model list. With helpers (a Haiku sub-agent) in the same answer, the
+    main model's window, else the largest."""
+    if not sid: return
+    mu = ev.get("modelUsage") if isinstance(ev, dict) else None
+    if not isinstance(mu, dict) or not mu: return
+    wins = {k: int((v or {}).get("contextWindow") or 0) for k, v in mu.items() if isinstance(v, dict)}
+    wins = {k: v for k, v in wins.items() if v > 0}
+    if not wins: return
+    w = wins.get(model_hint) if model_hint in wins else max(wins.values())
+    if Q is None: return
+    if Q.SESSION_WINDOW.get(sid) != w:
+        Q.SESSION_WINDOW[sid] = w
+        try: set_chat_pref(sid, context_window=w)
+        except Exception: pass
+
+
 def set_chat_pref(sid, **kw):
     with _WRITE_LOCK:                   # read, change, write: one chat at a time, or a change is lost
         return _set_chat_pref(sid, **kw)
@@ -1583,7 +1602,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     mk["owner"] = mk.get("owner") or sid
     # which model the chat is on and how full its window is, so a later switch to a
     # smaller model can make room first
-    mk["model"], mk["ctx_max"] = spec.get("id"), target["ctx"]
+    mk["model"], mk["ctx_max"] = spec.get("id"), (q.chat_window(sid) or target["ctx"])
 
     now = time.time()
     messages.append({"role": "user", "content": user_content, "t": now, "claude": dict(mk), **q.take_user_meta()})
@@ -2121,6 +2140,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
 
             if t == "result":
                 pending -= 1
+                note_context_window(sid, ev, model_hint=mk.get("model") if isinstance(mk, dict) else None)
                 if ev.get("is_error") and ev.get("subtype") not in ("success",):
                     result_err = ev.get("result") or ev.get("subtype")
                 if isinstance(ev.get("result"), str) and not ev.get("is_error"):

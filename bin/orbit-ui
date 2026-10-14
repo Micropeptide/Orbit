@@ -979,7 +979,7 @@ class H(http.server.BaseHTTPRequestHandler):
             want = (qs.get("sid") or [""])[0]
             cst = get_state(want) if want and (want in STATES or os.path.exists(q.session_path(want))) else S
             st = q.server_status()
-            st["context"] = q.context_state(cst.msgs, cst.sid)
+            st["context"] = q.context_state(cst.msgs, cst.sid, model=cst.model)
             return self._send(200, jdump(st))
         if p == "/api/health":   return self._send(200, jdump(q.health_check()))
         if p == "/api/default_prompt":
@@ -991,8 +991,8 @@ class H(http.server.BaseHTTPRequestHandler):
             want = (qs.get("sid") or [""])[0]
             st = get_state(want) if want and (want in STATES or os.path.exists(q.session_path(want))) else S
             if (qs.get("full") or [""])[0]:
-                return self._send(200, jdump(q.context_breakdown(st.msgs, st.sid, st.agent, st.project)))
-            return self._send(200, jdump(q.context_state(st.msgs, st.sid)))
+                return self._send(200, jdump(q.context_breakdown(st.msgs, st.sid, st.agent, st.project, model=st.model)))
+            return self._send(200, jdump(q.context_state(st.msgs, st.sid, model=st.model)))
         if p == "/api/sessions/stamp":
             # cheap "has the list changed?": the page asks every few seconds and only
             # re-reads the whole list when this moves
@@ -3539,8 +3539,11 @@ def start_turn(st, text, atts=None, effort=None, Q=None, origin=None, chain=None
                                  prompt_tokens=stats.get("prompt_tokens"),
                                  completion_tokens=stats.get("completion_tokens"),
                                  model=spec.get("label") or spec.get("model"))
+                    # The engines measure every request as it goes; that last measurement is how
+                    # full the window is. This total sums the prompt over every step of the
+                    # answer, so it is only a stand-in when no engine measured anything.
                     tot = (stats.get("prompt_tokens") or 0) + (stats.get("completion_tokens") or 0)
-                    if tot: q.SESSION_TOKENS[st.sid] = tot
+                    if tot and st.sid not in q.SESSION_TOKENS: q.SESSION_TOKENS[st.sid] = tot
                 except Exception: pass
                 st.running = False
                 if not failed[0]: st.clear_pickups = True

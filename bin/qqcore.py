@@ -5351,6 +5351,20 @@ def health_check():
 
 # ==================================================================== CONTEXT
 SESSION_TOKENS = {}          # sid -> exact prompt_tokens from the last real request
+SESSION_WINDOW = {}          # sid -> the window its engine says the model has (Claude Code's contextWindow)
+# the sizes context windows come in, for when a measured prompt shows the listed one is too small
+WINDOW_SIZES = (8192, 32768, 65536, 128000, 200000, 256000, 400000, 1000000, 2000000)
+
+
+def chat_window(sid):
+    """The window this chat's engine reported for its model, kept with the chat so a
+    restart does not forget it; None when it never said."""
+    if not sid: return None
+    if SESSION_WINDOW.get(sid): return SESSION_WINDOW[sid]
+    try: w = int((CE.chat_prefs(sid) or {}).get("context_window") or 0)
+    except Exception: w = 0
+    if w: SESSION_WINDOW[sid] = w
+    return w or None
 
 def estimate_tokens(messages):
     """Rough token count for a conversation. ~3.6 chars/token for English prose;
@@ -5384,31 +5398,77 @@ def tool_schema_tokens():
     except Exception:
         return 0
 
-def context_state(messages=None, sid=None):
+def saved_measurement(messages):
+    """The last real measurement saved with the chat: (tokens, window or None), or None.
+
+    Claude Code and Codex chats keep their own context (Claude Code compacts it), so
+    Orbit's copy of the transcript says nothing about how full theirs is. What their
+    last request measured is kept on that turn's message ("claude"/"codex" ctx, Codex's
+    with its model's window); a session imported from Claude Code keeps each request's
+    usage on its answers. Only the last turn counts: an older figure is out of date."""
+    for m in reversed(messages or []):
+        role = m.get("role")
+        if role == "assistant":
+            # read straight from a Claude Code transcript, an answer is one request and its
+            # usage is that request's; one Orbit ran carries the whole answer's total (and
+            # Orbit's own secs / tool_runs), so it is passed over for the turn's marker
+            u = m.get("usage") or {}
+            if (str(m.get("model") or "").startswith("Claude Code ·") and u.get("prompt_tokens")
+                    and "secs" not in m and "tool_runs" not in m):
+                return int(u["prompt_tokens"]), None
+            continue
+        if role == "user" and not m.get("note") and not m.get("nudge"):
+            for key in ("claude", "codex"):
+                mk = m.get(key)
+                if isinstance(mk, dict) and mk.get("ctx"):
+                    # Codex's window is the one Codex reported; a Claude turn's is only the
+                    # size Orbit's model list gave when it started, so it is not taken as fact
+                    win = int(mk.get("ctx_max") or 0) if key == "codex" else 0
+                    return int(mk["ctx"]), (win or None)
+            return None
+    return None
+
+
+def context_state(messages=None, sid=None, model=None):
     """How full the window is for THIS conversation.
     Uses the exact prompt_tokens the server reported for this session when we have
-    it, otherwise a character-based estimate — never another chat's numbers."""
-    spec = current_model()
-    mx = (spec or {}).get("context") or S["server"].get("context_window") or 1
+    it, otherwise a character-based estimate — never another chat's numbers. The window
+    is the one this chat's engine reported, else its own model's (not whichever model
+    was picked last somewhere else)."""
+    spec = current_model(model)
+    reported = chat_window(sid)
+    mx = reported or (spec or {}).get("context") or S["server"].get("context_window") or 1
     if messages is not None:
         # tool schemas ride along on every request; leaving them out made the
         # meter read 1% when the real prompt was already 12%
         est = estimate_tokens(messages) + tool_schema_tokens()
         exact = SESSION_TOKENS.get(sid) if sid else None
-        used, kind = (exact, "measured") if exact and abs(exact - est) < max(est, 1) * 2 \
-                     else (est, "estimated")
+        if not exact:
+            saved = saved_measurement(messages)
+            if saved:
+                exact = saved[0]
+                if saved[1] and not reported: reported = mx = saved[1]
+        # a measurement is this chat's own, from a real request, and is cleared when the
+        # chat is compacted: it wins over an estimate of Orbit's copy of the transcript,
+        # which for Claude Code and Codex is not what their model sees at all
+        used, kind = (exact, "measured") if exact else (est, "estimated")
     else:
         st = server_status()
         used, kind = st.get("context_used") or 0, "server"
         mx = st.get("context_max") or mx
+    # A request that big went through, so the window is bigger than the list says (Opus
+    # was listed at 200k while the Opus answering had 1M): the next real size, not 316%.
+    if kind == "measured" and used > mx and not reported:
+        mx = next((w for w in WINDOW_SIZES if w >= used), used)
+        kind = "measured (the window is at least this big)"
     return {"used": used, "max": mx, "pct": round(100.0 * used / max(mx, 1), 1),
             "basis": kind}
 
 
-def context_breakdown(messages=None, sid=None, agent=None, project=None):
+def context_breakdown(messages=None, sid=None, agent=None, project=None, model=None):
     """What is actually filling the window, part by part -- Claude Code's /context.
     Returns the same totals as context_state plus a share for each kind of content."""
-    st = context_state(messages, sid)
+    st = context_state(messages, sid, model=model)
     msgs = list(messages or [])
     sys_txt = ""
     for m in msgs:
