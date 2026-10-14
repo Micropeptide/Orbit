@@ -625,8 +625,12 @@ class H(http.server.BaseHTTPRequestHandler):
             if host and host not in allowed_hosts(): return self._refuse_cross_site()
             return self._serve_granted()
         if not self._origin_ok(): return self._refuse_cross_site()
-        if not self._authorised(): return self._refuse_unauthorised()
-        if not self._scope_ok(): return self._refuse_scope()
+        # The app's name and icons: a browser fetches these without its cookie when it
+        # installs Orbit as an app (Android's "Install app"), and there is nothing private in them.
+        pub = self.path.split("?")[0]
+        if not (pub == "/manifest.json" or (pub.startswith("/icons/") and pub.endswith(".png"))):
+            if not self._authorised(): return self._refuse_unauthorised()
+            if not self._scope_ok(): return self._refuse_scope()
         try:
             return self._get(self.path.split("?")[0])
         except Exception as e:
@@ -687,7 +691,8 @@ class H(http.server.BaseHTTPRequestHandler):
             code = (qs.get("c") or [""])[0]
             if code:
                 # a phone browser pairing with the QR's link: its own token, in a cookie
-                tok, _did = REMOTE.claim_code(q.ROOT, code, name="Phone browser", via="web")
+                tok, _did = REMOTE.claim_code(q.ROOT, code, via="web",
+                                              name=REMOTE.device_name_from_agent(self.headers.get("User-Agent")))
                 if not tok:
                     return self._send(401, "That pairing link has been used or has expired — show the QR "
                                            "on the Mac again.", "text/plain; charset=utf-8")
@@ -1025,6 +1030,13 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/skills":   return self._send(200, jdump(q.skills_list()))
         if p == "/api/remote":
             return self._send(200, jdump(REMOTE.status(q.ROOT, remote_mode(), PORT)))
+        if p == "/api/remote/weblink":
+            # a browser, an Android phone or Orbit for Windows: a link (and its QR) to open once
+            link, png = REMOTE.web_pair(q.ROOT, remote_mode(), PORT)
+            if not link:
+                return self._send(404, jdump({"error": "no reachable address yet — turn on a mode and restart"}))
+            return self._send(200, jdump({"link": link, "expires_in": REMOTE.CODE_TTL,
+                                          "qr": "data:image/png;base64," + base64.b64encode(png).decode()}))
         if p == "/api/remote/qr":
             png = REMOTE.pair_qr_png(q.ROOT, remote_mode(), PORT)
             if not png:

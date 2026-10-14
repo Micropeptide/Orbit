@@ -1,7 +1,9 @@
 {
+ "id": "/",
  "name": "Orbit",
  "short_name": "Orbit",
  "start_url": "/",
+ "scope": "/",
  "display": "standalone",
  "background_color": "#14171e",
  "theme_color": "#2c5bf0",

@@ -5100,7 +5100,13 @@ async function openSettings(tab){
          trades it for a token of its own, kept in its Keychain and never typed.</div>
         <button class=ghost id=rot style="margin-top:10px">Unpair every device</button>
         <div class=hint2>For one lost device, revoke just that one below.</div>
-       </div></div>`
+       </div></div>
+      <div class=sec style="margin-top:16px">Pair a browser, Android or Windows</div>
+      <div class=note style="margin-left:0">No app needed: open the link once in Chrome on Android, a browser on another
+       computer, or Orbit for Windows (<i>Connect to another computer</i>), and it stays signed in. On Android, Chrome's
+       menu → <b>Install app</b> (or <b>Add to Home screen</b>) then gives Orbit its own icon and window.</div>
+      <button class=ghost id=weblink style="margin-top:10px">Show a pairing link</button>
+      <div id=webpair style="margin-top:10px"></div>`
       :'<div class=note style="margin-top:12px">Turn on a mode above, then restart, to pair a device.</div>'}
     <div class=hint2 style="margin-top:14px">Changing the mode needs a restart —
      use <b>Save &amp; restart server</b> below, or the Restart button in the sidebar.</div>
@@ -5124,6 +5130,20 @@ async function openSettings(tab){
    const rot=$('#rot'); if(rot)rot.onclick=async()=>{
     if(!confirm('Unpair every device? Each one must scan the QR again.'))return;
     if(await apiPost('/api/remote/rotate',{},'unpairing')){toast('every device unpaired');render('phone')}};
+   const wl=$('#weblink'); if(wl)wl.onclick=async()=>{
+    const r=await fetch('/api/remote/weblink');const d=await r.json().catch(()=>({}));
+    if(!r.ok)return toast(d.error||'could not make a link');
+    const box=$('#webpair');
+    box.innerHTML=`<div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap">
+      <img src="${d.qr}" width=170 height=170 alt="pairing link as a QR code" style="border-radius:12px;background:#fff;padding:6px">
+      <div style="flex:1;min-width:240px"><div class=note style="margin-left:0">Scan it with the phone's camera, or send the link
+       to the device. Good once, for ${Math.round((d.expires_in||900)/60)} minutes.</div>
+       <div style="display:flex;gap:6px;margin-top:8px"><input readonly id=weblinkv style="font-family:var(--mono);font-size:var(--fs-xs)">
+        <button class=ghost id=weblinkc>Copy</button></div></div></div>`;
+    $('#weblinkv').value=d.link;
+    $('#weblinkc').onclick=async()=>{try{await navigator.clipboard.writeText(d.link);toast('link copied — it works once')}
+     catch(e){$('#weblinkv').select();toast('select and copy it')}};
+    setTimeout(drawDevices,15000)};
    drawDevices();
   }
   if(name==='backup'){

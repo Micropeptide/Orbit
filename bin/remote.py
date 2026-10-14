@@ -495,6 +495,32 @@ def pair_qr_png(root, mode, port, box=8):
     return buf.getvalue()
 
 
+def web_pair(root, mode, port, box=7):
+    """A link that pairs a browser — on Android, Windows, another Mac — or Orbit for Windows,
+    and the same link as a QR: (link, png bytes). One code for both, good once for fifteen
+    minutes; opening it leaves the device a token of its own in a cookie."""
+    p = pair_payload(root, mode, port)
+    if not p: return "", b""
+    import io
+    import qrcode
+    buf = io.BytesIO()
+    qrcode.make(p["web"], box_size=box, border=2).save(buf, format="PNG")
+    return p["web"], buf.getvalue()
+
+
+def device_name_from_agent(ua):
+    """What a device pairing through a browser calls itself, from its User-Agent."""
+    ua = ua or ""
+    if "Orbit/" in ua or "Electron/" in ua:
+        app = "Orbit for Windows" if "Windows" in ua else "Orbit for Mac" if "Macintosh" in ua else "Orbit desktop"
+        return app
+    where = ("Android" if "Android" in ua else "iPhone" if "iPhone" in ua else "iPad" if "iPad" in ua
+             else "Windows" if "Windows" in ua else "Mac" if "Macintosh" in ua else "Linux" if "Linux" in ua else "")
+    browser = ("Edge" if "Edg/" in ua else "Firefox" if "Firefox/" in ua else "Chrome" if "Chrome/" in ua
+               else "Safari" if "Safari/" in ua else "browser")
+    return (f"{browser} on {where}" if where else browser.capitalize())[:60]
+
+
 # ------------------------------------------------------------------ discovery
 
 _BONJOUR = {"proc": None}

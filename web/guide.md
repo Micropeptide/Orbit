@@ -133,6 +133,16 @@ Choose how often it checks (every hour, 6 hours, day or week) and whether to inc
 
 The phone shows the same chats live, with the model picker, the queue, goals, files and the home page. Answer approvals from the Lock Screen without unlocking; reply to a finished answer from its notification. If the phone loses the connection mid-answer, the Mac carries on and the app rejoins.
 
+## Orbit on Android, Windows and other computers
+
+Orbit's server runs on your Mac; any other device can use it once it is paired.
+
+- **Android:** on the Mac, Settings → Phone → **Show a pairing link**, and scan the QR with the Android phone's camera (or send it the link). It opens Orbit in Chrome, already signed in. Then Chrome's menu → **Install app** (or **Add to Home screen**) gives Orbit its own icon and full-screen window. Use Tailscale mode for this; Chrome only installs apps from a secure (https) address.
+- **Windows:** install **Orbit for Windows** from the [releases page](https://github.com/Micropeptide/Orbit/releases) (look for `Orbit-Setup-…exe`), choose **Connect to another computer**, and paste a pairing link from the Mac.
+- **Any browser:** open the pairing link; the browser stays signed in for a year, or until you revoke it.
+
+Each device appears under Settings → Phone → Devices with its own name. Revoke any one of them there, or limit it to chats only.
+
 ## Privacy and safety
 
 - Everything lives on your Mac: chats, files, memory and settings, in Orbit's folder. Nothing is sent anywhere except to the model you choose.
