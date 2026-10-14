@@ -17,8 +17,8 @@ It works two ways, and you can switch at any time:
   modes and memory, with every step shown and every approval answered in Orbit. A
   chat can even run on another machine over SSH.
 
-It is a Python server and one HTML file. No account, no telemetry, no build step,
-no Electron. There is an iPhone app.
+It is a Python server and one HTML file. No account, no telemetry, no build step.
+Use it in a browser, as [Orbit for Mac](#the-desktop-app), or from the iPhone app.
 
 ![Orbit's home page](docs/screenshots/home.png)
 
@@ -54,7 +54,7 @@ and the file it wrote is a card under the answer.</sub></td>
 - [Answers, files and previews](#answers-files-and-previews)
 - [Orbit's own agent](#orbits-own-agent)
 - [The interface](#the-interface)
-- [The desktop app](#the-desktop-app)
+- [Orbit for Mac](#the-desktop-app)
 - [Safety](#safety)
 - [On your phone](#on-your-phone)
 - [Install](#install) · [First ten minutes](#first-ten-minutes) · [Where your data lives](#where-your-data-lives) · [Configuration](#configuration) · [Background service](#running-it-as-a-background-service) · [Tests](#tests) · [Troubleshooting](#troubleshooting) · [Documentation](#documentation)
@@ -673,9 +673,10 @@ system or your choice.
 
 ---
 
-## The desktop app
+<a id="the-desktop-app"></a>
+## Orbit for Mac
 
-`desktop/` is Orbit as a Mac app (Electron), around the same interface:
+`desktop/` is Orbit as a Mac app, around the same interface:
 
 - a window of its own, with the chat tabs where the title bar was;
 - a menu bar icon listing the chats answering or waiting for you, and the Dock badge counting them;
@@ -687,9 +688,21 @@ system or your choice.
 
 It starts Orbit's server when it is not running — through its launchd agent if there is one — and never a second copy.
 
+**Install:** download `Orbit-<version>-arm64.dmg` from the
+[latest desktop release](https://github.com/Micropeptide/Orbit/releases?q=desktop&expanded=true),
+open it and drag Orbit to Applications. It is not notarized, so the first time right-click
+it → **Open** (or run `xattr -dr com.apple.quarantine /Applications/Orbit.app`). Apple
+Silicon Macs; Orbit itself (the server) must be installed as described in [Install](#install).
+
+**Updates:** Settings → General → *Orbit for Mac*, or Orbit → Updates in the menu bar:
+install automatically (when no chat is answering and you are away, or when you quit), tell
+you and let you install, or never check by itself; check every hour, 6 hours, day or week;
+beta versions optional. Downloads are checked against the release's `SHA256SUMS.txt`.
+
 ```bash
-cd desktop && npm install && npm start      # run it
-npm run dist                                 # build dist/mac-arm64/Orbit.app
+cd desktop && npm install
+npm run dist          # build dist/mac-arm64/Orbit.app (built with Electron)
+npm run release       # the dmg, the zip the updater uses, and SHA256SUMS.txt
 ```
 
 ---

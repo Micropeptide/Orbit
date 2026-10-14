@@ -7,8 +7,34 @@ const windows = require('./windows');
 const actions = require('./actions');
 const links = require('./links');
 const server = require('./server');
+const updater = require('./updater');
 
-/** hooks: { quickAsk, setKeepInMenuBar(bool), onPrefsChanged() } */
+/** Orbit › Updates submenu, bound to the update prefs. */
+function updatesSubmenu(hooks) {
+  const p = updater.getState().prefs;
+  const set = (patch) => () => hooks.setUpdatePrefs(patch);
+  const mode = (label, value) => ({ label, type: 'radio', checked: p.autoUpdate === value, click: set({ autoUpdate: value }) });
+  const every = (label, hours) => ({ label, type: 'radio', checked: p.updateCheckEvery === hours, click: set({ updateCheckEvery: hours }) });
+  return [
+    mode('Install Automatically', 'auto'),
+    mode('Notify Me', 'notify'),
+    mode('Don’t Check', 'off'),
+    { type: 'separator' },
+    every('Check Every Hour', 1),
+    every('Check Every 6 Hours', 6),
+    every('Check Every Day', 24),
+    every('Check Every Week', 168),
+    { type: 'separator' },
+    {
+      label: 'Include Beta Versions', type: 'checkbox', checked: p.updateChannel === 'beta',
+      click: (mi) => hooks.setUpdatePrefs({ updateChannel: mi.checked ? 'beta' : 'stable' }),
+    },
+    { type: 'separator' },
+    { label: updater.lastCheckedLabel(), enabled: false },
+  ];
+}
+
+/** hooks: { quickAsk, setKeepInMenuBar(bool), onPrefsChanged(), checkForUpdates(), setUpdatePrefs(patch) } */
 function build(hooks) {
   const cmd = (name, arg) => (_mi, focused) => {
     // In a preview window, Cmd+W just closes that window.
@@ -24,6 +50,8 @@ function build(hooks) {
       label: app.name || 'Orbit',
       submenu: [
         { role: 'about', label: 'About Orbit' },
+        { label: 'Check for Updates…', click: () => hooks.checkForUpdates() },
+        { label: 'Updates', submenu: updatesSubmenu(hooks) },
         { type: 'separator' },
         item('Settings…', 'Cmd+,', 'settings'),
         { type: 'separator' },

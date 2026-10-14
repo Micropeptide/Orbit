@@ -10,6 +10,11 @@ const status = require('./status');
 const quickPanel = require('./quick-panel');
 const deeplink = require('./deeplink');
 const ipc = require('./ipc');
+const updater = require('./updater');
+
+// Always "Orbit" (never "Electron"), even in a dev run: Dock, notifications, userData.
+app.setName('Orbit');
+app.setAppUserModelId('app.orbit.desktop');
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -52,12 +57,25 @@ const trayHooks = {
   newChat: () => windows.sendCommand('new-chat', undefined, windows.showMain(), { queue: true }),
   quickAsk: () => quickPanel.show(),
   openOrbit: () => windows.showMain(),
+  checkForUpdates: () => updater.checkNow(),
+  installUpdate: () => updater.promptInstall(),
 };
 const menuHooks = {
   quickAsk: () => quickPanel.toggle(),
   setKeepInMenuBar,
   onPrefsChanged: () => { menu.build(menuHooks); tray.invalidate(); },
+  checkForUpdates: () => updater.checkNow(),
+  setUpdatePrefs: (patch) => updater.setPrefs(patch),
 };
+
+// Rebuild the app menu only when something it shows changed (not on every download tick).
+let menuSignature = '';
+function refreshUpdateUI() {
+  const s = updater.getState();
+  const sig = JSON.stringify([s.prefs, updater.lastCheckedLabel()]);
+  if (sig !== menuSignature) { menuSignature = sig; menu.build(menuHooks); }
+  tray.refresh();
+}
 
 /** Only Orbit's own pages get permissions (clipboard, notifications, microphone…). */
 function setupPermissions() {
@@ -80,6 +98,9 @@ app.whenReady().then(() => {
   if (prefs.get('keepInMenuBar') !== false) tray.create(trayHooks);
   quickPanel.registerShortcut();
   status.start();
+  updater.onState(refreshUpdateUI);
+  updater.start();
+  setInterval(refreshUpdateUI, 60 * 1000); // keeps "Last checked: …" current
 
   const firstLink = pendingLinks.shift() || deeplink.findLink(process.argv);
   windows.createMainWindow();
@@ -101,6 +122,7 @@ app.on('window-all-closed', () => { /* handled by onLastClosed */ });
 app.on('will-quit', () => {
   quickPanel.unregisterShortcut();
   status.stop();
+  updater.stop();
   prefs.flushSync();
   windowState.flushSync();
   // The Orbit server is a background service: it keeps running after we quit.

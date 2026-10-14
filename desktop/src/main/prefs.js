@@ -11,6 +11,13 @@ const DEFAULT_PREFS = {
   zoomFactor: 1,
   keepInMenuBar: true,
   notifications: true,
+  // Updates (see updater.js)
+  autoUpdate: 'notify',       // 'auto' | 'notify' | 'off'
+  updateCheckEvery: 24,       // hours: 1, 6, 24, 168
+  updateChannel: 'stable',    // 'stable' | 'beta'
+  lastUpdateCheck: 0,         // epoch ms of the last successful check
+  skippedVersion: null,
+  justUpdatedTo: null,        // set just before installing; shows "Orbit updated to …" after relaunch
 };
 
 function createStore(fileName, defaults) {

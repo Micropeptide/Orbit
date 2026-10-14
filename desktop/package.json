@@ -1,7 +1,7 @@
 {
   "name": "orbit-desktop",
   "productName": "Orbit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Native macOS shell for the local Orbit AI chat/agent app",
   "main": "src/main/main.js",
   "private": true,
@@ -9,9 +9,11 @@
   "author": "Orbit",
   "scripts": {
     "start": "electron .",
+    "test": "node --test \"test/*.test.js\"",
     "tray-icon": "node scripts/make-tray-icon.js",
     "dist": "electron-builder --mac dir",
-    "dmg": "electron-builder --mac dmg"
+    "dmg": "electron-builder --mac dmg",
+    "release": "electron-builder --mac --publish never && node scripts/sums.js"
   },
   "devDependencies": {
     "electron": "44.7.1",
@@ -48,13 +50,13 @@
     "mac": {
       "target": [
         {
-          "target": "dir",
+          "target": "dmg",
           "arch": [
             "arm64"
           ]
         },
         {
-          "target": "dmg",
+          "target": "zip",
           "arch": [
             "arm64"
           ]
@@ -63,7 +65,12 @@
       "category": "public.app-category.developer-tools",
       "icon": "build/icon.icns",
       "hardenedRuntime": false,
-      "identity": null
-    }
+      "identity": null,
+      "artifactName": "Orbit-${version}-${arch}-mac.${ext}"
+    },
+    "dmg": {
+      "artifactName": "Orbit-${version}-${arch}.${ext}"
+    },
+    "afterPack": "scripts/adhoc-sign.js"
   }
 }

@@ -5,6 +5,7 @@ const windows = require('./windows');
 const links = require('./links');
 const actions = require('./actions');
 const server = require('./server');
+const updater = require('./updater');
 
 const SID_RE = /^[A-Za-z0-9_.:-]{1,200}$/;   // chat ids: 2026…-a291, cq-<uuid>, oc-ses_…
 
@@ -28,6 +29,21 @@ function on(channel, handler) {
     }
     try { handler(event, ...args); } catch (err) { console.error(`[orbit] ${channel} failed:`, err); }
   });
+}
+
+/** Like on(), for ipcRenderer.invoke: untrusted callers get a rejected promise. */
+function handle(channel, handler) {
+  ipcMain.handle(channel, (event, ...args) => {
+    if (!trustedSender(event)) throw new Error('untrusted sender');
+    return handler(event, ...args);
+  });
+}
+
+/** Push update state to every main window showing Orbit. */
+function pushUpdateState(s) {
+  for (const win of windows.mainWindows()) {
+    if (links.isOrbitURL(win.webContents.getURL())) win.webContents.send('orbit:updates:state', s);
+  }
 }
 
 function register({ quickPanel }) {
@@ -76,6 +92,18 @@ function register({ quickPanel }) {
     if (!windows.isMainWindow(win) || !links.isLocalAppPage(event.senderFrame.url)) return;
     if (await server.chooseOrbitRoot(win)) windows.loadOrbit(win);
   });
+
+  // Updates (window.orbitDesktop.updates). setPrefs validates in updater.setPrefs (throws on bad values).
+  handle('orbit:updates:get', () => updater.getState());
+  handle('orbit:updates:check', () => updater.check({ source: 'renderer' }));
+  handle('orbit:updates:install', () => updater.install());
+  handle('orbit:updates:set-prefs', (_event, patch) => {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new TypeError('setPrefs expects an object');
+    const clean = {};
+    for (const k of ['autoUpdate', 'updateCheckEvery', 'updateChannel']) if (patch[k] !== undefined) clean[k] = patch[k];
+    return updater.setPrefs(clean);
+  });
+  updater.onState(pushUpdateState);
 
   // Quick Ask panel.
   on('quick:submit', (event, text, background) => {

@@ -4854,6 +4854,7 @@ async function openSettings(tab){
  function keepText(){if($('#m_ins'))editIns=$('#m_ins').value;if($('#mcp_json'))editMcp=$('#mcp_json').value}
  async function tabs(n){host.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('on',b.dataset.t===n));
   keepText();collect();RENDER_GEN++;await render(n);
+  if(n==='general')drawDeskUpdates(body);
   if(editIns!=null&&$('#m_ins'))$('#m_ins').value=editIns;
   if(editMcp!=null&&$('#mcp_json'))$('#mcp_json').value=editMcp}
  host.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{
@@ -9030,6 +9031,36 @@ addEventListener('keydown',e=>{
  // menu sends ⌘1…9 itself
  if(e.altKey&&!e.metaKey&&!e.ctrlKey&&/^Digit[1-9]$/.test(e.code)&&!DESK){
   e.preventDefault();gotoTab(+e.code.slice(5))}});
+// Settings → General in Orbit for Mac: how it updates itself. The app keeps these (they
+// are about the app, not Orbit's server), so they apply the moment they change.
+async function drawDeskUpdates(body){
+ const U=DESK&&DESK.updates;if(!U||!body)return;
+ let st;try{st=await U.getState()}catch(e){return}
+ const box=el(`<div><div class=sec>Orbit for Mac</div><div class=grid>
+  <label>Updates</label><select id=du_mode><option value=auto>Install automatically</option>
+   <option value=notify>Tell me, I install</option><option value=off>Don't check by itself</option></select>
+  <div class=hint2>Automatic updates install when no chat is answering and you are away, or when you quit.</div>
+  <label>Check every</label><select id=du_every><option value=1>hour</option><option value=6>6 hours</option>
+   <option value=24>day</option><option value=168>week</option></select>
+  <label>Beta versions</label><div class=sw><input type=checkbox id=du_beta><span class=note style="margin-left:0">include them</span></div>
+  <label>Version</label><div class=sw><span id=du_state></span><button class=ghost id=du_check>Check now</button>
+   <button class=primary id=du_install style="display:none">Install and relaunch</button></div>
+ </div></div>`);
+ body.prepend(box);
+ const draw=s=>{st=s||st;const p=st.prefs||{};
+  $('#du_mode').value=p.autoUpdate||'notify';$('#du_every').value=String(p.updateCheckEvery||24);$('#du_beta').checked=p.updateChannel==='beta';
+  const when=st.lastCheck?new Date(st.lastCheck).toLocaleString([], {dateStyle:'medium',timeStyle:'short'}):'never';
+  $('#du_state').textContent=st.checking?'checking…':st.downloading?`downloading ${Math.round((st.progress||0)*100)}%`:
+   st.error?st.error:st.available&&st.latest?`${st.current} — ${st.latest.version} is available`:`${st.current} — up to date · checked ${when}`;
+  $('#du_install').style.display=st.available?'':'none'};
+ draw(st);
+ const off=U.onState(s=>{if(!document.body.contains(box)){off&&off();return}draw(s)});
+ const set=async patch=>{try{draw(await U.setPrefs(patch))}catch(e){toast('could not change that: '+(e.message||e))}};
+ $('#du_mode').onchange=e=>set({autoUpdate:e.target.value});
+ $('#du_every').onchange=e=>set({updateCheckEvery:+e.target.value});
+ $('#du_beta').onchange=e=>set({updateChannel:e.target.checked?'beta':'stable'});
+ $('#du_check').onclick=async()=>{try{draw(await U.check())}catch(e){toast(e.message||String(e))}};
+ $('#du_install').onclick=async()=>{try{draw(await U.install())}catch(e){toast(e.message||String(e))}}}
 // a question typed into the desktop app's Quick Ask: a new chat, in front or behind
 async function quickAsk(a){
  const text=String(a&&a.text||'').trim();if(!text)return;

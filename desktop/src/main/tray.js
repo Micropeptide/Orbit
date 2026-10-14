@@ -5,12 +5,13 @@ const links = require('./links');
 const status = require('./status');
 const windows = require('./windows');
 const actions = require('./actions');
+const updater = require('./updater');
 
 const MAX_ROWS = 8;
 let tray = null;
 let unsubscribe = null;
 let lastSignature = '';
-let hooks = { newChat() {}, quickAsk() {}, openOrbit() {} };
+let hooks = { newChat() {}, quickAsk() {}, openOrbit() {}, checkForUpdates() {}, installUpdate() {} };
 
 function elapsed(sinceEpoch) {
   const secs = Math.max(0, Math.floor(Date.now() / 1000 - Number(sinceEpoch)));
@@ -50,12 +51,14 @@ function render(st) {
   const header = st.up ? `Orbit — ${n} answering · ${m} need${m === 1 ? 's' : ''} you` : 'Orbit — not responding';
   const items = st.up ? rows(st) : [];
   const loginOn = actions.launchAtLogin();
-  const signature = JSON.stringify([header, items, loginOn]);
+  const updateVersion = updater.pendingVersion();
+  const signature = JSON.stringify([header, items, loginOn, updateVersion]);
   tray.setToolTip(header);
   if (signature === lastSignature) return;
   lastSignature = signature;
 
   const template = [
+    ...(updateVersion ? [{ label: `Install Update ${updateVersion}…`, click: () => hooks.installUpdate() }, { type: 'separator' }] : []),
     { label: header, enabled: false },
     ...items.map(({ sid, label }) => ({ label, click: () => windows.openChat(sid) })),
     { type: 'separator' },
@@ -68,6 +71,7 @@ function render(st) {
       label: 'Launch at Login', type: 'checkbox', checked: loginOn,
       click: (item) => { actions.setLaunchAtLogin(item.checked); lastSignature = ''; },
     },
+    { label: 'Check for Updates…', click: () => hooks.checkForUpdates() },
     { label: 'Quit Orbit', click: () => app.quit() },
   ];
   tray.setContextMenu(Menu.buildFromTemplate(template));
@@ -95,4 +99,7 @@ function destroy() {
 /** Re-render after a pref outside the tray changed (e.g. Launch at Login from the app menu). */
 function invalidate() { lastSignature = ''; render(status.state); }
 
-module.exports = { create, destroy, invalidate, exists: () => !!tray };
+/** Re-render only if what the menu shows changed (e.g. an update became available). */
+function refresh() { render(status.state); }
+
+module.exports = { create, destroy, invalidate, refresh, exists: () => !!tray };
