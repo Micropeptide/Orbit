@@ -13,12 +13,20 @@
 <script defer src="/vendor/katex/dist/contrib/auto-render.min.js"></script>
 <script defer src="/vendor/mermaid/dist/mermaid.min.js"></script>
 <link rel="manifest" href="/manifest.json">
-<meta name="theme-color" content="#6b5bd6"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#2c5bf0"><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
 :root{
- --bg:#faf9f5;--panel:#f0eee6;--card:#fff;--fg:#141413;--mut:#6b6a64;--dim:#9c9a92;
- --line:#e5e3da;--acc:#6b5bd6;--tool:#a8721c;--think:#7a6aa8;--err:#c0392b;--ok:#2d7d4f;
- --warn:#b8860b;--mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+ /* Orbit's own colours, taken from its icon: cool porcelain paper, ink with a little
+    blue in it, the icon's cobalt for what you act on and its violet for thinking. */
+ --bg:#f7f8fb;--panel:#eef1f6;--card:#fff;--fg:#151923;--mut:#586174;--dim:#8b93a3;
+ --line:#e2e6ee;--line2:#d3d9e3;--acc:#2c5bf0;--acc-ink:#fff;--tool:#9a6510;--think:#7c5cfa;--err:#d1343f;--ok:#1f8a5b;
+ --warn:#c27c0e;--mode:var(--acc);
+ --sans:"IBM Plex Sans",ui-sans-serif,-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans",sans-serif;
+ --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+ --shadow-sm:0 1px 2px rgba(21,25,35,.06),0 1px 1px rgba(21,25,35,.04);
+ --shadow-md:0 6px 20px -6px rgba(21,25,35,.16),0 2px 6px rgba(21,25,35,.06);
+ --shadow-lg:0 24px 60px -12px rgba(21,25,35,.28),0 8px 20px rgba(21,25,35,.08);
+ --hover:color-mix(in srgb,var(--fg) 6%,transparent);color-scheme:light;
  /* One interface size, and every other size derived from it. There were 25 different
     hardcoded font sizes in here and a slider in Settings that changed none of them,
     because nothing followed the size it set. Code and terminal output keep their own
@@ -30,35 +38,48 @@
  --fs-xs:calc(var(--ui) - 3.5px); --fs-2xs:calc(var(--ui) - 4.5px);
  --fs-code:12.5px;--fs-code-sm:11.5px;--fs-code-xs:11px;
  --s1:4px;--s2:8px;--s3:12px;--s4:16px;--s5:24px;
- --r-sm:4px;--r-md:7px;--r-lg:9px;--r-xl:12px;--r-full:999px}
+ /* one radius per level: badges, controls, cards, the composer and sheets */
+ --r-sm:5px;--r-md:8px;--r-lg:12px;--r-xl:16px;--r-full:999px}
 @media(prefers-color-scheme:dark){:root:not([data-theme=light]){
- --bg:#262624;--panel:#1f1e1d;--card:#30302e;--fg:#faf9f5;--mut:#b0aea5;--dim:#85837b;
- --line:#3d3d3a;--acc:#9d8cff;--tool:#d9a441;--think:#a596d6;--err:#e06c5b;--ok:#5fbf87;--warn:#d9a441}}
+ --bg:#14171e;--panel:#0f1218;--card:#1c2029;--fg:#e7eaf1;--mut:#a3aaba;--dim:#6e7688;
+ --line:#272c37;--line2:#343a47;--acc:#7194ff;--acc-ink:#0b1020;--tool:#e0b25c;--think:#a58bff;--err:#f0727a;--ok:#4cc38a;--warn:#e6a845;
+ --shadow-sm:0 1px 2px rgba(0,0,0,.4);--shadow-md:0 8px 24px -8px rgba(0,0,0,.6),0 2px 6px rgba(0,0,0,.3);
+ --shadow-lg:0 28px 70px -14px rgba(0,0,0,.7),0 8px 22px rgba(0,0,0,.35);--hover:color-mix(in srgb,var(--fg) 7%,transparent);color-scheme:dark}}
 :root[data-theme=dark]{
- --bg:#262624;--panel:#1f1e1d;--card:#30302e;--fg:#faf9f5;--mut:#b0aea5;--dim:#85837b;
- --line:#3d3d3a;--acc:#9d8cff;--tool:#d9a441;--think:#a596d6;--err:#e06c5b;--ok:#5fbf87;--warn:#d9a441}
+ --bg:#14171e;--panel:#0f1218;--card:#1c2029;--fg:#e7eaf1;--mut:#a3aaba;--dim:#6e7688;
+ --line:#272c37;--line2:#343a47;--acc:#7194ff;--acc-ink:#0b1020;--tool:#e0b25c;--think:#a58bff;--err:#f0727a;--ok:#4cc38a;--warn:#e6a845;
+ --shadow-sm:0 1px 2px rgba(0,0,0,.4);--shadow-md:0 8px 24px -8px rgba(0,0,0,.6),0 2px 6px rgba(0,0,0,.3);
+ --shadow-lg:0 28px 70px -14px rgba(0,0,0,.7),0 8px 22px rgba(0,0,0,.35);--hover:color-mix(in srgb,var(--fg) 7%,transparent);color-scheme:dark}
+@font-face{font-family:"IBM Plex Sans";font-weight:400;font-style:normal;font-display:swap;src:url(/vendor/plex/ibm-plex-sans-latin-400-normal.woff2) format("woff2")}
+@font-face{font-family:"IBM Plex Sans";font-weight:400;font-style:normal;font-display:swap;src:url(/vendor/plex/ibm-plex-sans-latin-ext-400-normal.woff2) format("woff2");unicode-range:U+0100-02BA,U+02BD-02C5,U+02C7-02CC,U+02CE-02D7,U+02DD-02FF,U+1E00-1EFF,U+2020,U+20A0-20AB,U+20AD-20C0,U+2113,U+2C60-2C7F,U+A720-A7FF}
+@font-face{font-family:"IBM Plex Sans";font-weight:400;font-style:italic;font-display:swap;src:url(/vendor/plex/ibm-plex-sans-latin-400-italic.woff2) format("woff2")}
+@font-face{font-family:"IBM Plex Sans";font-weight:500;font-style:normal;font-display:swap;src:url(/vendor/plex/ibm-plex-sans-latin-500-normal.woff2) format("woff2")}
+@font-face{font-family:"IBM Plex Sans";font-weight:600 700;font-style:normal;font-display:swap;src:url(/vendor/plex/ibm-plex-sans-latin-600-normal.woff2) format("woff2")}
+@font-face{font-family:"IBM Plex Mono";font-weight:400;font-style:normal;font-display:swap;src:url(/vendor/plex/ibm-plex-mono-latin-400-normal.woff2) format("woff2")}
+@font-face{font-family:"IBM Plex Mono";font-weight:500 700;font-style:normal;font-display:swap;src:url(/vendor/plex/ibm-plex-mono-latin-500-normal.woff2) format("woff2")}
 /* Claude Code mode: Claude's warm accent everywhere, and a band under the top bar,
    so it is plain at a glance that chats and settings follow the harness */
-body.harness{--acc:#c96442}
-@media(prefers-color-scheme:dark){:root:not([data-theme=light]) body.harness{--acc:#e0876a}}
-:root[data-theme=dark] body.harness{--acc:#e0876a}
-body.harness .top{box-shadow:inset 0 -2px 0 var(--acc)}
-#hmode{font-size:var(--fs-sm);padding:3px 10px;border-radius:12px;border:1px solid var(--line);background:transparent;color:var(--mut);cursor:pointer;white-space:nowrap}
+body.harness{--mode:#c96442}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]) body.harness{--mode:#e0876a}}
+:root[data-theme=dark] body.harness{--mode:#e0876a}
+body.harness .top{box-shadow:inset 0 -1.5px 0 var(--mode)}
+#hmode{font:inherit;font-size:var(--fs-sm);font-weight:500;padding:3px 10px;border-radius:var(--r-full);border:1px solid transparent;background:transparent;color:var(--mut);cursor:pointer;white-space:nowrap}
+#hmode:hover,#cmode:hover{background:var(--hover);color:var(--fg)}
 #hmode .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--dim);margin-right:6px;vertical-align:middle}
-body.harness #hmode{border-color:var(--acc);color:var(--acc);background:color-mix(in srgb,var(--acc) 10%,transparent)}
+body.harness #hmode{border-color:color-mix(in srgb,var(--mode) 45%,transparent);color:var(--mode);background:color-mix(in srgb,var(--mode) 9%,transparent)}
 /* Codex mode: Codex's green, and the same band, so it is plain which harness a chat runs in */
-body.codexmode{--acc:#10a37f}
-@media(prefers-color-scheme:dark){:root:not([data-theme=light]) body.codexmode{--acc:#3ccf9f}}
-:root[data-theme=dark] body.codexmode{--acc:#3ccf9f}
-body.codexmode .top{box-shadow:inset 0 -2px 0 var(--acc)}
-#cmode{font-size:var(--fs-sm);padding:3px 10px;border-radius:12px;border:1px solid var(--line);background:transparent;color:var(--mut);cursor:pointer;white-space:nowrap}
+body.codexmode{--mode:#10a37f}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]) body.codexmode{--mode:#3ccf9f}}
+:root[data-theme=dark] body.codexmode{--mode:#3ccf9f}
+body.codexmode .top{box-shadow:inset 0 -1.5px 0 var(--mode)}
+#cmode{font:inherit;font-size:var(--fs-sm);font-weight:500;padding:3px 10px;border-radius:var(--r-full);border:1px solid transparent;background:transparent;color:var(--mut);cursor:pointer;white-space:nowrap}
 #cmode .dot{display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--dim);margin-right:6px;vertical-align:middle}
-body.codexmode #cmode{border-color:var(--acc);color:var(--acc);background:color-mix(in srgb,var(--acc) 10%,transparent)}
-body.codexmode #cmode .dot{background:var(--acc)}
+body.codexmode #cmode{border-color:color-mix(in srgb,var(--mode) 45%,transparent);color:var(--mode);background:color-mix(in srgb,var(--mode) 9%,transparent)}
+body.codexmode #cmode .dot{background:var(--mode)}
 body.codexmode #hpick{display:inline-flex}
 body.codexmode #modelsel,body.codexmode #agentsel{display:none}
 body.codexmode #title{min-width:80px;flex-shrink:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-body.harness #hmode .dot{background:var(--acc)}
+body.harness #hmode .dot{background:var(--mode)}
 #hpick{display:none;gap:5px;align-items:center}
 body.harness #hpick{display:inline-flex}
 body.harness #modelsel,body.harness #agentsel{display:none}
@@ -80,8 +101,18 @@ body.harness #title{min-width:80px;flex-shrink:1;overflow:hidden;text-overflow:e
 *::-webkit-scrollbar-corner{background:transparent}
 *{box-sizing:border-box}html,body{height:100%}
 body{margin:0;display:flex;background:var(--bg);color:var(--fg);
- font:var(--fs-base)/1.65 ui-sans-serif,-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif}
-aside{width:256px;flex:0 0 256px;background:var(--panel);border-right:1px solid var(--line);
+ font:var(--fs-base)/1.6 var(--sans);-webkit-font-smoothing:antialiased;font-feature-settings:"kern","liga"}
+button,input,select,textarea{font-family:inherit}
+:focus-visible{outline:2px solid color-mix(in srgb,var(--acc) 70%,transparent);outline-offset:2px;border-radius:var(--r-sm)}
+::selection{background:color-mix(in srgb,var(--acc) 22%,transparent)}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
+/* The one moving thing in Orbit: a planet going round its ring, wherever a chat is at work. */
+.spin,.orbiting{display:inline-block;position:relative;width:12px;height:12px;flex:none;border-radius:50%;
+ border:1.5px solid color-mix(in srgb,var(--acc) 30%,transparent)!important;background:none;animation:orbit 1.15s linear infinite!important}
+.spin::after,.orbiting::after{content:"";position:absolute;width:4.5px;height:4.5px;border-radius:50%;background:var(--acc);
+ top:-3px;left:50%;margin-left:-2.25px;box-shadow:0 0 0 1.5px var(--panel)}
+@keyframes orbit{to{transform:rotate(360deg)}}
+aside{width:256px;flex:0 0 256px;background:var(--panel);border-right:1px solid var(--line);font-size:var(--fs-md);
  display:flex;flex-direction:column;height:100vh;height:100dvh}
 aside.hide{display:none}
 /* On a wide screen, hiding the sidebar used to remove every affordance with it: the
@@ -110,10 +141,10 @@ aside.rail #nav_trash::after{content:'🗑'}
 aside.rail .navtabs button::after{font-size:14px}
 aside.rail #sidestatus{padding:2px}
 aside.rail #sidehide{transform:rotate(180deg)}
-.brand{padding:11px 14px;border-bottom:1px solid var(--line);font-weight:650;font-size:var(--fs-base);
- display:flex;align-items:center;gap:8px}
+.brand{padding:12px 12px 8px 14px;font-weight:600;font-size:var(--fs-base);
+ display:flex;align-items:center;gap:8px;min-height:46px}
 .brand .mark{flex:0 0 20px;border-radius:5px}
-.brand .wordmark{letter-spacing:.2px}
+.brand .wordmark{letter-spacing:-.01em;font-size:calc(var(--ui) + 1px)}
 .brand small{font-weight:400;color:var(--mut);font-size:var(--fs-xs)}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--dim);flex:0 0 7px}
 .dot.up{background:var(--ok)}.dot.busy{background:var(--warn)}
@@ -121,27 +152,27 @@ aside.rail #sidehide{transform:rotate(180deg)}
 .srvbar button{flex:1;padding:5px 0;font-size:var(--fs-xs);border:1px solid var(--line);border-radius:7px;
  background:var(--card);color:var(--mut);cursor:pointer;font-family:inherit}
 .srvbar button:hover{color:var(--fg);border-color:var(--acc)}
-.newbtn{margin:9px 12px 5px;padding:8px 12px;border:1px solid var(--line);border-radius:9px;
- background:var(--card);color:var(--fg);font:inherit;font-size:var(--fs-md);cursor:pointer;text-align:left}
-.newbtn:hover{border-color:var(--acc)}
-.search{margin:0 12px 6px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;
+.newbtn{margin:9px 12px 5px;padding:7px 12px;border:1px solid var(--line);border-radius:var(--r-md);
+ background:var(--card);color:var(--fg);font:inherit;font-size:var(--fs-md);font-weight:500;cursor:pointer;text-align:left;box-shadow:var(--shadow-sm)}
+.newbtn:hover{border-color:var(--line2);background:color-mix(in srgb,var(--card) 70%,var(--bg))}
+.search{margin:0 12px 6px;padding:6px 10px;border:1px solid var(--line);border-radius:var(--r-md);
  background:var(--card);color:var(--fg);font:inherit;font-size:var(--fs-sm);width:calc(100% - 24px)}
 .slist{padding:0 0 6px}
-.sitem{padding:5px 8px 5px 10px;border-radius:7px;cursor:pointer;font-size:var(--fs-cap);display:flex;gap:6px;
- align-items:center;min-height:29px;position:relative}
+.sitem{padding:4px 8px 4px 9px;border-radius:var(--r-md);cursor:pointer;font-size:var(--fs-cap);display:flex;gap:7px;
+ align-items:center;min-height:30px;position:relative;color:color-mix(in srgb,var(--fg) 86%,var(--mut))}
 .sitem .stc{flex:0 0 14px;width:14px;display:inline-flex;align-items:center;justify-content:center;font-size:var(--fs-2xs);font-weight:700}
 .sitem.st-wait .stc{color:#fff;background:var(--warn,#d97706);border-radius:50%;height:14px}
 .sitem.st-queue .stc{color:var(--acc);border:1px solid var(--acc);border-radius:7px;height:14px;font-size:9.5px}
-.sitem .dotnew{width:7px;height:7px;border-radius:50%;background:var(--acc)}
+.sitem .dotnew{width:7px;height:7px;border-radius:50%;background:var(--acc);box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 18%,transparent)}
 .sitem.st-wait .t{font-weight:600}
 #sidestatus{display:flex;flex-wrap:wrap;gap:4px;padding:2px 2px 4px}
 #sidestatus:empty{display:none}
-.stchip{border:1px solid var(--line);background:var(--card);color:var(--mut);border-radius:12px;font:inherit;font-size:var(--fs-xs);
+.stchip{border:1px solid var(--line);background:var(--card);color:var(--mut);border-radius:var(--r-full);font:inherit;font-size:var(--fs-xs);
  padding:1px 8px;cursor:pointer;display:inline-flex;gap:5px;align-items:center}
 .stchip.wait{color:var(--warn,#d97706);border-color:var(--warn,#d97706)}
 .stchip.run{color:var(--acc)}
 #sidestatus.on .stchip{background:color-mix(in srgb,var(--acc) 14%,var(--card))}
-.stchip .spin{width:9px;height:9px;border-radius:50%;border:2px solid var(--acc);border-top-color:transparent;animation:sp .8s linear infinite}
+
 .sitem .ago{color:var(--dim);font-size:var(--fs-2xs);font-variant-numeric:tabular-nums;flex:0 0 auto}
 .sitem .more{display:none;border:0;background:none;color:var(--mut);cursor:pointer;padding:0 4px;font-size:var(--fs-base);line-height:1}
 .sitem:hover .more{display:inline}.sitem:hover .ago{display:none}
@@ -180,16 +211,16 @@ aside.rail #sidehide{transform:rotate(180deg)}
 .queuebox .qtail{height:6px}
 .sidetop{display:flex;gap:4px;margin:9px 12px 5px}
 .sidetop .newbtn{margin:0}.sidetop #newchat{flex:1}.sidetop #newwith{width:auto;padding:0 10px}
-.searchbtn{margin:0 12px 6px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;display:flex;
- align-items:center;background:var(--card);color:var(--mut);font:inherit;font-size:var(--fs-sm);cursor:pointer;text-align:left}
+.searchbtn{margin:0 12px 6px;padding:6px 10px;border:1px solid transparent;border-radius:var(--r-md);display:flex;
+ align-items:center;background:var(--hover);color:var(--mut);font:inherit;font-size:var(--fs-sm);cursor:pointer;text-align:left}
 .searchbtn span{flex:1}.searchbtn kbd{font-size:var(--fs-2xs);color:var(--dim);border:1px solid var(--line);border-radius:4px;padding:0 4px}
-.searchbtn:hover{border-color:var(--acc);color:var(--fg)}
+.searchbtn:hover{border-color:var(--line2);color:var(--fg)}
 .iconbtn2{border:0;background:none;color:var(--mut);cursor:pointer;font-size:var(--fs-cap);padding:2px 5px;border-radius:6px}
-.iconbtn2:hover{color:var(--fg);background:var(--card)}
+.iconbtn2:hover{color:var(--fg);background:var(--hover)}
 .brand #srvmenu{margin-left:auto}
 .sidescroll{flex:1;overflow-y:auto;padding:2px 8px 12px;min-height:0}
-.sechead{display:flex;align-items:center;gap:5px;padding:9px 6px 3px;font-size:var(--fs-xs);letter-spacing:.06em;
- text-transform:uppercase;color:var(--dim);cursor:pointer;user-select:none;position:sticky;top:0;background:var(--panel);z-index:2}
+.sechead{display:flex;align-items:center;gap:5px;padding:12px 6px 4px;font-size:var(--fs-xs);font-weight:600;
+ color:var(--dim);cursor:pointer;user-select:none;position:sticky;top:0;background:var(--panel);z-index:2}
 .sechead .caret{display:inline-block;width:10px;transition:transform .15s}
 .sechead.closed .caret{transform:rotate(-90deg)}
 .sechead .ct{text-transform:none;letter-spacing:0}
@@ -204,7 +235,7 @@ aside.rail #sidehide{transform:rotate(180deg)}
 .daygroup.closed .caret{transform:rotate(-90deg)}
 #activebox .sechead{color:var(--acc)}
 .footmenu{min-width:190px}
-.sitem:hover{background:var(--card)}.sitem.on{background:var(--card);box-shadow:inset 2px 0 0 var(--acc)}
+.sitem:hover{background:var(--hover)}.sitem.on{background:var(--card);color:var(--fg);box-shadow:var(--shadow-sm),0 0 0 1px var(--line)}
 .sitem .t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sitem .cqmark{font-size:9.5px;font-weight:600;letter-spacing:.3px;padding:0 5px;border-radius:6px;
  border:1px solid var(--line);color:var(--mut);align-self:center}
@@ -219,18 +250,28 @@ aside.rail #sidehide{transform:rotate(180deg)}
 .cqpanel .kv{display:grid;grid-template-columns:130px 1fr;gap:4px 10px;font-size:var(--fs-sm);margin:6px 0}
 .sitem .n{color:var(--dim);font-size:var(--fs-xs)}
 .sitem .pinmark{color:var(--acc);font-size:var(--fs-xs)}
-.foot{padding:8px 13px;border-top:1px solid var(--line);font-size:var(--fs-sm);color:var(--dim);
+.foot{padding:9px 14px;border-top:1px solid var(--line);font-size:var(--fs-sm);color:var(--dim);
  display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center}
 .foot #fmodel{flex-basis:100%;font-size:var(--fs-xs);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .foot a{color:var(--mut);cursor:pointer;text-decoration:none}.foot a:hover{color:var(--acc)}
-main{flex:1;display:flex;flex-direction:column;height:100vh;height:100dvh;min-width:0}
-.top{padding:9px 18px;border-bottom:1px solid var(--line);display:flex;gap:9px;align-items:center;
- font-size:var(--fs-cap);color:var(--mut)}
-.top b{color:var(--fg);font-weight:600;font-size:var(--fs-base);max-width:40ch;overflow:hidden;
+main{flex:1;display:flex;flex-direction:column;height:100vh;height:100dvh;min-width:0;container:main/inline-size}
+body{overflow:hidden}
+.top{overflow:hidden}
+/* a narrower window keeps the conversation's controls and lets the rest go to ⋯ (and the
+   sidebar's Settings), rather than pushing the bar past the edge */
+@container main (max-width:1080px){#easybtn,#tempbtn,#compact,#settings2{display:none}}
+@container main (max-width:860px){.top .ctx,#opbadge{display:none!important}}
+.top{padding:7px 14px 7px 18px;border-bottom:1px solid var(--line);display:flex;gap:6px;align-items:center;
+ font-size:var(--fs-cap);color:var(--mut);min-height:48px;background:var(--bg)}
+.top b{color:var(--fg);font-weight:600;font-size:var(--fs-base);letter-spacing:-.005em;max-width:40ch;overflow:hidden;margin-right:4px;
  text-overflow:ellipsis;white-space:nowrap;cursor:text}
-.ghost{background:none;border:1px solid var(--line);color:var(--mut);border-radius:7px;
- padding:3px 9px;font:inherit;font-size:var(--fs-sm);cursor:pointer}
-.ghost:hover{color:var(--fg);border-color:var(--acc)}
+.ghost{background:var(--card);border:1px solid var(--line);color:var(--mut);border-radius:var(--r-md);
+ padding:3px 10px;font:inherit;font-size:var(--fs-sm);cursor:pointer;transition:background .12s,border-color .12s,color .12s}
+.ghost:hover{color:var(--fg);border-color:var(--line2);background:color-mix(in srgb,var(--card) 60%,var(--panel))}
+/* in the top bar the controls sit on the bar itself, not in boxes of their own */
+.top .ghost,.top select.ghost{background:transparent;border-color:transparent}
+.top .ghost:hover,.top select.ghost:hover{background:var(--hover);border-color:transparent}
+.top select.ghost{padding:3px 6px;color:var(--fg);font-weight:500}
 .ctx{font-size:var(--fs-xs);color:var(--dim);display:flex;align-items:center;gap:6px}
 /* when the bar is full, the title, the cheaper-hours badge and the context figures give way
    first; the buttons and pickers keep their size */
@@ -241,21 +282,23 @@ main{flex:1;display:flex;flex-direction:column;height:100vh;height:100dvh;min-wi
 .top>#cqbar{flex-shrink:1;min-width:0;overflow:hidden}
 .top>#cqbar>*{min-width:0;flex-shrink:1}
 .top>#cqbar select{max-width:118px}
-.bar{width:70px;height:5px;background:var(--line);border-radius:3px;overflow:hidden}
+.bar{width:56px;height:4px;background:var(--line);border-radius:var(--r-full);overflow:hidden}
 .bar i{display:block;height:100%;background:var(--acc);width:0}
-#log{flex:1;overflow-y:auto;padding:22px 18px 26px}
-.wrap{max-width:800px;margin:0 auto}
-.msg{margin:0 0 20px;position:relative}
-.who{font-size:var(--fs-xs);letter-spacing:.07em;text-transform:uppercase;color:var(--dim);margin-bottom:5px;
+#log{flex:1;overflow-y:auto;padding:28px 22px 30px;scroll-padding-bottom:30px}
+.wrap{max-width:780px;margin:0 auto}
+.msg{margin:0 0 26px;position:relative}
+.who{font-size:var(--fs-xs);font-weight:500;color:var(--dim);margin-bottom:6px;
  display:flex;align-items:center;gap:8px}
 .who .acts{opacity:0;display:flex;gap:6px}.msg:hover .who .acts{opacity:1}
 .who .acts button{background:none;border:0;color:var(--dim);cursor:pointer;font-size:var(--fs-xs);padding:0}
 .who .acts button:hover{color:var(--acc)}
-.u .bub{background:var(--panel);border:1px solid transparent;border-radius:14px;padding:10px 14px}
+.u .bub{background:color-mix(in srgb,var(--acc) 7%,var(--card));border:1px solid color-mix(in srgb,var(--acc) 14%,var(--line));
+ border-radius:var(--r-lg) var(--r-lg) var(--r-sm) var(--r-lg);padding:10px 15px;width:fit-content;max-width:min(100%,640px);margin-left:auto}
+.msg.u>.who{justify-content:flex-end}
 .bub{word-wrap:break-word;overflow-wrap:anywhere}
-.bub p{margin:.5em 0}.bub h1,.bub h2,.bub h3{margin:.85em 0 .3em;font-size:1.06em}
+.bub p{margin:.55em 0}.bub h1,.bub h2,.bub h3{margin:1.1em 0 .35em;font-size:1.06em;letter-spacing:-.01em;font-weight:600}
 .bub ul,.bub ol{margin:.4em 0;padding-left:1.4em}.bub li{margin:.15em 0}
-.bub code{font-family:var(--mono);font-size:.88em;background:var(--panel);padding:1px 5px;border-radius:4px}
+.bub code{font-family:var(--mono);font-size:.86em;background:color-mix(in srgb,var(--fg) 6%,transparent);padding:1px 5px;border-radius:var(--r-sm)}
 .bub pre{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px 13px;
  overflow-x:auto;margin:.6em 0;position:relative}
 .bub pre code{background:none;padding:0;font-size:var(--fs-sm);line-height:1.55}
@@ -283,8 +326,8 @@ main{flex:1;display:flex;flex-direction:column;height:100vh;height:100dvh;min-wi
 .footnotes{border-top:1px solid var(--line);margin-top:1em;padding-top:.3em;font-size:var(--fs-sm);color:var(--mut)}
 .footnotes li.flash{background:color-mix(in srgb,var(--acc) 18%,transparent)}
 sup.fnref{color:var(--acc);cursor:pointer;font-size:.72em;padding:0 1px}
-.codeblk{border:1px solid var(--line);border-radius:9px;margin:.6em 0;background:var(--panel);overflow:hidden;position:relative}
-.codeblk .codehead{display:flex;align-items:center;gap:6px;padding:3px 6px 3px 11px;font-size:var(--fs-xs);color:var(--dim);border-bottom:1px solid var(--line);min-height:26px}
+.codeblk{border:1px solid var(--line);border-radius:var(--r-lg);margin:.75em 0;background:var(--card);overflow:hidden;position:relative;box-shadow:var(--shadow-sm)}
+.codeblk .codehead{display:flex;align-items:center;gap:6px;padding:3px 6px 3px 12px;font-size:var(--fs-xs);color:var(--dim);border-bottom:1px solid var(--line);min-height:28px;background:color-mix(in srgb,var(--panel) 60%,var(--card))}
 .codeblk .codehead .lang{font-family:var(--mono);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .codeblk .cacts{display:flex;gap:3px;flex-wrap:wrap;justify-content:flex-end}
 .codeblk .cacts button{font-size:var(--fs-xs);color:var(--mut);background:none;border:1px solid transparent;border-radius:5px;padding:0 6px;cursor:pointer;font-family:inherit;line-height:19px}
@@ -356,7 +399,7 @@ code.pathlink.pathcode{color:var(--acc);text-decoration:underline dotted;text-un
 .qitem.sched .qt{color:var(--fg)}
 .queuebox .qwhen{font-size:var(--fs-xs);color:var(--acc);white-space:nowrap;cursor:pointer;border:1px solid color-mix(in srgb,var(--acc) 35%,transparent);border-radius:6px;padding:0 5px}
 .queuebox .qwhen.missed{color:var(--warn);border-color:var(--warn)}
-.queuebox .qsec{font-size:var(--fs-xs);color:var(--dim);padding:5px 4px 1px;text-transform:uppercase;letter-spacing:.05em}
+.queuebox .qsec{font-size:var(--fs-xs);color:var(--dim);padding:5px 4px 1px;font-weight:600}
 #later{font-size:var(--fs-base)}
 @media(max-width:560px){#later{display:none}}
 .schedpop{position:fixed;z-index:80;background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:0 8px 26px rgba(0,0,0,.2);padding:10px;width:290px;font-size:var(--fs-cap)}
@@ -387,39 +430,116 @@ code.pathlink.pathcode{color:var(--acc);text-decoration:underline dotted;text-un
 .quotebtn button{border:0;background:none;color:var(--fg);font:inherit;font-size:var(--fs-sm);padding:3px 9px;border-radius:6px;cursor:pointer}
 .quotebtn button:hover{background:var(--panel)}
 .pvbody .fscards{display:flex;flex-wrap:wrap;gap:6px}
-details.think{margin:0 0 9px;border-left:2px solid var(--think);padding-left:11px}
+details.think{margin:0 0 10px;border-left:2px solid color-mix(in srgb,var(--think) 55%,transparent);padding-left:12px}
 details.think summary{cursor:pointer;color:var(--think);font-size:var(--fs-sm);list-style:none}
 details.think summary::-webkit-details-marker{display:none}
-details.think summary{font-style:italic}
+details.think summary{font-style:normal;font-weight:500}
 .think .body{color:var(--mut);font-size:var(--fs-cap);white-space:pre-wrap;margin:6px 0 4px}
-.tool{font-family:var(--mono);font-size:var(--fs-code);color:var(--tool);margin:5px 0;padding:5px 10px;
- background:color-mix(in srgb,var(--tool) 10%,transparent);border-radius:7px;overflow-x:auto;white-space:nowrap}
+.tool{font-family:var(--mono);font-size:var(--fs-code);color:var(--mut);margin:4px 0;padding:5px 11px;
+ background:var(--card);border:1px solid var(--line);border-left:2px solid color-mix(in srgb,var(--tool) 70%,transparent);
+ border-radius:var(--r-sm) var(--r-md) var(--r-md) var(--r-sm);overflow-x:auto;white-space:nowrap}
 .imgs{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
 .imgs img{max-width:190px;max-height:190px;border-radius:9px;border:1px solid var(--line)}
 .err{color:var(--err);font-size:var(--fs-md);margin-top:6px}
-.sysline{color:var(--mut);font-size:var(--fs-sm);text-align:center;margin:13px 0;font-style:italic}
-.composer{padding:11px 18px 15px;border-top:1px solid var(--line)}
-.cwrap{max-width:800px;margin:0 auto}
+.sysline{color:var(--dim);font-size:var(--fs-sm);text-align:center;margin:14px 0}
+.composer{padding:6px 22px 14px;position:relative}
+.composer::before{content:"";position:absolute;left:0;right:0;top:-28px;height:28px;pointer-events:none;background:linear-gradient(to bottom,transparent,var(--bg))}
+/* the terminal at the foot of the window: a shell in this chat's folder */
+.termdock{display:flex;flex-direction:column;border-top:1px solid var(--line);background:var(--card);
+ height:var(--termh,260px);min-height:120px;max-height:80vh;position:relative;flex:none}
+.termdock.max{height:calc(100% - 46px);max-height:none}
+.termdock .termgrip{position:absolute;left:0;right:0;top:-3px;height:6px;cursor:ns-resize;z-index:2}
+.termbar{display:flex;align-items:center;gap:2px;padding:3px 8px;border-bottom:1px solid var(--line);
+ font-size:var(--fs-sm);color:var(--mut);min-height:30px;overflow-x:auto;scrollbar-width:none}
+.termbar .ttab{display:flex;align-items:center;gap:6px;padding:3px 6px 3px 10px;border-radius:6px;cursor:pointer;
+ white-space:nowrap;max-width:220px;border:0;background:none;color:inherit;font:inherit}
+.termbar .ttab:hover{background:var(--panel)}
+.termbar .ttab.on{background:var(--panel);color:var(--fg)}
+.termbar .ttab.ended{opacity:.6}
+.termbar .ttab .tt{overflow:hidden;text-overflow:ellipsis}
+.termbar .ttab .tx{border:0;background:none;color:var(--dim);cursor:pointer;padding:0 3px;border-radius:4px;font-size:13px;line-height:1}
+.termbar .ttab .tx:hover{color:var(--fg);background:color-mix(in srgb,var(--fg) 10%,transparent)}
+.termbar .tsp{flex:1}
+.termbar .tbtn{border:0;background:none;color:var(--mut);cursor:pointer;padding:3px 7px;border-radius:6px;font:inherit}
+.termbar .tbtn:hover{background:var(--panel);color:var(--fg)}
+.termbody{flex:1;min-height:0;position:relative}
+.termpane{position:absolute;inset:6px 4px 2px 10px;display:none}
+.termpane.on{display:block}
+.termpane .xterm{height:100%}
+.termmsg{padding:18px;color:var(--dim);font-size:var(--fs-sm)}
+.top .wtbadge{font-family:var(--mono);font-size:var(--fs-xs);color:var(--acc);border-color:color-mix(in srgb,var(--acc) 40%,var(--line));max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* printed (or saved as PDF from the desktop app): the conversation alone, all of it */
+@media print{
+ html,body{height:auto;background:#fff;color:#151923;display:block}
+ aside,.tabstrip,.top,.composer,.termdock,#tobottom,.who .acts,.codeblk .cacts,.blktools button,.toast,.palette,#modalhost{display:none!important}
+ main{height:auto;display:block}#log{overflow:visible;height:auto;padding:0}
+ .wrap{max-width:none}.msg{break-inside:auto}.codeblk,.tblwrap,.u .bub{break-inside:avoid}
+ .bub .codeblk pre{max-height:none;overflow:visible;white-space:pre-wrap}
+ .u .bub{background:#f1f4fd;border-color:#d8e0f8}
+ .hero{display:none!important}}
+/* tabs: the chats you have open, along the top of the conversation */
+.tabstrip{display:flex;align-items:flex-end;gap:1px;padding:7px 10px 0;border-bottom:1px solid var(--line);
+ background:var(--panel);min-height:38px;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;flex:none}
+.tabstrip.off{display:none}
+.tabstrip .tab{display:flex;align-items:center;gap:7px;flex:0 1 200px;min-width:76px;padding:6px 6px 7px 11px;
+ border:1px solid transparent;border-bottom:0;border-radius:8px 8px 0 0;background:none;color:var(--mut);
+ font:inherit;font-size:var(--fs-sm);cursor:pointer;position:relative;top:1px;text-align:left}
+.tabstrip .tab:hover{color:var(--fg);background:color-mix(in srgb,var(--bg) 55%,transparent)}
+.tabstrip .tab.on{background:var(--bg);border-color:var(--line);color:var(--fg)}
+.tabstrip .tab.drag{opacity:.4}
+.tabstrip .tab .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tabstrip .tab .td{width:7px;height:7px;border-radius:50%;flex:none;display:none}
+.tabstrip .tab .td.run{display:block;background:var(--acc);animation:tabpulse 1.4s ease-in-out infinite}
+.tabstrip .tab .td.wait{display:block;background:var(--warn)}
+.tabstrip .tab .td.new{display:block;background:var(--acc)}
+.tabstrip .tab .tx{border:0;background:none;color:var(--dim);cursor:pointer;width:18px;height:18px;border-radius:5px;
+ font-size:14px;line-height:1;padding:0;visibility:hidden;flex:none}
+.tabstrip .tab:hover .tx,.tabstrip .tab.on .tx{visibility:visible}
+.tabstrip .tab .tx:hover{background:color-mix(in srgb,var(--fg) 10%,transparent);color:var(--fg)}
+.tabstrip .tabnew{border:0;background:none;color:var(--mut);font-size:16px;line-height:1;padding:5px 9px 8px;
+ border-radius:7px;cursor:pointer;flex:none;align-self:center}
+.tabstrip .tabnew:hover{color:var(--fg);background:color-mix(in srgb,var(--bg) 55%,transparent)}
+@keyframes tabpulse{0%,100%{opacity:1}50%{opacity:.35}}
+/* The desktop app: no title bar of its own, so the sidebar's header, the tabs and the top
+   bar are where the window is dragged from, and the traffic lights sit at the top left. */
+html.desktop .brand{padding-left:84px;min-height:46px;-webkit-app-region:drag}
+html.desktop .brand .mark{display:none}
+html.desktop .brand button,html.desktop .brand small,html.desktop .brand .dot{-webkit-app-region:no-drag}
+html.desktop aside.rail .brand{padding-top:42px;padding-left:8px}
+html.desktop .tabstrip,html.desktop .top{-webkit-app-region:drag}
+html.desktop .tabstrip>*,html.desktop .top>*,html.desktop .top>span>*{-webkit-app-region:no-drag}
+html.desktop .top>span[style*="margin-left:auto"]{-webkit-app-region:drag}
+html.desktop .tabstrip{min-height:46px;padding-top:9px}
+html.desktop aside.hide~main .tabstrip,html.desktop aside.hide~main .tabstrip.off+.top{padding-left:84px}
+html.desktop .tabstrip:not(.off)+.top{padding-top:7px;padding-bottom:7px}
+.cwrap{max-width:780px;margin:0 auto}
 .chips{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:7px}
 .chip{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:4px 9px;
  font-size:var(--fs-sm);display:flex;gap:7px;align-items:center}
 .chip img{width:26px;height:26px;object-fit:cover;border-radius:4px}
 .chip span{color:var(--dim)}.chip .x{cursor:pointer;color:var(--dim)}
 .row{display:flex;gap:8px;align-items:flex-end;position:relative}
-textarea{flex:1;resize:none;padding:11px 13px;border:1px solid var(--line);border-radius:11px;
+textarea{flex:1;resize:none;padding:11px 13px;border:1px solid var(--line);border-radius:var(--r-md);
  background:var(--card);color:var(--fg);font:inherit;max-height:200px;min-height:44px}
-textarea:focus{outline:2px solid var(--acc);outline-offset:-1px}
+textarea:focus{outline:2px solid color-mix(in srgb,var(--acc) 60%,transparent);outline-offset:-1px}
+.composer .row{gap:4px;padding:6px;background:var(--card);border:1px solid var(--line2);border-radius:var(--r-xl);
+ box-shadow:var(--shadow-md);transition:border-color .15s,box-shadow .15s}
+.composer .row:focus-within{border-color:color-mix(in srgb,var(--acc) 50%,var(--line2));
+ box-shadow:var(--shadow-md),0 0 0 3px color-mix(in srgb,var(--acc) 12%,transparent)}
+.composer textarea{border:0;background:transparent;padding:9px 6px;min-height:38px;line-height:1.5}
+.composer textarea:focus{outline:none}
 /* under 16px, iPhone Safari zooms the page on focus and leaves it zoomed */
 @media (pointer:coarse){textarea,input,select{font-size:max(16px,1em)}}
-.iconbtn{width:44px;height:44px;border:1px solid var(--line);border-radius:11px;background:var(--card);
- color:var(--mut);font-size:var(--fs-lg);cursor:pointer}.iconbtn:hover{color:var(--fg);border-color:var(--acc)}
-.sendbtn{height:44px;padding:0 17px;border:0;border-radius:11px;background:var(--acc);color:#fff;
- font:inherit;font-weight:600;cursor:pointer}.sendbtn:disabled{opacity:.4;cursor:default}
-.stopbtn{height:44px;padding:0 15px;border:1px solid var(--err);border-radius:11px;background:none;
- color:var(--err);font:inherit;font-weight:600;cursor:pointer}
-.hint{font-size:var(--fs-xs);color:var(--dim);margin-top:6px;display:flex;gap:13px;flex-wrap:wrap}
-.menu{position:absolute;bottom:52px;left:52px;background:var(--card);border:1px solid var(--line);
- border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.17);padding:5px;min-width:330px;
+.iconbtn{width:38px;height:38px;border:0;border-radius:var(--r-md);background:transparent;
+ color:var(--mut);font-size:var(--fs-lg);cursor:pointer;flex:none}.iconbtn:hover{color:var(--fg);background:var(--hover)}
+.sendbtn{height:38px;padding:0 16px;border:0;border-radius:var(--r-md);background:var(--acc);color:var(--acc-ink);
+ font:inherit;font-weight:600;cursor:pointer;flex:none;box-shadow:inset 0 1px 0 rgba(255,255,255,.18),0 1px 2px color-mix(in srgb,var(--acc) 40%,transparent);
+ transition:filter .12s}.sendbtn:hover{filter:brightness(1.07)}.sendbtn:disabled{opacity:.4;cursor:default}
+.stopbtn{height:38px;padding:0 14px;border:1px solid color-mix(in srgb,var(--err) 50%,transparent);border-radius:var(--r-md);background:color-mix(in srgb,var(--err) 7%,transparent);
+ color:var(--err);font:inherit;font-weight:600;cursor:pointer;flex:none}
+.hint{font-size:var(--fs-xs);color:var(--dim);margin-top:7px;padding:0 8px;display:flex;gap:14px;flex-wrap:wrap}
+.menu{position:absolute;bottom:56px;left:46px;background:var(--card);border:1px solid var(--line);
+ border-radius:var(--r-lg);box-shadow:var(--shadow-lg);padding:5px;min-width:330px;
  max-height:300px;overflow-y:auto;z-index:20}
 .menu div{padding:7px 11px;border-radius:7px;cursor:pointer;font-size:var(--fs-md)}
 .menu div:hover,.menu div.sel{background:var(--panel)}
@@ -428,31 +548,35 @@ textarea:focus{outline:2px solid var(--acc);outline-offset:-1px}
 .drop{position:fixed;inset:0;background:color-mix(in srgb,var(--acc) 16%,transparent);
  border:3px dashed var(--acc);z-index:60;display:flex;align-items:center;justify-content:center;
  font-size:var(--fs-xl);font-weight:600;color:var(--acc)}
-.modal{position:fixed;inset:0;background:rgba(0,0,0,.42);z-index:70;display:flex;
- align-items:center;justify-content:center;padding:22px}
-.sheet{background:var(--bg);border:1px solid var(--line);border-radius:14px;width:min(900px,100%);
+.modal{position:fixed;inset:0;background:color-mix(in srgb,#0d111a 38%,transparent);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);z-index:70;display:flex;
+ align-items:center;justify-content:center;padding:22px;animation:fadein .14s ease-out}
+.modal>.sheet{animation:sheetin .18s cubic-bezier(.2,.8,.2,1)}
+@keyframes fadein{from{opacity:0}}@keyframes sheetin{from{opacity:0;transform:translateY(6px) scale(.99)}}
+.sheet{background:var(--bg);border:1px solid var(--line);border-radius:var(--r-xl);box-shadow:var(--shadow-lg);width:min(900px,100%);
  height:min(78vh,720px);display:flex;flex-direction:column;overflow:hidden}
 .sheet.auto{height:auto;max-height:88vh}
 .sheet .body{flex:1 1 auto;min-height:0}
-.sheet header{padding:12px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px}
+.sheet header{padding:13px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;background:var(--card)}
+.sheet header>b{font-weight:600;letter-spacing:-.005em}
 .tabs{display:flex;gap:4px;margin-left:8px;flex-wrap:wrap}
 .tabs button{background:none;border:0;color:var(--mut);font:inherit;font-size:var(--fs-cap);padding:5px 11px;
- border-radius:8px;cursor:pointer}.tabs button.on{background:var(--panel);color:var(--fg)}
+ border-radius:var(--r-md);cursor:pointer}.tabs button:hover{background:var(--hover);color:var(--fg)}.tabs button.on{background:var(--panel);color:var(--fg);font-weight:500}
 .sheet .body{padding:16px 18px;overflow-y:auto}
 .grid{display:grid;grid-template-columns:200px 1fr;gap:11px 15px;align-items:center}
 .grid label{font-size:var(--fs-md);color:var(--mut)}
 .grid .hint2{grid-column:2;font-size:var(--fs-xs);color:var(--dim);margin-top:-6px}
-input[type=text],input[type=number],select,.ta{width:100%;padding:7px 10px;border:1px solid var(--line);
- border-radius:8px;background:var(--card);color:var(--fg);font:inherit;font-size:var(--fs-md)}
+input[type=text],input[type=number],select,.ta{width:100%;padding:7px 10px;border:1px solid var(--line2);
+ border-radius:var(--r-md);background:var(--card);color:var(--fg);font:inherit;font-size:var(--fs-md)}
+input[type=text]:focus,input[type=number]:focus,.ta:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 3px color-mix(in srgb,var(--acc) 14%,transparent)}
 .ta{font-family:var(--mono);font-size:var(--fs-code);min-height:180px;resize:vertical;line-height:1.5}
 .sw{display:flex;align-items:center;gap:8px}
 input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
-.sec{font-size:var(--fs-xs);letter-spacing:.07em;text-transform:uppercase;color:var(--dim);
+.sec{font-size:var(--fs-md);font-weight:600;color:var(--fg);
  margin:20px 0 9px;padding-top:14px;border-top:1px solid var(--line)}
 .sec:first-child{margin-top:0;padding-top:0;border-top:0}
 .sec small{text-transform:none;letter-spacing:0}
-.sheet footer{padding:11px 18px;border-top:1px solid var(--line);display:flex;gap:9px;align-items:center}
-.primary{background:var(--acc);color:#fff;border:0;border-radius:9px;padding:8px 16px;
+.sheet footer{padding:11px 18px;border-top:1px solid var(--line);display:flex;gap:9px;align-items:center;background:var(--card)}
+.primary{background:var(--acc);color:var(--acc-ink);border:0;border-radius:var(--r-md);padding:8px 16px;
  font:inherit;font-weight:600;cursor:pointer}
 .note{font-size:var(--fs-sm);color:var(--dim);margin-left:auto}
 .toolgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(215px,1fr));gap:7px}
@@ -460,7 +584,7 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
  background:var(--card);border:1px solid var(--line);border-radius:8px;cursor:pointer}
 .toolgrid label.off{opacity:.5}
 .toolgrid label.off span{text-decoration:line-through}
-.toolgrid .grp{grid-column:1/-1;font-size:var(--fs-xs);letter-spacing:.06em;text-transform:uppercase;
+.toolgrid .grp{grid-column:1/-1;font-size:var(--fs-xs);font-weight:600;
  color:var(--dim);margin:8px 0 2px}
 .memrow{display:flex;gap:9px;align-items:center;padding:8px 10px;border:1px solid var(--line);
  border-radius:9px;background:var(--card);margin-bottom:7px}
@@ -492,10 +616,11 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .autoappr{border-left:3px solid var(--ok);padding:6px 11px;margin:6px 0;font-size:var(--fs-sm);
  color:var(--ok);background:color-mix(in srgb,var(--ok) 7%,transparent);border-radius:7px;
  font-family:var(--mono)}
-.navtabs{display:flex;gap:4px;padding:8px 12px 4px}
-.navtabs button{flex:1;padding:5px 0;font-size:var(--fs-sm);border:1px solid var(--line);border-radius:7px;
- background:none;color:var(--mut);cursor:pointer;font-family:inherit}
-.navtabs button.on{background:var(--card);color:var(--fg);border-color:var(--acc)}
+.navtabs{display:flex;gap:2px;margin:6px 12px 4px;padding:2px;background:var(--hover);border-radius:var(--r-md)}
+.navtabs button{flex:1;padding:4px 0;font-size:var(--fs-xs);border:0;border-radius:6px;
+ background:none;color:var(--mut);cursor:pointer;font-family:inherit;font-weight:500;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.navtabs button:hover{color:var(--fg)}
+.navtabs button.on{background:var(--card);color:var(--fg);box-shadow:var(--shadow-sm)}
 .filters{display:flex;gap:5px;padding:0 12px 7px}
 .filters button{padding:3px 9px;font-size:var(--fs-xs);border:1px solid var(--line);border-radius:20px;
  background:none;color:var(--mut);cursor:pointer;font-family:inherit}
@@ -536,8 +661,8 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .jobrow .res{margin-top:7px;font-size:var(--fs-sm);color:var(--mut);border-left:2px solid var(--line);padding-left:9px}
 .jobrow .row2{display:flex;gap:7px;margin-top:9px;flex-wrap:wrap}
 .palette{position:fixed;top:14vh;left:50%;transform:translateX(-50%);width:min(620px,92vw);
- background:var(--card);border:1px solid var(--line);border-radius:13px;z-index:95;
- box-shadow:0 18px 60px rgba(0,0,0,.3);overflow:hidden}
+ background:var(--card);border:1px solid var(--line2);border-radius:var(--r-xl);z-index:95;
+ box-shadow:var(--shadow-lg),0 0 0 100vmax color-mix(in srgb,#0d111a 18%,transparent);overflow:hidden;animation:sheetin .14s ease-out}
 .palette input{width:100%;border:0;border-bottom:1px solid var(--line);padding:13px 16px;
  background:none;color:var(--fg);font:inherit;font-size:var(--fs-base)}
 .palette input:focus{outline:none}
@@ -548,10 +673,10 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
  border-radius:var(--r-sm);padding:0 1px}
 .palette .it.more{color:var(--acc);font-size:var(--fs-sm);justify-content:center}
 .palette .palsec{display:flex;gap:6px;align-items:baseline;padding:9px 11px 3px;
- font-size:var(--fs-2xs);letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
+ font-size:var(--fs-2xs);font-weight:600;color:var(--dim)}
 .palette .palsec span{margin-left:auto;padding:0 6px;border-radius:var(--r-full);
  background:color-mix(in srgb,var(--line) 70%,transparent)}
-.palette .it .k{color:var(--dim);font-size:var(--fs-xs);min-width:52px;text-transform:uppercase;letter-spacing:.05em}
+.palette .it .k{color:var(--dim);font-size:var(--fs-xs);min-width:52px;font-weight:600}
 .palette .it .s{color:var(--dim);font-size:var(--fs-sm);margin-left:auto}
 .tagrow{display:flex;gap:5px;flex-wrap:wrap;margin:0 12px 6px}
 .tag{font-size:var(--fs-xs);padding:2px 8px;border-radius:20px;border:1px solid var(--line);
@@ -560,11 +685,11 @@ input[type=checkbox]{width:16px;height:16px;accent-color:var(--acc)}
 .sel-bar{display:flex;gap:8px;align-items:center;margin-bottom:11px;font-size:var(--fs-sm);color:var(--mut)}
 .fcard.picked{outline:2px solid var(--acc)}
 .mermaid{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:10px;margin:.6em 0}
-.projrow{display:flex;align-items:center;gap:7px;padding:4px 8px 4px 10px;border-radius:7px;
+.projrow{display:flex;align-items:center;gap:8px;padding:4px 8px 4px 10px;border-radius:var(--r-md);min-height:29px;
  cursor:pointer;font-size:var(--fs-cap);margin:0}
-.projrow:hover{background:var(--card)}
-.projrow.on{background:var(--card);box-shadow:inset 2px 0 0 var(--acc)}
-.projrow .sw{width:9px;height:9px;border-radius:3px;flex:0 0 9px}
+.projrow:hover{background:var(--hover)}
+.projrow.on{background:var(--card);box-shadow:var(--shadow-sm),0 0 0 1px var(--line);font-weight:500}
+.projrow .sw{width:8px;height:8px;border-radius:50%;flex:0 0 8px}
 .projrow .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .projrow .ct{color:var(--dim);font-size:var(--fs-xs)}
 .projrow .pclaude{color:var(--acc);font-size:var(--fs-xs);opacity:.75}
@@ -698,7 +823,7 @@ details.tool.bgrun .tdot{color:var(--think);animation:bgpulse 1.6s ease-in-out i
 .think .body .tstamp:first-child{margin-top:0}
 .planbox{margin:8px 0;border:1px solid var(--line);border-radius:9px;background:var(--card);
  padding:9px 12px;font-size:var(--fs-cap)}
-.planbox b{font-size:var(--fs-xs);letter-spacing:.06em;text-transform:uppercase;color:var(--dim);
+.planbox b{font-size:var(--fs-xs);font-weight:600;color:var(--dim);
  display:block;margin-bottom:6px}
 .planbox .st{display:flex;gap:8px;align-items:flex-start;margin:3px 0}
 .planbox .st .bx{color:var(--dim)}
@@ -718,8 +843,9 @@ details.tool.bgrun .tdot{color:var(--think);animation:bgpulse 1.6s ease-in-out i
 .staleBar button{background:#1a1a1a;color:#fff;border:0;border-radius:7px;padding:4px 12px;
  font:inherit;font-size:var(--fs-sm);cursor:pointer}
 .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--card);
- border:1px solid var(--line);border-radius:9px;padding:8px 15px;font-size:var(--fs-cap);
- box-shadow:0 6px 24px rgba(0,0,0,.18);z-index:90}
+ border:1px solid var(--line2);border-radius:var(--r-lg);padding:9px 16px;font-size:var(--fs-cap);
+ box-shadow:var(--shadow-md);z-index:90;animation:toastin .2s cubic-bezier(.2,.8,.2,1)}
+@keyframes toastin{from{opacity:0;transform:translate(-50%,8px)}}
 .sitem .unseen{width:7px;height:7px;border-radius:50%;background:var(--acc);flex:0 0 7px}
 details.tool{white-space:normal;overflow:hidden;padding:0;background:none;margin:1px 0;
  color:var(--fg);font-size:var(--fs-cap);font-family:inherit;border-radius:0}
@@ -836,7 +962,7 @@ textarea.memmode{outline:2px solid var(--think)!important}
 #modehint.mode-bypassPermissions,#modehint.mode-dontAsk{color:var(--err)}
 #modehint:empty{display:none}
 .qhelp{margin-left:auto;cursor:pointer}.qhelp:hover{color:var(--acc)}
-.shortcuts .kgroup{grid-column:1/-1;margin-top:8px;font-size:var(--fs-xs);letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
+.shortcuts .kgroup{grid-column:1/-1;margin-top:8px;font-size:var(--fs-xs);font-weight:600;color:var(--dim)}
 .planbox .st.active span:last-child,.plandock .st.active span:last-child{font-weight:600}
 .planbox .st .bx,.plandock .st .bx{font-family:var(--mono)}
 .planbox .st.active .bx,.plandock .st.active .bx{color:var(--acc)}
@@ -897,23 +1023,32 @@ textarea.memmode{outline:2px solid var(--think)!important}
 .suggp:hover{color:var(--fg);border-color:color-mix(in srgb,var(--acc) 45%,transparent)}
 .herot{font-size:clamp(20px,4.6cqw,27px);font-weight:500;letter-spacing:-.015em;color:var(--fg)}
 .herostar{color:var(--acc);display:inline-block;animation:herospin 14s linear infinite}
+/* Orbit's mark, drawn: a ring with its planet going round, slowly */
+.heromark{width:46px;height:46px;margin:0 auto 18px;border-radius:50%;position:relative;
+ border:2px solid color-mix(in srgb,var(--acc) 26%,transparent);
+ background:radial-gradient(circle at 50% 50%,transparent 58%,color-mix(in srgb,var(--think) 10%,transparent) 59%,transparent 72%)}
+.heromark i{position:absolute;inset:-2px;border-radius:50%;animation:orbit 16s linear infinite}
+.heromark i::after{content:"";position:absolute;width:12px;height:12px;border-radius:50%;top:-5px;left:50%;margin-left:-6px;
+ background:radial-gradient(circle at 35% 30%,#fff 0,color-mix(in srgb,var(--acc) 55%,#fff) 30%,var(--acc) 70%);
+ box-shadow:0 0 0 3px var(--bg),0 2px 8px color-mix(in srgb,var(--acc) 45%,transparent)}
+@media(prefers-reduced-motion:reduce){.heromark i{animation:none}}
 @keyframes herospin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){.herostar{animation:none}}
 .herosub{color:var(--dim);font-size:var(--fs-cap);margin-top:6px}
 .herosub .hsm{cursor:pointer;border-bottom:1px dashed var(--line)}.herosub .hsm:hover{color:var(--fg);border-color:var(--acc)}
 .herotips{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin:16px 0 18px}
-.herotip{border:1px solid var(--line);border-radius:16px;padding:3px 10px;font-size:var(--fs-sm);color:var(--mut);cursor:pointer;background:var(--card);transition:border-color .15s,color .15s}
+.herotip{border:1px solid var(--line);border-radius:var(--r-full);padding:3px 10px;font-size:var(--fs-sm);color:var(--mut);cursor:pointer;background:var(--card);transition:border-color .15s,color .15s}
 .herotip b{font-family:var(--mono);color:var(--acc);font-weight:600}
-.herotip:hover{border-color:var(--acc);color:var(--fg)}
+.herotip:hover{border-color:var(--line2);color:var(--fg);background:var(--panel)}
 .heroalerts{display:flex;flex-direction:column;gap:6px;margin:0 0 12px;text-align:left}
 .halert{display:flex;gap:9px;align-items:center;padding:8px 12px;border-radius:10px;font-size:var(--fs-cap);cursor:pointer;border:1px solid color-mix(in srgb,var(--warn) 35%,var(--line));background:color-mix(in srgb,var(--warn) 8%,var(--card))}
 .halert.bad{border-color:color-mix(in srgb,var(--err) 35%,var(--line));background:color-mix(in srgb,var(--err) 7%,var(--card))}
 .halert .hai{font-size:var(--fs-base);width:16px;text-align:center}.halert .hat{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .halert .hago{color:var(--dim);font-size:var(--fs-sm)}.halert:hover{filter:brightness(.98)}
 .herogrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;text-align:left}
-.hcard{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;min-width:0;display:flex;flex-direction:column}
+.hcard{background:var(--card);border:1px solid var(--line);border-radius:var(--r-lg);padding:13px 15px;box-shadow:var(--shadow-sm);min-width:0;display:flex;flex-direction:column}
 .hcard.wide{grid-column:1/-1}
-.hch{display:flex;align-items:center;gap:8px;font-size:var(--fs-xs);letter-spacing:.06em;text-transform:uppercase;color:var(--dim);margin-bottom:8px}
+.hch{display:flex;align-items:center;gap:8px;font-size:var(--fs-xs);font-weight:600;color:var(--dim);margin-bottom:8px}
 .hch .hcl{margin-left:auto;text-transform:none;letter-spacing:0;font-size:var(--fs-sm);color:var(--mut);cursor:pointer;background:none;border:0;padding:0}
 .hch .hcl:hover{color:var(--acc)}
 .hch .hdot{width:7px;height:7px;border-radius:50%;background:var(--dim)}.hch .hdot.live{background:var(--ok);box-shadow:0 0 0 0 color-mix(in srgb,var(--ok) 60%,transparent);animation:hpulse 1.8s infinite}
@@ -978,7 +1113,7 @@ details.hookbox summary{cursor:pointer;list-style:none}
 details.hookbox summary::-webkit-details-marker{display:none}
 details.hookbox .hl{font-family:var(--mono);font-size:var(--fs-code-xs);margin:4px 0 0 16px;white-space:pre-wrap;max-height:200px;overflow:auto}
 .taskrow{display:flex;gap:10px;align-items:center;padding:8px 4px;border-bottom:1px solid var(--line)}
-.taskrow .tkind{font-size:var(--fs-2xs);letter-spacing:.05em;text-transform:uppercase;border-radius:6px;padding:2px 7px;
+.taskrow .tkind{font-size:var(--fs-2xs);font-weight:600;border-radius:6px;padding:2px 7px;
  background:var(--panel);color:var(--mut);flex:0 0 auto}
 .taskhead{font-size:var(--fs-sm);color:var(--dim);margin-bottom:6px}
 .taskcmd{font-family:var(--mono);font-size:var(--fs-code);color:var(--fg);margin-bottom:6px;word-break:break-all}
@@ -994,6 +1129,19 @@ pre.taskout{background:var(--panel);border-radius:8px;padding:9px 11px;font-fami
 body.statuson #wrap .msg.a:last-child .bub>.working:only-child{display:none}
 .approve.ccask:focus{outline:2px solid color-mix(in srgb,var(--acc) 60%,transparent);outline-offset:1px}
 .sfindwrap{position:relative;margin-left:8px}
+/* settings: its sections down the left, the page on the right */
+.sheet.settings{width:min(1040px,100%);height:min(84vh,820px)}
+.setgrid{flex:1;min-height:0;display:grid;grid-template-columns:188px minmax(0,1fr)}
+.tabs.vnav{flex-direction:column;flex-wrap:nowrap;gap:1px;margin:0;padding:10px 8px;border-right:1px solid var(--line);
+ background:var(--panel);overflow-y:auto}
+.tabs.vnav button{text-align:left;padding:6px 10px;font-size:var(--fs-md)}
+.tabs.vnav button.on{background:var(--card);box-shadow:var(--shadow-sm),0 0 0 1px var(--line)}
+.tabs.vnav .tgrp{font-size:var(--fs-xs);font-weight:600;color:var(--dim);padding:12px 10px 4px}
+.tabs.vnav .tgrp:first-child{padding-top:2px}
+.setgrid>.body{padding:18px 24px}
+@media(max-width:700px){.setgrid{grid-template-columns:1fr;grid-template-rows:auto 1fr}
+ .tabs.vnav{flex-direction:row;flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line);padding:6px}
+ .tabs.vnav .tgrp{display:none}}
 #sfind{width:170px;padding:4px 9px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg);font:inherit;font-size:var(--fs-sm)}
 .sfindres{position:absolute;top:calc(100% + 4px);right:0;min-width:260px;z-index:30;background:var(--panel);border-radius:9px;
  box-shadow:0 6px 24px rgba(0,0,0,.18)}
@@ -1094,10 +1242,12 @@ table.stbl{border-collapse:collapse;width:100%;font-size:var(--fs-cap);margin:2p
 </aside>
 
 <main>
+  <div class="tabstrip off" id=tabstrip></div>
   <div class=top>
     <button class=ghost id=toggle>&#9776;</button>
     <b id=title title="click to rename">New chat</b>
     <span id=runbadge class=note style="color:var(--acc)"></span>
+    <button class="ghost wtbadge" id=wtbadge style="display:none" onclick="openWorktree()"></button>
     <button id=hmode title="Claude Code mode: every chat runs through the Claude Code harness, on the provider and model you pick"><span class=dot></span>Claude Code</button>
     <button id=cmode title="Codex mode: every chat runs through Codex's own agent — on your ChatGPT account, or any provider in Orbit's list"><span class=dot></span>Codex</button>
     <span id=hpick><select id=hprov class=ghost title="provider"></select><select id=hmodel class=ghost title="model for this chat"></select>
@@ -1137,6 +1287,8 @@ table.stbl{border-collapse:collapse;width:100%;font-size:var(--fs-cap);margin:2p
     </div>
     <div class=hint><span id=modehint></span><span id=keyhint>Enter send · Shift+Enter newline</span><span id=tools></span><span class=qhelp id=qhelp title="keyboard shortcuts">? for shortcuts</span></div>
   </div></div>
+  <div class=termdock id=termdock style="display:none"><div class=termgrip id=termgrip title="drag to resize"></div>
+    <div class=termbar id=termbar></div><div class=termbody id=termbody></div></div>
 </main>
 <input type=file id=file multiple hidden>
 <div id=modalhost></div>
@@ -1195,6 +1347,8 @@ const CMDS=[
  {c:'/copy',d:'copy the last answer (/copy 2 for the one before)'},
  {c:'/diff',d:'every file this answer changed, as a diff'},
  {c:'/goal',d:'keep working until it is done — /goal <what done looks like>; alone, shows the goal'},
+ {c:'/worktree',d:'work in a copy of the repository on a branch of its own — merge it back or throw it away'},
+ {c:'/terminal',d:'a shell in this chat\'s folder, at the foot of the window (Ctrl+`)'},
  {c:'/verbose',d:'show every tool call in full, or fold them again (Ctrl+O)'},
  {c:'/todos',d:'show or hide the todo list (Ctrl+T)'},
  {c:'/usage',d:'cost, tokens and time — this chat and lately'},
@@ -2452,7 +2606,7 @@ async function loadSessions(){
   const had=SESSIONS.filter(s=>s.external&&extSource(s)===k), got=items.filter(s=>s.external&&extSource(s)===k);
   if(!got.length&&had.length&&!SRC_SHORT[k]){SRC_SHORT[k]=true;items=items.concat(had)}
   else if(got.length)SRC_SHORT[k]=false});
- SESSIONS=items; sessTotal=d.total??SESSIONS.length; renderSessions(); loadTags(); loadProjects();
+ SESSIONS=items; sessTotal=d.total??SESSIONS.length; renderSessions(); loadTags(); loadProjects(); drawTabs(); pruneTabs();
  if(!wrap.querySelector('.msg'))drawHero()}
 $('#search').oninput=renderSessions;
 
@@ -2471,7 +2625,7 @@ function syncBusy(){
  $('#stopgen').style.display=busy?'':'none';
  const kh=$('#keyhint');if(kh)kh.textContent=busy?'Enter queue · ⌘Enter send in now · Shift+Enter newline':'Enter send · Shift+Enter newline';
  $('#dot').classList.toggle('busy',RUNNING.size>0);
- drawPlanDock();drawModeHint()}      // every chat switch passes through here
+ drawPlanDock();drawModeHint();drawTabs()}      // every chat switch passes through here
 /* ---------------- model picker ---------------- */
 let MODELS={models:[],current:'',default:''};
 async function loadModels(){
@@ -2838,6 +2992,8 @@ async function runCmd(cmd,rest){
  if(cmd==='/diff'){showTurnDiff();return true}
  if(cmd==='/goal'){if(!rest){editGoal();return true}
   q.value=rest;setTimeout(()=>go({goal:true}),0);return true}
+ if(cmd==='/terminal'){toggleTerm(true);return true}
+ if(cmd==='/worktree'){openWorktree();return true}
  if(cmd==='/verbose'){setVerbose(!VERBOSE);return true}
  if(cmd==='/todos'){togglePlanDock();return true}
  if(cmd==='/usage'){showStats(7);return true}
@@ -2920,7 +3076,7 @@ async function newChat(){
   PLAN_MODE=false;drawPlanMode();wrap.innerHTML='';$('#title').textContent='New chat';drawGoal();
   tempMode=false;$('#tempbtn').style.borderColor='';$('#tempbtn').style.color='';
   $('#burnbtn').style.display='none';
-  chatChanged(null);                     // a new chat keeps nothing from the last one
+  chatChanged(null,true);                // a new chat keeps nothing from the last one
   syncBusy();
   $('#ctxbox').style.display='none';loadSessions();drawClaudeBar()})();
  try{await switching}finally{switching=null}}
@@ -4650,18 +4806,21 @@ async function openSettings(tab){
  const mcp=await (await fetch('/api/mcp')).json();
  PROMPTS=await (await fetch('/api/prompts')).json();
  const host=$('#modalhost');
- host.innerHTML=`<div class=modal><div class=sheet>
-  <header><b>Settings</b><div class=tabs>
+ host.innerHTML=`<div class=modal><div class="sheet settings">
+  <header><b>Settings</b><span class=sfindwrap><input type=search id=sfind placeholder="Search settings" autocomplete=off><div class=sfindres id=sfindres></div></span>
+  <button class=ghost style="margin-left:auto" id=closex>Close</button></header>
+  <div class=setgrid><nav class="tabs vnav">
+   <span class=tgrp>Orbit</span>
    <button data-t=general>General</button><button data-t=models>Models &amp; keys</button>
-   <button data-t=phone>Phone</button><button data-t=backup>Backup</button>
-   <button data-t=model>Local server</button>
    <button data-t=tools>Tools</button><button data-t=memory>Memory</button>
    <button data-t=mcp>MCP</button><button data-t=library>Library →</button>
+   <span class=tgrp>How chats run</span>
    <button data-t=claude>Claude Code</button><button data-t=codex>Codex</button>
+   <button data-t=model>Local server</button>
+   <span class=tgrp>This Mac</span>
+   <button data-t=phone>Phone</button><button data-t=backup>Backup</button>
    <button data-t=status>Status</button>
-  </div><span class=sfindwrap><input type=search id=sfind placeholder="Search settings" autocomplete=off><div class=sfindres id=sfindres></div></span>
-  <button class=ghost style="margin-left:auto" id=closex>close</button></header>
-  <div class=body id=sbody></div>
+  </nav><div class=body id=sbody></div></div>
   <footer><button class=primary id=savebtn>Save</button>
    <button class=ghost id=restartbtn>Save &amp; restart server</button>
    <span class=note id=snote></span></footer></div></div>`;
@@ -6775,7 +6934,8 @@ async function showAbout(){
     <span style="color:var(--mut)">Built on MTPLX and Apple&nbsp;Silicon MLX, with optional
     hosted and CLI models. Runs entirely on your own machine.</span></p>
    <div class=sec>Links</div>
-   <p style="font-size:13.5px"><a href="${a.github}" target=_blank>${a.github}</a>
+   <p style="font-size:13.5px"><a href="https://runtianwu.com" target=_blank rel=noopener>runtianwu.com</a>
+    &nbsp;·&nbsp; <a href="${a.github}" target=_blank>${a.github}</a>
     &nbsp;·&nbsp; model: <code>${esc(a.model)}</code>
     &nbsp;·&nbsp; <span style="color:var(--mut)">press <span class=kbd>?</span> for shortcuts</span></p>
   </div></div></div>`;
@@ -7855,7 +8015,8 @@ function drawHero(fromData){
    hr<18?'Good afternoon':hr<23?'Good evening':'Late one';
  const engine=isClaudeChat()?'Claude Code':isCodexChat()?'Codex':'Orbit';
  h.innerHTML='';
- h.appendChild(el(`<div class=herot><span class=herostar>✻</span> ${esc(when)} — what's next?</div>`));
+ h.appendChild(el(`<div class=heromark aria-hidden=true><i></i></div>`));
+ h.appendChild(el(`<div class=herot>${esc(when)} — what's next?</div>`));
  const sub=el('<div class=herosub></div>');
  sub.appendChild(document.createTextNode(engine+' · '));
  const ms=el('<span class=hsm title="change the model"></span>');ms.textContent=modelLabel();
@@ -8527,11 +8688,12 @@ let CHATPREFS={};           // the settings this chat keeps for itself
 // Everything on this page that belongs to one chat rather than to Orbit. A chat can
 // change without openSession -- a new chat, the temporary one, burning it -- and each
 // of those used to leave the last chat's easy mode and branch on screen.
-function chatChanged(prefs){
+function chatChanged(prefs,fresh){
  CHATPREFS=prefs||{};
  GITSTATE=null;GITSID=null;GITAT=0;
  findClose();
- drawEasyBtn();drawPlanDock();
+ drawEasyBtn();drawPlanDock();drawWtBadge();
+ tabsNote(!!fresh);
  if(sid)pollGit(true)}
 
 function easyOn(){
@@ -8555,6 +8717,12 @@ $('#more').onclick=e=>{e.stopPropagation();
   {icon:'⤓',label:'Export markdown',run:()=>location.href='/api/export?id='+encodeURIComponent(sid||'')},
   {icon:'⤓',label:'Export HTML (with figures)',run:()=>exportHTML()},
   {icon:'☑',label:'Pick turns to export or copy…',run:startPicking},
+  ...(DESK&&DESK.exportPDF?[{icon:'⤓',label:'Export as PDF…',run:()=>DESK.exportPDF()}]:[]),
+  '-',
+  {icon:'▭',label:'Terminal in this chat\'s folder  (Ctrl+`)',run:()=>toggleTerm(true)},
+  {icon:'⑂',label:wtOf()?'Separate copy: '+wtOf().branch+'…':'Work in a separate copy (git worktree)…',run:openWorktree},
+  {icon:'◌',label:tempMode?'Temporary chat (on)':'Temporary chat — nothing is saved',run:()=>$('#tempbtn').click()},
+  {icon:'⇲',label:'Compact this chat',run:()=>$('#compact').click()},
   '-',
   {icon:easyOn()?'☑':'☐',
    label:'Easy mode — essential tools only (this chat)',
@@ -8770,6 +8938,324 @@ addEventListener('keydown',e=>{
    e.preventDefault();jumpRel(e.key==='ArrowUp'?-1:1)}}
  if(e.key==='?'&&document.activeElement!==q&&!/input|textarea/i.test(document.activeElement.tagName)){
   e.preventDefault();showShortcuts()}});
+// ---- tabs: the chats you have open, along the top (in the desktop app, its title bar).
+// Opening a chat gives it a tab; ⌘W closes one and ⌘⇧T brings it back. A brand-new chat
+// you leave without writing in loses its tab, as it is never saved.
+const DESK=window.orbitDesktop&&window.orbitDesktop.isDesktop?window.orbitDesktop:null;
+if(DESK)document.documentElement.classList.add('desktop');
+const TAB_MAX=12;
+let TABS=[],TAB_USED={},TAB_TITLES={},CLOSED_TABS=[],FRESH_TABS=new Set(),TAB_LAST=null,DESK_SENT='';
+try{const t=JSON.parse(localStorage.getItem('orbit.tabs')||'{}');
+ TABS=(t.open||[]).filter(x=>typeof x==='string').slice(0,TAB_MAX);TAB_TITLES=t.titles||{};TAB_USED=t.used||{}}catch(e){}
+function saveTabs(){try{const keep={};TABS.forEach(id=>{if(TAB_TITLES[id])keep[id]=TAB_TITLES[id]});
+ const used={};TABS.forEach(id=>{if(TAB_USED[id])used[id]=TAB_USED[id]});
+ localStorage.setItem('orbit.tabs',JSON.stringify({open:TABS,titles:keep,used}))}catch(e){}}
+function tabTitle(id){
+ const s=SESSIONS.find(x=>x.id===id);
+ if(s&&s.title)TAB_TITLES[id]=s.title;
+ if(id===sid){const t=$('#title').textContent;if(t&&t!=='New chat')TAB_TITLES[id]=t}
+ return TAB_TITLES[id]||(FRESH_TABS.has(id)?'New chat':'Chat')}
+let TABS_CHECKED=false;
+async function pruneTabs(){
+ if(TABS_CHECKED)return;TABS_CHECKED=true;
+ if(sid&&!TABS.includes(sid))tabsNote(!SESSIONS.some(s=>s.id===sid));
+ const unknown=TABS.filter(id=>id!==sid&&!SESSIONS.some(s=>s.id===id)&&!RUNNING.has(id));
+ for(const id of unknown){
+  // a chat the list does not show may simply be older than the page of it loaded
+  try{const r=await fetch('/api/session/'+encodeURIComponent(id));const d=await r.json();
+   if(!r.ok||d.error||!(d.messages||[]).length)TABS=TABS.filter(x=>x!==id);
+   else if(d.title)TAB_TITLES[id]=d.title}catch(e){}}
+ saveTabs();drawTabs()}
+function tabSaved(id){return !FRESH_TABS.has(id)||SESSIONS.some(s=>s.id===id)||RUNNING.has(id)}
+// every chat switch passes through chatChanged, which calls this
+function tabsNote(fresh){
+ if(!sid)return;
+ if(fresh)FRESH_TABS.add(sid);
+ // the new chat you just left, never written in, goes
+ if(TAB_LAST&&TAB_LAST!==sid&&!tabSaved(TAB_LAST))TABS=TABS.filter(x=>x!==TAB_LAST);
+ if(!TABS.includes(sid)){
+  const at=TABS.indexOf(TAB_LAST);TABS.splice(at<0?TABS.length:at+1,0,sid);
+  while(TABS.length>TAB_MAX){       // the one you used longest ago makes room
+   const old=TABS.filter(x=>x!==sid).sort((a,b)=>(TAB_USED[a]||0)-(TAB_USED[b]||0))[0];
+   TABS=TABS.filter(x=>x!==old)}}
+ TAB_USED[sid]=Date.now();TAB_LAST=sid;saveTabs();drawTabs()}
+function drawTabs(){
+ const bar=$('#tabstrip');if(!bar)return;
+ const show=DESK?TABS.length>0:TABS.length>1;
+ bar.classList.toggle('off',!show);
+ if(DESK){const title=sid?tabTitle(sid):'';const key=sid+'\n'+title;
+  if(key!==DESK_SENT&&DESK.setActiveChat){DESK_SENT=key;try{DESK.setActiveChat(sid||null,title)}catch(e){}}}
+ if(!show){bar.innerHTML='';return}
+ const sig=JSON.stringify([TABS,sid,TABS.map(id=>[tabTitle(id),RUNNING.has(id),WAITING.has(id),!!UNSEEN[id]])]);
+ if(bar.dataset.sig===sig)return;bar.dataset.sig=sig;
+ bar.innerHTML='';
+ TABS.forEach((id,i)=>{
+  const st=WAITING.has(id)?'wait':RUNNING.has(id)?'run':UNSEEN[id]?'new':'';
+  const b=el(`<button class="tab${id===sid?' on':''}" draggable=true><span class="td ${st}"></span><span class=tt></span><span class=tx title="close tab (⌘W)">×</span></button>`);
+  b.querySelector('.tt').textContent=tabTitle(id);
+  b.title=tabTitle(id)+(st==='wait'?' — waiting for you':st==='run'?' — answering':st==='new'?' — new since you looked':'')+(i<9?`  ·  ${DESK?'⌘':'Alt+'}${i+1}`:'');
+  b.onclick=e=>{if(e.target.classList.contains('tx')){e.stopPropagation();closeTab(id);return}
+   if(id!==sid){showPane('log');openSession(id)}};
+  b.onauxclick=e=>{if(e.button===1){e.preventDefault();closeTab(id)}};
+  b.ondragstart=e=>{e.dataTransfer.setData('text/orbit-tab',id);e.dataTransfer.effectAllowed='move';b.classList.add('drag')};
+  b.ondragend=()=>b.classList.remove('drag');
+  b.ondragover=e=>{if(e.dataTransfer.types.includes('text/orbit-tab'))e.preventDefault()};
+  b.ondrop=e=>{const from=e.dataTransfer.getData('text/orbit-tab');if(!from||from===id)return;e.preventDefault();
+   TABS=TABS.filter(x=>x!==from);TABS.splice(TABS.indexOf(id)+(e.offsetX>b.offsetWidth/2?1:0),0,from);saveTabs();drawTabs()};
+  bar.appendChild(b)});
+ const add=el(`<button class=tabnew title="new chat (${DESK?'⌘N':'⌘K'})">+</button>`);add.onclick=()=>newChat();bar.appendChild(add);
+ const on=bar.querySelector('.tab.on');if(on)on.scrollIntoView({block:'nearest',inline:'nearest'})}
+async function closeTab(id){
+ id=id||sid;const i=TABS.indexOf(id);if(i<0)return;
+ TABS.splice(i,1);
+ if(tabSaved(id)){CLOSED_TABS.push(id);if(CLOSED_TABS.length>20)CLOSED_TABS.shift()}
+ saveTabs();
+ if(id!==sid){drawTabs();return}
+ const next=TABS[i]||TABS[i-1];
+ TAB_LAST=null;                      // what is left is already a tab; nothing to place it after
+ if(next){showPane('log');await openSession(next)}else await newChat();
+ drawTabs()}
+function reopenTab(){
+ const id=CLOSED_TABS.pop();if(!id)return toast('no closed tab to bring back');
+ showPane('log');openSession(id)}
+function gotoTab(n){
+ // ⌘9 is the last tab, as in a browser
+ const id=n===9?TABS[TABS.length-1]:TABS[n-1];
+ if(id&&id!==sid){showPane('log');openSession(id)}}
+function stepTab(d){
+ if(TABS.length<2)return;const i=TABS.indexOf(sid);
+ gotoTab(((i<0?0:i)+d+TABS.length)%TABS.length+1)}
+addEventListener('keydown',e=>{
+ // in a browser: Alt+1…9 (⌘1…9 belong to the browser's own tabs); the desktop app's
+ // menu sends ⌘1…9 itself
+ if(e.altKey&&!e.metaKey&&!e.ctrlKey&&/^Digit[1-9]$/.test(e.code)&&!DESK){
+  e.preventDefault();gotoTab(+e.code.slice(5))}});
+// a question typed into the desktop app's Quick Ask: a new chat, in front or behind
+async function quickAsk(a){
+ const text=String(a&&a.text||'').trim();if(!text)return;
+ if(a.draft){await newChat();showPane('log');q.value=text;fitQ();q.focus();return}
+ if(!a.background){await newChat();showPane('log');q.value=text;fitQ();go();return}
+ // behind: its own chat, started and left to run; the app says when the answer is in
+ try{
+  const d=await (await fetch('/api/new',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
+  if(!d.sid)throw new Error(d.error||'no chat');
+  const ac=new AbortController();
+  const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},signal:ac.signal,
+   body:JSON.stringify({sid:d.sid,message:text})});
+  // the answer carries on on the Mac without this page listening
+  setTimeout(()=>ac.abort(),400);
+  if(!r.ok)throw new Error('the server answered '+r.status);
+  toast('Asked in a new chat — you will be told when the answer is in');
+  setTimeout(loadSessions,1500)}
+ catch(e){if(e.name!=='AbortError')toast('could not ask: '+(e.message||e))}}
+if(DESK&&DESK.onCommand)DESK.onCommand((name,arg)=>{
+ const dialog=!!$('#modalhost').innerHTML;
+ switch(name){
+  case 'settings':openSettings();break;
+  case 'new-chat':if(dialog)closeModal();showPane('log');newChat();break;
+  case 'new-chat-with':newChatWith();break;
+  case 'close-tab':if(dialog)closeModal();else if(document.querySelector('.palette'))closePal();else closeTab(sid);break;
+  case 'reopen-tab':reopenTab();break;
+  case 'find':if(!sid||!wrap.children.length)$('#search').focus();else openFind();break;
+  case 'palette':openPal();break;
+  case 'jump':openJump();break;
+  case 'toggle-sidebar':{const a=$('#side');sideOpen(a.classList.contains('hide'),false);break}
+  case 'toggle-terminal':toggleTerm();break;
+  case 'files':showPane('files');break;
+  case 'stop':stopRun();break;
+  case 'next-tab':stepTab(1);break;
+  case 'prev-tab':stepTab(-1);break;
+  case 'tab':if(arg&&+arg.n>=1&&+arg.n<=9)gotoTab(+arg.n);break;
+  case 'open-chat':if(arg&&typeof arg.sid==='string'&&arg.sid){if(dialog)closeModal();showPane('log');openSession(arg.sid)}break;
+  case 'new-chat-send':quickAsk(arg||{});break;
+ }});
+// ---- a chat in a copy of its own: a git worktree on a branch of its own (OpenCode v2's
+// workspaces). Your checkout stays as it is; merge the work back, or throw the copy away.
+function wtOf(){return (CHATPREFS&&CHATPREFS.worktree)||null}
+function drawWtBadge(){
+ const b=$('#wtbadge');if(!b)return;const wt=wtOf();
+ b.style.display=wt?'':'none';
+ if(wt){b.textContent='⑂ '+(wt.branch||'copy');b.title='This chat works in a copy of '+(wt.repo||'its repository')+
+  ' on branch '+wt.branch+' — click to merge it back or throw it away'}}
+async function wtCall(body){
+ const r=await fetch('/api/worktree',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||('the server answered '+r.status));return d}
+async function openWorktree(){
+ const forSid=sid;if(!forSid)return;
+ $('#modalhost').innerHTML=`<div class=modal><div class="sheet auto" style="max-width:560px">
+  <header><b>Separate copy</b><button class=ghost style="margin-left:auto" id=wtx>close</button></header>
+  <div class=body id=wtbody><div class=note>Looking…</div></div><footer id=wtfoot></footer></div></div>`;
+ $('#wtx').onclick=closeModal;
+ $('#modalhost').querySelector('.modal').onclick=e=>{if(e.target.classList.contains('modal'))closeModal()};
+ let d;try{d=await wtCall({sid:forSid,op:'status'})}catch(e){$('#wtbody').innerHTML=`<div class=note>${esc(e.message)}</div>`;return}
+ const body=$('#wtbody'),foot=$('#wtfoot'),wt=d.worktree;
+ const act=(label,cls,fn)=>{const b=el(`<button class="${cls}">${label}</button>`);b.onclick=async()=>{
+  b.disabled=true;try{await fn()}catch(e){toast(e.message);b.disabled=false}};foot.appendChild(b);return b};
+ if(!wt){
+  const started=!!wrap.querySelector('.msg');
+  body.innerHTML=`<p style="margin-top:0">Work in a <b>copy of this chat's repository</b>, on a branch of its own. The chat can change files
+   freely while your checkout stays exactly as it is — and two chats can work on one repository without treading on each other.
+   When it is done, merge the branch back, or throw the copy away.</p>
+   <p class=note>Only what is committed goes into the copy. ${started?'This chat has already started in its folder, so the copy opens in a <b>new chat</b>.':''}</p>
+   <label class=note>Branch name <input id=wtname placeholder="from the chat's title" style="width:100%;margin-top:4px"></label>`;
+  act(started?'Open a new chat in a copy':'Work in a copy','sendbtn',async()=>{
+   const name=$('#wtname').value.trim();
+   let target=forSid;
+   if(started){await newChat();target=sid}
+   const r=await wtCall({sid:target,op:'create',name,from_sid:started?forSid:undefined});
+   CHATPREFS=Object.assign({},CHATPREFS,{worktree:r.worktree,cwd:r.worktree.cwd});drawWtBadge();closeModal();
+   toast('This chat now works in '+r.worktree.branch+(r.worktree.left_behind?' — uncommitted changes in your checkout stayed there':''));
+   pollGit(true)});
+  return}
+ if(!wt.exists){
+  body.innerHTML=`<p style="margin-top:0">The copy for <b>${esc(wt.branch)}</b> is gone (deleted outside Orbit?).</p>`;
+  act('Forget it','ghost',async()=>{await wtCall({sid:forSid,op:'discard'});CHATPREFS.worktree=null;drawWtBadge();closeModal()});return}
+ body.innerHTML=`<div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:var(--fs-sm)">
+   <span class=note>branch</span><b class=wtv></b><span class=note>from</span><span class=wtv></span>
+   <span class=note>copy</span><span class=wtv style="font-family:var(--mono);font-size:var(--fs-xs);word-break:break-all"></span>
+   <span class=note>state</span><span class=wtv></span></div>
+  <div id=wtlog style="margin-top:10px"></div>`;
+ const v=body.querySelectorAll('.wtv');
+ v[0].textContent=wt.branch;v[1].textContent=wt.base+' in '+wt.repo;v[2].textContent=wt.path;
+ v[3].textContent=`${wt.ahead} commit${wt.ahead===1?'':'s'} of its own · ${wt.dirty} file${wt.dirty===1?'':'s'} not committed`+
+  (wt.behind?` · ${wt.base} has ${wt.behind} newer commit${wt.behind===1?'':'s'}`:'');
+ const lg=$('#wtlog');
+ (wt.commits||[]).forEach(c=>{const r=el('<div class=note style="font-family:var(--mono);font-size:var(--fs-xs)"></div>');r.textContent=c;lg.appendChild(r)});
+ (wt.files||[]).slice(0,12).forEach(f=>{const r=el('<div class=note style="font-family:var(--mono);font-size:var(--fs-xs)"></div>');r.textContent='● '+f;lg.appendChild(r)});
+ act('Merge back into '+esc(wt.base),'sendbtn',async()=>{
+  if(!confirm(`Commit what is left in the copy, merge ${wt.branch} into ${wt.base} in your checkout, then remove the copy?`))return;
+  const r=await wtCall({sid:forSid,op:'merge'});CHATPREFS.worktree=null;drawWtBadge();closeModal();
+  toast(r.merged?`Merged ${r.commits} commit${r.commits===1?'':'s'} into ${wt.base}`:(r.why||'nothing to merge'));pollGit(true)});
+ act('Terminal there','ghost',async()=>{closeModal();newTerm(wt.cwd)});
+ act('Throw the copy away','ghost',async()=>{
+  if(!confirm(`Delete the copy and branch ${wt.branch}, with everything in it? This cannot be undone.`))return;
+  await wtCall({sid:forSid,op:'discard'});CHATPREFS.worktree=null;drawWtBadge();closeModal();toast('The copy is gone')}).style.color='var(--err)'}
+// ---- the terminal: a shell in this chat's folder, at the foot of the window. The shells
+// live on the Mac, not in the page: reload (or open another window) and they are still there.
+const TERMS={list:[],active:null,lib:null};
+function termLib(){
+ if(TERMS.lib)return TERMS.lib;
+ TERMS.lib=new Promise((ok,bad)=>{
+  const l=document.createElement('link');l.rel='stylesheet';l.href='/vendor/xterm/xterm.css';document.head.appendChild(l);
+  let n=0;const files=['xterm.js','addon-fit.js','addon-web-links.js'];
+  files.forEach(f=>{const e=document.createElement('script');e.src='/vendor/xterm/'+f;
+   e.onload=()=>{if(++n===files.length)ok()};e.onerror=()=>{TERMS.lib=null;bad(new Error('the terminal did not load'))};
+   document.head.appendChild(e)})});
+ return TERMS.lib}
+function termTheme(){
+ const c=getComputedStyle(document.documentElement),v=k=>c.getPropertyValue(k).trim();
+ return {background:v('--card')||'#fff',foreground:v('--fg')||'#141413',cursor:v('--acc'),cursorAccent:v('--card'),
+  selectionBackground:/^#[0-9a-f]{6}$/i.test(v('--acc'))?v('--acc')+'4d':'rgba(107,91,214,.3)',
+  ...(termDark(v('--card'))?TERM_DARK:TERM_LIGHT)}}
+function termDark(hex){const m=/^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex||'');
+ if(!m)return matchMedia('(prefers-color-scheme: dark)').matches;
+ return (0.299*parseInt(m[1],16)+0.587*parseInt(m[2],16)+0.114*parseInt(m[3],16))<128}
+// calm palettes in the page's own warm greys, readable on its card colour
+const TERM_LIGHT={black:'#3b3a36',red:'#c0392b',green:'#2d7d4f',yellow:'#a8721c',blue:'#3d6fb6',magenta:'#7a5bd6',
+ cyan:'#1f7f86',white:'#d9d6cc',brightBlack:'#8a8880',brightRed:'#d9534f',brightGreen:'#3c9a63',brightYellow:'#c08a2b',
+ brightBlue:'#5687cc',brightMagenta:'#8f74e0',brightCyan:'#2f98a0',brightWhite:'#f0eee6'};
+const TERM_DARK={black:'#1f1e1d',red:'#ec6a5e',green:'#7fc89a',yellow:'#e0b866',blue:'#7aa7e6',magenta:'#b39ef5',
+ cyan:'#6cc4c9',white:'#d6d3c9',brightBlack:'#6b6a64',brightRed:'#f28b80',brightGreen:'#9fdcb4',brightYellow:'#ecc985',
+ brightBlue:'#9cc0f0',brightMagenta:'#c9b8fa',brightCyan:'#8fd6da',brightWhite:'#faf9f5'};
+function termShown(){return $('#termdock').style.display!=='none'}
+async function toggleTerm(open){
+ const dock=$('#termdock');
+ if(termShown()&&open!==true){dock.style.display='none';
+  if(!matchMedia('(pointer:coarse)').matches)q.focus();return}
+ dock.style.display='';
+ try{const h=localStorage.getItem('orbit.termh');if(h)dock.style.setProperty('--termh',h)}catch(e){}
+ try{await termLib()}catch(e){$('#termbody').innerHTML=`<div class=termmsg>${esc(e.message)}</div>`;return}
+ // the shells already running on the Mac, opened from another window or before a reload
+ try{const d=await (await fetch('/api/term/list')).json();
+  (d.terms||[]).filter(v=>v.alive&&!TERMS.list.some(t=>t.id===v.id)).forEach(v=>termAttach(v,false))}
+ catch(e){}
+ if(!TERMS.list.length){await newTerm();return}
+ termShow(TERMS.active||TERMS.list[TERMS.list.length-1].id)}
+async function newTerm(cwd){
+ if(!termShown()){$('#termdock').style.display=''}
+ try{await termLib()}catch(e){toast(e.message);return}
+ const r=await fetch('/api/term/open',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({sid,cwd:cwd||undefined,cols:100,rows:24})});
+ const v=await r.json().catch(()=>({}));
+ if(!r.ok){toast(v.error||'could not open a terminal');if(!TERMS.list.length)$('#termdock').style.display='none';return}
+ termAttach(v,true)}
+function termAttach(v,show){
+ const pane=el('<div class=termpane></div>');$('#termbody').appendChild(pane);
+ const css=getComputedStyle(document.documentElement);
+ // prompts drawn with Nerd Font glyphs (powerlevel10k and the like) find them in the font they ship
+ const term=new Terminal({fontFamily:'"IBM Plex Mono","MesloLGS NF","MesloLGS Nerd Font","Symbols Nerd Font Mono","Hack Nerd Font",Menlo,monospace',fontSize:12.5,
+  lineHeight:1.15,cursorBlink:true,scrollback:8000,allowProposedApi:false,theme:termTheme(),macOptionIsMeta:true});
+ const fit=new FitAddon.FitAddon();term.loadAddon(fit);
+ try{term.loadAddon(new WebLinksAddon.WebLinksAddon((ev,uri)=>window.open(uri,'_blank','noopener')))}catch(e){}
+ term.open(pane);
+ const t={id:v.id,title:v.title,cwd:v.cwd,host:v.host,term,fit,pane,off:0,ended:false,es:null,out:''};
+ TERMS.list.push(t);
+ // typing goes out in one request per burst, not one per key
+ let flushT=null;
+ term.onData(d=>{t.out+=d;if(flushT)return;flushT=setTimeout(()=>{const data=t.out;t.out='';flushT=null;
+  fetch('/api/term/input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:t.id,data})})},8)});
+ term.onResize(({cols,rows})=>{if(!t.ended)fetch('/api/term/resize',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({id:t.id,cols,rows})})});
+ termListen(t);
+ if(show||!TERMS.active)termShow(t.id);else drawTermBar()}
+function termListen(t){
+ if(t.es)t.es.close();
+ const es=new EventSource('/api/term/stream?id='+encodeURIComponent(t.id)+'&from='+t.off);t.es=es;
+ es.onmessage=ev=>{let m;try{m=JSON.parse(ev.data)}catch(e){return}
+  if(m.d){const b=atob(m.d),u=new Uint8Array(b.length);for(let i=0;i<b.length;i++)u[i]=b.charCodeAt(i);t.term.write(u)}
+  if(m.o!=null)t.off=m.o;
+  if('exit' in m){t.ended=true;es.close();t.es=null;
+   t.term.write('\r\n\x1b[2m[the shell ended'+(m.exit!=null?' with code '+m.exit:'')+' — close this tab or open a new one]\x1b[0m\r\n');
+   drawTermBar()}};
+ // EventSource would reconnect from where it first started and print everything twice:
+ // reconnect by hand, from what has been printed so far
+ es.onerror=()=>{es.close();if(t.es!==es)return;t.es=null;
+  if(!t.ended&&TERMS.list.includes(t))setTimeout(()=>{if(!t.es&&!t.ended&&TERMS.list.includes(t))termListen(t)},1500)}}
+function termShow(id){
+ TERMS.active=id;
+ TERMS.list.forEach(t=>t.pane.classList.toggle('on',t.id===id));
+ drawTermBar();
+ const t=TERMS.list.find(x=>x.id===id);
+ if(t)requestAnimationFrame(()=>{try{t.fit.fit()}catch(e){}t.term.focus()})}
+async function closeTerm(id){
+ const t=TERMS.list.find(x=>x.id===id);if(!t)return;
+ if(t.es)t.es.close();t.es=null;
+ TERMS.list=TERMS.list.filter(x=>x!==t);
+ fetch('/api/term/close',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+ try{t.term.dispose()}catch(e){}t.pane.remove();
+ if(TERMS.active===id)TERMS.active=null;
+ if(!TERMS.list.length){$('#termdock').style.display='none';drawTermBar();return}
+ termShow(TERMS.active||TERMS.list[TERMS.list.length-1].id)}
+function drawTermBar(){
+ const bar=$('#termbar');bar.innerHTML='';
+ TERMS.list.forEach(t=>{
+  const b=el(`<button class="ttab${t.id===TERMS.active?' on':''}${t.ended?' ended':''}"><span class=tt></span><span class=tx title="close this terminal">×</span></button>`);
+  b.querySelector('.tt').textContent=(t.host?'⇄ ':'')+t.title;b.title=(t.host?t.host+':':'')+t.cwd;
+  b.onclick=e=>{if(e.target.classList.contains('tx'))closeTerm(t.id);else termShow(t.id)};
+  b.onauxclick=e=>{if(e.button===1)closeTerm(t.id)};
+  bar.appendChild(b)});
+ const add=el('<button class=tbtn title="a new terminal in this chat\'s folder">+</button>');add.onclick=()=>newTerm();bar.appendChild(add);
+ bar.appendChild(el('<span class=tsp></span>'));
+ const max=el(`<button class=tbtn title="taller / shorter">${$('#termdock').classList.contains('max')?'▾':'▴'}</button>`);
+ max.onclick=()=>{$('#termdock').classList.toggle('max');drawTermBar();termFit()};bar.appendChild(max);
+ const hide=el('<button class=tbtn title="hide (Ctrl+`) — the shells keep running">✕</button>');hide.onclick=()=>toggleTerm(false);
+ bar.appendChild(hide)}
+function termFit(){const t=TERMS.list.find(x=>x.id===TERMS.active);if(t&&termShown())requestAnimationFrame(()=>{try{t.fit.fit()}catch(e){}})}
+new ResizeObserver(()=>termFit()).observe($('#termbody'));
+// the theme follows the page's: light, dark, or whatever the Mac says
+function termRetheme(){TERMS.list.forEach(t=>{t.term.options.theme=termTheme()})}
+new MutationObserver(termRetheme).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme','style','class']});
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',()=>setTimeout(termRetheme,50));
+$('#termgrip').onpointerdown=e=>{
+ const dock=$('#termdock'),y0=e.clientY,h0=dock.getBoundingClientRect().height;dock.classList.remove('max');
+ e.target.setPointerCapture(e.pointerId);
+ const mv=ev=>{const h=Math.max(120,Math.min(innerHeight*0.8,h0+(y0-ev.clientY)));dock.style.setProperty('--termh',h+'px')};
+ const up=()=>{e.target.removeEventListener('pointermove',mv);e.target.removeEventListener('pointerup',up);
+  try{localStorage.setItem('orbit.termh',dock.style.getPropertyValue('--termh'))}catch(_){}termFit()};
+ e.target.addEventListener('pointermove',mv);e.target.addEventListener('pointerup',up)};
+// Ctrl+` from anywhere, the terminal included (it would otherwise take the key itself)
+addEventListener('keydown',e=>{if(e.ctrlKey&&!e.metaKey&&!e.altKey&&e.code==='Backquote'){
+ e.preventDefault();e.stopPropagation();toggleTerm()}},true);
 fetch('/api/info').then(r=>r.json()).then(d=>{
  // this lands whenever it lands, and on a slow first load that can be after you have
  // already clicked a chat: it may not drag the page back to the Mac's current one

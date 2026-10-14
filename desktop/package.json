@@ -1,0 +1,69 @@
+{
+  "name": "orbit-desktop",
+  "productName": "Orbit",
+  "version": "0.1.0",
+  "description": "Native macOS shell for the local Orbit AI chat/agent app",
+  "main": "src/main/main.js",
+  "private": true,
+  "license": "MIT",
+  "author": "Orbit",
+  "scripts": {
+    "start": "electron .",
+    "tray-icon": "node scripts/make-tray-icon.js",
+    "dist": "electron-builder --mac dir",
+    "dmg": "electron-builder --mac dmg"
+  },
+  "devDependencies": {
+    "electron": "44.7.1",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "app.orbit.desktop",
+    "productName": "Orbit",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "*.html",
+      "*.css",
+      "preload.js",
+      "quick-preload.js",
+      "quick.js",
+      "boot.js",
+      "build/trayTemplate.png",
+      "build/trayTemplate@2x.png",
+      "package.json"
+    ],
+    "protocols": [
+      {
+        "name": "Orbit",
+        "schemes": [
+          "orbit"
+        ]
+      }
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dir",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
+      "hardenedRuntime": false,
+      "identity": null
+    }
+  }
+}

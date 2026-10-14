@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Starting Orbit…</title>
+  <link rel="stylesheet" href="boot.css">
+</head>
+<body>
+  <div class="drag" aria-hidden="true"></div>
+  <main>
+    <div class="logo" aria-hidden="true">
+      <img src="assets/orbit-128.png" alt="" width="72" height="72">
+      <span class="ring"></span>
+    </div>
+    <h1>Orbit</h1>
+    <p id="status" role="status" aria-live="polite">Connecting to Orbit…</p>
+    <div id="actions" class="actions">
+      <button id="retry" type="button">Retry</button>
+      <button id="choose" type="button" class="secondary">Choose Orbit folder…</button>
+    </div>
+    <p class="hint">Orbit runs a small local server on this Mac. This window opens it as soon as it answers.</p>
+  </main>
+  <script src="boot.js"></script>
+</body>
+</html>

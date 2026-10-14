@@ -14,6 +14,8 @@ import file_links as FL
 
 PORT = int(os.environ.get("ORBIT_UI_PORT") or os.environ.get("QQ_UI_PORT") or 8899)
 import remote as REMOTE
+import term as TERM
+import worktree as WT
 import collections, re, subprocess
 
 def remote_mode():
@@ -569,7 +571,7 @@ class H(http.server.BaseHTTPRequestHandler):
                       "/api/mcp/save", "/api/restart_ui", "/api/server/", "/api/model/provider",
                       "/api/model/account", "/api/claude/settings", "/api/claude/skills", "/api/claude/plugins",
                       "/api/codex/settings", "/api/plugins", "/api/skills/", "/api/agents/", "/api/instructions",
-                      "/api/backup", "/api/self", "/api/update", "/api/quiet", "/api/bionic")
+                      "/api/backup", "/api/self", "/api/update", "/api/quiet", "/api/bionic", "/api/term")
     READ_OK = ("/api/settings", "/api/permissions")      # reading these is fine; changing them is not
 
     def _scope_ok(self):
@@ -666,6 +668,7 @@ class H(http.server.BaseHTTPRequestHandler):
 
     def _get(self, _p):
         p = self.path.split("?")[0]
+        if p.startswith("/api/term/"): return self._term_get(p)
         if p == "/api/file":
             # a file a chat names, for an image in an answer, a preview or a download
             qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
@@ -1244,7 +1247,7 @@ class H(http.server.BaseHTTPRequestHandler):
                                               # the one setting a client needs resolved:
                                               # a chat that never set it follows Orbit's
                                               "prefs": {k: v for k, v in (q.CE.chat_prefs(sid) or {}).items()
-                                                        if k in q.PER_CHAT},
+                                                        if k in q.PER_CHAT or k == "worktree"},
                                               "easy_mode": bool(q.chat_setting("easy_mode", sid)),
                                               "queue": _queue_view(stt)}))
             except Exception as e:
@@ -1289,6 +1292,7 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/knowledge/upload": return self._upload(to_knowledge=True)
         if p == "/api/chat":   return self._chat()
         d = self._body()
+        if p.startswith("/api/term/"): return self._term_post(p, d)
         if p == "/api/new":
             with LOCK: q.reload_settings()
             fresh_state(leaving=self._from_loopback())
@@ -1340,6 +1344,8 @@ class H(http.server.BaseHTTPRequestHandler):
         if p == "/api/claude/mode":
             # a chat's Claude Code permission mode: live if it is answering, and from now on
             return self._send(200, jdump(q.CE.set_permission_mode(d.get("sid", ""), d.get("mode", ""))))
+        if p == "/api/worktree":
+            return self._worktree(d)
         if p == "/api/claude/cwd":
             # the folder a chat's Claude session starts in (and extra folders it may use)
             sid_, cwd = d.get("sid", ""), (d.get("cwd") or "").strip()
@@ -2623,6 +2629,119 @@ class H(http.server.BaseHTTPRequestHandler):
         except Exception as e: text = f"(could not extract text: {e})"
         return self._send(200, jdump({"kind":"file","name":safe,"path":path,
                                       "chars":len(text),"preview":text[:400]}))
+
+    # ---- a chat in a copy of its own: a git worktree on a branch of its own
+    def _worktree(self, d):
+        sid_, op = d.get("sid") or "", d.get("op") or "status"
+        if not sid_: return self._send(400, jdump({"error": "which chat?"}))
+        prefs = q.CE.chat_prefs(sid_)
+        wt = prefs.get("worktree")
+        st_ = STATES.get(sid_)
+        try:
+            if op == "status":
+                return self._send(200, jdump({"worktree": WT.status(wt) if wt else None}))
+            if op != "status" and st_ is not None and st_.lock.locked():
+                return self._send(409, jdump({"error": "that chat is answering — do this when it has finished"}))
+            if op == "create":
+                if wt: return self._send(409, jdump({"error": "this chat already works in a copy: " + wt.get("branch", "")}))
+                # the folder to copy: this chat's, or the one it was opened from
+                cwd, host = _git_folder(d.get("from_sid") or sid_)
+                if host: return self._send(409, jdump({"error": "it works on " + host + " — copies are for folders on this Mac"}))
+                if st_ is not None and q.CE.marker_of(st_.msgs):
+                    return self._send(409, jdump({"error": "this chat has already started in its folder — "
+                                                           "open a new chat in a copy instead"}))
+                title = (STATES[d["from_sid"]].title if d.get("from_sid") in STATES else (st_.title if st_ else "")) or ""
+                wt = WT.create(cwd, q.ROOT, (d.get("name") or "").strip(), title=title)
+                q.CE.set_chat_pref(sid_, cwd=wt["cwd"], worktree=wt)
+                return self._send(200, jdump({"worktree": WT.status(wt)}))
+            if not wt: return self._send(409, jdump({"error": "this chat works in its own folder, not a copy"}))
+            title = (st_.title if st_ else "") or "work from Orbit"
+            if op == "merge":
+                got = WT.merge(wt, title)
+            elif op == "discard":
+                WT.remove(wt, force=True); got = {"discarded": True}
+            elif op == "commit":
+                got = {"committed": WT.commit_all(wt, d.get("message") or title)}
+                return self._send(200, jdump({**got, "worktree": WT.status(wt)}))
+            else:
+                return self._send(400, jdump({"error": f"unknown op {op}"}))
+            # the copy is gone: the chat goes back to the folder it came from
+            q.CE.set_chat_pref(sid_, cwd=wt.get("origin") or wt.get("repo"), worktree=None)
+            return self._send(200, jdump({**got, "worktree": None}))
+        except Exception as e:
+            return self._send(409, jdump({"error": str(e)}))
+
+    # ---- terminals: a shell in the chat's folder, in the page
+    def _term_allowed(self):
+        """A terminal is a shell on this Mac. You at the Mac get one; a paired device only
+        when Settings -> Phone allows it, and never one limited to chats."""
+        return self._from_loopback() or bool(q.S.get("terminal_remote"))
+
+    def _term_get(self, p):
+        if not self._term_allowed():
+            return self._send(403, jdump({"error": "terminals are for the Mac itself — allow paired devices "
+                                                   "in Settings → Phone"}))
+        qs = _up.parse_qs(self.path.split("?")[1]) if "?" in self.path else {}
+        if p == "/api/term/list":
+            return self._send(200, jdump({"terms": TERM.listing()}))
+        if p != "/api/term/stream":
+            return self._send(404, jdump({"error": "no such terminal endpoint"}))
+        t = TERM.get((qs.get("id") or [""])[0])
+        if t is None: return self._send(404, jdump({"error": "that terminal has closed"}))
+        try: since = max(0, int((qs.get("from") or ["0"])[0]))
+        except ValueError: since = 0
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        while True:
+            data, since, alive = t.read(since, 15)
+            if data:
+                line = f"data: {jdump({'d': base64.b64encode(data).decode(), 'o': since})}\n\n".encode()
+            elif alive:
+                line = b": ping\n\n"
+            else:
+                line = f"data: {jdump({'exit': t.code, 'o': since})}\n\n".encode()
+            try:
+                self.wfile.write(line); self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return                           # the page went; the shell carries on
+            if not data and not alive: return
+
+    def _term_post(self, p, d):
+        if not self._term_allowed():
+            return self._send(403, jdump({"error": "terminals are for the Mac itself — allow paired devices "
+                                                   "in Settings → Phone"}))
+        if p == "/api/term/open":
+            sid_ = d.get("sid") or None
+            cwd, host = _git_folder(sid_)
+            want = d.get("cwd")
+            if isinstance(want, str) and want.strip():
+                want = os.path.expanduser(want.strip())
+                if not os.path.isdir(want):
+                    return self._send(400, jdump({"error": f"no such folder: {want}"}))
+                cwd, host = want, ""
+            try:
+                t = TERM.open_term(cwd, d.get("cols") or 100, d.get("rows") or 30, host=host, sid=sid_)
+            except Exception as e:
+                return self._send(409, jdump({"error": str(e)}))
+            return self._send(200, jdump(t.view()))
+        t = TERM.get(d.get("id"))
+        if p == "/api/term/close":
+            return self._send(200, jdump({"ok": TERM.close_term(d.get("id"))}))
+        if t is None: return self._send(404, jdump({"error": "that terminal has closed"}))
+        if p == "/api/term/input":
+            data = d.get("data")
+            if not isinstance(data, str) or len(data) > 65536:
+                return self._send(400, jdump({"error": "input must be text, at most 64 KB at a time"}))
+            return self._send(200, jdump({"ok": t.write(data)}))
+        if p == "/api/term/resize":
+            try: t.resize(int(d.get("cols") or 0), int(d.get("rows") or 0))
+            except (TypeError, ValueError): return self._send(400, jdump({"error": "cols and rows are numbers"}))
+            return self._send(200, jdump({"ok": True}))
+        return self._send(404, jdump({"error": "no such terminal endpoint"}))
 
     def _chat(self):
         d = self._body()

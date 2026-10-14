@@ -29,3 +29,4 @@ ios/DerivedData/
 
 # Claude Code engine working files (settings, MCP config, per-chat prefs)
 config/claude/
+worktrees/

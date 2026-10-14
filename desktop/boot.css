@@ -1,0 +1,57 @@
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1d1d22;
+  --muted: #6e6e78;
+  --accent: #5b5bd6;
+  --accent-fg: #ffffff;
+  --btn: #f1f1f4;
+  --btn-border: #dcdce2;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1b1b1f;
+    --fg: #ececf1;
+    --muted: #9a9aa6;
+    --accent: #8b8bff;
+    --accent-fg: #15151a;
+    --btn: #2a2a30;
+    --btn-border: #3a3a42;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  display: grid;
+  place-items: center;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.drag { position: fixed; inset: 0 0 auto 0; height: 44px; -webkit-app-region: drag; }
+main { text-align: center; max-width: 380px; padding: 24px; }
+.logo { position: relative; width: 96px; height: 96px; margin: 0 auto 14px; display: grid; place-items: center; }
+.logo img { border-radius: 18px; }
+.ring {
+  position: absolute; inset: 0; border-radius: 50%;
+  border: 2px solid transparent; border-top-color: var(--accent);
+  animation: spin 1.1s linear infinite;
+}
+body.failed .ring { animation: none; border-color: transparent; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .ring { animation-duration: 4s; } }
+h1 { font-size: 22px; font-weight: 650; margin: 0 0 4px; letter-spacing: -0.01em; }
+#status { color: var(--muted); margin: 0 0 20px; min-height: 1.5em; }
+body.failed #status { color: var(--fg); }
+.actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
+button {
+  font: inherit; font-weight: 550;
+  padding: 7px 16px; border-radius: 8px; cursor: pointer;
+  background: var(--accent); color: var(--accent-fg); border: 1px solid transparent;
+}
+button.secondary { background: var(--btn); color: var(--fg); border-color: var(--btn-border); }
+button:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: 2px; }
+button:disabled { opacity: 0.55; cursor: default; }
+.hint { color: var(--muted); font-size: 12px; margin-top: 26px; }

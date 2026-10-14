@@ -1,0 +1,47 @@
+:root {
+  color-scheme: light dark;
+  --fg: #1d1d22;
+  --muted: rgba(60, 60, 67, 0.55);
+  --tint: rgba(255, 255, 255, 0.35);
+  --edge: rgba(0, 0, 0, 0.08);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #f2f2f7;
+    --muted: rgba(235, 235, 245, 0.45);
+    --tint: rgba(30, 30, 36, 0.25);
+    --edge: rgba(255, 255, 255, 0.10);
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; }
+body { font: 20px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif; color: var(--fg); }
+.panel {
+  height: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 26px 22px 0 22px;
+  border-radius: 16px;
+  background: var(--tint);
+  border: 1px solid var(--edge);
+  -webkit-app-region: drag;
+}
+.glyph { flex: none; margin-top: 4px; opacity: 0.6; }
+@media (prefers-color-scheme: dark) { .glyph { filter: invert(1); } }
+textarea {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  margin: 0;
+  max-height: 340px;
+  overflow-y: auto;
+  -webkit-app-region: no-drag;
+}
+textarea::placeholder { color: var(--muted); font-size: 17px; }

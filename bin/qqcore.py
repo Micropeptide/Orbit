@@ -92,6 +92,7 @@ DEFAULTS = {
   "goal_offer_wait_s": 120,
   "push_ntfy_url": "",
   "push_private": False,     # a push says only "open Orbit", never the text itself
+  "terminal_remote": False,  # paired devices may open a terminal on this Mac (you at it always can)
   # an answer stopped by a used-up plan allowance (Claude's 5-hour or weekly limit, a
   # ChatGPT limit, an OpenCode Go allowance) carries on by itself once it resets
   "resume_after_limit": True,

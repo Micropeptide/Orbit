@@ -54,6 +54,7 @@ and the file it wrote is a card under the answer.</sub></td>
 - [Answers, files and previews](#answers-files-and-previews)
 - [Orbit's own agent](#orbits-own-agent)
 - [The interface](#the-interface)
+- [The desktop app](#the-desktop-app)
 - [Safety](#safety)
 - [On your phone](#on-your-phone)
 - [Install](#install) · [First ten minutes](#first-ten-minutes) · [Where your data lives](#where-your-data-lives) · [Configuration](#configuration) · [Background service](#running-it-as-a-background-service) · [Tests](#tests) · [Troubleshooting](#troubleshooting) · [Documentation](#documentation)
@@ -657,6 +658,9 @@ one beside it has everything. It is in the chat's ⋯ menu, on the Mac and on th
 | **Library** | Knowledge documents, skills, agents, saved prompts. |
 | **Scheduled** | Messages scheduled in any chat and tasks that run on their own — edit text, time, repeat and model in place — and a live view of cluster jobs. |
 | **Trash** | Deleted chats and files, restorable, auto-purged after a retention you set. |
+| **Tabs** | The chats you have open, along the top: ⌘1–9 in the desktop app (Alt+1–9 in a browser), ⌘W closes one and ⌘⇧T brings it back, drag to reorder; each shows whether it is answering, waiting for you or has news. |
+| **Terminal** | `Ctrl+\`` or `/terminal`: a shell in the chat's folder at the foot of the window — on the chat's machine when it works over SSH. The shells live on the Mac, so a reload or another window finds them still there. Only you at the Mac can open one unless Settings → Phone allows paired devices. |
+| **Separate copy** | `/worktree` (or ⋯ → *Work in a separate copy*): the chat works in a git worktree of its repository on a branch of its own (`orbit/<name>`), so your checkout stays as it is and two chats can work on one repository at once. *Merge back* commits what is left, merges into the branch it came from and removes the copy; a merge that conflicts changes nothing and says where. |
 
 Also: `⌘P` searches chats, messages, files and commands; `⌘G` jumps to any message;
 `⌘K` starts a new chat and `⌘⇧K` *New chat with…* (model, machine, folder, permission
@@ -666,6 +670,27 @@ at finishes or needs you, answerable from any window. Light and dark themes foll
 system or your choice.
 
 <p align="center"><img src="docs/screenshots/home-dark.png" width="760" alt="The home page in the dark theme"></p>
+
+---
+
+## The desktop app
+
+`desktop/` is Orbit as a Mac app (Electron), around the same interface:
+
+- a window of its own, with the chat tabs where the title bar was;
+- a menu bar icon listing the chats answering or waiting for you, and the Dock badge counting them;
+- a notification when an answer is ready or a chat needs your approval — click it to open that chat;
+- **Quick Ask** on ⌥Space from anywhere: Enter asks in a new chat, ⌘Enter asks in the background and tells you when the answer is in;
+- `orbit://chat/<id>` links, and `orbit://new?text=…` to start a message (it fills the box; it never sends by itself);
+- the full menu: ⌘N new chat, ⌘P palette, ⌘B sidebar, `Ctrl+\`` terminal, ⌘. stop, ⌘⇧E export the chat as PDF, ⌘1–9 tabs;
+- launch at login, and staying in the menu bar when the window closes.
+
+It starts Orbit's server when it is not running — through its launchd agent if there is one — and never a second copy.
+
+```bash
+cd desktop && npm install && npm start      # run it
+npm run dist                                 # build dist/mac-arm64/Orbit.app
+```
 
 ---
 
@@ -928,4 +953,4 @@ newer than the running process; click *Restart interface*.
 
 ---
 
-Built by **Micropeptide** · MIT licensed · [github.com/Micropeptide](https://github.com/Micropeptide)
+Built by **Micropeptide** · MIT licensed · [runtianwu.com](https://runtianwu.com) · [github.com/Micropeptide](https://github.com/Micropeptide)
