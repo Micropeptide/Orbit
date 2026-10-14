@@ -52,9 +52,15 @@ def _nothing_outlives_a_test(tmp_path_factory):
     the per-test stubs had already been put back, one of them wrote a chat into the real
     sessions folder and asked the real side-work model to check it."""
     import qqcore as q
-    saved = (q.SESSIONS, q.goal_audit)
+    import claude_engine as CE, harness as HARN
+    saved = (q.SESSIONS, q.goal_audit, CE._work_dir, HARN._learned_path)
     q.SESSIONS = str(tmp_path_factory.mktemp("sessions"))
     q._real_goal_audit = saved[1]
     q.goal_audit = lambda *a, **k: {"status": "", "reason": "(no model calls in tests)", "next": "", "failed": True}
+    # each chat's own settings and the windows learned from use: a test's chat setting its
+    # instructions, or a mock model's window, landed in the real files and stayed there
+    cfg = tmp_path_factory.mktemp("config")
+    CE._work_dir = lambda: str(cfg)
+    HARN._learned_path = lambda root: str(cfg / "learned-windows.json")
     yield
-    q.SESSIONS, q.goal_audit = saved
+    q.SESSIONS, q.goal_audit, CE._work_dir, HARN._learned_path = saved

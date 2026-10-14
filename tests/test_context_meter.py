@@ -109,6 +109,8 @@ class TestAfterARestart(Patch):
 class TestClaudeCodeSaysHowBig(Patch):
     def setUp(self):
         self.addCleanup(q.SESSION_WINDOW.pop, "s2", None)
+        tmp = tempfile.mkdtemp(prefix="orbit-ctxwin-"); self.addCleanup(shutil.rmtree, tmp, True)
+        self.patch(q, "ROOT", tmp)                  # the chat's settings go here, not into Orbit's
 
     def test_its_result_carries_the_window(self):
         ev = {"type": "result", "subtype": "success",

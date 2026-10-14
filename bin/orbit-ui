@@ -4721,20 +4721,27 @@ if __name__ == "__main__":
             try: q.CE.reap_live()
             except Exception: pass
     threading.Thread(target=_reap_remote, daemon=True).start()
-    # model lists for harness providers, refreshed in the background once a day
+    # model lists for harness providers -- names, and each model's window -- kept no more
+    # than a day old for as long as Orbit runs (it used to look only when it started, so a
+    # server up for a week had week-old windows); models.dev also gives the Claude
+    # subscription's aliases their newest model's window
     def _refresh_lists():
-        try:
-            for pid in q.HARN.providers(q.ROOT):
-                if pid == "local": continue
-                at = float((q.HARN.fetched(q.ROOT).get(pid) or {}).get("at") or 0)
-                if time.time() - at > 86400: q.HARN.refresh_models(q.ROOT, pid, q.secrets_load())
-        except Exception as e:
-            print(f"  ! model list refresh: {e}")
-        try:
-            if time.time() - float((q.USAGE.limits_meta(q.ROOT) or {}).get("at") or 0) > 86400:
-                q.USAGE.refresh_limits(q.ROOT)
-        except Exception as e:
-            print(f"  ! OpenCode Go usage limits: {e}")
+        while True:
+            try: q.HARN.models_dev(q.ROOT)          # fetches when the copy is a day old
+            except Exception as e: print(f"  ! models.dev: {e}")
+            try:
+                for pid in q.HARN.providers(q.ROOT):
+                    if pid == "local": continue
+                    at = float((q.HARN.fetched(q.ROOT).get(pid) or {}).get("at") or 0)
+                    if time.time() - at > 86400: q.HARN.refresh_models(q.ROOT, pid, q.secrets_load())
+            except Exception as e:
+                print(f"  ! model list refresh: {e}")
+            try:
+                if time.time() - float((q.USAGE.limits_meta(q.ROOT) or {}).get("at") or 0) > 86400:
+                    q.USAGE.refresh_limits(q.ROOT)
+            except Exception as e:
+                print(f"  ! OpenCode Go usage limits: {e}")
+            time.sleep(6 * 3600)
     threading.Thread(target=_refresh_lists, daemon=True).start()
     def _resume_queues():
         # messages still queued when Orbit stopped: their chats carry on

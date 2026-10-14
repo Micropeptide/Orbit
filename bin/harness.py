@@ -270,10 +270,69 @@ def save(root, cfg):
     return keep
 
 
+# ------------------------------------------------------------------ windows that keep up
+#
+# A window written into this file is right until the day a newer model comes out. The
+# Claude subscription's "opus", "sonnet" and "haiku" are aliases for the newest model of
+# each family, so their windows are read from models.dev's newest; a window an engine
+# reported while answering (Claude Code says it with every answer) is the surest of all
+# and is remembered per model; your own setting under "contexts" still wins.
+
+CLAUDE_ALIAS_FAMILY = {"opus": "claude-opus", "sonnet": "claude-sonnet", "haiku": "claude-haiku"}
+
+
+def _models_dev_cached(root):
+    """models.dev as last fetched -- never a network call (the daily refresh does those)."""
+    try: return json.load(open(os.path.join(root, "config", "models-dev.json")))
+    except (OSError, ValueError): return {}
+
+
+def claude_alias_windows(root):
+    """{alias: (window, model name)} for the newest model of each Claude family."""
+    best = {}
+    for mid, info in ((_models_dev_cached(root).get("anthropic") or {}).get("models") or {}).items():
+        if not isinstance(info, dict): continue
+        fam = info.get("family") or ""
+        ctx = int((info.get("limit") or {}).get("context") or 0)
+        for alias, f in CLAUDE_ALIAS_FAMILY.items():
+            if ctx and (fam == f or mid.startswith(f + "-")):
+                when = info.get("release_date") or ""
+                if alias not in best or when > best[alias][0]:
+                    best[alias] = (when, ctx, info.get("name") or mid)
+    return {k: (v[1], v[2]) for k, v in best.items()}
+
+
+def _learned_path(root):
+    return os.path.join(root, "config", "learned-windows.json")
+
+
+def learned_windows(root):
+    """{"provider/model": window} that the engines reported while answering."""
+    try:
+        d = json.load(open(_learned_path(root)))
+        return {k: int(v) for k, v in d.items() if isinstance(v, int) and v > 0}
+    except (OSError, ValueError):
+        return {}
+
+
+def learn_window(root, key, window):
+    """Remember the window an engine reported for a model ("claude/opus" -> 1000000)."""
+    try: w = int(window)
+    except (TypeError, ValueError): return
+    if not key or not (1000 <= w <= 20_000_000): return
+    d = learned_windows(root)
+    if d.get(key) == w: return
+    d[key] = w
+    tmp = _learned_path(root) + ".tmp"
+    with open(tmp, "w") as fh: json.dump(d, fh, indent=1)
+    os.replace(tmp, _learned_path(root))
+
+
 def providers(root, local_name=None):
     """Presets merged with the user's choices, plus custom providers."""
     cfg = load(root)
     fetched_all = fetched(root)
+    learned = learned_windows(root)
     out = {}
     for pid, p in list(PRESETS.items()) + [(k, {**v, "custom": True}) for k, v in cfg["custom"].items()]:
         p = json.loads(json.dumps(p))
@@ -304,10 +363,20 @@ def providers(root, local_name=None):
                 p["models"] = [_m(m["model"], "chat", m["context"],
                                   label=m["label"] + ("" if m["tools"] else " · no tool use"))
                                for m in b.models()]
+        aliases = claude_alias_windows(root) if pid == "claude" else {}
+        # "opus[1m]" asks Claude Code for the 1M window; when "opus" is a 1M model already it
+        # is the same thing twice in the picker
+        p["models"] = [m for m in p["models"]
+                       if not (m["id"].endswith("[1m]") and (aliases.get(m["id"][:-4]) or (0,))[0] >= 1000000)]
         for m in p["models"]:
             m.setdefault("format", "messages"); m.setdefault("context", 128000)
             m.setdefault("label", _label(m["id"]))
-            ctx = cfg["contexts"].get(f"{pid}/{m['id']}")
+            if m["id"] in aliases:                       # "opus" is today's newest Opus
+                m["context"], name = aliases[m["id"]]
+                m["label"] = f"{name} (latest)"
+            ctx = learned.get(f"{pid}/{m['id']}")         # what the engine said in use
+            if ctx: m["context"] = ctx
+            ctx = cfg["contexts"].get(f"{pid}/{m['id']}")  # and yours, above all
             if ctx: m["context"] = int(ctx)
         out[pid] = p
     return out

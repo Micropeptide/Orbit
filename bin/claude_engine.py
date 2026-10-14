@@ -1086,6 +1086,11 @@ def note_context_window(sid, ev, model_hint=None):
     if not wins: return
     w = wins.get(model_hint) if model_hint in wins else max(wins.values())
     if Q is None: return
+    # and for the model itself, so its window in the picker and in every other chat on
+    # it is the one Claude Code really has ("harness:claude/opus" -> "claude/opus")
+    if isinstance(model_hint, str) and model_hint.startswith("harness:"):
+        try: Q.HARN.learn_window(Q.ROOT, model_hint[len("harness:"):], w)
+        except Exception: pass
     if Q.SESSION_WINDOW.get(sid) != w:
         Q.SESSION_WINDOW[sid] = w
         try: set_chat_pref(sid, context_window=w)
