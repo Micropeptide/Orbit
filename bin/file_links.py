@@ -155,6 +155,14 @@ def resolve(raw, roots, changed=()):
         if st is None: continue
         return describe(c, st, info)
     info["path"] = os.path.normpath(cands[0]) if cands else text
+    # not there (yet): the nearest folder above it that is, so "show me where" still works
+    # for a file an answer is about to make. Not / -- that is nowhere in particular.
+    up = os.path.dirname(info["path"]) if os.path.isabs(info["path"]) else ""
+    while up and up != os.path.dirname(up):
+        if os.path.isdir(up):
+            info["nearest"] = up
+            break
+        up = os.path.dirname(up)
     return info
 
 

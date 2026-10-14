@@ -50,6 +50,15 @@ class TestFiles(unittest.TestCase):
         open(p, "wb").write(data)
         return p
 
+    def test_a_file_not_made_yet_points_at_the_nearest_folder_that_is_there(self):
+        """An answer says where a file will go before it makes it: the link is missing,
+        but the folder it will go in -- or the nearest one that exists -- is somewhere to go."""
+        planned = os.path.join(self.work, "flow-field", "site", "index.html")
+        info = F.resolve(planned, [self.work])
+        self.assertFalse(info["exists"])
+        self.assertEqual(info["nearest"], self.work)
+        self.assertNotIn("nearest", F.resolve(os.path.join(self.work, "report.html"), [self.work]))
+
     def test_relative_names_mean_the_chats_folder_first(self):
         roots = F.roots_for(self.work, (), None, self.other)
         f = F.resolve("`report.html`", roots)

@@ -477,6 +477,12 @@ details.think summary{font-style:normal;font-weight:500}
 .termpane.on{display:block}
 .termpane .xterm{height:100%}
 .termmsg{padding:18px;color:var(--dim);font-size:var(--fs-sm)}
+.pathbar{position:fixed;z-index:85;display:flex;align-items:center;gap:2px;padding:3px;background:var(--card);
+ border:1px solid var(--line2);border-radius:var(--r-md);box-shadow:var(--shadow-md);font-size:var(--fs-xs);animation:fadein .12s}
+.pathbar button{border:0;background:none;color:var(--fg);font:inherit;font-weight:500;padding:4px 9px;border-radius:6px;cursor:pointer;white-space:nowrap}
+.pathbar button:hover{background:var(--hover);color:var(--acc)}
+.pathbar .pbnote{color:var(--dim);padding:0 6px 0 8px}
+.pathlink.missing{text-decoration-style:dashed}
 .sheet.welcome .body{padding:30px 34px 18px}
 .welcome .wtop{text-align:center;margin-bottom:22px}
 .welcome .wtop img{border-radius:18px;box-shadow:0 10px 26px -8px rgba(44,91,240,.45)}
@@ -2020,14 +2026,21 @@ async function findNamed(e,f){
 function fileMenu(e,f){
  const path=f.path,remote=!!f.host,cat=f.category||'other';
  if(f.exists===false||(!f.kind&&document.querySelector(`.pathlink.missing[data-path="${CSS.escape(path)}"]`)))
-  return ctxMenu(e,[{icon:'🔎',label:'Find files named '+String(path).split('/').pop(),run:()=>findNamed(e,f)},
+  return ctxMenu(e,[
+   ...(f.nearest&&!remote?[{icon:'🔍',label:'Show '+tildify(f.nearest)+' in Finder',sub:'nearest folder that exists',
+      run:()=>fileAction('reveal',{path:f.nearest,kind:'folder',category:'folder',name:f.nearest.split('/').pop()})},
+     {icon:'>_',label:'Terminal in '+tildify(f.nearest),run:()=>newTerm(f.nearest)},'-']:[]),
+   {icon:'↻',label:'Check again',sub:'it may have been made since',run:()=>recheckMissing(null,true)},
+   {icon:'🔎',label:'Find files named '+String(path).split('/').pop(),run:()=>findNamed(e,f)},
    {icon:'⎘',label:'Copy path',run:()=>copy(path)},{icon:'✎',label:'Insert path in message',run:()=>insertAtCursor(path)}]);
  const items=[{icon:'↗',label:remote?'Download and open':(f.line?'Open at line '+f.line:'Open'),run:()=>fileAction('open',f)}];
  if(PREVIEWABLE.has(cat))items.push({icon:'👁',label:'Preview in Orbit',run:()=>previewFile(f)});
  if(!remote){items.push({icon:'␣',label:'Quick Look',run:()=>fileAction('quicklook',f)});
   items.push({icon:'▸',label:'Open with…',run:()=>openWithMenu(e,f)})}
  items.push({icon:'🔍',label:remote?'Download and show in Finder':'Show in Finder',run:()=>fileAction('reveal',f)});
- if(!remote&&f.kind==='folder')items.push({icon:'>_',label:'Open in Terminal',run:()=>fileAction('terminal',f)});
+ if(!remote){const dir=f.kind==='folder'?path:path.replace(/\/[^/]*$/,'')||'/';
+  items.push({icon:'▭',label:'Terminal here, in Orbit',sub:tildify(dir),run:()=>newTerm(dir)});
+  if(f.kind==='folder')items.push({icon:'>_',label:'Open in Terminal',run:()=>fileAction('terminal',f)})}
  items.push('-',{icon:'⎘',label:'Copy path',sub:remote?f.host:'',run:()=>copy(path)});
  const rel=relPath(path);if(rel!==path)items.push({icon:'⎘',label:'Copy relative path',sub:rel.length>30?'…'+rel.slice(-29):rel,run:()=>copy(rel)});
  if(remote)items.push({icon:'⎘',label:'Copy scp command',run:()=>copy(`scp ${f.host}:${shq(path)} .`)});
@@ -2250,14 +2263,37 @@ addEventListener('drop',dropLineOff);
 // where the scrollbar happens to be: an image finishing loading, a tool block opening,
 // a long message expanding and the dock appearing all fire scroll events, and reading
 // them as "the user scrolled" is what yanks you back to the bottom mid-sentence.
-let stickToBottom=true, scrollIsOurs=0;
+// Following an answer as it writes: only your own input decides it. Going up -- the
+// wheel or trackpad, a finger, the scrollbar, the keys -- stops it at once, however
+// small the move; going down by your own hand to the end starts it again. Orbit's own
+// scrolling, content growing, an image loading or a block opening never change it.
+// (It used to count the scrolls it caused and ignore that many: following an answer
+// already at the bottom fires no scroll event, so the count only grew and your scrolls
+// were taken for its own. Then "within reach of the end" counted as following, and a
+// trackpad's small steps never got out of reach before the next token pulled you back.)
+function followBox(box,reach,get,set){
+ const atEnd=()=>box.scrollHeight-box.scrollTop-box.clientHeight<reach;
+ const checkEnd=()=>setTimeout(()=>{if(atEnd())set(true)},140);
+ box.addEventListener('wheel',e=>{if(e.deltaY<0)set(false);else if(e.deltaY>0&&!get())checkEnd()},{passive:true});
+ let ty=null;
+ box.addEventListener('touchstart',e=>{ty=e.touches[0].clientY},{passive:true});
+ box.addEventListener('touchmove',e=>{const y=e.touches[0].clientY;
+  if(ty!=null){if(y>ty+3)set(false);else if(y<ty-3&&!get())checkEnd()}ty=y},{passive:true});
+ box.addEventListener('touchend',()=>{if(!get())checkEnd()},{passive:true});
+ let dragging=false,last=0;
+ box.addEventListener('pointerdown',e=>{if(e.target===box){dragging=true;last=box.scrollTop}});
+ addEventListener('pointerup',()=>{if(dragging){dragging=false;if(atEnd())set(true)}});
+ box.addEventListener('scroll',()=>{if(dragging&&box.scrollTop<last-1)set(false);last=box.scrollTop});
+ return {atEnd,checkEnd}}
+let stickToBottom=true;
 function nearBottom(){return log.scrollHeight-log.scrollTop-log.clientHeight < 120}
-log.addEventListener('scroll',()=>{
- if(scrollIsOurs>0){scrollIsOurs--;return}      // we moved it, so it says nothing
- stickToBottom=nearBottom()});
+const LOGFOLLOW=followBox(log,120,()=>stickToBottom,v=>{stickToBottom=v});
+addEventListener('keydown',e=>{
+ if(/input|textarea|select/i.test((document.activeElement||{}).tagName||'')||e.metaKey||e.ctrlKey)return;
+ if(/^(PageUp|ArrowUp|Home)$/.test(e.key))stickToBottom=false;
+ else if(/^(PageDown|ArrowDown|End)$/.test(e.key)||e.key===' ')LOGFOLLOW.checkEnd()});
 function bottom(force){            // only auto-scroll if the user is already at the end
  if(!(force||stickToBottom))return;
- scrollIsOurs++;                               // the scroll event this causes is not the user
  log.scrollTop=log.scrollHeight;
  if(force)stickToBottom=true}
 function sysline(t){const n=el(`<div class=sysline>${esc(t)}</div>`);
@@ -2339,8 +2375,7 @@ function addAssistant(who,ts){
  // otherwise every token yanked you back down mid-read.
  const thBody=th.querySelector('.body');
  thBody._stick=true;
- thBody.addEventListener('scroll',()=>{
-  thBody._stick=thBody.scrollHeight-thBody.scrollTop-thBody.clientHeight<30});
+ followBox(thBody,24,()=>thBody._stick,v=>{thBody._stick=v});
  const acts=m.querySelector('.acts');
  const c=el('<button title="copy as Markdown, with formatting, or as plain text">copy ▾</button>');c.onclick=e=>{e.stopPropagation();copyMenu(e,b)};acts.appendChild(c);
  const ck=el('<button>check DOIs</button>');
@@ -4742,6 +4777,7 @@ async function go(opts){
  if(!answer)a.bub.textContent=lost?'(the connection dropped — following the answer again)'
                               :(stoppedSid===sendSid)?'(stopped before it wrote anything)':'(no answer)';
  else {a.bub.innerHTML=md(answer);decorate(a.bub)}
+ setTimeout(()=>recheckMissing(a.m),2500);          // files it said it would make, made since
  const took=endP&&endP.secs!=null?endP.secs:(performance.now()-t0)/1000;
  answerStats(a,took,endP&&endP.usage);
  // the turn is over: its steps fold away behind one line, as they do on reopening
@@ -9300,6 +9336,50 @@ async function openWorktree(){
  act('Throw the copy away','ghost',async()=>{
   if(!confirm(`Delete the copy and branch ${wt.branch}, with everything in it? This cannot be undone.`))return;
   await wtCall({sid:forSid,op:'discard'});CHATPREFS.worktree=null;drawWtBadge();closeModal();toast('The copy is gone')}).style.color='var(--err)'}
+// ---- paths in answers: what you can do with them, in plain sight. A path was a dotted
+// underline you had to know to click (open) or right-click (everything else); hovering one
+// now shows its main actions, and one the answer had not made yet keeps checking.
+function tildify(p){const h=(FILE_CTX&&FILE_CTX.home)||'';return h&&p.startsWith(h)?'~'+p.slice(h.length):String(p).replace(/^\/Users\/[^/]+/,'~')}
+async function recheckMissing(root,loud){
+ const miss=[...(root||wrap).querySelectorAll('.pathlink.missing[data-path]')];
+ if(!miss.length){if(loud)toast('nothing missing here');return}
+ const cache=RESOLVED[sid||'']||{};miss.forEach(m=>{delete cache[m.dataset.path]});
+ const res=await resolveNames(miss.map(m=>m.dataset.path));let found=0;
+ miss.forEach(c=>{const f=res[c.dataset.path];if(!f||!f.exists)return;found++;
+  c.classList.remove('missing');c.dataset.path=f.path;if(c.tagName==='CODE')c.classList.add('pathcode');
+  c.title=`${f.path}${f.kind==='file'?' · '+fmtBytes(f.size):' · folder'}`});
+ if(loud)toast(found?`found ${found} that ${found===1?'is':'are'} there now`:'still not there')}
+let PATHBAR=null,PATHBAR_T=null;
+function hidePathBar(){clearTimeout(PATHBAR_T);if(PATHBAR){PATHBAR.remove();PATHBAR=null}}
+document.addEventListener('mouseover',e=>{
+ const p=e.target.closest&&e.target.closest('#wrap .pathlink:not(.toolopen)');
+ if(!p){if(PATHBAR&&!(e.target.closest&&e.target.closest('.pathbar'))){clearTimeout(PATHBAR_T);PATHBAR_T=setTimeout(hidePathBar,350)}return}
+ if(PATHBAR&&PATHBAR._for===p){clearTimeout(PATHBAR_T);return}
+ clearTimeout(PATHBAR_T);
+ PATHBAR_T=setTimeout(async()=>{
+  hidePathBar();
+  if(p.classList.contains('missing'))await recheckMissing(p.parentElement);   // made since?
+  const f=pathInfo(p),miss=p.classList.contains('missing'),remote=!!f.host;
+  const bar=el('<div class=pathbar role=toolbar></div>');bar._for=p;
+  const add=(label,run,title)=>{const b=el(`<button>${label}</button>`);if(title)b.title=title;
+   b.onclick=ev=>{ev.stopPropagation();hidePathBar();run(ev)};bar.appendChild(b)};
+  if(miss){
+   bar.appendChild(el('<span class=pbnote>not there yet</span>'));
+   if(f.nearest&&!remote)add('Show nearest folder',()=>fileAction('reveal',{path:f.nearest,kind:'folder',category:'folder'}),tildify(f.nearest));
+  }else{
+   add(f.kind==='folder'?'Open':'Open',()=>fileAction('open',f));
+   if(PREVIEWABLE.has(f.category||''))add('Preview',()=>previewFile(f));
+   add(remote?'Show in Finder':'Show in Finder',()=>fileAction('reveal',f));
+  }
+  add('Copy path',()=>copy(f.path));
+  add('⋯',ev=>fileMenu({clientX:ev.clientX,clientY:ev.clientY,preventDefault(){}},pathInfo(p)),'everything you can do with it');
+  document.body.appendChild(bar);PATHBAR=bar;
+  const r=p.getBoundingClientRect(),bw=bar.offsetWidth;
+  bar.style.left=Math.max(8,Math.min(innerWidth-bw-8,r.left))+'px';
+  bar.style.top=(r.top>48?r.top-bar.offsetHeight-6:r.bottom+6)+'px';
+  bar.onmouseleave=()=>{PATHBAR_T=setTimeout(hidePathBar,300)};bar.onmouseenter=()=>clearTimeout(PATHBAR_T);
+ },420)});
+document.addEventListener('scroll',hidePathBar,true);
 // ---- the terminal: a shell in this chat's folder, at the foot of the window. The shells
 // live on the Mac, not in the page: reload (or open another window) and they are still there.
 const TERMS={list:[],active:null,lib:null};
