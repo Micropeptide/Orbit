@@ -7,11 +7,23 @@ struct RootView: View {
     @State private var showSample = false
     /// The welcome tips are shown once, after this phone first pairs.
     @AppStorage("orbit.tipsShown") private var tipsShown = false
+    /// The welcome — what Orbit is, connecting it, the guide — once, the first time the app opens.
+    @AppStorage("orbit.welcomed") private var welcomed = false
     /// One object for the life of the app, so code blocks read it without redrawing.
     @State private var blockActions = BlockActions()
 
     /// Development only: `ORBIT_TAB=scheduled|files|library|settings` opens on that tab so the
     /// simulator can be screenshotted without a finger. Compiled out of release.
+    /// Development only: `ORBIT_SKIP_WELCOME=1` keeps the welcome out of the way of scripted runs;
+    /// `ORBIT_WELCOME=1` shows it again.
+    private static var skipWelcome: Bool {
+        #if DEBUG
+        return ProcessInfo.processInfo.environment["ORBIT_SKIP_WELCOME"] == "1"
+        #else
+        return false
+        #endif
+    }
+
     private static var initialTab: String {
         #if DEBUG
         return ProcessInfo.processInfo.environment["ORBIT_TAB"] ?? "chats"
@@ -66,11 +78,28 @@ struct RootView: View {
             }
         }
         }
+        .fullScreenCover(isPresented: Binding(get: { !welcomed && !Self.skipWelcome }, set: { if !$0 { welcomed = true } })) {
+            WelcomeView { welcomed = true }
+        }
         .preferredColorScheme(Appearance.scheme(theme))
+        .alert("Pair with a different Mac?", isPresented: Binding(
+            get: { state.pendingPair != nil }, set: { if !$0 { state.pendingPair = nil } })) {
+            Button("Replace pairing", role: .destructive) {
+                if let p = state.pendingPair { state.pair(from: p.url, confirmed: true) }
+            }
+            Button("Cancel", role: .cancel) { state.pendingPair = nil }
+        } message: {
+            Text("A link asked to pair this phone with \(state.pendingPair?.host ?? "another computer"). "
+                 + "Your chats, prompts and attachments would go there instead of \(state.pairing?.name ?? "your Mac"). "
+                 + "Only continue if you just showed this code on your own Mac.")
+        }
         .environment(\.blockActions, blockActions)
         .onAppear {
             blockActions.state = state
             state.tab = Self.initialTab
+            #if DEBUG
+            if ProcessInfo.processInfo.environment["ORBIT_WELCOME"] == "1" { welcomed = false }
+            #endif
             #if DEBUG
             showSample = MarkdownSample.wanted
             #endif
@@ -88,7 +117,25 @@ struct ConnectionBanner: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if state.reachable == false {
+            if state.refusedByMac {
+                HStack(spacing: 8) {
+                    Image(systemName: "lock.slash")
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("This phone is no longer paired with \(state.macDisplayName)")
+                            .font(.footnote.weight(.semibold))
+                        Text("It was revoked or unpaired on the Mac. Scan the QR in Settings → Phone there to pair again.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Pair again") { state.unpair() }
+                        .font(.caption.weight(.semibold))
+                        .buttonStyle(.bordered)
+                }
+                .padding(.horizontal, 14).padding(.vertical, 9)
+                .background(.thinMaterial)
+                .overlay(Divider(), alignment: .bottom)
+            } else if state.reachable == false {
                 HStack(spacing: 8) {
                     Image(systemName: "wifi.slash")
                     VStack(alignment: .leading, spacing: 1) {

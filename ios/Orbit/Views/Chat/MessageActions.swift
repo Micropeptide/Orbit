@@ -149,6 +149,14 @@ struct MessageActions {
             }
             .disabled(busy)
         }
+        let r = m.redoableChanges.count
+        if r > 0 {
+            Divider()
+            Button { undo(m) } label: {
+                Label("Redo \(r) file change\(r == 1 ? "" : "s")…", systemImage: "arrow.uturn.forward")
+            }
+            .disabled(busy)
+        }
     }
 }
 

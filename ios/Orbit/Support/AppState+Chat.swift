@@ -157,6 +157,18 @@ extension AppState {
         }
     }
 
+    func redoChanges(of message: Message) async -> [String]? {
+        guard let server, let sid = openChat?.sid, let t = message.t else { return nil }
+        do {
+            let r = try await server.redoChanges(sid: sid, t: t)
+            await reloadSaved(sid)
+            return r.lines
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
     func captureSkill(named name: String) async {
         guard let server, let sid = openChat?.sid else { return }
         toast("Capturing the procedure…")
@@ -233,6 +245,8 @@ extension AppState {
         if let r = try? await server.runningState() {
             noteRunningState(running: r.running, waiting: r.waiting)
             runningChats = r.running
+            if runningSince != r.since { runningSince = r.since }
+            if talking != r.talking { talking = r.talking }
             chatExtras.waiting = r.waiting
         }
     }

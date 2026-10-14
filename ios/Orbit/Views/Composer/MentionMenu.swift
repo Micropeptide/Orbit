@@ -44,7 +44,16 @@ struct MentionMenu: View {
     private var hits: [MentionFile] {
         guard let term else { return [] }
         let t = term.lowercased()
-        return Array(catalog.files.filter { t.isEmpty || $0.name.lowercased().contains(t) }.prefix(8))
+        // chats too: "@" a chat to tell this one which chat to hand work to
+        let chats = state.chats
+            .filter { $0.external != true && $0.id != state.openChat?.sid
+                && (t.isEmpty || $0.displayTitle.lowercased().contains(t)) }
+            .prefix(4)
+            .map { c in MentionFile(name: c.displayTitle,
+                                    rel: "chat “" + c.displayTitle.replacingOccurrences(of: "“", with: "")
+                                        .replacingOccurrences(of: "”", with: "") + "” (\(c.id))",
+                                    area: "chat") }
+        return Array((chats + catalog.files.filter { t.isEmpty || $0.name.lowercased().contains(t) }).prefix(8))
     }
 
     var body: some View {

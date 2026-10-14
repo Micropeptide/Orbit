@@ -144,6 +144,12 @@ extension Message {
         return changes ?? []
     }
 
+    /// Undone, and still able to be put back as the answer left them.
+    var redoableChanges: [String] {
+        guard changes_undone == true, can_redo == true, t != nil else { return [] }
+        return changes ?? []
+    }
+
     static func duration(_ s: Double) -> String {
         if s < 60 { return String(format: "%.1f s", s) }
         let m = Int(s) / 60, r = Int(s) % 60
@@ -355,6 +361,10 @@ enum SeenChats {
     }
 
     static func isUnread(_ chat: ChatSummary, seen: [String: Double]) -> Bool {
+        // The Mac knows when the last answer landed; the chat's time is only the last
+        // message you sent, so an answer that finished after you left never changed it
+        // and never showed as new.
+        if let u = chat.unread { return u }
         guard let t = seen[chat.id] else { return false }
         return chat.mtime > t + 2
     }

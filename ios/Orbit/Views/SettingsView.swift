@@ -9,6 +9,8 @@ struct SettingsView: View {
     @AppStorage("codeSize") private var codeSize = "follow"
     @AppStorage("haptics") private var haptics = true
     @AppStorage("faceID") private var faceID = false
+    @State private var search = ""
+    @State private var jump: String?
 
     private var diagnostics: String {
         let b = Bundle.main.infoDictionary
@@ -33,12 +35,16 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationStack {
+          ScrollViewReader { proxy in
             List {
-                ServerControlView()
-                HarnessSection()
-                AutonomySection()
-                BackupSection()
-                MacSettingsSection()
+              if !search.trimmingCharacters(in: .whitespaces).isEmpty {
+                SettingsSearchResults(term: search) { id in search = ""; jump = id }
+              } else {
+                ServerControlView().id("server")
+                HarnessSection().id("harness")
+                AutonomySection().id("autonomy")
+                BackupSection().id("backup")
+                MacSettingsSection().id("mac")
 
                 Section {
                     Picker("New chats use", selection: Binding(
@@ -53,6 +59,7 @@ struct SettingsView: View {
                 } footer: {
                     Text("Each chat can still pick its own from the label above the message box.")
                 }
+                .id("default")
 
                 Section {
                     LabeledContent("Mac", value: state.macDisplayName)
@@ -95,6 +102,7 @@ struct SettingsView: View {
                     Text("Diagnostics is a short text report — versions, address, model server, "
                          + "last error — with no chat content and no token.")
                 }
+                .id("connected")
 
                 Section {
                     Picker("Theme", selection: $theme) {
@@ -117,6 +125,7 @@ struct SettingsView: View {
                          + "an answer bigger otherwise reflows every diff and wraps every "
                          + "shell line.")
                 }
+                .id("appearance")
 
                 Section {
                     Toggle("Require Face ID", isOn: $faceID)
@@ -124,6 +133,7 @@ struct SettingsView: View {
                     Text("Asks for Face ID or your passcode whenever Orbit comes to the front. "
                          + "If the phone can't check, it doesn't lock.")
                 }
+                .id("faceid")
 
                 Section {
                     NavigationLink("Bin") { BinView() }
@@ -133,6 +143,7 @@ struct SettingsView: View {
                     Text("Chats and files you binned. Restore puts them back where they were; "
                          + "the Mac purges the bin on its own schedule.")
                 }
+                .id("bin")
 
                 Section {
                     LabeledContent("Chats held locally", value: "\(state.chats.count)")
@@ -146,6 +157,7 @@ struct SettingsView: View {
                     Text("Your Mac is the only place chats are stored. This app keeps a "
                          + "read-only copy so it opens to something when the Mac is asleep.")
                 }
+                .id("offline")
 
                 Section {
                     Button("Unpair this phone", role: .destructive) { confirmUnpair = true }
@@ -153,23 +165,40 @@ struct SettingsView: View {
                     Text("Removes the token from this phone's Keychain and deletes the "
                          + "offline copy. Nothing on your Mac changes.")
                 }
+                .id("unpair")
 
                 Section {
                     NavigationLink {
+                        GuideView()
+                    } label: {
+                        Label("User guide", systemImage: "book")
+                    }
+                    NavigationLink {
                         AboutView()
                     } label: {
-                        LabeledContent("About Orbit", value: "by Micropeptide")
+                        LabeledContent("About Orbit", value: "by Runtian Wu")
                     }
                     LabeledContent("Version",
                                    value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")
                 } header: {
                     Text("About")
                 } footer: {
-                    Text("Made by Micropeptide · MIT licensed")
+                    Text("Made by Runtian Wu · MIT licensed")
                 }
+                .id("about")
+              }
+            }
+            .searchable(text: $search, placement: .navigationBarDrawer(displayMode: .automatic),
+                        prompt: "Search settings")
+            .onChange(of: jump) { _, id in
+                guard let id else { return }
+                // after the full list is back on screen
+                Task { try? await Task.sleep(for: .milliseconds(250))
+                       withAnimation { proxy.scrollTo(id, anchor: .top) }; jump = nil }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
+            .debugSettingsDestination()
             .task { await state.refreshServer(); await state.refreshBackup(); await state.refreshAutonomy() }
             .refreshable {
                 await state.refreshEverything(); await state.refreshServer()
@@ -180,6 +209,7 @@ struct SettingsView: View {
                 Button("Unpair", role: .destructive) { state.unpair() }
                 Button("Cancel", role: .cancel) {}
             }
+          }
         }
     }
 }

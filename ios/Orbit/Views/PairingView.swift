@@ -21,10 +21,8 @@ struct PairingView: View {
                         scanning = true
                     } label: {
                         Label("Scan the QR code", systemImage: "qrcode.viewfinder")
-                            .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
+                    .buttonStyle(.orbitPrimary)
 
                     steps
 
@@ -67,7 +65,7 @@ struct PairingView: View {
             .sheet(isPresented: $scanning) {
                 QRScannerView { value in
                     scanning = false
-                    guard let url = URL(string: value), state.pair(from: url) else {
+                    guard let url = URL(string: value), state.pair(from: url, confirmed: true) else {
                         failed = "That QR code isn't an Orbit pairing code."
                         return
                     }
@@ -83,8 +81,8 @@ struct PairingView: View {
         VStack(spacing: 10) {
             Image("OrbitMark")
                 .resizable().scaledToFit()
-                .frame(width: 84, height: 84)
-                .shadow(color: .black.opacity(0.12), radius: 10, y: 4)
+                .frame(width: 88, height: 88)
+                .shadow(color: Color.accentColor.opacity(0.25), radius: 14, y: 6)
             Text("Your Mac holds everything")
                 .font(.title3.weight(.semibold))
             Text("Orbit keeps your chats, notes and papers on your Mac. "
@@ -101,15 +99,16 @@ struct PairingView: View {
             step(2, "Choose Tailscale (works anywhere) or Local network (same Wi-Fi), then restart.")
             step(3, "Scan the QR code it shows.")
         }
-        .padding(14)
-        .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 14))
+        .padding(16)
+        .background(OrbitTheme.surface, in: .rect(cornerRadius: 16))
+        .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(OrbitTheme.line.opacity(0.7), lineWidth: 0.75))
     }
 
     private func step(_ n: Int, _ text: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Text("\(n)").font(.caption.weight(.bold))
                 .frame(width: 20, height: 20)
-                .background(.tint, in: .circle)
+                .background(OrbitTheme.gradient, in: .circle)
                 .foregroundStyle(.white)
             Text(text).font(.footnote)
             Spacer(minLength: 0)

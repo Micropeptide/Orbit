@@ -32,13 +32,16 @@ struct AboutView: View {
 
             if let mac { onMac(mac) }
 
-            Section("Author") {
-                LabeledContent("Made by", value: "Micropeptide")
-                Link(destination: URL(string: "https://github.com/Micropeptide/Orbit")!) {
-                    LabeledContent("Source", value: "github.com/Micropeptide/Orbit")
+            Section("Made by") {
+                LabeledContent("Author", value: "Runtian Wu")
+                Link(destination: URL(string: "https://runtianwu.com")!) {
+                    LabeledContent("Website", value: "runtianwu.com")
                 }
                 Link(destination: URL(string: "https://github.com/Micropeptide")!) {
-                    LabeledContent("More", value: "github.com/Micropeptide")
+                    LabeledContent("GitHub", value: "github.com/Micropeptide")
+                }
+                Link(destination: URL(string: "https://github.com/Micropeptide/Orbit")!) {
+                    LabeledContent("Source", value: "github.com/Micropeptide/Orbit")
                 }
             }
 

@@ -28,6 +28,16 @@ final class AppState: ObservableObject {
     /// What a brand-new chat answers with, set on the Mac.
     @Published var defaultModel: String?
     @Published var runningChats: Set<String> = []
+    /// When each answering chat started, so the list can count the time as it runs.
+    @Published var runningSince: [String: Double] = [:]
+    /// Chats waiting on another chat's answer: id -> that chat's title.
+    @Published var talking: [String: String] = [:]
+    /// The open chat's goal (Goal.swift), and whether its editor is showing.
+    @Published var goal: Goal?
+    @Published var goalOffer: GoalOffer?
+    /// The Mac answered, and refused this phone's token: revoked, or unpaired there.
+    @Published var refusedByMac = false
+    @Published var showGoalEditor = false
     /// Set to push a conversation onto the stack — used by deep links today and
     /// by notification taps later.
     @Published var deepLink: String?
@@ -130,20 +140,43 @@ final class AppState: ObservableObject {
 
     // ------------------------------------------------------------ pairing
 
+    /// A pairing link that would replace the Mac this phone is paired with, waiting for
+    /// you to say yes (RootView asks).
+    @Published var pendingPair: (url: URL, host: String)?
+
     /// Accept `orbit://pair?url=…&token=…&name=…`, from a QR scan or a tapped link.
+    ///
+    /// A link that points somewhere else than the Mac already paired is held until you
+    /// confirm it: any web page could offer one, and after a single "Open in Orbit?" your
+    /// prompts and attachments went to whoever made it. `confirmed` is that yes (or the
+    /// camera, which you pointed at the code yourself).
     @discardableResult
-    func pair(from url: URL) -> Bool {
+    func pair(from url: URL, confirmed: Bool = false) -> Bool {
         guard url.scheme == "orbit", url.host == "pair",
               let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems
         else { return false }
         let map = Dictionary(items.compactMap { i in i.value.map { (i.name, $0) } },
                              uniquingKeysWith: { a, _ in a })
-        guard let base = map["url"], let token = map["token"], !base.isEmpty, !token.isEmpty
-        else { return false }
+        guard let base = map["url"], !base.isEmpty else { return false }
+        let clean = base.hasSuffix("/") ? String(base.dropLast()) : base
         let alts = (map["alts"] ?? "").split(separator: ",").map(String.init)
             .map { $0.hasSuffix("/") ? String($0.dropLast()) : $0 }
             .filter { !$0.isEmpty }
-        pairing = Pairing(url: base.hasSuffix("/") ? String(base.dropLast()) : base,
+        // A Mac that gives each device its own token puts a one-time code in the QR;
+        // the phone trades it for its token (Links.swift). An older Mac sends the token.
+        let token = map["token"] ?? ""
+        let code = map["code"] ?? ""
+        guard !token.isEmpty || !code.isEmpty else { return false }
+        if !confirmed, let cur = pairing, cur.url != clean || (!token.isEmpty && cur.token != token) {
+            pendingPair = (url, URL(string: clean)?.host ?? clean)
+            return false
+        }
+        pendingPair = nil
+        if token.isEmpty {
+            Task { await claimPairing(url: clean, alts: alts, code: code, name: map["name"] ?? "Mac") }
+            return true
+        }
+        pairing = Pairing(url: clean,
                           token: token, name: map["name"] ?? "Mac",
                           alts: alts.isEmpty ? nil : alts)
         Task { await refreshEverything() }
@@ -208,9 +241,18 @@ final class AppState: ObservableObject {
             _ = try await server.health()
             latencyMS = Int(Date().timeIntervalSince(t0) * 1000)
             reachable = true
+            refusedByMac = false
             lastError = nil
             await learnAlternates()
         } catch {
+            // It answered, and said no: not a network problem, and no other address
+            // will answer differently. Say so, rather than "can't reach".
+            if case OrbitServer.Failure.unauthorised = error {
+                refusedByMac = true
+                reachable = false
+                lastError = error.localizedDescription
+                return
+            }
             // The address in the QR is not always the one that works from here
             // (no MagicDNS on this phone, a new DHCP lease). Try the others the
             // Mac listed and keep whichever answers.
@@ -359,6 +401,8 @@ final class AppState: ObservableObject {
             chatExtras.planMode = false
             chatExtras.prefs = [:]
             chatExtras.easyMode = false
+            goal = nil
+            goalOffer = nil
         }
         markSeen(id)
         // show the cached copy immediately; the network fills it in
@@ -376,6 +420,8 @@ final class AppState: ObservableObject {
             chatExtras.planMode = d.plan_mode ?? false
             chatExtras.prefs = d.prefs ?? [:]
             chatExtras.easyMode = d.easy_mode ?? false
+            goal = d.goal
+            goalOffer = d.goal_offer
             var fresh = d.messages
             // Mid-answer the Mac may not have written the question yet (it starts
             // the model server first). Keep the one we showed rather than losing it.
@@ -443,7 +489,7 @@ final class AppState: ObservableObject {
 
     // ------------------------------------------------------------ sending
 
-    func send(_ text: String, effort: String? = nil) async {
+    func send(_ text: String, effort: String? = nil, goal asGoal: Bool = false) async {
         guard let server, let sid = openChat?.sid,
               !(text.isEmpty && attachments.isEmpty) else { return }
         let going = attachments
@@ -452,6 +498,7 @@ final class AppState: ObservableObject {
             : ([text] + going.map { "📎 \($0.name)" })
                 .filter { !$0.isEmpty }.joined(separator: "\n")
         messages.append(Message(role: "user", text: label))
+        goalOffer = nil                          // you moved on: the Mac withdraws it too
         // each new request starts a fresh plan on the Mac; "continue" carries the old one on
         if !text.lowercased().hasPrefix("continue") { plans[sid] = nil }
         beginLive(for: sid)
@@ -461,7 +508,7 @@ final class AppState: ObservableObject {
             do {
                 for try await ev in await server.send(sid: sid, message: text,
                                                       attachments: going.map(\.payload),
-                                                      effort: effort) {
+                                                      effort: effort, goal: asGoal) {
                     if Task.isCancelled { break }
                     // a chat you have since left keeps generating on the Mac;
                     // its tokens must not land in the one you are looking at
@@ -484,6 +531,8 @@ final class AppState: ObservableObject {
             else if liveSid == sid {
                 let failed = lastError != nil
                 finishLive(sid: sid)
+                if asGoal { await refreshGoal(sid) }
+                followGoal(sid)
                 // whether the Mac kept the message is its call; ask rather than guess
                 if failed { await open(sid) }
             }
@@ -650,6 +699,8 @@ final class AppState: ObservableObject {
         case .error(let e):    lastError = e
         case .extra(let e):    applyExtra(e)
         case .end(_, let title):
+            // it finished in front of you: not new, here or on the Mac
+            if !backgrounded, let s = liveSid, openChat?.sid == s { seenOnMac(s) }
             if let title, var c = openChat {
                 c.title = title
                 openChat = c
@@ -685,8 +736,9 @@ final class AppState: ObservableObject {
         // the chat that asked, which is not always the chat you have open
         let name = (openChat?.sid == sid ? openChat?.title : nil)
             ?? chats.first { $0.id == sid }?.title ?? "Orbit"
-        c.title = name + " needs your approval"
-        c.body = String((a.reason.isEmpty ? a.name : a.reason).prefix(240))
+        c.title = Self.lockScreen(name, otherwise: "Orbit") + " needs your approval"
+        c.body = Self.lockScreen(String((a.reason.isEmpty ? a.name : a.reason).prefix(240)),
+                                 otherwise: "Unlock to see what it wants to do.")
         c.sound = .default
         c.categoryIdentifier = Notifications.approvalCategory
         c.userInfo = ["sid": sid, "approvalID": a.id]
@@ -725,13 +777,23 @@ final class AppState: ObservableObject {
         n.removePendingNotificationRequests(withIdentifiers: ["approval-" + id])
     }
 
+    /// What a notification may say on the Lock Screen. With the Face ID lock on, the
+    /// app hides your chats behind it -- and its notifications printed up to 240
+    /// characters of the answer or the command for anyone holding the phone.
+    static func lockScreen(_ text: String, otherwise: String = "Open Orbit to read it.") -> String {
+        UserDefaults.standard.bool(forKey: "faceID") ? otherwise : text
+    }
+
     func notifyIfBackgrounded(title: String, body: String, sid: String? = nil) {
         guard backgrounded else { return }
         let c = UNMutableNotificationContent()
         c.title = title
-        c.body = String(body.prefix(240))
+        c.body = Self.lockScreen(String(body.prefix(240)))
         c.sound = .default
-        if let sid { c.userInfo = ["sid": sid] }     // tapping it opens that chat
+        if let sid {
+            c.userInfo = ["sid": sid]                // tapping it opens that chat,
+            c.categoryIdentifier = Notifications.answerCategory   // and Reply answers it
+        }
         UNUserNotificationCenter.current().add(
             UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil))
     }

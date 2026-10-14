@@ -187,9 +187,12 @@ extension AppState {
     func alert(for ev: StreamEvent) {
         guard let sid = liveSid else { return }
         switch ev {
-        case .approvalPrompt(let a): raise("Needs your approval", body: a.name + (a.reason.isEmpty ? "" : " — " + a.reason), sid: sid)
+        // the notification with Allow and Deny on it is posted by notifyApproval; this one,
+        // without them, stayed behind after the approval was answered and kept the badge up
+        case .approvalPrompt(let a): raise("Needs your approval", body: a.name + (a.reason.isEmpty ? "" : " — " + a.reason), sid: sid, post: false)
         case .approval(let n, let r, _): raise("Needs your approval", body: n + (r.isEmpty ? "" : " — " + r), sid: sid)
-        case .question(let q): raise("Orbit has a question", body: q.question, sid: sid)
+        case .question(let q): raise("Orbit has a question", body: q.question, sid: sid,
+                                     category: Notifications.questionCategory, info: ["questionID": q.id])
         case .error(let e): raise("Error", body: e, sid: sid)
         case .notice(let n) where n.lowercased().contains("limit") && n.lowercased().contains("usage")
             || n.lowercased().contains("plan limit"):
@@ -202,17 +205,21 @@ extension AppState {
     /// background, a toast when you are in another chat, nothing when you are
     /// looking at it. Only news you did not see counts toward the badge: while
     /// the app is away, or in a chat that is not on screen.
-    func raise(_ kind: String, body: String, sid: String) {
+    func raise(_ kind: String, body: String, sid: String, post: Bool = true,
+               category: String? = nil, info: [String: String] = [:]) {
         let looking = !backgrounded && openChat?.sid == sid
         guard !looking else { return }
         composerExtras.unseen[sid, default: 0] += 1
         let title = chats.first { $0.id == sid }?.displayTitle
-        if backgrounded {
+        if backgrounded, !post {
+            // counted, and announced elsewhere
+        } else if backgrounded {
             let c = UNMutableNotificationContent()
-            c.title = kind + (title.map { " — " + $0 } ?? "")
-            c.body = String(body.prefix(240))
+            c.title = kind + (title.map { AppState.lockScreen(" — " + $0, otherwise: "") } ?? "")
+            c.body = AppState.lockScreen(String(body.prefix(240)))
             if UserDefaults.standard.object(forKey: "orbit.sound") as? Bool ?? true { c.sound = .default }
-            c.userInfo = ["sid": sid]
+            c.userInfo = info.merging(["sid": sid]) { a, _ in a }
+            if let category { c.categoryIdentifier = category }
             c.threadIdentifier = "orbit-" + sid
             UNUserNotificationCenter.current().add(
                 UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil))
@@ -222,11 +229,19 @@ extension AppState {
         syncBadge()
     }
 
-    /// Opening a chat is looking at its news.
+    /// Opening a chat is looking at its news -- here and, through the Mac, everywhere.
     func markSeen(_ sid: String) {
+        seenOnMac(sid)
         guard composerExtras.unseen[sid] != nil else { return }
         composerExtras.unseen[sid] = nil
         syncBadge()
+    }
+
+    /// Tell the Mac this chat has been looked at, and drop its "new" mark at once.
+    func seenOnMac(_ sid: String) {
+        if let i = chats.firstIndex(where: { $0.id == sid }), chats[i].unread == true { chats[i].unread = false }
+        guard let server else { return }
+        Task { try? await server.markSeen(sid) }
     }
 
     /// Coming back to the app with a chat on screen is looking at its news: what
@@ -234,7 +249,8 @@ extension AppState {
     /// Called when the app becomes active.
     func markOpenChatSeen() {
         guard let sid = openChat?.sid else { syncBadge(); return }
-        if composerExtras.unseen[sid] != nil { markSeen(sid) } else { syncBadge() }
+        markSeen(sid)
+        syncBadge()
     }
 
     /// A chat that is gone has no news left to see: its count leaves the badge.

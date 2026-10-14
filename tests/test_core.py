@@ -70,6 +70,24 @@ class TestSecretsWithSpaces(Sandbox):
             q.SECRETS = saved
 
 
+class TestStableChatOrder(Sandbox):
+    def test_a_chat_moves_when_you_send_not_when_it_saves(self):
+        """REGRESSION: chats were ordered by their last save, and an answer saves every
+        few seconds, so the list reshuffled while chats answered."""
+        now = time.time()
+        q.session_save("a", [{"role": "user", "content": "x", "t": now - 300}], "A")
+        q.session_save("b", [{"role": "user", "content": "y", "t": now - 100}], "B")
+        self.assertEqual([r["id"] for r in q.session_list()], ["b", "a"])
+        time.sleep(0.02)
+        q.session_save("a", [{"role": "user", "content": "x", "t": now - 300},
+                             {"role": "assistant", "content": "still answering"}], "A")    # a save mid-answer
+        self.assertEqual([r["id"] for r in q.session_list()], ["b", "a"])
+        q.session_save("a", [{"role": "user", "content": "x", "t": now - 300},
+                             {"role": "assistant", "content": "done"},
+                             {"role": "user", "content": "next", "t": now}], "A")         # you send again
+        self.assertEqual([r["id"] for r in q.session_list()], ["a", "b"])
+
+
 class TestSessionCache(Sandbox):
     def test_edit_invalidates_cache(self):
         """REGRESSION: pin/tag edits were served stale — a directory's mtime does
@@ -158,17 +176,17 @@ class TestKnowledge(Sandbox):
 
     def test_underscore_files_are_skipped(self):
         """REGRESSION: an injection-test doc named _x.md was silently not indexed."""
-        self._doc("real.md", "the citric acid cycle runs in the matrix")
+        self._doc("real.md", "DRM2 catalyses de novo methylation")
         self._doc("_index_like.md", "should be ignored")
         names = [d["name"] for d in q.know_docs()]
         self.assertIn("real.md", names)
         self.assertNotIn("_index_like.md", names)
 
     def test_bm25_ranks_relevant_doc_first(self):
-        self._doc("meth.md", "mitochondria generate ATP by oxidative phosphorylation")
+        self._doc("meth.md", "DRM2 catalyses de novo cytosine methylation in RdDM")
         self._doc("other.md", "Restriction enzymes and Golden Gate cloning")
         q.know_reindex()
-        hits = q.know_search("oxidative phosphorylation ATP", 2)
+        hits = q.know_search("de novo methylation DRM2", 2)
         self.assertEqual(hits[0]["doc"], "meth.md")
 
     def test_precomputed_tf_present(self):
@@ -177,8 +195,8 @@ class TestKnowledge(Sandbox):
         self.assertIn("tf", q.know_index_load()["chunks"][0])
 
     def test_project_scoping(self):
-        self._doc("p1.md", "comparative phylogenomics of kinase domains")
-        self._doc("p2.md", "ribosome assembly pathway")
+        self._doc("p1.md", "phylogenomics of DUF724 domains")
+        self._doc("p2.md", "RdDM small RNA pathway")
         q.know_reindex()
         q.know_set_project("p1.md", "projA")
         q.know_set_project("p2.md", "projB")
@@ -469,7 +487,6 @@ class TestUIState(unittest.TestCase):
 
 
 
-
 class TestPrivacyAndSwitching(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -533,7 +550,7 @@ class TestSafetyHardening(unittest.TestCase):
 
     def test_machine_level_changes_need_approval(self):
         for cmd in ("sudo systemsetup -x", "shutdown -h now",
-                    "launchctl bootout gui/501/com.example.agent",
+                    "launchctl bootout gui/501/com.example.orbit-ui",
                     "security find-generic-password -s github",
                     "git filter-branch --all", "npm publish"):
             level, _ = q.risk_check("run_shell", {"command": cmd})
@@ -867,7 +884,7 @@ class TestGuardianBorrowings(unittest.TestCase):
     def test_agent_memory_search_is_read_only_and_cites_sources(self):
         if not os.path.isfile(q.AGENT_MEMORY_SEARCH):
             self.skipTest("the other agents are not on this machine")
-        out = q.dispatch("search_agent_memory", {"query": "protein", "limit": 2})
+        out = q.dispatch("search_agent_memory", {"query": "RdDM", "limit": 2})
         self.assertNotIn("Error:", out[:20])
         self.assertTrue("KNOWLEDGE.md" in out or "No other agent" in out)
 
@@ -939,8 +956,7 @@ class TestProtectedPathNesting(unittest.TestCase):
             self.assertEqual(lvl, "block", cmd)
 
     def test_broad_containers_only_block_the_bare_root(self):
-        lvl, _ = q.risk_check("run_shell",
-                              {"command": "rm -rf " + os.path.expanduser("~")})
+        lvl, _ = q.risk_check("run_shell", {"command": "rm -rf " + os.path.expanduser("~")})
         self.assertEqual(lvl, "block")
         lvl, _ = q.risk_check("run_shell",
                               {"command": f"rm -rf {q.WORKSPACE}/scratch"})
@@ -948,8 +964,7 @@ class TestProtectedPathNesting(unittest.TestCase):
 
     def test_broad_container_nested_paths_are_not_hard_blocked(self):
         # a lot of legitimate work (including Orbit's own workspace) lives
-        # nested under the home directory -- only the bare root itself is a
-        # hard block
+        # nested under /Users -- only the bare root itself is a hard block
         lvl, _ = q.risk_check("run_shell",
             {"command": "rm -rf " + os.path.join(os.path.expanduser("~"), "some", "nested", "path")})
         self.assertEqual(lvl, "confirm")
@@ -1159,7 +1174,7 @@ class TestLongAnswers(unittest.TestCase):
         q.TURN_CTX.model = None
         q.TURN_CTX.pin_model = "local:test-local-model"      # the local model, whatever your default is
         self.tmp = tempfile.mkdtemp(prefix="qqtest-long-")
-        names = ("stream_call", "probe", "ensure_model", "model_is_local", "notify", "S",
+        names = ("stream_call", "probe", "ensure_model", "restart_server", "model_is_local", "notify", "S",
                  "MODEL", "local_model_name", "tool_schema_tokens", "server_status",
                  "TOOL_LOG", "TOOL_OUT", "LEDGER")
         self._saved = {k: getattr(q, k) for k in names}
@@ -1170,6 +1185,7 @@ class TestLongAnswers(unittest.TestCase):
         q.MODEL = "fake-model"
         q.probe = lambda *a, **k: "fake-model"
         q.ensure_model = lambda *a, **k: "fake-model"
+        q.restart_server = lambda *a, **k: "fake-model"
         q.model_is_local = lambda *a, **k: True
         q.local_model_name = lambda *a, **k: "fake-model"
         q.tool_schema_tokens = lambda *a, **k: 0
@@ -1487,13 +1503,13 @@ class TestAutoMemory(unittest.TestCase):
         open(os.path.join(self.tmp, "platform-ports.md"), "w").write("the original note\n")
         q.suggest_memories = lambda msgs, max_items=3: [
             {"name": "platform-ports", "content": "a different claim"},
-            {"name": "Sensor Offset", "content": "offset near 1.3 C fits the lab thermometer"}]
+            {"name": "Weather Sigma", "content": "sigma near 1.3 F fits NWS vs Kalshi"}]
         self.assertEqual(q.auto_memory([{"role": "system", "content": "s"}], "Market run"),
-                         ["sensor-offset"])
+                         ["weather-sigma"])
         self.assertEqual(open(os.path.join(self.tmp, "platform-ports.md")).read(),
                          "the original note\n")
-        new = open(os.path.join(self.tmp, "sensor-offset.md")).read()
-        self.assertIn("offset near 1.3", new)
+        new = open(os.path.join(self.tmp, "weather-sigma.md")).read()
+        self.assertIn("sigma near 1.3", new)
         self.assertIn("saved automatically from “Market run”", new)
 
     def test_it_can_be_switched_off(self):
@@ -1661,7 +1677,6 @@ class TestFallback(TestLongAnswers):
         self.assertEqual([m["content"] for m in msgs if m["role"] == "user"], ["hello"])     # not twice
         self.assertIn("fallback", self.kinds())
         self.assertNotIn("error", self.kinds())                                        # the failed attempt's error is not shown
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
@@ -1869,6 +1884,67 @@ class TestRound1(TestLongAnswers):
         self.assertIn("retry", self.kinds())
         self.assertTrue(any(m.get("compacted") for m in msgs))
         self.assertEqual(q.S["autocompact_pct"], 80, "limit restored")
+
+    def test_empty_model_stream_is_retried_and_recovers(self):
+        """REGRESSION: MTPLX sometimes ended a stream with no answer at all.
+        Orbit treated that as task completion and abandoned an open plan."""
+        calls, restarts = {"n": 0}, []
+        def fake(messages, tools, **kw):
+            # Recovery compaction may make a separate no-tools summary request.
+            if tools is None:
+                return {"role": "assistant", "content": "RECOVERY SUMMARY"}
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                return {"role": "assistant", "content": "",
+                        "_usage": {"prompt_tokens": 0, "completion_tokens": 0}}
+            return {"role": "assistant", "content": "finished after recovery"}
+        q.stream_call = fake
+        q.restart_server = lambda *a, **k: restarts.append(1) or "fake-model"
+        msgs = self.chat({"role": "user", "content": "older"},
+                         {"role": "assistant", "content": "older answer"})
+        out = q.turn(msgs, "do the task", [], emit=self.emit)
+        self.assertEqual(out, "finished after recovery")
+        self.assertEqual(calls["n"], 3)
+        self.assertEqual(restarts, [1])
+        self.assertIn("model_silent", self.kinds())
+        self.assertIn("model_recovering", self.kinds())
+
+    def test_persistent_empty_stream_reports_saved_resume_point(self):
+        q.stream_call = lambda messages, tools, **kw: {
+            "role": "assistant", "content": "" if tools is not None else "RECOVERY SUMMARY"}
+        msgs, saved = self.chat(), []
+        out = q.turn(msgs, "do the task", [], emit=self.emit,
+                     checkpoint=lambda: saved.append(len(msgs)))
+        self.assertIn("retried", out)
+        self.assertIn("saved", out)
+        self.assertEqual(msgs[-1]["content"], out)
+        self.assertEqual(saved, [len(msgs)])
+        self.assertIn(out, [p for k, p in self.events if k == "content_delta"])
+
+    def test_empty_stream_retries_do_not_consume_the_round_limit(self):
+        replies = iter(({"role": "assistant", "content": ""},
+                        {"role": "assistant", "content": ""},
+                        {"role": "assistant", "content": "recovered"}))
+        q.stream_call = lambda messages, tools, **kw: (
+            {"role": "assistant", "content": "RECOVERY SUMMARY"}
+            if tools is None else next(replies))
+        q.S["max_tool_rounds"] = 1
+        out = q.turn(self.chat({"role": "user", "content": "old"},
+                               {"role": "assistant", "content": "old answer"}),
+                     "do it", [], emit=self.emit)
+        self.assertEqual(out, "recovered")
+        self.assertNotIn("round_limit", self.kinds())
+
+    def test_stop_during_empty_stream_skips_model_restart(self):
+        stop, restarts = threading.Event(), []
+        def fake(messages, tools, **kw):
+            stop.set()
+            return {"role": "assistant", "content": ""}
+        q.stream_call = fake
+        q.restart_server = lambda *a, **k: restarts.append(1)
+        out = q.turn(self.chat(), "do it", [], emit=self.emit, cancel=stop)
+        self.assertEqual(out, "(stopped by user)")
+        self.assertEqual(restarts, [])
 
     # --- wrap-up when a limit is hit
     def test_a_new_daily_job_waits_for_its_next_time(self):
@@ -2459,6 +2535,16 @@ class TestRound1Server(Sandbox):
         cls.ui = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.ui)
 
+    def test_expected_client_disconnect_does_not_fill_the_ui_log(self):
+        import contextlib, io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            try:
+                raise ConnectionResetError("browser closed keep-alive socket")
+            except ConnectionResetError:
+                self.ui.Srv.handle_error(None, None, ("127.0.0.1", 1234))
+        self.assertEqual(err.getvalue(), "")
+
     def test_a_chats_project_follows_its_state_both_ways(self):
         """A chat loaded from disk keeps its project on the next save, and taking
         it out of the project sticks too (it used to be copied back from disk)."""
@@ -2520,6 +2606,14 @@ class TestRound1Server(Sandbox):
         m = self.ui._job_minutes({"prompt": "x", "stop_at": time.strftime("%H:%M", time.localtime(time.time() + 3600))})
         self.assertTrue(58 <= m <= 61, m)
         self.assertIn("You have until", self.ui._job_prompt({"prompt": "x", "stop_at": "06:00"}))
+
+    def test_a_job_with_a_far_stop_time_gets_its_whole_budget(self):
+        # the overnight run ends early only if its budget is short; a 02:00 start
+        # with stop_at 06:00 must get ~240 minutes, not the ~26 it actually used
+        stop = time.strftime("%H:%M", time.localtime(time.time() + 4 * 3600))
+        m = self.ui._job_minutes({"prompt": "x", "stop_at": stop})
+        self.assertIsNotNone(m)
+        self.assertGreaterEqual(m, 200, m)
 
     def test_a_tool_step_with_no_text_keeps_its_tool_rows(self):
         msgs = [{"role": "user", "content": "go"},

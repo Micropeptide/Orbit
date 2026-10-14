@@ -133,7 +133,7 @@ struct RunningNowSection: View {
                         .background(tint(t).opacity(0.15), in: .capsule)
                         .foregroundStyle(tint(t))
                     if t.kind == .answer, !model.stopped.contains(t.id) {
-                        ProgressView().controlSize(.mini)
+                        OrbitSpinner(size: 11)
                     }
                 }
                 Text(t.title.isEmpty ? t.rawID : t.title)

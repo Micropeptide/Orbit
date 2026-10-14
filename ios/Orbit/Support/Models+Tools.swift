@@ -175,6 +175,7 @@ enum ToolText {
     /// the name Claude Code gives it.
     static let names: [String: String] = [
         "read_file": "Read", "Read": "Read", "NotebookRead": "Read", "read_chat": "Read chat",
+        "chat_create": "New chat", "chat_send": "Message chat", "chat_wait": "Wait for chat", "chat_list": "List chats",
         "write_file": "Write", "Write": "Write", "edit_file": "Update", "Edit": "Update", "MultiEdit": "Update",
         "multi_edit": "Update", "NotebookEdit": "Edit notebook", "apply_patch": "Update",
         "run_shell": "Bash", "Bash": "Bash", "shell": "Bash", "BashOutput": "Bash output", "KillShell": "Kill shell",
@@ -194,7 +195,8 @@ enum ToolText {
         "Bash": "Running", "Python": "Running", "Search": "Searching", "Search chats": "Searching",
         "Search memory": "Searching", "Web Search": "Searching", "List": "Listing", "Fetch": "Fetching",
         "Fetch paper": "Fetching", "Agent": "Running task", "Cluster": "Running", "Plan": "Planning",
-        "Todos": "Updating todos",
+        "Todos": "Updating todos", "New chat": "Starting a chat", "Message chat": "Messaging a chat",
+        "Wait for chat": "Waiting for a chat", "List chats": "Listing chats",
     ]
     /// Calls that only look things up: several in a row fold into one line.
     static let family: [String: String] = [
@@ -210,7 +212,8 @@ enum ToolText {
         let n = n.isEmpty ? "tool" : n
         if let d = names[n] { return d }
         if n.hasPrefix("mcp__") {
-            return (n.components(separatedBy: "__").last ?? n).replacingOccurrences(of: "_", with: " ")
+            let last = n.components(separatedBy: "__").last ?? n
+            return names[last] ?? last.replacingOccurrences(of: "_", with: " ")
         }
         if n.contains(".") { return (n.split(separator: ".").last.map(String.init) ?? n).replacingOccurrences(of: "_", with: " ") }
         return n.replacingOccurrences(of: "_", with: " ")

@@ -36,12 +36,24 @@ struct MessageBubble: View {
                         .clipShape(.rect(cornerRadius: 13))
                 }
             }
+            // sent by another chat: which, and a way over to it
+            if let from = message.from_chat, let fsid = from["sid"], let url = URL(string: "orbit://chat/" + fsid) {
+                Link(destination: url) {
+                    Label("from " + (from["title"] ?? "another chat"), systemImage: "arrowshape.turn.up.right")
+                        .font(.caption2.weight(.semibold))
+                }
+            }
             HStack {
                 Spacer(minLength: 40)
                 Text(message.text)
                     .textSelection(.enabled)
                     .padding(.horizontal, 14).padding(.vertical, 10)
-                    .background(.tint.opacity(0.14), in: .rect(cornerRadius: 17))
+                    // your own words: on a cobalt-tinted card, its corner pointing at you
+                    .background(Color.accentColor.opacity(0.09), in: UnevenRoundedRectangle(
+                        topLeadingRadius: 18, bottomLeadingRadius: 18, bottomTrailingRadius: 6, topTrailingRadius: 18))
+                    .overlay(UnevenRoundedRectangle(topLeadingRadius: 18, bottomLeadingRadius: 18,
+                                                    bottomTrailingRadius: 6, topTrailingRadius: 18)
+                        .strokeBorder(Color.accentColor.opacity(0.16), lineWidth: 0.75))
                     .contextMenu {
                         Button {
                             UIPasteboard.general.string = message.text
@@ -68,7 +80,7 @@ struct MessageBubble: View {
         } else {
             VStack(alignment: .leading, spacing: 7) {
                 if showByline, let model = message.model, !model.isEmpty {
-                    Text(model).font(.caption2.smallCaps()).foregroundStyle(.secondary)
+                    Text(model).font(.caption2.weight(.medium)).foregroundStyle(.secondary)
                 }
                 // a step reads in the order it happened: what it said, then the tools it called
                 if !message.text.isEmpty { MarkdownText(message.text) }

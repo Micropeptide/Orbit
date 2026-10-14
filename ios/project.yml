@@ -23,6 +23,12 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         ENABLE_USER_SCRIPT_SANDBOXING: NO
+    # Settings search's list of pages and the words on them, read from the settings
+    # screens on every build, so a new setting is findable without anyone listing it.
+    preBuildScripts:
+      - name: Settings search index
+        script: /usr/bin/python3 "$SRCROOT/scripts/gen-settings-index"
+        basedOnDependencyAnalysis: false
     # Everything below goes into Info.plist itself. INFOPLIST_KEY_* build
     # settings are ignored when a plist file is supplied, which once shipped a
     # build with no launch screen (letterboxed on modern phones) and no camera
@@ -50,7 +56,6 @@ targets:
         CFBundleURLTypes:
           - CFBundleURLName: uk.runtian.orbit.pair
             CFBundleURLSchemes: [orbit]
-        UIBackgroundModes: [processing]
         # Plain HTTP to your own Mac. On a LAN that is your network; over
         # Tailscale it travels inside WireGuard. ATS would otherwise refuse the
         # tailnet address (only .local and private ranges count as "local").

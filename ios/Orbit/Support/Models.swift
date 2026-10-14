@@ -32,6 +32,13 @@ struct ChatSummary: Identifiable, Codable, Hashable {
     var cwd: String?
     var host: String?
     var model: String?
+    /// An answer has landed since the chat was last looked at, on any device. The Mac
+    /// keeps this; nil from an older Mac, which the phone then guesses at itself.
+    var unread: Bool?
+    /// The status of its goal, if it has one ("active", "paused", "blocked", …).
+    var goal: String?
+    /// The chat that started this one (chat_create), by id and title.
+    var parent: [String: String]?
 
     var displayTitle: String { (title?.isEmpty == false ? title! : "New chat") }
     var date: Date { Date(timeIntervalSince1970: mtime) }
@@ -39,7 +46,7 @@ struct ChatSummary: Identifiable, Codable, Hashable {
     enum CodingKeys: String, CodingKey {
         case id, title, n, mtime, pinned, archived, project, tags
         case queued, scheduled
-        case external, source, cwd, host, model
+        case external, source, cwd, host, model, unread, goal, parent
     }
 
     init(from d: Decoder) throws {
@@ -59,6 +66,9 @@ struct ChatSummary: Identifiable, Codable, Hashable {
         cwd = try? c.decode(String.self, forKey: .cwd)
         host = (try? c.decode(String.self, forKey: .host)).flatMap { $0.isEmpty ? nil : $0 }
         model = try? c.decode(String.self, forKey: .model)
+        unread = c.lenientBool(.unread)
+        goal = c.lenientString(.goal)
+        parent = try? c.decode([String: String].self, forKey: .parent)
     }
 }
 
@@ -81,6 +91,8 @@ struct Message: Identifiable, Codable, Hashable {
     var thinking: String?
     /// A note sent while an answer was running, which it read at its next step.
     var note: Bool? = nil
+    /// Sent by another chat (chat_send): which one, by id and title.
+    var from_chat: [String: String]? = nil
     // saved with an answer: when it was written, how long it took, its tokens,
     // and the files it changed (undoable until undone)
     var t: Double? = nil
@@ -88,6 +100,8 @@ struct Message: Identifiable, Codable, Hashable {
     var usage: TokenUsage? = nil
     var changes: [String]? = nil
     var changes_undone: Bool? = nil
+    /// After an undo, whether redo can put the answer's files back.
+    var can_redo: Bool? = nil
     /// Each tool call this step made, with what came back.
     var tool_runs: [ToolRun]? = nil
     /// A command you ran with `!`, saved as your message.
@@ -102,8 +116,8 @@ struct Message: Identifiable, Codable, Hashable {
     var isUser: Bool { role == "user" }
 
     enum CodingKeys: String, CodingKey {
-        case role, text, images, plots, tools, model, thinking, note
-        case t, secs, usage, changes, changes_undone
+        case role, text, images, plots, tools, model, thinking, note, from_chat
+        case t, secs, usage, changes, changes_undone, can_redo
         case tool_runs, bang, plan, thinking_marks
     }
 
@@ -124,11 +138,13 @@ struct Message: Identifiable, Codable, Hashable {
         model = try? c.decode(String.self, forKey: .model)
         thinking = try? c.decode(String.self, forKey: .thinking)
         note = try? c.decode(Bool.self, forKey: .note)
+        from_chat = try? c.decode([String: String].self, forKey: .from_chat)
         t = c.lenientDouble(.t)
         secs = c.lenientDouble(.secs)
         usage = try? c.decode(TokenUsage.self, forKey: .usage)
         changes = (try? c.decode([String?].self, forKey: .changes))?.compactMap { $0 }
         changes_undone = c.lenientBool(.changes_undone)
+        can_redo = c.lenientBool(.can_redo)
         tool_runs = try? c.decode([ToolRun].self, forKey: .tool_runs)
         bang = try? c.decode(BangRun.self, forKey: .bang)
         plan = try? c.decode(String.self, forKey: .plan)
@@ -159,9 +175,15 @@ struct ChatDetail: Codable {
     /// Easy mode as it applies to this chat — the chat's own if it set one, and
     /// otherwise Orbit's, resolved on the Mac so the phone need not hold both.
     var easy_mode: Bool?
+    /// What this chat keeps working toward, if anything (Goal.swift).
+    var goal: Goal?
+    /// An open offer to keep going until the work is done.
+    var goal_offer: GoalOffer?
+    /// The chat that started this one (chat_create), by id and title.
+    var parent: [String: String]?
 
     enum CodingKeys: String, CodingKey {
-        case sid, title, messages, n, running, context, plan_mode, prefs, easy_mode
+        case sid, title, messages, n, running, context, plan_mode, prefs, easy_mode, goal, goal_offer, parent
     }
 
     init(sid: String, title: String? = nil, messages: [Message] = []) {
@@ -186,6 +208,9 @@ struct ChatDetail: Codable {
         plan_mode = c.lenient(Bool.self, .plan_mode)
         prefs = c.lenient([String: JSONValue].self, .prefs)
         easy_mode = c.lenient(Bool.self, .easy_mode)
+        goal = c.lenient(Goal.self, .goal)
+        goal_offer = c.lenient(GoalOffer.self, .goal_offer)
+        parent = try? c.decode([String: String].self, forKey: .parent)
     }
 }
 
@@ -549,11 +574,14 @@ struct ScheduledTask: Identifiable, Codable, Hashable {
     var kind: String?
     var why: String?
     var attempt: Int?
+    /// Stops repeating once the Mac judges its prompt met ("until the tests pass").
+    var until_done: Bool?
+    var done_at: Double?
 
     enum CodingKeys: String, CodingKey {
         case id, name, prompt, every, at, at_ts, n, weekday, stop_at, model, agent, sid, project,
              enabled, last_run, last_ok, last_result, last_sid, next_ts, next
-        case kind, why, attempt
+        case kind, why, attempt, until_done, done_at
     }
 
     init(from d: Decoder) throws {
@@ -581,6 +609,8 @@ struct ScheduledTask: Identifiable, Codable, Hashable {
         kind = try? c.decode(String.self, forKey: .kind)
         why = try? c.decode(String.self, forKey: .why)
         attempt = c.lenientDouble(.attempt).map { Int($0) }
+        until_done = c.lenientBool(.until_done)
+        done_at = c.lenientDouble(.done_at)
     }
 
     init(new: Void = ()) {

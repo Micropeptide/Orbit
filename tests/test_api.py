@@ -4,7 +4,7 @@
 
 Creates and removes its own data; leaves nothing behind.
 """
-import json, os, urllib.request, time
+import json, os, urllib.error, urllib.request, time
 BASE="http://127.0.0.1:8899"
 def post(p, d=None):
     r=urllib.request.Request(BASE+p, data=json.dumps(d or {}).encode(),
@@ -100,5 +100,53 @@ check("pending pin survives first save", raw.get("pinned") is True, raw)
 check("pending tag survives first save", "pending" in (raw.get("tags") or []), raw)
 os.remove(qc.session_path(fresh))          # leave nothing behind
 qc._SESS_CACHE["key"] = None
+
+# --- what a chat keeps for itself, and the two read-only views of its folder.
+# A synthetic chat, not /api/new: this runs against the live app, and /api/new would
+# make itself the current chat out from under whatever is answering.
+def post_raw(p, d):
+    """Like post(), but an error status is an answer rather than an exception."""
+    r = urllib.request.Request(BASE+p, data=json.dumps(d).encode(),
+        headers={"Content-Type":"application/json","Origin":BASE})
+    try:
+        return json.load(urllib.request.urlopen(r, timeout=30))
+    except urllib.error.HTTPError as e:
+        try: return json.loads(e.read().decode())
+        except Exception: return {"error": f"HTTP {e.code}"}
+
+pc = "smoke-prefs-" + time.strftime("%Y%m%d-%H%M%S")
+qc.session_save(pc, [{"role":"system","content":"s"}], "smoke prefs")
+qc._SESS_CACHE["key"] = None
+try:
+    d = post("/api/chat/setting", {"sid": pc, "key": "easy_mode", "value": True})
+    check("a chat can set easy mode for itself", d.get("effective") is True, d)
+    check("and it does not become everyone's",
+          get("/api/info")["settings"].get("easy_mode") is not True)
+    sess = get("/api/session/" + pc)
+    check("the chat says so when it is opened",
+          sess.get("easy_mode") is True and (sess.get("prefs") or {}).get("easy_mode") is True, sess)
+    d = post("/api/chat/setting", {"sid": pc, "key": "easy_mode", "value": None})
+    check("clearing it follows Orbit again", "easy_mode" not in (d.get("prefs") or {}), d)
+    d = post_raw("/api/chat/setting", {"sid": pc, "key": "workspace", "value": "/"})
+    check("a chat cannot keep its own copy of a global setting", bool(d.get("error")), d)
+
+    g = get("/api/git?sid=" + pc)
+    check("git state answers for the chat's folder", "repo" in g, g)
+    check("and only ever reads", g.get("repo") is False or isinstance(g.get("dirty"), int), g)
+
+    d = post_raw("/api/rewind/preview", {"sid": pc, "index": 0})
+    check("rewind preview refuses a message that is not there", bool(d.get("error")), d)
+
+    d = post("/api/permissions/session", {"sid": pc, "tool": "read_file", "pattern": "*"})
+    check("a rule can be held for one chat", d.get("ok") is True, d)
+    check("and is not written to the permanent rules",
+          not any(r.get("note") == "" and r.get("tool") == "read_file"
+                  for r in ((get("/api/state").get("settings") or {})
+                            .get("permission_rules", {}) or {}).get("allow", [])), "settings")
+finally:
+    qc.SESSION_RULES.pop(pc, None)
+    try: os.remove(qc.session_path(pc))
+    except OSError: pass
+    qc._SESS_CACHE["key"] = None
 
 print("\nfailures:", fails or "none")

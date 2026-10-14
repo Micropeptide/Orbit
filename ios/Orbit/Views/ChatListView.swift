@@ -108,6 +108,8 @@ struct ChatListView: View {
                     }
                 }
                 .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .background(OrbitTheme.paper)
                 .refreshable { await state.refreshEverything() }
                 .quickLookPreview($filePreview)
             }
@@ -309,51 +311,61 @@ struct ChatListView: View {
     }
 
     private func row(_ chat: ChatSummary) -> some View {
-        HStack(spacing: 12) {
-            ZStack {
-                Circle().fill(avatarColor(chat.id).gradient)
-                if state.runningChats.contains(chat.id) || state.chatExtras.waiting.contains(chat.id) {
-                    ProgressView().controlSize(.mini).tint(.white)
-                } else {
-                    Text(String(chat.displayTitle.prefix(1)).uppercased())
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(.white)
-                }
-            }
-            .frame(width: 40, height: 40)
+        let status = state.status(of: chat, seen: listModel.seen)
+        let unread = status == .unread
+        return HStack(alignment: .top, spacing: 11) {
+            // what the chat is doing, where a letter avatar used to say nothing at all
+            RowMark(status: status)
+                .frame(width: 16, height: 20)
             VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 5) {
-                    Text(chat.displayTitle).lineLimit(1).font(.body)
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Text(chat.displayTitle).lineLimit(1)
+                        .font(.body.weight(unread ? .semibold : .regular))
                         .italic(chat.external == true)
                     if chat.pinned == true {
-                        Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.orange)
+                        Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.secondary)
                     }
                     if let host = chat.host { ChatHostBadge(host: host) }
+                    if let p = chat.parent {
+                        Image(systemName: "arrow.turn.down.right").font(.caption2).foregroundStyle(.tint)
+                            .accessibilityLabel("started by " + (p["title"] ?? "another chat"))
+                    }
+                    Spacer(minLength: 6)
+                    Text(Self.when(chat.date))
+                        .font(.footnote.monospacedDigit())
+                        .foregroundStyle(unread ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
                 }
-                Text(relative(chat.date) + (chat.n > 0 ? " · \(chat.n) messages" : " · empty"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                ChatStatusBadge(status: state.status(of: chat, seen: listModel.seen))
-                if let tags = chat.tags, !tags.isEmpty {
-                    HStack(spacing: 4) {
-                        ForEach(tags.prefix(3), id: \.self) { t in
+                HStack(spacing: 8) {
+                    Text(chat.n > 0 ? "\(chat.n) message\(chat.n == 1 ? "" : "s")" : "empty")
+                        .font(.caption).foregroundStyle(.secondary)
+                    ChatStatusBadge(status: status == .unread ? .none : status,
+                                    since: state.runningSince[chat.id], goal: chat.goal,
+                                    talkingTo: state.talking[chat.id], spinner: false)
+                    if let tags = chat.tags, !tags.isEmpty {
+                        ForEach(tags.prefix(2), id: \.self) { t in
                             Text(t).font(.caption2)
-                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .padding(.horizontal, 6).padding(.vertical, 1)
                                 .background(.quaternary.opacity(0.5), in: .capsule)
                         }
                     }
                 }
+                .lineLimit(1)
             }
-            Spacer(minLength: 0)
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 4)
     }
 
-    /// A stable colour per chat, from its id — the same chat always gets the same one.
-    private func avatarColor(_ id: String) -> Color {
-        let palette: [Color] = [.blue, .indigo, .purple, .teal, .green, .orange, .pink, .cyan]
-        let h = id.unicodeScalars.reduce(0) { ($0 &* 31) &+ Int($1.value) }
-        return palette[abs(h) % palette.count]
+    /// 17:26 today, Yesterday, Mon this week, 28 Sep before that -- as Messages does.
+    static func when(_ d: Date) -> String {
+        let cal = Calendar.current
+        if cal.isDateInToday(d) { return d.formatted(date: .omitted, time: .shortened) }
+        if cal.isDateInYesterday(d) { return "Yesterday" }
+        if let days = cal.dateComponents([.day], from: d, to: .now).day, days < 7 {
+            return d.formatted(.dateTime.weekday(.abbreviated))
+        }
+        let sameYear = cal.component(.year, from: d) == cal.component(.year, from: .now)
+        return sameYear ? d.formatted(.dateTime.day().month(.abbreviated))
+                        : d.formatted(.dateTime.day().month(.abbreviated).year(.twoDigits))
     }
 
     private var empty: some View {
@@ -370,13 +382,5 @@ struct ChatListView: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 50)
         .listRowSeparator(.hidden)
-    }
-
-    private func relative(_ d: Date) -> String {
-        let seconds = Date.now.timeIntervalSince(d)
-        if seconds < 60 { return "just now" }        // never "in 0s"
-        let f = RelativeDateTimeFormatter()
-        f.unitsStyle = .abbreviated
-        return f.localizedString(for: d, relativeTo: .now)
     }
 }

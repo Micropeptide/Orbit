@@ -52,10 +52,6 @@
 	<string>Saving a plot or picture from a conversation to your Photos.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Attaching an image to a conversation.</string>
-	<key>UIBackgroundModes</key>
-	<array>
-		<string>processing</string>
-	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

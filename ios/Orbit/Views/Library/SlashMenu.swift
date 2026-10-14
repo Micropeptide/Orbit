@@ -83,6 +83,7 @@ final class SlashController: ObservableObject {
         ("/remember", "save a note to memory: /remember <text>"),
         ("/scheduled", "messages and tasks for later"), ("/files", "files named in this chat"),
         ("/rename", "rename this chat: /rename <title>"),
+        ("/goal", "keep working until it is done: /goal <what done looks like>; alone, shows the goal"),
         ("/later", "send later: /later 21:30 <message>, /later tomorrow 9am …, /later daily 8:00 …"),
         ("/tasks", "everything running in the background — answers, queued messages, shell jobs"),
         ("/plan", "plan mode: it may read and think but change nothing"),
@@ -99,7 +100,7 @@ final class SlashController: ObservableObject {
     ]
 
     /// Commands that wait for words after them rather than running when picked.
-    static let takesWords: Set<String> = ["/remember", "/rename", "/later"]
+    static let takesWords: Set<String> = ["/remember", "/rename", "/later", "/goal"]
 
     func items(for draft: String, builtins: [(String, String)], catalog: SlashCatalog,
                claude: Bool) -> [SlashItem] {
@@ -185,6 +186,10 @@ final class SlashController: ObservableObject {
                 await state.rename(sid, to: rest)
                 note = "Renamed to “\(rest)”"
             }
+        case "/goal":
+            guard sid != nil else { note = "Open a chat first"; return "" }
+            if rest.isEmpty { state.showGoalEditor = true; return "" }
+            Task { await state.sendGoal(rest) }
         case "/later":
             guard LaterParser.parse(rest).map({ !$0.text.isEmpty }) == true else {
                 note = "Usage: " + LaterParser.usage

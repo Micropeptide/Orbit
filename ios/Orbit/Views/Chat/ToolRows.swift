@@ -341,6 +341,12 @@ struct ThinkingBlock: View {
     @State private var userTouched = false
     /// The answer has begun at least once, so thinking is no longer the thing to read.
     @State private var answered = false
+    /// While it thinks: keep the newest line in view. Scrolling up inside the box to read an
+    /// earlier part turns it off -- it used to show only the last few lines, so there was
+    /// nothing above to read, and every new token pulled you back -- and scrolling back to
+    /// the end of the box turns it on again.
+    @State private var thinkFollow = true
+    @State private var thinkScrolling = false
 
     /// Long thinking shows its first lines (the latest ones while it is written) and a
     /// "Show all"; the rest is a tap away.
@@ -349,11 +355,47 @@ struct ThinkingBlock: View {
     private var long: Bool { lineCount > Self.lines + 2 || text.count > Self.lines * 140 }
     private var shown: String {
         guard long, !showAll else { return text }
-        if live {                                   // while it thinks: the newest part
-            let tail = text.split(separator: "\n", omittingEmptySubsequences: false).suffix(Self.lines)
-            return "…\n" + String(tail.joined(separator: "\n").suffix(Self.lines * 140))
+        if live {                                   // while it thinks: enough to read back through
+            let all = text.split(separator: "\n", omittingEmptySubsequences: false)
+            return all.count > 300 ? "…\n" + all.suffix(300).joined(separator: "\n") : text
         }
         return text
+    }
+
+    /// The live box: follows the newest line until you scroll up in it.
+    @ViewBuilder private var liveThoughts: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    thoughts
+                    Color.clear.frame(height: 1).id("think-end")
+                }
+            }
+            .frame(maxHeight: 240)
+            .scrollBounceBehavior(.basedOnSize)
+            .onAppear { proxy.scrollTo("think-end", anchor: .bottom) }
+            .onChange(of: text) { _, _ in
+                if thinkFollow && !thinkScrolling { proxy.scrollTo("think-end", anchor: .bottom) }
+            }
+            .simultaneousGesture(DragGesture(minimumDistance: 4)
+                .onChanged { v in
+                    thinkScrolling = true
+                    if v.translation.height > 3 { thinkFollow = false }
+                }
+                .onEnded { _ in thinkScrolling = false })
+            .apply { box in
+                if #available(iOS 18.0, *) {
+                    box.onScrollGeometryChange(for: Bool.self) { g in
+                        g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 12
+                    } action: { _, atEnd in
+                        if atEnd && thinkScrolling { thinkFollow = true }
+                    }
+                    .onScrollPhaseChange { _, phase in
+                        thinkScrolling = phase == .interacting || phase == .decelerating
+                    }
+                } else { box }
+            }
+        }
     }
 
     private var thoughts: some View {
@@ -391,10 +433,13 @@ struct ThinkingBlock: View {
                 // are waiting for. Capping it with .clipped() cut text that had no
                 // "Show all" to open (that button only exists for LONG thinking), so it
                 // scrolls inside itself instead and nothing is unreachable.
-                ScrollView { thoughts }
-                    .frame(maxHeight: live && !showAll ? 240 : .infinity)
-                    .scrollBounceBehavior(.basedOnSize)
-                    .scrollDisabled(!(live && !showAll))
+                if live && !showAll {
+                    liveThoughts
+                } else {
+                    ScrollView { thoughts }
+                        .scrollBounceBehavior(.basedOnSize)
+                        .scrollDisabled(true)
+                }
                 if long {
                     Button(showAll ? "Show less" : "Show all · \(ToolText.plural(lineCount, "line", "lines"))") {
                         withAnimation(.easeInOut(duration: 0.15)) { showAll.toggle() }
@@ -430,7 +475,7 @@ struct BangBlock: View {
                     .textSelection(.enabled)
                 if run.running {
                     HStack(spacing: 6) {
-                        ProgressView().controlSize(.mini)
+                        OrbitSpinner(size: 10, tint: OrbitTheme.tool)
                         Text("running…").font(.caption.monospaced()).foregroundStyle(.secondary)
                     }
                 } else {

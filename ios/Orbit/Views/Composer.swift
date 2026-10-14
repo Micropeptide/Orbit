@@ -123,8 +123,9 @@ struct Composer: View {
                 } label: {
                     Image(systemName: "plus")
                         .font(.body.weight(.semibold))
+                        .foregroundStyle(.secondary)
                         .frame(width: 36, height: 36)
-                        .background(.quaternary.opacity(0.5), in: .circle)
+                        .contentShape(.circle)
                 }
                 .accessibilityLabel("Attach")
 
@@ -132,9 +133,7 @@ struct Composer: View {
                     .lineLimit(1...6)
                     .font(mode == .shell ? .body.monospaced() : .body)
                     .focused(typing)
-                    .padding(.horizontal, 14).padding(.vertical, 9)
-                    .background(.background, in: .rect(cornerRadius: 20))
-                    .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(modeBorder, lineWidth: mode == .message ? 1 : 1.5))
+                    .padding(.horizontal, 2).padding(.vertical, 8)
 
                 if !state.streaming || canSend {
                     sendButton
@@ -155,6 +154,11 @@ struct Composer: View {
                     .accessibilityLabel("Stop")
                 }
             }
+            // one floating surface for the whole row: attach, the box, send
+            .padding(4)
+            .orbitSurface(cornerRadius: 22)
+            .overlay(RoundedRectangle(cornerRadius: 22)
+                .strokeBorder(modeBorder, lineWidth: mode == .message ? 0 : 1.5))
             .padding(.horizontal, 12)
             .padding(.top, 8)
             .padding(.bottom, mode == .message ? 6 : 4)
@@ -226,7 +230,7 @@ struct Composer: View {
             Image(systemName: queues ? "tray.and.arrow.down.fill" : "arrow.up")
                 .font(.body.weight(.bold))
                 .frame(width: 36, height: 36)
-                .background(canSend ? Color.accentColor : Color.secondary.opacity(0.35),
+                .background(canSend ? AnyShapeStyle(OrbitTheme.gradient) : AnyShapeStyle(Color.secondary.opacity(0.35)),
                             in: .circle)
                 .foregroundStyle(.white)
         }

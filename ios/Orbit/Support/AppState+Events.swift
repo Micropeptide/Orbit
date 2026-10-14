@@ -118,10 +118,20 @@ extension AppState {
         case .roundLimit(let reason, let pending):
             chatExtras.roundLimit = reason
             store.roundPending[sid] = pending
+        case .goalOffer(let o):
+            if openChat?.sid == sid { goalOffer = o }
+            notifyGoalOffer(o, sid: sid)
         }
     }
 
     // ------------------------------------------------------------ the message box
+
+    /// Add text to the reply being written, as it is (not quoted).
+    func quoteInDraftPlain(_ text: String) {
+        guard let sid = openChat?.sid else { return }
+        let current = Drafts.load(sid)
+        draftPrefill = (current.isEmpty ? "" : current + "\n\n") + text
+    }
 
     /// Quote some words into your reply.
     func quoteInDraft(_ text: String) {

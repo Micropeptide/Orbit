@@ -18,13 +18,30 @@ struct ChatView: View {
     /// True while a scroll you started is still in flight, so a layout change cannot be
     /// mistaken for you scrolling back to the bottom.
     @State private var userScrolling = false
+    /// Which way your last scroll went. Only coming DOWN to the end starts following again:
+    /// "your finger is on it and the end is near" also held for a small scroll up, which
+    /// switched following straight back on and jumped to the newest line.
+    @State private var scrolledDown = false
     @State private var scrollToken = UUID()
-    /// How tall each transcript row is, for the turn rail's bars.
-    @State private var rowHeights: [Int: CGFloat] = [:]
-    @State private var viewportHeight: CGFloat = 800
+    /// What the transcript has measured of itself: how tall the scroll view is, and how
+    /// tall each row is for the turn rail's bars. Neither is read from the body, so both
+    /// live in a box rather than in @State. Through @State a measurement rebuilt the very
+    /// transcript that was measuring itself, and the rebuild changed the measurement --
+    /// SwiftUI called that what it was ("Geometry action is cycling between duplicate
+    /// values") and cut the layout pass short. Rows are worse than the viewport: an
+    /// ordinary chat draws every one of them at once, so that is hundreds of writes in a
+    /// single pass. The rail reads them when it appears, which is a state change already.
+    @State private var measured = Measured()
     /// Draw lazily only in very long chats. Decided from the saved messages with a gap between
     /// the two thresholds, so an answer finishing (or streaming) never flips it mid-read --
     /// flipping rebuilt the whole transcript.
+    ///
+    /// The bar used to be 110 messages, and a 439-message chat ending in one very long
+    /// answer opened completely blank: the lazy list places the end from estimated row
+    /// heights, the last row was several times its estimate, and the jump landed past
+    /// everything the list had actually built. Nothing was drawn there, so the chat looked
+    /// empty until a flick built the rows. Both ends of the new range were checked against
+    /// that chat and against one of 4,681 messages, which is lazy and lands correctly.
     @State private var lazyTranscript = false
     /// Bumped by the "Latest" button, which lives in the composer, away from the scroll proxy.
     @State private var scrollDownRequest = 0
@@ -57,10 +74,28 @@ struct ChatView: View {
 
     /// A chat known to be empty — a new one, or one loaded with nothing in it — opens at
     /// its greeting. Not merely one with no messages yet: a chat still loading has none for
-    /// a moment, and opening it at the top left an ongoing conversation at its oldest message.
+    /// a moment, and opening it at the top left an ongoing conversation at its oldest
+    /// message. That is what `openChat?.sid == sid` settles, and it settles it on its own.
+    /// This also asked for `n == 0`, which sounds like the same question and is not: `n`
+    /// counts the RAW records on the Mac, system and tool ones included, and a brand new
+    /// chat has one of those and no messages. So it was never true for a new chat, which
+    /// is the one case it exists for -- every new chat opened at the foot of its own home
+    /// page, below the greeting, with the cards that load a moment later pushing it further.
     private var isHome: Bool {
         state.messages.isEmpty && !state.streaming && state.openChat?.sid == sid
-            && (state.openChat?.messages.isEmpty ?? true) && (state.openChat?.n ?? 0) == 0
+            && (state.openChat?.messages.isEmpty ?? true)
+    }
+
+    /// Whether this chat opens at its greeting — answered on the very first layout, before
+    /// `open(sid)` has returned anything. `isHome` cannot answer that early: until the chat
+    /// arrives it says "not empty", so an empty one opened at the bottom, and the home
+    /// cards then loading pushed it further down -- a new chat came up scrolled past its own
+    /// greeting, showing the foot of the page. The chat list already knows how many messages
+    /// a chat has; a chat too new to be in it is a new chat, which is a home.
+    private var opensAtHome: Bool {
+        if state.openChat?.sid == sid { return isHome }
+        guard let known = state.chats.first(where: { $0.id == sid }) else { return true }
+        return known.n == 0
     }
 
     /// "Good morning — what's next?", as the Mac greets a new chat. Six bands, and the
@@ -78,6 +113,7 @@ struct ChatView: View {
         // that keeps the transcript's own inset correct, so text scrolls under
         // the navigation bar instead of starting behind it.
         transcript
+            .background(OrbitTheme.paper.ignoresSafeArea())
             .safeAreaInset(edge: .top, spacing: 0) {
                 VStack(spacing: 0) {
                     ConnectionBanner()
@@ -186,7 +222,7 @@ struct ChatView: View {
                 out.append((index: r.index, text: m.text, height: 0))
             }
             guard !out.isEmpty else { continue }
-            out[out.count - 1].height += (rowHeights[r.index] ?? 60)
+            out[out.count - 1].height += (measured.rows[r.index] ?? 60)
         }
         return out.count > 3 ? out.map { ($0.index, $0.text, max(10, $0.height)) } : []
     }
@@ -216,11 +252,12 @@ struct ChatView: View {
                 .padding(.top, 14)
             }
             .coordinateSpace(name: "transcript")
-            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewportHeight = $0 }
+            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { measured.height = $0 }
             // open at the newest message; an empty chat opens at its greeting
-            .defaultScrollAnchor(isHome ? .top : .bottom)
+            .defaultScrollAnchor(opensAtHome ? .top : .bottom)
             .scrollDismissesKeyboard(.interactively)
             .apply { followingNewest($0, proxy: proxy) }
+            .apply { scrollIntent($0) }
             .onChange(of: actionsModel.jumpRequest) { _, i in
                 guard let i else { return }
                 jumpTo = i
@@ -235,7 +272,11 @@ struct ChatView: View {
                 jumpTo = nil
             }
             .onAppear { scroll(proxy, animated: false) }
-            .onDisappear { SeenChats.mark(sid, mtime: state.chats.first { $0.id == sid }?.mtime ?? 0) }
+            .onDisappear {
+                SeenChats.mark(sid, mtime: state.chats.first { $0.id == sid }?.mtime ?? 0)
+                // leaving after watching it answer: that answer has been seen
+                if !(state.streaming && state.liveSid == sid) { state.seenOnMac(sid) }
+            }
             .modifier(AnswerTextSize())
             // how long this is and where you are in it — a question the outline, which
             // lists what you asked, does not answer
@@ -253,6 +294,7 @@ struct ChatView: View {
                 draft = Drafts.load(sid)
                 await state.open(sid)
                 SeenChats.mark(sid, mtime: state.chats.first { $0.id == sid }?.mtime ?? 0)
+                state.markSeen(sid)
                 if let text = state.draftPrefill { draft = text; typing = true; state.draftPrefill = nil }
                 if highlight == nil { await pinToNewest(proxy) }
                 // a search hit: land on that message and flash it once the rows exist
@@ -271,8 +313,7 @@ struct ChatView: View {
     @ViewBuilder private var transcriptContent: some View {
                     if state.messages.isEmpty && !state.streaming {
                         VStack(spacing: 10) {
-                            Image("OrbitMark").resizable().scaledToFit()
-                                .frame(width: 56, height: 56).opacity(0.9)
+                            OrbitMark(size: 46).padding(.bottom, 8)
                             Text(Self.greeting()).font(.title3.weight(.semibold))
                             Text("Answering with \(currentModelName)")
                                 .font(.caption2).foregroundStyle(.tertiary)
@@ -316,7 +357,7 @@ struct ChatView: View {
                             // one per row per frame rebuilt the whole transcript each time.
                             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { h in
                                 let r = (h / 4).rounded() * 4          // ignore sub-step noise
-                                if rowHeights[i] != r { rowHeights[i] = r }
+                                if measured.rows[i] != r { measured.rows[i] = r }
                             }
                     }
                     if state.streaming {
@@ -336,18 +377,38 @@ struct ChatView: View {
                     // where the end of the chat is on screen: within a short reach of the bottom
                     // edge counts as being at the newest message (appear/disappear can't tell --
                     // an ordinary stack creates every row up front)
+                    // A chat that opens at its greeting has no newest message to be away
+                    // from, so there is nothing to measure. It is not merely pointless there
+                    // -- the greeting's cards arrive after the first layout and move this
+                    // marker 200pt while nothing else moves, and SwiftUI cuts the layout pass
+                    // short over it ("Geometry action is cycling between duplicate values").
+                    // The watch is on the measurement itself, so not measuring is the answer;
+                    // a test inside the action would come too late.
                     Color.clear.frame(height: 8).id("bottom")
-                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named("transcript")).minY } action: { y in
-                            let near = y < viewportHeight + 60
-                            if near != atBottom { atBottom = near }
-                            if near { newBelow = false }
-                            // Following again is a decision, and only you make it. An image
-                            // finishing, a tool row opening, a thinking block expanding and the
-                            // todo dock appearing all move this marker into range without your
-                            // touching anything — and the next token then yanked you down
-                            // mid-sentence. Your own drag ending near the bottom says it.
-                            if near && userScrolling { following = true }
+                        .apply { marker in
+                            if opensAtHome { marker } else { marker.watchingTheEnd(watch) }
                         }
+    }
+
+    /// Where the end of the chat is on screen, given the marker's distance down the
+    /// transcript. Within a short reach of the bottom edge counts as being at the newest
+    /// message -- appear/disappear can't tell us, because an ordinary stack creates every
+    /// row up front.
+    private func watch(_ y: CGFloat) {
+        // Arriving needs less room than leaving. The "Latest" pill this answer shows sits
+        // in the column with the box: showing it takes ~40pt from the scroll view and moves
+        // this very marker, which then said you were at the bottom after all and hid the
+        // pill again. SwiftUI caught the loop ("Geometry action is cycling between duplicate
+        // values") and settled on whichever side it happened to reach, leaving the pill
+        // stuck. A band wider than the pill means its own height can never flip the answer.
+        let near = y < measured.height + (atBottom ? 160 : 60)
+        if near != atBottom { atBottom = near }
+        if near { newBelow = false }
+        // Following again is a decision, and only you make it. An image finishing, a tool
+        // row opening, a thinking block expanding and the todo dock appearing all move this
+        // marker into range without your touching anything — and the next token then yanked
+        // you down mid-sentence. Your own drag ending near the bottom says it.
+        if near && userScrolling && scrolledDown { following = true }
     }
 
     /// Shown in the transcript where the answer would have been, because that
@@ -373,10 +434,13 @@ struct ChatView: View {
     private func followingNewest<V: View>(_ content: V, proxy: ScrollViewProxy) -> some View {
         content
     // pulling the list down is you reading back: stop following until you come back down
-    .simultaneousGesture(DragGesture(minimumDistance: 12)
+    .simultaneousGesture(DragGesture(minimumDistance: 6)
         .onChanged { v in
             userScrolling = true
-            if v.translation.height > 16 { following = false }
+            // a few points is enough: below 16 the next token snapped the view back to the
+            // bottom under your finger, which read as the chat refusing to move
+            if v.translation.height > 4 { following = false; scrolledDown = false }
+            else if v.translation.height < -4 { scrolledDown = true }
         }
         // the flag outlives the gesture a moment: the scroll carries on after your
         // thumb leaves, and it is still your scroll that lands at the bottom
@@ -405,14 +469,41 @@ struct ChatView: View {
     .onChange(of: state.chatExtras.approval?.id) { _, _ in follow(proxy) }
     .onChange(of: scrollDownRequest) { _, _ in following = true; newBelow = false; scroll(proxy) }
     .onChange(of: state.messages.count, initial: true) { _, n in
-        if n > 110 { lazyTranscript = true } else if n < 70 { lazyTranscript = false }
+        if n > 600 { lazyTranscript = true } else if n < 450 { lazyTranscript = false }
     }
+    }
+
+    /// On iOS 18 the scroll view says itself when you are scrolling (touching, or the glide
+    /// after a flick) and where to: going up stops following at once, however small the
+    /// movement, and nothing moves the view while it is in your hands. The drag gesture
+    /// above stays for iOS 17, and as a second witness.
+    @ViewBuilder private func scrollIntent<V: View>(_ content: V) -> some View {
+        if #available(iOS 18.0, *) {
+            content
+                .onScrollPhaseChange { _, phase in
+                    if phase == .interacting || phase == .decelerating {
+                        userScrolling = true
+                    } else if phase == .idle {
+                        let token = UUID(); scrollToken = token
+                        Task { try? await Task.sleep(for: .milliseconds(250))
+                               if scrollToken == token { userScrolling = false } }
+                    }
+                }
+                .onScrollGeometryChange(for: CGFloat.self) { $0.contentOffset.y } action: { old, new in
+                    guard userScrolling else { return }
+                    if new < old - 2 { following = false; scrolledDown = false }
+                    else if new > old + 2 { scrolledDown = true }
+                }
+        } else {
+            content
+        }
     }
 
     /// Keeps up with a growing answer only while you are at the bottom; otherwise marks
     /// that something new arrived below.
     private func follow(_ proxy: ScrollViewProxy, animated: Bool = true) {
-        if following { scroll(proxy, animated: animated) } else { newBelow = true }
+        // never while your finger is on it, or the view is still gliding from your flick
+        if following && !userScrolling { scroll(proxy, animated: animated) } else { newBelow = true }
     }
 
     /// Back to the newest message after the rows have been measured -- twice, because a
@@ -438,7 +529,7 @@ struct ChatView: View {
 
     private func scroll(_ proxy: ScrollViewProxy, animated: Bool = true) {
         // an empty chat is its home page: start at the greeting, not the bottom of the cards
-        let empty = isHome
+        let empty = opensAtHome
         let last = transcriptRows.last?.index ?? -1
         let go = {
             if empty { proxy.scrollTo("home", anchor: .top); return }
@@ -588,13 +679,13 @@ struct ChatView: View {
             VStack(alignment: .leading, spacing: 7) {
                 if state.liveSteps.isEmpty && !continues {
                     Text(state.liveModel.isEmpty ? currentModelName : state.liveModel)
-                        .font(.caption2.smallCaps())
+                        .font(.caption2.weight(.medium))
                         .foregroundStyle(.secondary)
                 }
 
                 if !state.liveStatus.isEmpty && state.liveText.isEmpty && state.liveRuns.isEmpty {
-                    HStack(spacing: 7) {
-                        ProgressView().controlSize(.mini)
+                    HStack(spacing: 8) {
+                        OrbitSpinner(size: 12)
                         Text(state.liveStatus).font(.footnote).foregroundStyle(.secondary)
                     }
                 }
@@ -637,6 +728,9 @@ struct ChatView: View {
                 .transition(.opacity)
                 .accessibilityHint("Scrolls to the newest message")
             }
+            ParentLine(sid: sid)
+            LinksStrip(sid: sid)
+            GoalStrip(sid: sid)
             TodoDock(sid: sid)
             GitDock(sid: sid)
             AnswerStatusLine(sid: sid)
@@ -644,7 +738,18 @@ struct ChatView: View {
                      onPickModel: { showModels = true },
                      onCommand: { command($0) })
         }
-        .background(.bar)       // one bar behind the todo list, status line and box
+        // the conversation's own paper behind the docks and the floating box, fading in
+        // over the last lines of the transcript rather than cutting them off at a hard edge
+        .background(alignment: .top) {
+            VStack(spacing: 0) {
+                LinearGradient(colors: [OrbitTheme.paper.opacity(0), OrbitTheme.paper],
+                               startPoint: .top, endPoint: .bottom)
+                    .frame(height: 22)
+                OrbitTheme.paper
+            }
+            .padding(.top, -22)
+            .ignoresSafeArea(edges: .bottom)
+        }
     }
 }
 
@@ -678,7 +783,23 @@ struct TranscriptPage: View {
     }
 }
 
+/// What the transcript has measured of itself. A plain class, so writing to it does not
+/// invalidate the view that did the measuring -- which is the whole point: a transcript
+/// measuring its own rows and being rebuilt for each answer never settles.
+private final class Measured {
+    var height: CGFloat = 800
+    var rows: [Int: CGFloat] = [:]
+}
+
 extension View {
     /// Hands the view to a function mid-chain, so a long chain can be split up.
     func apply<V: View>(@ViewBuilder _ transform: (Self) -> V) -> V { transform(self) }
+
+    /// Reports how far down the transcript this marker sits, so the chat can tell whether
+    /// the newest message is on screen. Attached only where the question means something:
+    /// SwiftUI watches the measurement, not what is done with it.
+    func watchingTheEnd(_ report: @escaping (CGFloat) -> Void) -> some View {
+        onGeometryChange(for: CGFloat.self) { $0.frame(in: .named("transcript")).minY }
+            action: { report($0) }
+    }
 }

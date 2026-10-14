@@ -91,6 +91,21 @@ struct UndoChangesSheet: View {
                     Section("Done") {
                         ForEach(done, id: \.self) { Text($0).font(.footnote) }
                     }
+                } else if !message.redoableChanges.isEmpty {
+                    Section {
+                        Button {
+                            busy = true
+                            Task { done = await state.redoChanges(of: message); busy = false }
+                        } label: {
+                            HStack {
+                                Label("Redo: put these changes back", systemImage: "arrow.uturn.forward")
+                                if busy { Spacer(); ProgressView() }
+                            }
+                        }
+                        .disabled(busy)
+                    } footer: {
+                        Text("These were undone. Redo puts each file back as the answer left it — unless you have changed it since, in which case nothing moves.")
+                    }
                 } else {
                     Section {
                         Button(role: .destructive) { confirm = true } label: {

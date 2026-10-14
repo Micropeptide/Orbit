@@ -40,6 +40,8 @@ enum TranscriptEvent {
     /// A second model checked the answer against what was asked. `failOpen` means
     /// the check itself could not run, so the work was passed rather than failed.
     case verified(passed: Bool, reason: String, next: String, failOpen: Bool)
+    /// The answer left work undone: an offer to make the request a goal.
+    case goalOffer(GoalOffer)
 
     static func int(_ v: Any?) -> Int {
         (v as? Int) ?? (v as? Double).map { Int($0) } ?? (v as? String).flatMap { Int($0) } ?? 0
@@ -96,6 +98,8 @@ enum TranscriptEvent {
                              reason: (d["reason"] as? String) ?? "",
                              next: (d["next"] as? String) ?? "",
                              failOpen: (d["fail_open"] as? Bool) ?? false)
+        case "goal_offer":
+            return GoalOffer(d).map { .goalOffer($0) }
         case "round_limit":
             let why = (d["reason"] as? String) == "time" ? "stopped at the time limit"
                 : "stopped after \(int(d["rounds"])) tool rounds"

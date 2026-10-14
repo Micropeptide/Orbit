@@ -332,6 +332,11 @@ actor OrbitServer {
         return try JSONDecoder().decode(N.self, from: data).sid
     }
 
+    /// Looked at on this phone: the Mac, and every other device, stop showing it as new.
+    func markSeen(_ id: String) async throws {
+        try await post("/api/session/seen", ["id": id])
+    }
+
     func rename(_ id: String, to title: String) async throws {
         try await post("/api/session/rename", ["id": id, "title": title])
     }
@@ -388,13 +393,14 @@ actor OrbitServer {
     /// as it arrives, so this is a plain line reader rather than a dependency.
     func send(sid: String, message: String,
               attachments: [[String: String]] = [],
-              effort: String? = nil) -> AsyncThrowingStream<StreamEvent, Error> {
+              effort: String? = nil, goal: Bool = false) -> AsyncThrowingStream<StreamEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
                     var body: [String: Any] = ["sid": sid, "message": message]
                     if !attachments.isEmpty { body["attachments"] = attachments }
                     if let effort { body["effort"] = effort }       // "xhigh" for retry deeper
+                    if goal { body["goal"] = true }                 // this message is the chat's goal
                     var req = try request("/api/chat", method: "POST", body: body)
                     req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
                     req.timeoutInterval = 3600
@@ -672,6 +678,12 @@ actor OrbitServer {
 
     /// The git state of the folder a chat works in, as the Mac reads it (cached
     /// there for a few seconds, and read-only — nothing is committed from here).
+    /// One changed file of the chat's folder, as a diff.
+    func gitDiff(sid: String, path: String) async throws -> String {
+        let obj = try await getJSON("/api/git/diff?sid=\(OrbitServer.escaped(sid))&path=\(OrbitServer.escaped(path))")
+        return ((obj as? [String: Any])?["diff"] as? String) ?? ""
+    }
+
     func gitState(sid: String) async throws -> GitState? {
         let data = try await run(try request("/api/git?sid=\(OrbitServer.escaped(sid))"))
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

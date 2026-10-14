@@ -337,6 +337,19 @@ struct GitState: Equatable {
     var ahead: Int
     var behind: Int
     var last: String
+    /// Each changed file: path, status letter (M, A, D, R, ? new, U conflict), +/-.
+    var files: [GitFile]
+    /// A merge, rebase, cherry-pick or revert left half done, and how many conflicts.
+    var op: String?
+    var conflicts: Int
+
+    struct GitFile: Equatable, Identifiable {
+        var path: String
+        var status: String
+        var added: Int?
+        var removed: Int?
+        var id: String { path }
+    }
 
     init(_ d: [String: Any]) {
         branch = (d["branch"] as? String) ?? "?"
@@ -346,11 +359,19 @@ struct GitState: Equatable {
         ahead = (d["ahead"] as? Int) ?? 0
         behind = (d["behind"] as? Int) ?? 0
         last = (d["last"] as? String) ?? ""
+        files = ((d["files"] as? [[String: Any]]) ?? []).compactMap { f in
+            guard let p = f["path"] as? String else { return nil }
+            return GitFile(path: p, status: (f["status"] as? String) ?? "M",
+                           added: f["added"] as? Int, removed: f["removed"] as? Int)
+        }
+        op = d["op"] as? String
+        conflicts = (d["conflicts"] as? Int) ?? 0
     }
 
     /// Branch first, then only what is true: "main · 3 changed · ↑2".
     var short: String {
         var bits = [branch]
+        if let op { bits.append("⚠ \(op) in progress" + (conflicts > 0 ? " · \(conflicts) conflicts" : "")) }
         if dirty > 0 { bits.append("\(dirty) changed") }
         if ahead > 0 { bits.append("↑\(ahead)") }
         if behind > 0 { bits.append("↓\(behind)") }

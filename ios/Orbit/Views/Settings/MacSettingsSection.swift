@@ -2,48 +2,7 @@ import SwiftUI
 
 /// The Mac's own Settings, one link each — the same tabs as the web page.
 struct MacSettingsSection: View {
-    #if DEBUG
-    /// Development only: `ORBIT_SETTINGS_PAGE=models|fallback|general|tools|mcp|claude|codex|phone|status`
-    /// (with `ORBIT_TAB=settings`) opens that page, so each can be screenshotted without a finger.
-    @State private var debugPage: String?
-    private static var debugOpened = false
-    #endif
-
-    var body: some View {
-        section
-        #if DEBUG
-            .navigationDestination(isPresented: Binding(get: { debugPage != nil },
-                                                        set: { if !$0 { debugPage = nil } })) {
-                switch debugPage {
-                case "models": ModelsKeysView()
-                case "fallback": FallbackView()
-                case "general": MacGeneralView()
-                case "server": LocalServerView()
-                case "tools": ToolsRulesView()
-                case "easy": EasyModeView()
-                case "mcp": MCPServersView()
-                case "claude": ClaudeCodeSettingsView()
-                case "claude-options": ClaudeOptionsView()
-                case "claude-permissions": ClaudePermissionsView()
-                case "claude-skills": ClaudeSkillsView()
-                case "claude-plugins": ClaudePluginsView()
-                case "claude-mcp": ClaudeMCPView()
-                case "codex": CodexSettingsView()
-                case "phone": PhoneAccessView()
-                case let p? where p.hasPrefix("provider:"): DebugProviderPage(id: String(p.dropFirst(9)))
-                case "codex-options", "codex-agents", "codex-skills", "codex-plugins", "codex-mcp":
-                    DebugCodexPage(page: debugPage ?? "")
-                default: StatusHealthView()
-                }
-            }
-            .onAppear {
-                if !Self.debugOpened, let p = ProcessInfo.processInfo.environment["ORBIT_SETTINGS_PAGE"] {
-                    Self.debugOpened = true
-                    debugPage = p
-                }
-            }
-        #endif
-    }
+    var body: some View { section }
 
     private var section: some View {
         Section {
@@ -65,6 +24,66 @@ struct MacSettingsSection: View {
         } footer: {
             Text("The same settings as Orbit's page on the Mac. Changes are made there, for every device.")
         }
+    }
+}
+
+#if DEBUG
+/// Development only: `ORBIT_SETTINGS_PAGE=models|fallback|general|tools|easy|mcp|claude|codex|phone|status`
+/// (with `ORBIT_TAB=settings`) opens that page, so each can be screenshotted without a finger.
+///
+/// This belongs to the whole Settings screen, not to one of its sections. A
+/// `navigationDestination` inside a `List` sits in a lazy container: the stack can only
+/// see it while the rows that hold it are on screen, so the page opened or did not
+/// depending on where Settings happened to be scrolled — and SwiftUI says it will stop
+/// working altogether. Applied to the List itself, it is always visible to the stack.
+struct DebugSettingsDestination: ViewModifier {
+    @State private var page: String?
+    private static var opened = false
+
+    func body(content: Content) -> some View {
+        content
+            .navigationDestination(isPresented: Binding(get: { page != nil },
+                                                        set: { if !$0 { page = nil } })) {
+                switch page {
+                case "models": ModelsKeysView()
+                case "fallback": FallbackView()
+                case "general": MacGeneralView()
+                case "server": LocalServerView()
+                case "tools": ToolsRulesView()
+                case "easy": EasyModeView()
+                case "mcp": MCPServersView()
+                case "claude": ClaudeCodeSettingsView()
+                case "claude-options": ClaudeOptionsView()
+                case "claude-permissions": ClaudePermissionsView()
+                case "claude-skills": ClaudeSkillsView()
+                case "claude-plugins": ClaudePluginsView()
+                case "claude-mcp": ClaudeMCPView()
+                case "codex": CodexSettingsView()
+                case "phone": PhoneAccessView()
+                case let p? where p.hasPrefix("provider:"): DebugProviderPage(id: String(p.dropFirst(9)))
+                case "codex-options", "codex-agents", "codex-skills", "codex-plugins", "codex-mcp":
+                    DebugCodexPage(page: page ?? "")
+                default: StatusHealthView()
+                }
+            }
+            .onAppear {
+                if !Self.opened, let p = ProcessInfo.processInfo.environment["ORBIT_SETTINGS_PAGE"] {
+                    Self.opened = true
+                    page = p
+                }
+            }
+    }
+}
+#endif
+
+extension View {
+    /// No-op in a release build.
+    func debugSettingsDestination() -> some View {
+        #if DEBUG
+        return modifier(DebugSettingsDestination())
+        #else
+        return self
+        #endif
     }
 }
 

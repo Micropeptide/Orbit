@@ -42,8 +42,9 @@ struct OnboardingTips: View {
                         HStack(alignment: .top, spacing: 14) {
                             Image(systemName: t.symbol)
                                 .font(.title3)
-                                .foregroundStyle(Color.accentColor)
-                                .frame(width: 30)
+                                .foregroundStyle(.white)
+                                .frame(width: 38, height: 38)
+                                .background(OrbitTheme.gradient, in: .rect(cornerRadius: 10))
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(t.title).font(.headline)
                                 Text(t.text).font(.callout).foregroundStyle(.secondary)
@@ -51,6 +52,11 @@ struct OnboardingTips: View {
                             }
                         }
                         .accessibilityElement(children: .combine)
+                    }
+                    NavigationLink {
+                        GuideView()
+                    } label: {
+                        Label("Read the user guide", systemImage: "book.pages").font(.callout.weight(.semibold))
                     }
                     Text("Settings has everything else the Mac offers — models and keys, Claude Code, Codex, phone access.")
                         .font(.footnote).foregroundStyle(.tertiary)
@@ -62,12 +68,11 @@ struct OnboardingTips: View {
                     onDone()
                     dismiss()
                 } label: {
-                    Text("Get started").frame(maxWidth: .infinity)
+                    Text("Get started")
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .padding(.horizontal, 22).padding(.bottom, 12)
-                .background(.bar)
+                .buttonStyle(.orbitPrimary)
+                .padding(.horizontal, 22).padding(.top, 8).padding(.bottom, 12)
+                .background(OrbitTheme.paper.opacity(0.96))
             }
             .navigationTitle("Welcome to Orbit")
             .navigationBarTitleDisplayMode(.inline)

@@ -92,7 +92,7 @@ struct PhoneAccessView: View {
                         Text("Pair another device")
                     } footer: {
                         Text("Scan it with the Orbit app on another iPhone or iPad. The code carries the address "
-                             + "and the pairing token, which is stored in that device's Keychain and never typed. "
+                             + "and a one-time pairing code, which the device trades for a token of its own, kept in its Keychain. "
                              + "Anyone who sees this code can pair — show it only to your own devices.")
                     }
                 } else {
@@ -102,13 +102,15 @@ struct PhoneAccessView: View {
                     }
                 }
 
+                if r.enabled { DevicesSection() }
+
                 if r.enabled {
                     Section {
-                        Button("Rotate pairing token", role: .destructive) { confirmRotate = true }
+                        Button("Unpair every device", role: .destructive) { confirmRotate = true }
                             .disabled(busy)
                     } footer: {
-                        Text("Unpairs every device, including this phone. Use it if a phone is lost; then scan "
-                             + "the new code in Settings → Phone on the Mac.")
+                        Text("Unpairs every device, including this phone. For one lost device, revoke just that "
+                             + "one above.")
                     }
                 }
             } else if error == nil {

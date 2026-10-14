@@ -248,6 +248,7 @@ struct ScheduledView: View {
         if let next = t.nextDescription { out.append(t.enabled ? "next: \(next)" : next) }
         else if t.enabled { out.append("finished") }
         if let s = t.stop_at, !s.isEmpty { out.append("stops by \(s)") }
+        if t.until_done == true { out.append(t.done_at != nil ? "done" : "until it is done") }
         out.append("on " + (state.modelLabel(t.model) ?? (t.sid != nil ? "its chat's model" : "the default model")))
         if let sid = t.sid {
             let title = state.chats.first { $0.id == sid }?.displayTitle
@@ -400,6 +401,7 @@ struct TaskEditor: View {
     @State private var confirmDelete = false
     // stops by, where it runs, project and agent — as the Mac's task form has them
     @State private var stopBy = false
+    @State private var untilDone = false
     @State private var stopAt = Date.now
     @State private var runsIn = ""
     @State private var project = ""
@@ -453,6 +455,13 @@ struct TaskEditor: View {
                     }
                     Toggle("Enabled", isOn: $enabled)
                 } header: { Text("When") }
+
+                Section {
+                    Toggle("Until it's done", isOn: $untilDone)
+                } footer: {
+                    Text("After each run the Mac checks the prompt against what happened, and stops repeating once "
+                         + "it is met — \"every night, until the tests pass\".")
+                }
 
                 Section {
                     Toggle("Stop by a time", isOn: $stopBy)
@@ -574,6 +583,7 @@ struct TaskEditor: View {
         model = task.model ?? ""
         enabled = task.enabled
         stopBy = !(task.stop_at ?? "").isEmpty
+        untilDone = task.until_done ?? false
         if let s = task.stop_at, let d = Self.hhmm.date(from: s),
            let t = Calendar.current.date(bySettingHour: Calendar.current.component(.hour, from: d),
                                          minute: Calendar.current.component(.minute, from: d),
@@ -594,7 +604,7 @@ struct TaskEditor: View {
         let stop = stopBy ? Self.hhmm.string(from: stopAt) : ""
         var full: [String: Any] = ["name": name, "prompt": prompt, "every": every, "enabled": enabled,
                                    "model": model, "stop_at": stop, "sid": runsIn,
-                                   "project": project, "agent": agent]
+                                   "project": project, "agent": agent, "until_done": untilDone]
         switch every {
         case "once": full["at_ts"] = once.timeIntervalSince1970
         case "minutes", "hours": full["n"] = n
@@ -611,6 +621,7 @@ struct TaskEditor: View {
         if runsIn != (task.sid ?? "") { job["sid"] = runsIn }
         if project != (task.project ?? "") { job["project"] = project }
         if agent != (task.agent ?? "") { job["agent"] = agent }
+        if untilDone != (task.until_done ?? false) { job["until_done"] = untilDone }
         // when it runs: send the whole of it if any part moved, so the Mac never
         // pairs a new kind with an old time
         let whenKeys = ["at", "at_ts", "n", "weekday"]

@@ -74,8 +74,8 @@ struct EmptyChatHero: View {
             HomeDashboard()
             if !recent.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text("PICK UP WHERE YOU LEFT OFF")
-                        .font(.caption2.weight(.semibold)).tracking(0.6).foregroundStyle(.secondary)
+                    Text("Pick up where you left off")
+                        .font(.footnote.weight(.semibold)).foregroundStyle(.secondary)
                         .padding(.horizontal, 12).padding(.bottom, 6)
                     ForEach(recent) { chat in
                         Button {

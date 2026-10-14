@@ -130,7 +130,7 @@ struct HomeDashboard: View {
                     Image(systemName: "circle.fill").font(.system(size: 7)).foregroundStyle(.green)
                         .symbolEffect(.pulse)
                 }
-                Text(title.uppercased()).font(.caption2.weight(.semibold)).tracking(0.6)
+                Text(title).font(.footnote.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
                 if let link {
@@ -140,9 +140,12 @@ struct HomeDashboard: View {
             }
             content()
         }
-        .padding(12)
+        .padding(13)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.25), in: .rect(cornerRadius: 12))
+        // a card on the page: its own surface and a hairline, as on the Mac's home page
+        .background(OrbitTheme.surface, in: .rect(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(OrbitTheme.line.opacity(0.7), lineWidth: 0.75))
+        .shadow(color: .black.opacity(0.04), radius: 2, y: 1)
     }
 
     private func skeleton() -> some View {
@@ -318,7 +321,7 @@ struct HomeDashboard: View {
             }
             if let h = home, !h.models.isEmpty {
                 if !accounts.isEmpty {
-                    Text("MOST USED · 7 DAYS").font(.caption2.weight(.semibold)).tracking(0.6)
+                    Text("Most used, last 7 days").font(.footnote.weight(.semibold))
                         .foregroundStyle(.secondary).padding(.top, 2)
                 }
                 let most = h.models.map(\.turns).max() ?? 1
