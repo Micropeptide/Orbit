@@ -264,6 +264,13 @@ body{overflow:hidden}
 /* the chat's folder keeps a readable width; the session label (the mode chip already says
    which engine) goes first when the bar is short */
 .top>#cqbar .cqdir{flex-shrink:0;max-width:170px;min-width:0}
+main .top>#cqbar select{flex:none;width:96px;min-width:96px;max-width:96px}
+main .top>#cqbar .cqdir{flex:none}
+/* the chat's folder is how you choose where it works: it stays; the model names give way */
+main .top>#cqbar{flex-shrink:0;overflow:visible}
+main .top>#hpick{flex-shrink:1;min-width:0}
+#hpick #hprov{min-width:70px;flex-shrink:1}#hpick #hmodel{min-width:96px;flex-shrink:1}
+.top>#title{min-width:72px}
 @container main (max-width:1320px){#cqbar .cqi{display:none}}
 @container main (max-width:900px){#cqbar .cqdir{display:none}}
 @container main (max-width:860px){.top .ctx,#opbadge{display:none!important}}
@@ -2669,7 +2676,10 @@ function syncBusy(){
 let MODELS={models:[],current:'',default:''};
 async function loadModels(){
  try{MODELS=await (await fetch('/api/models')).json()}catch(e){return}
- drawModelPicker()}
+ drawModelPicker();
+ // the folder and permission bar needs to know the mode: on the page's first load it was
+ // drawn before this arrived, and stayed missing until you switched chats
+ if(sid)drawClaudeBar()}
 function drawModelPicker(){
  document.body.classList.toggle('harness',!!MODELS.harness_mode);
  document.body.classList.toggle('codexmode',!!MODELS.codex_mode&&!MODELS.harness_mode);
@@ -9000,7 +9010,7 @@ function tabTitle(id){
  const s=SESSIONS.find(x=>x.id===id);
  if(s&&s.title)TAB_TITLES[id]=s.title;
  if(id===sid){const t=$('#title').textContent;if(t&&t!=='New chat')TAB_TITLES[id]=t}
- return TAB_TITLES[id]||(FRESH_TABS.has(id)?'New chat':'Chat')}
+ return TAB_TITLES[id]||(FRESH_TABS.has(id)||id===sid?($('#title').textContent||'New chat'):'Chat')}
 let TABS_CHECKED=false;
 async function pruneTabs(){
  if(TABS_CHECKED)return;TABS_CHECKED=true;
