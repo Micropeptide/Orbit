@@ -40,7 +40,7 @@ class TestSkillsAreNamedInThePrompt(unittest.TestCase):
         self.assertIn("more (list_skills)", sec)
 
     def test_frontmatter_is_read_rather_than_shown(self):
-        body = "---\nname: hoffman2\ndescription: Run compute on the cluster\n---\n\n# Hoffman2\n"
+        body = "---\nname: hpc-cluster\ndescription: Run compute on the cluster\n---\n\n# HPC cluster\n"
         self.assertEqual(q._skill_title(body), "Run compute on the cluster")
         self.assertEqual(q._skill_title("# Plain skill\n\ntext"), "Plain skill")
 
