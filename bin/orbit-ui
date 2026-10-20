@@ -4186,8 +4186,10 @@ class _LimitWatch:
         except Exception:
             plan = None
         try:
-            return q.schedule_limit_resume(sid or st.sid, title if title is not None else st.title,
-                                           self.texts + said, mdl, attempt, plan=plan)
+            job = q.schedule_limit_resume(sid or st.sid, title if title is not None else st.title,
+                                          self.texts + said, mdl, attempt, plan=plan)
+            if job and job.get("switch"): wake_scheduler(4)       # due in 3 s: do not wait for the next minute
+            return job
         except Exception:
             return None
 
@@ -4622,13 +4624,30 @@ def run_job(job, manual=False):
     q._SESS_CACHE["key"] = None
     return result
 
+SCHED_WAKE = threading.Event()        # set to have the scheduler look for due jobs now, not at its next minute
+
+
+def wake_scheduler(after=0.0):
+    """Look for due jobs after `after` seconds (a job due in a few seconds, such as a chat
+    carrying on after its account ran out, should not wait for the next minute)."""
+    if after > 0: threading.Timer(after, SCHED_WAKE.set).start()
+    else: SCHED_WAKE.set()
+
+
+def gap_blocks(job, now=None):
+    """Whether the quiet gap after the last answer keeps this job waiting. A chat moving on to
+    another account after a limit is not a chore that can wait: it is the answer carrying on."""
+    if job.get("switch"): return False
+    gap = float(q.S.get("schedule_gap_min") or 0) * 60
+    return (now or time.time()) - q.GEN_STATE.get("ended", 0) < gap
+
+
 def scheduler_loop():
     def _due_jobs():
         # a job waits only for its own chat, or for the local model when it needs it
         # (jobs_ready_to_start), plus a gap after the last answer; one start a minute
-        if time.time() - q.GEN_STATE.get("ended", 0) < float(q.S.get("schedule_gap_min") or 0) * 60:
-            return
         for job in jobs_ready_to_start():
+            if gap_blocks(job): continue
             jid = job.get("id")
             # in its own thread: a scheduled job is a full model turn, and running
             # it here stalled every other chore for as long as it took
@@ -4665,7 +4684,7 @@ def scheduler_loop():
             try: fn()
             except Exception as e:
                 print(f"[maintenance] {name} failed: {type(e).__name__}: {e}", flush=True)
-        time.sleep(60)
+        SCHED_WAKE.wait(60); SCHED_WAKE.clear()
 
 class Srv(socketserver.ThreadingTCPServer):
     allow_reuse_address = True

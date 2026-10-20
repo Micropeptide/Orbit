@@ -2687,7 +2687,8 @@ class TestRound1Server(Sandbox):
         gate = src[src.index("def jobs_ready_to_start("):][:1400]
         self.assertIn("q.slot_busy()", gate)
         self.assertIn('job["sid"] in busy', gate)
-        self.assertIn("schedule_gap_min", block)
+        self.assertIn("gap_blocks(job)", block)                                  # the quiet gap, per job
+        self.assertIn("schedule_gap_min", src[src.index("def gap_blocks("):][:700])
         self.assertIn("one job per minute at most", block)
 
     def test_burn_never_erases_a_saved_chat(self):

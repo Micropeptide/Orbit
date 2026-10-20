@@ -164,3 +164,30 @@ class TestWhichAccountARunTakes(TwoAccounts):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestNoWaiting(TwoAccounts):
+    """"Continuing on Lab" must mean now: not after the quiet gap, and not at the next minute."""
+    def test_the_gap_after_an_answer_does_not_hold_a_switch(self):
+        q = self.q
+        saved = (q.S.get("schedule_gap_min"), q.GEN_STATE.get("ended"))
+        def restore():
+            q.S["schedule_gap_min"] = saved[0]
+            if saved[1] is None: q.GEN_STATE.pop("ended", None)
+            else: q.GEN_STATE["ended"] = saved[1]
+        self.addCleanup(restore)
+        q.S["schedule_gap_min"] = 3
+        q.GEN_STATE["ended"] = time.time()                      # an answer just ended
+        self.assertTrue(self.ui.gap_blocks({"kind": "limit_resume"}))              # an ordinary chore waits
+        self.assertFalse(self.ui.gap_blocks({"kind": "limit_resume", "switch": "continuing on Lab"}))
+
+    def test_a_switch_wakes_the_scheduler_when_it_comes_due(self):
+        self.ui.SCHED_WAKE.clear()
+        self.check(self.watch("main"))
+        self.assertTrue(self.ui.SCHED_WAKE.wait(8))              # due in 3 s, woken at 4 s
+
+    def test_waiting_for_a_reset_does_not_wake_it(self):
+        H.set_policy(self.tmp, auto_switch=False)
+        self.ui.SCHED_WAKE.clear()
+        self.check(self.watch("main", hours=4))
+        self.assertFalse(self.ui.SCHED_WAKE.wait(5))
