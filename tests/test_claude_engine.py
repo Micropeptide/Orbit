@@ -184,6 +184,30 @@ class TestClaudeEngine(unittest.TestCase):
         self.assertTrue(os.path.isdir(target))
         self.assertIn("Nobody is watching", json.dumps(self.requests()[-1]["messages"]))
 
+    def test_auto_on_the_local_model_is_decided_by_orbit_not_claudes_classifier(self):
+        """Claude Code 2.1.x runs its own classifier whenever the mode is auto -- from its
+        settings or, with none stated, by default -- and on the local model that refuses
+        every Write and Bash ("Auto mode could not evaluate this action"). A chat in Orbit's
+        own auto has the mode said out loud, so Orbit's rules answer instead, even where the
+        Claude settings say auto."""
+        with open(os.path.join(self.cfgdir, "settings.json"), "w") as f:
+            json.dump({"permissions": {"defaultMode": "auto"}}, f)
+        self.addCleanup(os.remove, os.path.join(self.cfgdir, "settings.json"))
+        cfg = q.S["claude_qwen"]
+        self.addCleanup(cfg.__setitem__, "permission_mode", cfg["permission_mode"])
+        cfg["permission_mode"] = "auto"
+        target = os.path.join(self.work, "keepme-auto")
+        os.makedirs(target, exist_ok=True)
+        self.serve([
+            [{"tool_use": {"name": "Bash", "input": {"command": f"rm -rf {target}"}}}],
+            [{"text": "Could not."}],
+        ])
+        self.run_turn([{"role": "system", "content": "s"}], "go", approve=None)
+        self.assertTrue(os.path.isdir(target))
+        seen = json.dumps(self.requests()[-1]["messages"])
+        self.assertNotIn("Auto mode could not evaluate", seen)
+        self.assertIn("Nobody is watching", seen)
+
     def test_question_goes_to_orbits_question_box(self):
         self.serve([
             [{"tool_use": {"name": "AskUserQuestion", "input": {"questions": [{
