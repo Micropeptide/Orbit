@@ -349,6 +349,20 @@ def remote_target_env(target, env):
     return ssh_remote.remote_env(renv), (rport, gateway_port())
 
 
+def look_screenshots(tool, text):
+    """The screenshots a look tool (bin/orbit-look) just took, as paths inside the workspace,
+    where the page can show them: its result says "Screenshot saved: <path> (WxH px)"."""
+    if not str(tool).startswith("mcp__orbit-look__"): return []
+    root = os.path.realpath(Q.WORKSPACE)
+    out = []
+    for m in re.finditer(r"Screenshot saved: (.+?\.png)", str(text or "")):
+        fp = os.path.realpath(m.group(1).strip())
+        if os.path.isfile(fp) and fp.startswith(root + os.sep):
+            rel = os.path.relpath(fp, root)
+            if rel not in out: out.append(rel)
+    return out
+
+
 def test_account(account):
     """One tiny question to Claude Code on this account, to see that its sign-in works.
     {"ok", "detail"}; the answer is a word, so it uses next to none of the allowance."""
@@ -2095,9 +2109,13 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                         p["background"] = True
                         # the id the task goes by (Claude's own, when its task event came first)
                         if rec: emit("bgtask", {k: rec.get(k) for k in ("id", "kind", "description", "status")})
+                    shots = look_screenshots(name, text)
+                    if shots: p["images"] = shots              # the picture itself, not only its path
                     emit("tool_result", p)
                     tmsg = {"role": "tool", "tool_call_id": tid, "name": name, "t": time.time(),
-                            "ok": ok, "secs": secs, "content": text[:60000]}
+                            "ok": ok, "secs": secs,
+                            # a reopened chat (and the phone) show the pictures from this line
+                            "content": text[:60000] + (f"\n[created images: {', '.join(shots)}]" if shots else "")}
                     if sub: tmsg["subagent"] = sub
                     if p.get("background"): tmsg["background"] = True
                     messages.append(tmsg)

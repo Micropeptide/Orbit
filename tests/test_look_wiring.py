@@ -91,3 +91,43 @@ class TestTheGate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestScreenshotsShowInTheChat(unittest.TestCase):
+    """A look tool's result names the screenshot it saved; the chat shows the picture."""
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="orbit-shots-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.saved = q.WORKSPACE
+        q.WORKSPACE = os.path.join(self.tmp, "my workspace")            # a folder with a space in its name
+        os.makedirs(os.path.join(q.WORKSPACE, ".screenshots", "look"))
+        self.addCleanup(setattr, q, "WORKSPACE", self.saved)
+        self.shot = os.path.join(q.WORKSPACE, ".screenshots", "look", "page-001.png")
+        open(self.shot, "wb").write(b"\x89PNG\r\n\x1a\n")
+
+    def test_the_path_becomes_a_picture(self):
+        text = f"Opened http://x/\nScreenshot saved: {self.shot} (1100x640 px)\nTitle: x"
+        self.assertEqual(CE.look_screenshots("mcp__orbit-look__browser_open", text), [".screenshots/look/page-001.png"])
+
+    def test_only_look_tools_and_only_inside_the_workspace(self):
+        text = f"Screenshot saved: {self.shot} (1x1 px)"
+        self.assertEqual(CE.look_screenshots("Bash", text), [])
+        outside = os.path.join(self.tmp, "elsewhere.png")
+        open(outside, "wb").write(b"x")
+        self.assertEqual(CE.look_screenshots("mcp__orbit-look__browser_screenshot", f"Screenshot saved: {outside} (1x1 px)"), [])
+        self.assertEqual(CE.look_screenshots("mcp__orbit-look__browser_open", "Screenshot saved: /nope/missing.png (1x1 px)"), [])
+
+    def test_a_reopened_chat_shows_it_too(self):
+        import importlib.machinery, importlib.util
+        loader = importlib.machinery.SourceFileLoader("orbit_ui_shots", os.path.join(os.path.dirname(HERE), "bin", "orbit-ui"))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        ui = importlib.util.module_from_spec(spec); loader.exec_module(ui)
+        text = f"Screenshot saved: {self.shot} (1x1 px)"
+        shots = CE.look_screenshots("mcp__orbit-look__browser_open", text)
+        msgs = [{"role": "user", "content": "go"},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function",
+                 "function": {"name": "mcp__orbit-look__browser_open", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "name": "mcp__orbit-look__browser_open", "ok": True,
+                 "content": text + f"\n[created images: {', '.join(shots)}]"}]
+        plots = [pl for m in ui.render(msgs) for pl in m.get("plots", [])]
+        self.assertEqual(plots, ["/api/ws/.screenshots/look/page-001.png"])
