@@ -3811,15 +3811,22 @@ async function renderHarnessModels(box){
   const host=gc.querySelector('#gcli');host.innerHTML='';
   (d.clis||[]).forEach(c=>{
    const status=!c.installed?'not installed':c.signed_in===true?`✓ signed in${c.models?' · '+c.models+' models':''}`
-    :c.signed_in===false?'installed — not signed in':'installed';
+    :c.signed_in===false?`sign-in not working yet${c.models?' · '+c.models+' models listed':''}`
+    :`installed${c.models?' · '+c.models+' models':''} · press Test to check the sign-in`;
    const row=el(`<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:5px 0">
      <b style="min-width:130px">${esc(c.label)}</b><span class=note style="flex:1;min-width:180px">${esc(status)}</span>
      ${!c.installed?'<button class=ghost data-a=install title="types the install command; you press Enter">Install in the terminal</button>'
       :c.signed_in===true?'<button class=ghost data-a=login>Open in the terminal</button>'
       :'<button class=ghost data-a=login>Sign in in the terminal</button>'}
+     ${c.installed?'<button class=ghost data-a=test title="a one-word question, to see that the sign-in works">Test</button>':''}
      <button class=ghost data-a=check>Check again</button></div>`);
    row.querySelector('[data-a=install]')&&(row.querySelector('[data-a=install]').onclick=()=>terminalDo(c.install,false));
    row.querySelector('[data-a=login]')&&(row.querySelector('[data-a=login]').onclick=()=>terminalDo(c.login,true));
+   const tb=row.querySelector('[data-a=test]');
+   if(tb)tb.onclick=async()=>{tb.textContent='…';tb.disabled=true;
+    const r=await apiPost('/api/google/cli/test',{id:c.id},'testing');
+    toast(r&&r.ok?`${c.label}: signed in and answering`:`${c.label}: ${(r&&r.detail)||'no answer'}`,r&&r.ok?undefined:7000);
+    await drawG(true);delete HPROV_CACHE.models;loadModels()};
    row.querySelector('[data-a=check]').onclick=async()=>{await drawG(true);delete HPROV_CACHE.models;loadModels();toast('checked')};
    host.appendChild(row)})};
  drawG(false);

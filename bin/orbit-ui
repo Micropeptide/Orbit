@@ -1761,6 +1761,9 @@ class H(http.server.BaseHTTPRequestHandler):
             over["accounts"] = accts
             q.HARN.save(q.ROOT, cfg)
             return self._send(200, jdump({"ok": True, "accounts": accts, "id": aid}))
+        if p == "/api/google/cli/test":
+            # one tiny question to Antigravity or the Gemini CLI: is its Google sign-in working?
+            return self._send(200, jdump(q.MODELS.google_cli_test(d.get("id", ""))))
         if p == "/api/harness/policy":
             # what every provider with several accounts does when one runs out
             return self._send(200, jdump({"ok": True, "policy": q.HARN.set_policy(

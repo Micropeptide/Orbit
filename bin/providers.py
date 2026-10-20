@@ -212,42 +212,85 @@ GOOGLE_CLIS = (
 )
 
 
+_SIGNED = {}            # cli id -> (when, ok): the last time its sign-in was tried with a real question
+
+
+def google_cli_test(cid, timeout=90):
+    """Ask the CLI one tiny question, to see that its sign-in works: {"ok", "detail"}. The model
+    list is no proof (`agy models` answers before anyone has signed in), so this is the check."""
+    import subprocess, time
+    g = next((x for x in GOOGLE_CLIS if x["id"] == cid), None)
+    exe = which(g["bin"]) if g else None
+    if not exe: return {"ok": False, "detail": "not installed"}
+    try:
+        r = subprocess.run([exe, "-p", "Reply with the single word OK."], capture_output=True, text=True,
+                           timeout=timeout, env=cli_env(exe), stdin=subprocess.DEVNULL, cwd=os.path.expanduser("~"))
+    except subprocess.TimeoutExpired:
+        res = {"ok": False, "detail": f"no answer in {timeout}s: run {g['login']} in a terminal and sign in"}
+    except OSError as e:
+        res = {"ok": False, "detail": str(e)}
+    else:
+        said = (r.stdout or "").strip()
+        res = ({"ok": True, "detail": "signed in and answering"} if r.returncode == 0 and said
+               else {"ok": False, "detail": (said or r.stderr or "no answer").strip()[-300:]})
+    _SIGNED[cid] = (time.time(), res["ok"])
+    return res
+
+
 def google_cli_status(fresh=False):
-    """Where each of Google's terminal agents stands, for Settings: installed, signed in (the
-    models it lists for your account; the Gemini CLI has no list, so its sign-in file stands in),
-    and the commands to install it and to sign in. Never reads a credential."""
+    """Where each of Google's terminal agents stands, for Settings: installed, how many models it
+    lists, whether its sign-in has been shown to work (True/False after a test, else None), and
+    the commands to install it and to sign in. Never reads a credential."""
     if fresh: _AGY["at"] = 0.0
     out = []
     for g in GOOGLE_CLIS:
         exe = which(g["bin"])
         row = {"id": g["id"], "label": g["label"], "note": g["note"], "installed": bool(exe),
-               "install": g["install"], "login": g["login"], "models": 0, "signed_in": None}
+               "install": g["install"], "login": g["login"], "models": 0,
+               "signed_in": (_SIGNED.get(g["id"]) or (0, None))[1] if exe else None}
         if exe and g["id"] == "agy-cli":
             row["models"] = len(agy_models(max_age=0 if fresh else 3600))
-            row["signed_in"] = row["models"] > 0
-        elif exe:
-            row["signed_in"] = os.path.exists(os.path.expanduser("~/.gemini/oauth_creds.json")) or None
         out.append(row)
     return out
 
 
+def parse_agy_models(out):
+    """[(slug, label)] from what `agy models` prints: one "slug<TAB>Label" line per model
+    (1.4.3), after a "Fetching available models..." line -- or JSON, in versions that have it."""
+    out = (out or "").strip()
+    if out[:1] in "[{":
+        try:
+            d = json.loads(out)
+            rows = []
+            for m in (d if isinstance(d, list) else (d.get("models") or d.get("data") or [])):
+                if isinstance(m, str): rows.append((m, m))
+                elif isinstance(m, dict):
+                    slug = m.get("slug") or m.get("id") or m.get("name")
+                    if slug: rows.append((str(slug), str(m.get("displayName") or m.get("display_name") or m.get("name") or slug)))
+            return rows
+        except ValueError:
+            return []
+    rows = []
+    for line in out.splitlines():
+        if "\t" not in line: continue                       # progress and headings are not models
+        slug, _, label = line.partition("\t")
+        slug = slug.strip()
+        if slug and " " not in slug: rows.append((slug, label.strip() or slug))
+    return rows
+
+
 def agy_models(max_age=3600):
-    """The models Antigravity offers this account, from `agy models --output-format json`:
-    [(slug, label)], kept for an hour. Empty when the CLI is missing or says nothing usable."""
+    """The models Antigravity offers this account, from `agy models`: [(slug, label)], kept for
+    an hour. Empty when the CLI is missing or says nothing usable."""
     import subprocess, time
     if time.time() - _AGY["at"] < max_age: return list(_AGY["rows"])
     exe = which("agy")
     rows = []
     if exe:
         try:
-            r = subprocess.run([exe, "models", "--output-format", "json"], capture_output=True, text=True,
-                               timeout=20, env=cli_env(exe), stdin=subprocess.DEVNULL)
-            d = json.loads(r.stdout or "[]")
-            for m in (d if isinstance(d, list) else (d.get("models") or d.get("data") or [])):
-                if isinstance(m, str): rows.append((m, m))
-                elif isinstance(m, dict):
-                    slug = m.get("slug") or m.get("id") or m.get("name")
-                    if slug: rows.append((str(slug), str(m.get("displayName") or m.get("display_name") or m.get("name") or slug)))
+            r = subprocess.run([exe, "models"], capture_output=True, text=True, timeout=30,
+                               env=cli_env(exe), stdin=subprocess.DEVNULL)
+            rows = parse_agy_models(r.stdout)
         except Exception:
             rows = []
     _AGY.update(at=time.time(), rows=rows)

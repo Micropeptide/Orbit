@@ -12,8 +12,10 @@ FAKE = textwrap.dedent('''\
     import json, sys
     a = sys.argv[1:]
     if a[:1] == ["models"]:
-        print(json.dumps([{"slug": "gemini-3.8-flash", "displayName": "Gemini 3.8 Flash"},
-                          {"slug": "gemini-4-argon", "displayName": "Gemini 4 Argon"}]))
+        # as agy 1.4.3 prints it: a heading, then one "slug<TAB>Label" line per model; no JSON flag
+        print("Fetching available models...")
+        print("gemini-3.8-flash\tGemini 3.8 Flash")
+        print("gemini-4-argon\tGemini 4 Argon")
         sys.exit(0)
     # the prompt is whatever follows -p; flags must all come before it
     i = a.index("-p")
@@ -29,11 +31,11 @@ class Fake(unittest.TestCase):
         self.exe = os.path.join(self.tmp, "fake")
         open(self.exe, "w").write(FAKE)
         os.chmod(self.exe, os.stat(self.exe).st_mode | stat.S_IXUSR)
-        saved = (P.which, dict(P._AGY))
+        saved = (P.which, dict(P._AGY), dict(P._SIGNED))
         P.which = lambda name: self.exe if name in ("agy", "gemini") else None
-        P._AGY.update(at=0.0, rows=[])
+        P._AGY.update(at=0.0, rows=[]); P._SIGNED.clear()
         def restore():
-            P.which = saved[0]; P._AGY.clear(); P._AGY.update(saved[1])
+            P.which = saved[0]; P._AGY.clear(); P._AGY.update(saved[1]); P._SIGNED.clear(); P._SIGNED.update(saved[2])
         self.addCleanup(restore)
 
     def ask(self, backend, model, text="hello"):
@@ -92,18 +94,24 @@ class TestSigningIn(Fake):
     def row(self, cid):
         return next(r for r in P.google_cli_status(fresh=True) if r["id"] == cid)
 
-    def test_installed_and_signed_in_when_it_lists_models(self):
+    def test_the_model_list_alone_proves_nothing_about_the_sign_in(self):
         r = self.row("agy-cli")
-        self.assertEqual((r["installed"], r["signed_in"], r["models"]), (True, True, 2))
+        self.assertEqual((r["installed"], r["models"], r["signed_in"]), (True, 2, None))   # asked nothing yet
         self.assertEqual(r["login"], "agy")
 
-    def test_installed_but_not_signed_in_lists_nothing(self):
+    def test_a_question_that_gets_an_answer_is_a_working_sign_in(self):
+        self.assertTrue(P.google_cli_test("agy-cli")["ok"])
+        self.assertTrue(self.row("agy-cli")["signed_in"])
+
+    def test_a_question_that_does_not_is_not_and_says_why(self):
         bad = os.path.join(self.tmp, "bad")
-        open(bad, "w").write("#!/bin/sh\necho 'please sign in' >&2\nexit 1\n")
+        open(bad, "w").write("#!/bin/sh\necho 'please sign in with Google' >&2\nexit 1\n")
         os.chmod(bad, 0o755)
         P.which = lambda name: bad if name == "agy" else None
-        r = self.row("agy-cli")
-        self.assertEqual((r["installed"], r["signed_in"], r["models"]), (True, False, 0))
+        res = P.google_cli_test("agy-cli")
+        self.assertFalse(res["ok"])
+        self.assertIn("sign in with Google", res["detail"])
+        self.assertIs(self.row("agy-cli")["signed_in"], False)
 
     def test_not_installed_says_how(self):
         P.which = lambda name: None
