@@ -388,6 +388,11 @@ class TestASecondOpinionForTheLocalModel(unittest.TestCase):
 
     def test_a_reviewer_on_this_mac_is_refused(self):
         """It exists to be somewhere else; a local one is the problem, not the fix."""
+        saved = q.model_catalogue                    # a hosted model that is ready, whatever this machine has set up
+        q.model_catalogue = lambda: [
+            {"id": "local:orcarouter-qwen3.8-27b-uncensored-mlx", "provider": "local", "ready": True},
+            {"id": "harness:claude/haiku", "provider": "harness", "ready": True}]
+        self.addCleanup(setattr, q, "model_catalogue", saved)
         self.assertTrue(q._model_is_local("local:orcarouter-qwen3.8-27b-uncensored-mlx"))
         self.assertTrue(q._model_is_local("a-model-nobody-has-heard-of"))
         self.assertFalse(q._model_is_local("harness:claude/haiku"))

@@ -25,10 +25,15 @@ class Base(unittest.TestCase):
     def setUp(self):
         ui = self.ui
         self.tmp = tempfile.mkdtemp(prefix="orbit-chats-"); self.addCleanup(shutil.rmtree, self.tmp, True)
-        saved = (q.SESSIONS, ui.QUEUE_INDEX, q.turn, q.slot_enter, q.slot_exit, ui._learn_later, q.CHATS)
+        saved = (q.SESSIONS, ui.QUEUE_INDEX, q.turn, q.slot_enter, q.slot_exit, ui._learn_later, q.CHATS,
+                 q.model_catalogue)
         def restore():
-            q.SESSIONS, ui.QUEUE_INDEX, q.turn, q.slot_enter, q.slot_exit, ui._learn_later, q.CHATS = saved
+            (q.SESSIONS, ui.QUEUE_INDEX, q.turn, q.slot_enter, q.slot_exit, ui._learn_later, q.CHATS,
+             q.model_catalogue) = saved
         self.addCleanup(restore)
+        # the models these chats name are ready here, whichever providers this machine has set up
+        q.model_catalogue = lambda: [{"id": self.HOSTED, "model": "deepseek-v4.1-flash", "label": "DeepSeek V4.1 Flash",
+                                      "provider": "harness", "ready": True}]
         q.SESSIONS = os.path.join(self.tmp, "s"); os.makedirs(q.SESSIONS)
         ui.QUEUE_INDEX = os.path.join(self.tmp, "queues.json")
         q._SESS_CACHE["key"] = None
