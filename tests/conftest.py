@@ -11,6 +11,12 @@ import sys
 
 import pytest
 
+# tests/test_api.py is a script for a RUNNING Orbit (`venv/bin/python tests/test_api.py`): it
+# runs at import, against the real server on :8899, creating and removing real memory notes,
+# agents, skills, projects, tasks and a chat. pytest importing it to look for tests ran all of
+# that on every suite run, and left a trail in the real Trash.
+collect_ignore = ["test_api.py"]
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"))
 
 # Settings that call out to a model or a service when they are set.
