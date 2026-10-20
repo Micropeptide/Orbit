@@ -119,7 +119,7 @@ CLI_BACKENDS = {
     # `agy -p` answers once on stdout; every flag goes before -p, which takes the prompt.
     "agy-cli": {
         "label": "Antigravity CLI", "bin": "agy",
-        "argv": [], "prompt_flag": "-p", "plain": True,
+        "argv": ["--output-format", "stream-json"], "prompt_flag": "-p",
         "model_flag": "--model", "system_flag": None,
         "models": [("", "Antigravity · its default model")],
         "note": "your Google sign-in (AI Pro/Ultra) — no API key. Install: "
@@ -356,6 +356,22 @@ def _cli_text(ev):
     part = ev.get("part")
     if isinstance(part, dict) and isinstance(part.get("text"), str):
         return ("whole", part["text"])
+    # antigravity (agy --output-format stream-json)
+    if ev.get("event") == "step_update" and isinstance(ev.get("step_update"), dict):
+        s = ev["step_update"]
+        if s.get("step_type") == "agent_response" and s.get("text_delta"): return ("delta", s["text_delta"])
+        if s.get("step_type") == "tool" and s.get("state") == "DONE":
+            info = s.get("tool_info") if isinstance(s.get("tool_info"), dict) else {}
+            params = info.get("parameters") if isinstance(info.get("parameters"), dict) else {}
+            arg = next((str(v) for v in params.values() if isinstance(v, (str, int, float))), "")
+            out = str(info.get("output") or "").strip().splitlines()
+            line = f"⚙ {s.get('tool_name') or info.get('name') or 'tool'} {arg[:90]}".rstrip()
+            return ("think", line + (f" — {out[0][:100]}" if out else "") + "\n")
+    if ev.get("event") == "result" and isinstance(ev.get("result"), dict):
+        r = ev["result"]
+        if str(r.get("status") or "SUCCESS").upper() != "SUCCESS":
+            raise RuntimeError(f"Antigravity stopped: {str(r.get('response') or r.get('status'))[:300]}")
+        if isinstance(r.get("response"), str): return ("final", r["response"])
     return (None, "")
 
 
@@ -417,7 +433,7 @@ def _cli_stream_once(backend, model, messages, emit=None, cancel=None, timeout=9
         resume_mk = AG.marker_of(messages, backend)
     except Exception:
         resume_mk = None
-    if resume_mk and backend in ("codex-cli", "opencode-cli"):
+    if resume_mk and backend in ("codex-cli", "opencode-cli", "agy-cli"):
         new = [m for m in AG.since_marker(messages) if m.get("role") in ("user", "assistant", "tool")]
         last = next((m for m in reversed(new) if m.get("role") == "user"), None) or \
                next((m for m in reversed(messages) if m.get("role") == "user"), {})
@@ -431,6 +447,10 @@ def _cli_stream_once(backend, model, messages, emit=None, cancel=None, timeout=9
         if resume_mk.get("cwd") and os.path.isdir(resume_mk["cwd"]): cwd = resume_mk["cwd"]
         if backend == "codex-cli":
             argv = [exe, "exec", "--json", "--skip-git-repo-check", *list(extra_args or []), "resume", resume_mk["id"], said]
+        elif backend == "agy-cli":      # its own conversation goes on; only what is new is sent
+            argv = [exe, *b["argv"]]
+            if model and model != "default": argv += ["--model", model]
+            argv += ["--conversation", resume_mk["id"], *list(extra_args or []), "-p", said]
         else:
             argv = [exe, "run", "--format", "json", "--session", resume_mk["id"]]
             if model and model != "default": argv += ["--model", model]
@@ -468,7 +488,7 @@ def _cli_stream_once(backend, model, messages, emit=None, cancel=None, timeout=9
                 if cancel.wait(0.4): stop("cancelled"); return
         threading.Thread(target=watch, daemon=True).start()
 
-    live, whole, final, think, errs = [], [], None, [], []
+    live, whole, final, think, errs, usage = [], [], None, [], [], None
     try:
         for raw in proc.stdout:
             if b.get("plain"):                 # a CLI that answers in plain text, not events
@@ -486,7 +506,11 @@ def _cli_stream_once(backend, model, messages, emit=None, cancel=None, timeout=9
             if not session_id:
                 # the session the CLI answered in, so the next message continues it
                 session_id = (ev.get("thread_id") if ev.get("type") == "thread.started" else None) \
-                    or ev.get("sessionID") or ev.get("session_id")
+                    or ev.get("sessionID") or ev.get("session_id") or ev.get("conversation_id")
+            if ev.get("event") == "result" and isinstance(ev.get("result"), dict):
+                ru = ev["result"].get("usage") if isinstance(ev["result"].get("usage"), dict) else {}
+                if ru: usage = {"prompt_tokens": int(ru.get("input_tokens") or 0),
+                                "completion_tokens": int(ru.get("output_tokens") or 0)}
             kind, text = _cli_text(ev)
             if not text: continue
             if kind == "delta":
@@ -511,7 +535,7 @@ def _cli_stream_once(backend, model, messages, emit=None, cancel=None, timeout=9
         rc = proc.wait()
 
     text = final or ("".join(live) if live else "\n\n".join(whole))
-    if b.get("plain"): text = text.strip()
+    if b.get("plain") or backend == "agy-cli": text = text.strip()
 
     # A signed-out CLI exits 0 and prints its complaint as the answer, which then
     # gets saved as though the model had said it. Surface it as the failure it is.
@@ -544,6 +568,7 @@ def _cli_stream_once(backend, model, messages, emit=None, cancel=None, timeout=9
         tail = err.decode("utf-8", "replace").strip().splitlines()
         raise RuntimeError(f"{b['bin']} exited {rc}: " + (tail[-1][:300] if tail else "no output"))
     msg = {"role": "assistant", "content": text}
+    if usage: msg["usage"] = usage
     if think: msg["reasoning_content"] = "".join(think)
     if AG is not None and backend in AG.BACKEND_SOURCE and (session_id or resume_mk):
         msg["agent"] = {"source": AG.BACKEND_SOURCE[backend], "id": session_id or resume_mk["id"],

@@ -21,6 +21,9 @@ OPENCODE_DB = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.join(HOME,
 SOURCES = {
     "codex": {"prefix": "cx-", "label": "Codex", "backend": "codex-cli"},
     "opencode": {"prefix": "oc-", "label": "OpenCode", "backend": "opencode-cli"},
+    # Antigravity: a chat started in Orbit continues its own conversation (agy --conversation);
+    # its history is protobuf in a local database, so it is not listed in the sidebar
+    "agy": {"prefix": "ag-", "label": "Antigravity", "backend": "agy-cli", "orbit_only": True},
 }
 BACKEND_SOURCE = {v["backend"]: k for k, v in SOURCES.items()}
 

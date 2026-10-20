@@ -488,7 +488,9 @@ builds* switches each engine and each kind off. Looking runs without asking; `ma
   for you to read and run; **Sign in in the terminal** runs `agy`, which asks for your Google
   account in the browser. Orbit then lists it as a chat, with the models `agy models` reports (on a Google plan that has
   included Gemini 3.8 Flash at three effort levels, Claude Sonnet/Opus 4.6 and GPT-OSS 120B). **Test** asks
-  it one question to prove the sign-in works. Credentials stay with the CLI (Orbit never reads them). A subscription is not an API key,
+  it one question to prove the sign-in works. An Antigravity chat streams its answer, shows the tools it
+  used as lines of its thinking, counts its tokens, and continues its own conversation
+  (`agy --conversation`) instead of replaying the transcript. Credentials stay with the CLI (Orbit never reads them). A subscription is not an API key,
   so these run as their own agents, not inside Claude Code.
 
 ## Chats on another machine (SSH)

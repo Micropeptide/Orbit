@@ -19,7 +19,25 @@ FAKE = textwrap.dedent('''\
         sys.exit(0)
     # the prompt is whatever follows -p; flags must all come before it
     i = a.index("-p")
-    print("flags=" + " ".join(a[:i]) + " | prompt=" + " ".join(a[i + 1:]).splitlines()[0])
+    flags, prompt = " ".join(a[:i]), " ".join(a[i + 1:])
+    if "--output-format" in a and a[a.index("--output-format") + 1] == "stream-json":     # agy, as 1.4.3 writes it
+        conv = a[a.index("--conversation") + 1] if "--conversation" in a else "conv-1"
+        def ev(o): print(json.dumps(o), flush=True)
+        ev({"event": "init", "conversation_id": conv, "init": {"model": "m", "cwd": "/x", "tools": [], "permission_mode": "request-review"}})
+        step = {"conversation_id": conv, "step_index": 1, "step_type": "tool", "tool_name": "read_file"}
+        ev({"event": "step_update", "step_update": {**step, "state": "ACTIVE", "tool_info": {"name": "read_file", "parameters": {"Path": "notes.txt"}}}})
+        ev({"event": "step_update", "step_update": {**step, "state": "DONE", "tool_info": {"name": "read_file", "parameters": {"Path": "notes.txt"}, "output": "1 lines, 17 bytes"}}})
+        text = "flags=" + flags + " | prompt=" + prompt.splitlines()[0]
+        if "FAIL" in prompt:
+            ev({"event": "result", "result": {"conversation_id": conv, "status": "ERROR", "response": "the model refused"}})
+            sys.exit(3)
+        for chunk in (text[:12], text[12:]):
+            ev({"event": "step_update", "step_update": {"conversation_id": conv, "step_index": 2, "state": "ACTIVE",
+                                                        "step_type": "agent_response", "text_delta": chunk}})
+        ev({"event": "result", "result": {"conversation_id": conv, "status": "SUCCESS", "response": text + "\\n", "num_turns": 1,
+                                          "usage": {"input_tokens": 100, "output_tokens": 7}}})
+        sys.exit(0)
+    print("flags=" + flags + " | prompt=" + prompt.splitlines()[0])
     print("second line")
 ''')
 
@@ -56,12 +74,10 @@ class TestAntigravity(Fake):
 
     def test_the_model_flag_comes_before_the_flag_that_takes_the_prompt(self):
         out = self.ask("agy-cli", "gemini-3.8-flash", "what is 2+2")
-        self.assertIn("flags=--model gemini-3.8-flash | prompt=User: what is 2+2", out["content"])
-        self.assertIn("second line", out["content"])                  # plain text, all of it, trimmed
-        self.assertFalse(out["content"].endswith("\n"))
+        self.assertIn("flags=--output-format stream-json --model gemini-3.8-flash | prompt=User: what is 2+2", out["content"])
 
     def test_the_default_model_passes_no_flag(self):
-        self.assertIn("flags= | prompt=User: hello", self.ask("agy-cli", "default")["content"])
+        self.assertIn("flags=--output-format stream-json | prompt=User: hello", self.ask("agy-cli", "default")["content"])
 
     def test_not_installed_means_not_listed(self):
         P.which = lambda name: None
@@ -75,6 +91,56 @@ class TestAntigravity(Fake):
         P.which = lambda name: bad if name == "agy" else None
         self.assertEqual(P.agy_models(), [])
         self.assertEqual([m["model"] for m in P.cli_models() if m["provider"] == "agy-cli"], ["default"])
+
+
+class TestAntigravityChat(Fake):
+    """An Antigravity chat: its text streams, its tool steps show, its own conversation goes on,
+    and what it spent is counted."""
+    def run_chat(self, messages, model="gemini-3.8-flash-low"):
+        seen = []
+        out = P.cli_stream("agy-cli", model, messages, emit=lambda k, p: seen.append((k, p)), cwd=self.tmp)
+        return out, seen
+
+    def test_the_answer_streams_in_pieces(self):
+        out, seen = self.run_chat([{"role": "user", "content": "hello"}])
+        deltas = [p for k, p in seen if k == "content_delta"]
+        self.assertGreater(len(deltas), 1)
+        self.assertTrue("".join(deltas).startswith("flags="))
+        self.assertEqual(out["content"], "".join(deltas).strip())
+
+    def test_a_tool_it_used_shows_as_a_line_of_its_thinking(self):
+        out, seen = self.run_chat([{"role": "user", "content": "hello"}])
+        self.assertIn("⚙ read_file notes.txt — 1 lines, 17 bytes", out["reasoning_content"])
+        self.assertTrue(any(k == "thinking_delta" and "read_file" in p for k, p in seen))
+
+    def test_it_says_which_conversation_to_continue_and_what_it_cost(self):
+        out, _ = self.run_chat([{"role": "user", "content": "hello"}])
+        self.assertEqual(out["agent"]["source"], "agy")
+        self.assertEqual(out["agent"]["id"], "conv-1")
+        self.assertEqual(out["usage"], {"prompt_tokens": 100, "completion_tokens": 7})
+
+    def test_the_next_message_goes_into_the_same_conversation_alone(self):
+        first, _ = self.run_chat([{"role": "user", "content": "hello"}])
+        history = [{"role": "user", "content": "hello"}, {**first},
+                   {"role": "user", "content": "and now this"}]
+        out, _ = self.run_chat(history)
+        self.assertIn("--conversation conv-1", out["content"])
+        self.assertIn("prompt=and now this", out["content"])               # just the new message, not a replay
+        self.assertNotIn("User: hello", out["content"])
+
+    def test_what_was_said_on_another_model_meanwhile_goes_along(self):
+        first, _ = self.run_chat([{"role": "user", "content": "hello"}])
+        history = [{"role": "user", "content": "hello"}, {**first},
+                   {"role": "user", "content": "q2"}, {"role": "assistant", "content": "a2 from elsewhere"},
+                   {"role": "user", "content": "q3"}]
+        out, _ = self.run_chat(history)
+        self.assertIn("--conversation conv-1", out["content"])
+        self.assertIn("Meanwhile", out["content"])
+
+    def test_a_turn_it_stops_with_an_error_is_an_error(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self.run_chat([{"role": "user", "content": "please FAIL"}])
+        self.assertIn("the model refused", str(cm.exception))
 
 
 class TestGeminiCli(Fake):
