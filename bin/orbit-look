@@ -1,0 +1,1806 @@
+#!/usr/bin/env python3
+"""Eyes for a coding agent: a browser, the iOS Simulator and Mac app windows, as an MCP server.
+
+An agent that builds a page or an app cannot see it. Started over stdio by any MCP
+client (Claude Code, Codex CLI, OpenCode, Orbit's own agent), this gives it screenshots
+it can look at AND the same screen as plain text (visible text, a numbered list of what
+can be clicked, an accessibility tree), because some models cannot read images.
+
+The browser is a headless Chromium-family browser on a throwaway profile, driven over
+the DevTools Protocol with a small WebSocket client written here; it is never the user's
+own profile. The simulator goes through `xcrun simctl` (no Simulator.app needed); taps
+need AXe or idb. Mac windows go through CoreGraphics and screencapture. Whatever
+this process started is killed with it, on EOF, a signal, or its parent dying. Standard
+library only.
+
+Env: ORBIT_LOOK_DIR (screenshots, default ~/Library/Caches/orbit-look), ORBIT_LOOK_CHROME
+(browser to use), ORBIT_LOOK_HEADED=1 (show the browser window).
+"""
+import atexit, base64, hashlib, json, os, re, shutil, signal, socket, struct
+import subprocess, sys, tempfile, threading, time, traceback, urllib.parse, urllib.request
+
+VERSION = "1.0.0"
+PROTOCOL = "2024-11-05"
+MAX_SIDE = 1568                       # longest edge of any screenshot handed to a model
+KEEP_SHOTS = 60
+AXE_MISSING = "Tapping needs AXe: brew install cameroncooke/axe/axe"
+MOBILE_UA = ("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+             "(KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1")
+
+
+class ToolError(Exception):
+    """A failure the agent can act on: the message says what failed and how to fix it."""
+
+
+# --------------------------------------------------------------------- small helpers
+
+def run_cmd(cmd, timeout=30, env=None):
+    """Run a command to completion -> (returncode, stdout, stderr). Never raises, never reads our stdin."""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout,
+                           stdin=subprocess.DEVNULL, env=env)
+        return p.returncode, p.stdout or "", p.stderr or ""
+    except subprocess.TimeoutExpired:
+        return 124, "", "timed out after %ss" % timeout
+    except FileNotFoundError:
+        return 127, "", "%s: command not found" % cmd[0]
+    except OSError as e:
+        return 126, "", str(e)
+
+
+def tail(s, n=600):
+    s = (s or "").strip()
+    return s if len(s) <= n else "..." + s[-n:]
+
+
+def fmt_num(v):
+    v = float(v)
+    return str(int(v)) if v == int(v) else "%.1f" % v
+
+
+def text_part(s):
+    return {"type": "text", "text": s}
+
+
+def image_part(path):
+    with open(path, "rb") as f:
+        return {"type": "image", "data": base64.b64encode(f.read()).decode("ascii"), "mimeType": "image/png"}
+
+
+def out_dir():
+    d = os.path.expanduser(os.environ.get("ORBIT_LOOK_DIR") or "~/Library/Caches/orbit-look")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def prune_shots(d, keep=KEEP_SHOTS):
+    """Keep the newest `keep` screenshots of ours; never touch other files in the folder."""
+    try:
+        files = [os.path.join(d, n) for n in os.listdir(d) if n.startswith("orbit-look-") and n.endswith(".png")]
+        files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        for p in files[keep:]:
+            try: os.remove(p)
+            except OSError: pass
+    except OSError:
+        pass
+
+
+_shot_seq = [0]
+
+
+def png_size(path):
+    with open(path, "rb") as f:
+        head = f.read(24)
+    if head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
+        raise ToolError("The capture is not a PNG image (%s)." % path)
+    return struct.unpack(">II", head[16:24])
+
+
+def shrink(path, limit=MAX_SIDE):
+    """Cap the longest edge at `limit` px with sips (macOS); only ever shrinks."""
+    w, h = png_size(path)
+    if max(w, h) > limit and shutil.which("sips"):
+        run_cmd(["sips", "-Z", str(limit), path], timeout=30)
+        w, h = png_size(path)
+    return w, h
+
+
+def new_shot_path(tag):
+    _shot_seq[0] += 1
+    return os.path.join(out_dir(), "orbit-look-%d-%03d-%s.png" % (int(time.time() * 1000), _shot_seq[0] % 1000, tag))
+
+
+def finish_shot(path):
+    """Cap the size, prune old captures -> (path, width, height)."""
+    w, h = shrink(path)
+    prune_shots(os.path.dirname(path))
+    return path, w, h
+
+
+def save_png_bytes(data, tag):
+    path = new_shot_path(tag)
+    with open(path, "wb") as f:
+        f.write(data)
+    return finish_shot(path)
+
+
+# --------------------------------------------------------------------- WebSocket (RFC 6455)
+
+WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def ws_mask(data, key):
+    n = len(data)
+    if not n: return b""
+    k = (key * (n // 4 + 1))[:n]
+    return (int.from_bytes(data, "big") ^ int.from_bytes(k, "big")).to_bytes(n, "big")
+
+
+class WS:
+    """Minimal client: handshake, masked frames out, fragmentation/ping/close in, big payloads."""
+
+    def __init__(self, url, timeout=10):
+        u = urllib.parse.urlparse(url)
+        if u.scheme != "ws": raise ValueError("only ws:// URLs: %s" % url)
+        host, port = u.hostname, u.port or 80
+        path = (u.path or "/") + ("?" + u.query if u.query else "")
+        self.sock = socket.create_connection((host, port), timeout)
+        self.buf = bytearray()
+        self.wlock = threading.Lock()
+        self.closed = False
+        key = base64.b64encode(os.urandom(16))
+        req = ("GET %s HTTP/1.1\r\nHost: %s:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+               "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n") % (path, host, port, key.decode())
+        self.sock.sendall(req.encode())
+        while b"\r\n\r\n" not in self.buf:
+            chunk = self.sock.recv(4096)
+            if not chunk: raise ConnectionError("connection closed during the WebSocket handshake")
+            self.buf += chunk
+        head, _, rest = bytes(self.buf).partition(b"\r\n\r\n")
+        self.buf = bytearray(rest)
+        lines = head.decode("latin-1").split("\r\n")
+        if " 101" not in lines[0]: raise ConnectionError("WebSocket upgrade refused: " + lines[0])
+        accept = base64.b64encode(hashlib.sha1(key + WS_GUID).digest()).decode()
+        got = {l.split(":", 1)[0].strip().lower(): l.split(":", 1)[1].strip() for l in lines[1:] if ":" in l}
+        if got.get("sec-websocket-accept") != accept: raise ConnectionError("bad Sec-WebSocket-Accept")
+
+    def _send_frame(self, op, payload=b""):
+        n = len(payload)
+        head = bytearray([0x80 | op])
+        if n < 126: head.append(0x80 | n)
+        elif n < 65536: head += bytes([0x80 | 126]) + struct.pack(">H", n)
+        else: head += bytes([0x80 | 127]) + struct.pack(">Q", n)
+        key = os.urandom(4)
+        with self.wlock:
+            self.sock.sendall(bytes(head) + key + ws_mask(payload, key))
+
+    def send(self, data):
+        if isinstance(data, str): self._send_frame(0x1, data.encode("utf-8"))
+        else: self._send_frame(0x2, bytes(data))
+
+    def _frame(self):
+        """One complete frame from the buffer -> (fin, opcode, payload) or None if more bytes are needed."""
+        b = self.buf
+        if len(b) < 2: return None
+        fin, op = bool(b[0] & 0x80), b[0] & 0x0F
+        masked, n, i = bool(b[1] & 0x80), b[1] & 0x7F, 2
+        if n == 126:
+            if len(b) < 4: return None
+            n, i = struct.unpack(">H", bytes(b[2:4]))[0], 4
+        elif n == 127:
+            if len(b) < 10: return None
+            n, i = struct.unpack(">Q", bytes(b[2:10]))[0], 10
+        key = b""
+        if masked:
+            if len(b) < i + 4: return None
+            key, i = bytes(b[i:i + 4]), i + 4
+        if len(b) < i + n: return None
+        payload = bytes(b[i:i + n])
+        del b[:i + n]
+        return fin, op, (ws_mask(payload, key) if masked else payload)
+
+    def recv(self, timeout=None):
+        """Next whole message (str for text, bytes for binary). socket.timeout if none in time;
+        ConnectionError once the peer closes. Partial frames survive a timeout."""
+        parts, kind = [], None
+        deadline = None if timeout is None else time.time() + timeout
+        while True:
+            fr = self._frame()
+            if fr is None:
+                left = None if deadline is None else max(0.0, deadline - time.time())
+                if deadline is not None and left == 0.0 and not self.buf: raise socket.timeout()
+                self.sock.settimeout(left)
+                chunk = self.sock.recv(1 << 20)           # raises socket.timeout
+                if not chunk:
+                    self.closed = True
+                    raise ConnectionError("WebSocket closed")
+                self.buf += chunk
+                continue
+            fin, op, payload = fr
+            if op == 0x9: self._send_frame(0xA, payload); continue          # ping -> pong
+            if op == 0xA: continue
+            if op == 0x8:
+                self.closed = True
+                try: self._send_frame(0x8, payload[:2])
+                except OSError: pass
+                raise ConnectionError("WebSocket closed by peer")
+            if op in (0x1, 0x2): kind, parts = op, [payload]
+            elif op == 0x0: parts.append(payload)
+            if fin and kind is not None:
+                data = b"".join(parts)
+                return data.decode("utf-8", "replace") if kind == 0x1 else data
+
+    def close(self):
+        self.closed = True
+        try: self._send_frame(0x8, struct.pack(">H", 1000))
+        except OSError: pass
+        try: self.sock.close()
+        except OSError: pass
+
+
+class CDP:
+    """DevTools Protocol over one WebSocket: a reader thread routes replies and events."""
+
+    def __init__(self, ws_url):
+        self.ws = WS(ws_url)
+        self.lock = threading.Lock()
+        self.next_id = 0
+        self.pending = {}
+        self.handlers = {}
+        self.closed = False
+        threading.Thread(target=self._reader, daemon=True).start()
+
+    def on(self, method, fn):
+        self.handlers[method] = fn
+
+    def _reader(self):
+        try:
+            while True:
+                msg = self.ws.recv()
+                try: data = json.loads(msg)
+                except (TypeError, ValueError): continue
+                if "id" in data:
+                    slot = self.pending.pop(data["id"], None)
+                    if slot: slot[1] = data; slot[0].set()
+                else:
+                    fn = self.handlers.get(data.get("method"))
+                    if fn:
+                        try: fn(data.get("params") or {})
+                        except Exception: pass
+        except Exception:
+            pass
+        finally:
+            self.closed = True
+            for slot in list(self.pending.values()):
+                slot[1] = {"error": {"message": "browser connection closed"}}
+                slot[0].set()
+
+    def send(self, method, params=None, timeout=30, wait=True):
+        if self.closed: raise ToolError("The browser connection is closed. Call browser_open again.")
+        with self.lock:
+            self.next_id += 1
+            mid = self.next_id
+            slot = [threading.Event(), None]
+            if wait: self.pending[mid] = slot
+        try: self.ws.send(json.dumps({"id": mid, "method": method, "params": params or {}}))
+        except OSError: raise ToolError("The browser connection dropped. Call browser_open again.")
+        if not wait: return None
+        if not slot[0].wait(timeout):
+            self.pending.pop(mid, None)
+            raise ToolError("The browser did not answer %s within %ss. Try browser_close, then browser_open again." % (method, timeout))
+        resp = slot[1]
+        if "error" in resp:
+            raise ToolError("Browser error in %s: %s" % (method, resp["error"].get("message", resp["error"])))
+        return resp.get("result") or {}
+
+    def close(self):
+        self.closed = True
+        self.ws.close()
+
+
+# --------------------------------------------------------------------- the browser
+
+CHROME_APPS = ["Google Chrome", "Chromium", "Brave Browser", "Microsoft Edge"]
+CHROME_PATH_NAMES = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "brave-browser", "microsoft-edge", "chrome"]
+
+
+def app_executable(app):
+    macos = os.path.join(app, "Contents", "MacOS")
+    if not os.path.isdir(macos): return None
+    base = os.path.join(macos, os.path.basename(app)[:-4])
+    if os.path.isfile(base): return base
+    files = [f for f in os.listdir(macos) if os.path.isfile(os.path.join(macos, f))]
+    return os.path.join(macos, files[0]) if len(files) == 1 else None
+
+
+def find_chrome():
+    want = os.environ.get("ORBIT_LOOK_CHROME", "").strip()
+    if want:
+        want = os.path.expanduser(want)
+        if want.endswith(".app"): want = app_executable(want) or want
+        if os.path.isfile(want) and os.access(want, os.X_OK): return want
+        raise ToolError("ORBIT_LOOK_CHROME=%s is not an executable browser. Point it at a Chromium-family binary or .app, or unset it." % want)
+    for name in CHROME_APPS:
+        for root in ("/Applications", os.path.expanduser("~/Applications")):
+            exe = app_executable(os.path.join(root, name + ".app"))
+            if exe: return exe
+    for n in CHROME_PATH_NAMES:
+        p = shutil.which(n)
+        if p: return p
+    raise ToolError("No Chromium-family browser found. Install Google Chrome (brew install --cask google-chrome) "
+                    "or set ORBIT_LOOK_CHROME to a Chrome, Chromium, Brave or Edge executable.")
+
+
+def chrome_flags(profile, headed=False):
+    flags = ["--remote-debugging-port=0", "--user-data-dir=" + profile, "--no-first-run",
+             "--no-default-browser-check", "--disable-extensions", "--use-mock-keychain",
+             "--password-store=basic", "--disable-sync", "--disable-background-networking",
+             "--disable-search-engine-choice-screen", "--mute-audio", "--hide-scrollbars",
+             "--window-size=1280,800", "about:blank"]
+    if not headed: flags.insert(0, "--headless=new")
+    return flags
+
+
+# Watches from outside our process: if we are killed outright (SIGKILL), it still reaps Chrome.
+GUARD_SH = ('while kill -0 "$1" 2>/dev/null && kill -0 "$2" 2>/dev/null; do sleep 1; done; '
+            'kill -TERM -- "-$2" 2>/dev/null; sleep 1; kill -KILL -- "-$2" 2>/dev/null; '
+            'case "$3" in */orbit-look-*) rm -rf "$3";; esac')
+
+SNAP_JS = r"""(() => {
+  const MAXEL = 120, MAXTXT = 6000;
+  const vw = innerWidth, vh = innerHeight;
+  const sel = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=tab],' +
+    '[role=menuitem],[role=checkbox],[role=switch],[role=radio],[role=option],[role=textbox],[role=combobox],' +
+    '[onclick],[contenteditable=""],[contenteditable="true"]';
+  const clean = s => (s || '').replace(/\s+/g, ' ').trim();
+  const rectOf = e => {
+    const r = e.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return null;
+    const cs = getComputedStyle(e);
+    if (cs.visibility === 'hidden' || cs.display === 'none' || +cs.opacity === 0) return null;
+    return r;
+  };
+  const roleOf = e => {
+    const t = e.tagName.toLowerCase(), ar = e.getAttribute('role');
+    if (ar) return ar;
+    if (t === 'a') return 'link';
+    if (t === 'button' || t === 'summary') return 'button';
+    if (t === 'select') return 'select';
+    if (t === 'textarea') return 'textbox';
+    if (t === 'input') {
+      const ty = (e.type || 'text').toLowerCase();
+      if (ty === 'checkbox' || ty === 'radio') return ty;
+      if (['submit', 'button', 'reset', 'image'].includes(ty)) return 'button';
+      return 'input:' + ty;
+    }
+    return 'clickable';
+  };
+  const labelOf = e => {
+    let s = e.getAttribute('aria-label') || '';
+    if (!s && e.labels && e.labels[0]) s = e.labels[0].innerText;
+    if (!s && e.tagName === 'INPUT' && ['submit', 'button', 'reset'].includes(e.type)) s = e.value;
+    if (!s && e.tagName !== 'SELECT' && e.tagName !== 'INPUT' && e.tagName !== 'TEXTAREA') s = e.innerText || e.textContent;
+    if (!s) s = e.placeholder || e.title || e.alt || e.name || e.id || '';
+    return clean(s).slice(0, 80);
+  };
+  const els = [], seen = new Set();
+  const add = (e) => {
+    if (seen.has(e)) return;
+    const r = rectOf(e); if (!r) return;
+    seen.add(e);
+    const o = {role: roleOf(e), label: labelOf(e), x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height), el: e};
+    if (e.tagName === 'A') o.href = (e.getAttribute('href') || '').slice(0, 100);
+    if (e.tagName === 'SELECT') o.value = clean(Array.from(e.selectedOptions).map(x => x.text).join(', ')).slice(0, 60);
+    else if ('value' in e && e.type !== 'checkbox' && e.type !== 'radio' && e.value && !['submit', 'button', 'reset'].includes(e.type))
+      o.value = e.type === 'password' ? '(set)' : clean(e.value).slice(0, 60);
+    if (e.type === 'checkbox' || e.type === 'radio') o.checked = !!e.checked;
+    if (e.disabled) o.disabled = true;
+    o.off = r.bottom < 0 ? 'above' : r.top > vh ? 'below' : r.right < 0 ? 'left' : r.left > vw ? 'right' : '';
+    els.push(o);
+  };
+  document.querySelectorAll(sel).forEach(add);
+  let scanned = 0;
+  for (const e of document.body ? document.body.querySelectorAll('*') : []) {       // pointer-cursor things with no role
+    if (++scanned > 3000 || els.length >= MAXEL) break;
+    if (seen.has(e) || e.children.length > 6) continue;
+    if (getComputedStyle(e).cursor !== 'pointer') continue;
+    if (e.parentElement && getComputedStyle(e.parentElement).cursor === 'pointer') continue;
+    if (els.some(o => o.el.contains(e) || e.contains(o.el))) continue;
+    add(e);
+  }
+  const total = els.length;
+  const kept = els.slice(0, MAXEL);
+  window.__orbitLook = kept.map(o => o.el);
+  let text = document.body ? (document.body.innerText || '') : '';
+  text = text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  const cut = Math.max(0, text.length - MAXTXT);
+  if (cut) text = text.slice(0, MAXTXT) + '\n...[' + cut + ' more characters not shown]';
+  return {title: document.title, url: location.href, text: text,
+          scroll: {x: Math.round(scrollX), y: Math.round(scrollY), w: document.documentElement.scrollWidth, h: document.documentElement.scrollHeight, vw: vw, vh: vh},
+          total: total, elements: kept.map(o => { const c = Object.assign({}, o); delete c.el; return c; })};
+})()"""
+
+RESOLVE_JS = r"""(() => {
+  const spec = __SPEC__;
+  try {
+    let e = null;
+    if (spec.n !== undefined) { const L = window.__orbitLook || []; e = L[spec.n] || null; if (e && !e.isConnected) e = null; }
+    else e = document.querySelector(spec.css);
+    if (!e) return {ok: false, why: spec.n !== undefined ? 'stale' : 'nomatch'};
+    e.scrollIntoView({block: 'center', inline: 'center', behavior: 'instant'});
+    if (spec.focus) e.focus();
+    const r = e.getBoundingClientRect();
+    if (r.width < 1 && r.height < 1) return {ok: false, why: 'hidden'};
+    return {ok: true, x: r.x + r.width / 2, y: r.y + r.height / 2, left: r.x, top: r.y, w: r.width, h: r.height,
+            px: scrollX, py: scrollY, tag: e.tagName.toLowerCase()};
+  } catch (err) { return {ok: false, why: 'error', msg: String(err && err.message || err)}; }
+})()"""
+
+TYPE_JS = r"""(() => {
+  const spec = __SPEC__;
+  const e = document.activeElement;
+  if (!e) return {ok: false, why: 'nofocus'};
+  if (e.tagName === 'SELECT') {
+    const want = spec.text.trim().toLowerCase();
+    const opt = Array.from(e.options).find(o => o.value.toLowerCase() === want || o.text.trim().toLowerCase() === want)
+      || Array.from(e.options).find(o => o.text.toLowerCase().includes(want));
+    if (!opt) return {ok: false, why: 'nooption', options: Array.from(e.options).map(o => o.text.trim()).slice(0, 30)};
+    e.value = opt.value;
+    e.dispatchEvent(new Event('input', {bubbles: true})); e.dispatchEvent(new Event('change', {bubbles: true}));
+    return {ok: true, selected: opt.text.trim()};
+  }
+  const editable = e.isContentEditable || e.tagName === 'TEXTAREA' || (e.tagName === 'INPUT');
+  if (!editable) return {ok: false, why: 'noteditable', tag: e.tagName.toLowerCase()};
+  try {
+    if (spec.clear) { if (e.select) e.select(); else document.execCommand('selectAll'); }
+    else if (e.setSelectionRange && e.value !== undefined) { try { e.setSelectionRange(e.value.length, e.value.length); } catch (_) {} }
+  } catch (_) {}
+  return {ok: true, insert: true};
+})()"""
+
+INIT_JS = r"""(() => {
+  window.open = function (u) { if (u) location.href = u; return null; };
+  document.addEventListener('click', e => {
+    const a = e.target && e.target.closest && e.target.closest('a[target]');
+    if (a && /^_(blank|new)$/i.test(a.target)) a.target = '_self';
+  }, true);
+})();"""
+
+KEYS = {
+    "enter": ("Enter", "Enter", 13, "\r"), "return": ("Enter", "Enter", 13, "\r"), "tab": ("Tab", "Tab", 9, ""),
+    "escape": ("Escape", "Escape", 27, ""), "esc": ("Escape", "Escape", 27, ""),
+    "backspace": ("Backspace", "Backspace", 8, ""), "delete": ("Delete", "Delete", 46, ""),
+    "arrowup": ("ArrowUp", "ArrowUp", 38, ""), "arrowdown": ("ArrowDown", "ArrowDown", 40, ""),
+    "arrowleft": ("ArrowLeft", "ArrowLeft", 37, ""), "arrowright": ("ArrowRight", "ArrowRight", 39, ""),
+    "up": ("ArrowUp", "ArrowUp", 38, ""), "down": ("ArrowDown", "ArrowDown", 40, ""),
+    "left": ("ArrowLeft", "ArrowLeft", 37, ""), "right": ("ArrowRight", "ArrowRight", 39, ""),
+    "home": ("Home", "Home", 36, ""), "end": ("End", "End", 35, ""),
+    "pageup": ("PageUp", "PageUp", 33, ""), "pagedown": ("PageDown", "PageDown", 34, ""),
+    "space": (" ", "Space", 32, " "),
+}
+MODS = {"alt": 1, "option": 1, "ctrl": 2, "control": 2, "meta": 4, "cmd": 4, "command": 4, "shift": 8}
+EDIT_COMMANDS = {"a": "selectAll", "c": "copy", "v": "paste", "x": "cut", "z": "undo"}
+
+
+def parse_key(spec):
+    """'Control+a' / 'Enter' / 'ArrowDown' -> dispatchKeyEvent fields."""
+    parts = [p for p in re.split(r"\+(?=.)", str(spec).strip()) if p]
+    if not parts: raise ToolError("browser_press needs a key such as Enter, Tab, Escape, ArrowDown or Control+a.")
+    mods, name = 0, parts[-1]
+    for m in parts[:-1]:
+        if m.lower() not in MODS: raise ToolError("Unknown modifier %r in key %r. Use Control, Alt, Shift or Meta." % (m, spec))
+        mods |= MODS[m.lower()]
+    k = KEYS.get(name.lower())
+    if k: key, code, vk, txt = k
+    elif len(name) == 1:
+        key, vk = name, ord(name.upper())
+        code = ("Key" + name.upper()) if name.isalpha() else ("Digit" + name if name.isdigit() else "")
+        txt = name
+    else:
+        raise ToolError("Unknown key %r. Try Enter, Tab, Escape, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp, PageDown, Space or one character." % name)
+    ev = {"key": key, "code": code, "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk, "modifiers": mods}
+    if txt and not (mods & 6): ev["text"] = txt
+    if mods & 6 and name.lower() in EDIT_COMMANDS: ev["commands"] = [EDIT_COMMANDS[name.lower()]]
+    return ev
+
+
+def parse_ref(spec):
+    """A snapshot number ('3', '[3]', 3) or a CSS selector -> ('n', 3) / ('css', '#go')."""
+    if isinstance(spec, bool) or spec is None or spec == "":
+        raise ToolError("Give element as a snapshot number (from browser_snapshot) or a CSS selector.")
+    if isinstance(spec, int): return ("n", spec)
+    if isinstance(spec, float) and spec == int(spec): return ("n", int(spec))
+    s = str(spec).strip()
+    m = re.fullmatch(r"\[?\s*(\d+)\s*\]?", s)
+    return ("n", int(m.group(1))) if m else ("css", s)
+
+
+def resolve_js(ref, focus=False):
+    kind, val = ref
+    spec = {"n": val} if kind == "n" else {"css": val}
+    if focus: spec["focus"] = True
+    return RESOLVE_JS.replace("__SPEC__", json.dumps(spec))
+
+
+def check_url(url):
+    u = urllib.parse.urlparse((url or "").strip())
+    if u.scheme.lower() not in ("http", "https", "file"):
+        hint = ""
+        raw = (url or "").strip()
+        if u.scheme.lower() in ("", ) or re.match(r"^[\w.\-]+:\d+", raw) or "." in raw.split("/")[0]:
+            hint = " Did you mean http://%s ?" % raw.lstrip("/")
+        raise ToolError("browser_open only opens http, https and file URLs (got %r).%s" % (raw[:80], hint))
+    if u.scheme.lower() in ("http", "https") and not u.netloc:
+        raise ToolError("That URL has no host: %r." % url)
+    return url.strip()
+
+
+def fmt_snapshot(s):
+    sc = s.get("scroll") or {}
+    lines = ["Title: %s" % (s.get("title") or "(none)"), "URL: %s" % s.get("url", "")]
+    if sc:
+        lines.append("Viewport: %sx%s, scrolled to %s,%s of a %sx%s page" % (
+            sc.get("vw"), sc.get("vh"), sc.get("x"), sc.get("y"), sc.get("w"), sc.get("h")))
+    lines += ["", "Visible text:", s.get("text") or "(no text)", ""]
+    els = s.get("elements") or []
+    total = s.get("total", len(els))
+    if not els:
+        lines.append("Interactive elements: none found.")
+    else:
+        lines.append("Interactive elements (%d%s), [n] role \"label\" @ x,y WxH in viewport pixels:" % (
+            len(els), "" if total <= len(els) else " of %d, first shown" % total))
+        for i, e in enumerate(els):
+            bits = ["[%d] %s" % (i, e.get("role", "?"))]
+            if e.get("label"): bits.append('"%s"' % e["label"])
+            if e.get("href"): bits.append("-> %s" % e["href"])
+            if e.get("value"): bits.append("value=%r" % e["value"])
+            if "checked" in e: bits.append("checked" if e["checked"] else "unchecked")
+            if e.get("disabled"): bits.append("disabled")
+            bits.append("@ %s,%s %sx%s" % (e.get("x"), e.get("y"), e.get("w"), e.get("h")))
+            if e.get("off"): bits.append("(%s the viewport; scrolls into view when used)" % e["off"])
+            lines.append(" ".join(bits))
+    return "\n".join(lines)
+
+
+class Browser:
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.vp = {"width": 1280, "height": 800, "mobile": False}
+        self._clear()
+
+    def _clear(self):
+        self.proc = self.guard = self.cdp = self.tmp = None
+        self.main_frame = None
+        self.console = []
+        self.requests = {}
+        self.inflight = set()
+        self.loading = False
+        self.status = None
+        self.opened = False
+        self.crashed = False
+
+    # -- lifecycle
+    def running(self):
+        return bool(self.cdp and not self.cdp.closed and self.proc and self.proc.poll() is None and not self.crashed)
+
+    def ensure(self):
+        if self.running(): return
+        self.stop()
+        self.start()
+
+    def start(self):
+        exe = find_chrome()
+        self.tmp = tempfile.mkdtemp(prefix="orbit-look-")
+        try:
+            log = open(os.path.join(self.tmp, "browser.log"), "wb")
+            try:
+                self.proc = subprocess.Popen([exe] + chrome_flags(self.tmp, os.environ.get("ORBIT_LOOK_HEADED") == "1"),
+                                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log,
+                                             start_new_session=True)
+            finally:
+                log.close()
+            try:
+                self.guard = subprocess.Popen(["/bin/sh", "-c", GUARD_SH, "sh", str(os.getpid()), str(self.proc.pid), self.tmp],
+                                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                              start_new_session=True)
+            except OSError:
+                self.guard = None
+            port = self._wait_port()
+            ws_url = self._page_ws(port)
+            self.cdp = CDP(ws_url)
+            self._wire()
+            self._setup()
+        except ToolError:
+            self.stop(); raise
+        except Exception as e:
+            self.stop()
+            raise ToolError("Could not start the browser: %s: %s. Check ORBIT_LOOK_CHROME or reinstall Chrome." % (type(e).__name__, e))
+
+    def _wait_port(self):
+        portfile = os.path.join(self.tmp, "DevToolsActivePort")
+        end = time.time() + 25
+        while time.time() < end:
+            rc = self.proc.poll()
+            if rc is not None:
+                try:
+                    with open(os.path.join(self.tmp, "browser.log"), errors="replace") as f: log = tail(f.read(), 400)
+                except OSError: log = ""
+                raise ToolError("The browser exited while starting (code %s). %s" % (rc, log))
+            try:
+                with open(portfile) as f: first = f.read().split("\n")[0].strip()
+                if first.isdigit(): return int(first)
+            except OSError:
+                pass
+            time.sleep(0.1)
+        raise ToolError("The browser did not report its DevTools port within 25s (machine busy or browser blocked). Try again.")
+
+    def _page_ws(self, port):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        base = "http://127.0.0.1:%d" % port
+        end = time.time() + 10
+        while time.time() < end:
+            try:
+                with opener.open(base + "/json/list", timeout=5) as r: targets = json.load(r)
+                for t in targets:
+                    if t.get("type") == "page" and t.get("webSocketDebuggerUrl"): return t["webSocketDebuggerUrl"]
+                req = urllib.request.Request(base + "/json/new?about:blank", method="PUT")
+                with opener.open(req, timeout=5) as r: t = json.load(r)
+                if t.get("webSocketDebuggerUrl"): return t["webSocketDebuggerUrl"]
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.2)
+        raise ToolError("The browser started but offered no page to control.")
+
+    def _wire(self):
+        c = self.cdp
+
+        def stack(p):
+            fr = ((p.get("stackTrace") or {}).get("callFrames") or [{}])[0]
+            return " (%s:%s)" % (fr["url"], fr.get("lineNumber", 0) + 1) if fr.get("url") else ""
+
+        def arg_text(a):
+            if "value" in a: return a["value"] if isinstance(a["value"], str) else json.dumps(a["value"])
+            return a.get("unserializableValue") or a.get("description") or a.get("type", "")
+
+        def note(kind, text):
+            self.console.append("[%s] %s" % (kind, text))
+            del self.console[:-500]
+
+        def console_api(p):
+            note(p.get("type", "log"), " ".join(str(arg_text(a)) for a in p.get("args", []))[:1000] + stack(p))
+
+        def exception(p):
+            d = p.get("exceptionDetails") or {}
+            ex = (d.get("exception") or {}).get("description") or d.get("text", "exception")
+            note("exception", ex.split("\n")[0][:400] + (" (%s:%s)" % (d["url"], d.get("lineNumber", 0) + 1) if d.get("url") else ""))
+
+        def log_entry(p):
+            e = p.get("entry") or {}
+            if e.get("source") == "network": return                  # reported with its status below
+            note(e.get("level", "info"), "%s%s" % (e.get("text", "")[:600], " (%s)" % e["url"] if e.get("url") else ""))
+
+        def req_sent(p):
+            self.requests[p["requestId"]] = (p.get("request", {}).get("method", "GET"), p.get("request", {}).get("url", ""))
+            if p.get("type") not in ("WebSocket", "EventSource", "Ping", "Prefetch"): self.inflight.add(p["requestId"])
+
+        def resp(p):
+            r = p.get("response") or {}
+            if p.get("type") == "Document" and p.get("frameId") == self.main_frame: self.status = r.get("status")
+            if (r.get("status") or 0) >= 400:
+                note("network", "HTTP %s %s %s" % (r.get("status"), self.requests.get(p.get("requestId"), ("GET",))[0], r.get("url", "")))
+
+        def finished(p):
+            self.inflight.discard(p.get("requestId"))
+
+        def failed(p):
+            self.inflight.discard(p.get("requestId"))
+            if p.get("canceled"): return
+            m, u = self.requests.get(p.get("requestId"), ("GET", "?"))
+            note("network", "FAILED %s %s: %s%s" % (m, u, p.get("errorText", ""),
+                                                   " (blocked: %s)" % p["blockedReason"] if p.get("blockedReason") else ""))
+
+        def started(p):
+            if p.get("frameId") == self.main_frame: self.loading = True
+
+        def stopped(p):
+            if p.get("frameId") == self.main_frame: self.loading = False
+
+        def dialog(p):
+            note("dialog", "%s: %s (auto-accepted)" % (p.get("type", "alert"), p.get("message", "")[:300]))
+            c.send("Page.handleJavaScriptDialog", {"accept": True, "promptText": p.get("defaultPrompt", "")}, wait=False)
+
+        def crashed(p):
+            self.crashed = True
+
+        for name, fn in (("Runtime.consoleAPICalled", console_api), ("Runtime.exceptionThrown", exception),
+                         ("Log.entryAdded", log_entry), ("Network.requestWillBeSent", req_sent),
+                         ("Network.responseReceived", resp), ("Network.loadingFinished", finished),
+                         ("Network.loadingFailed", failed), ("Page.frameStartedLoading", started),
+                         ("Page.frameStoppedLoading", stopped), ("Page.javascriptDialogOpening", dialog),
+                         ("Inspector.targetCrashed", crashed)):
+            c.on(name, fn)
+
+    def _setup(self):
+        for d in ("Page", "Runtime", "Network", "Log"):
+            self.call(d + ".enable")
+        self.main_frame = self.call("Page.getFrameTree")["frameTree"]["frame"]["id"]
+        self.call("Page.addScriptToEvaluateOnNewDocument", {"source": INIT_JS})
+        try: self.call("Emulation.setFocusEmulationEnabled", {"enabled": True})
+        except ToolError: pass
+        self.apply_viewport()
+
+    def apply_viewport(self):
+        v = self.vp
+        self.call("Emulation.setDeviceMetricsOverride", {
+            "width": v["width"], "height": v["height"], "deviceScaleFactor": 2 if v["mobile"] else 1,
+            "mobile": bool(v["mobile"])})
+        try:
+            self.call("Emulation.setTouchEmulationEnabled", {"enabled": bool(v["mobile"])})
+            self.call("Emulation.setUserAgentOverride", {"userAgent": MOBILE_UA if v["mobile"] else ""})
+        except ToolError:
+            pass
+
+    def stop(self):
+        cdp, proc, guard, tmp = self.cdp, self.proc, self.guard, self.tmp
+        self._clear()
+        if cdp:
+            try: cdp.close()
+            except Exception: pass
+        if guard:
+            try: guard.kill(); guard.wait(2)
+            except Exception: pass
+        if proc:
+            kill_group(proc)
+        if tmp:
+            sweep_profile(tmp)
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    # -- plumbing
+    def call(self, method, params=None, timeout=30):
+        cdp = self.cdp
+        if not cdp: raise ToolError("The browser is not running. Call browser_open(url) first.")
+        return cdp.send(method, params, timeout)
+
+    def evaluate(self, expr, timeout=30):
+        r = self.call("Runtime.evaluate", {"expression": expr, "returnByValue": True, "awaitPromise": True,
+                                           "userGesture": True}, timeout)
+        if r.get("exceptionDetails"):
+            d = r["exceptionDetails"]
+            msg = (d.get("exception") or {}).get("description") or d.get("text", "error")
+            raise ToolError("JavaScript error: " + msg.split("\n")[0][:500])
+        return r.get("result") or {}
+
+    def need_page(self):
+        if not self.opened or not self.running():
+            raise ToolError("No page is open. Call browser_open(url) first.")
+
+    def wait_loaded(self, timeout=30):
+        time.sleep(0.1)
+        end = time.time() + timeout
+        while self.loading and time.time() < end:
+            time.sleep(0.05)
+        return not self.loading
+
+    def settle(self, maxwait=3.0, quiet=0.4):
+        end = time.time() + maxwait
+        quiet_since = None
+        while time.time() < end:
+            if self.loading or self.inflight: quiet_since = None
+            else:
+                quiet_since = quiet_since or time.time()
+                if time.time() - quiet_since >= quiet: return
+            time.sleep(0.05)
+
+    def after_action(self, pause=0.3):
+        """Let an action's effects land: a navigation it started, then the network going quiet."""
+        time.sleep(pause)
+        self.wait_loaded(15)
+        self.settle(2.5)
+
+    # -- page operations
+    def snapshot(self):
+        s = self.evaluate(SNAP_JS).get("value")
+        if not isinstance(s, dict): raise ToolError("Could not read the page. Is it still open? Try browser_open again.")
+        return s
+
+    def resolve(self, spec, focus=False):
+        ref = parse_ref(spec)
+        r = self.evaluate(resolve_js(ref, focus)).get("value") or {}
+        if r.get("ok"): return r
+        why = r.get("why")
+        if why == "stale":
+            raise ToolError("Element [%s] is not on the page any more (numbers reset on every snapshot and navigation). Call browser_snapshot for a fresh list." % ref[1])
+        if why == "nomatch": raise ToolError("No element matches the selector %r. Check it against browser_snapshot." % ref[1])
+        if why == "hidden": raise ToolError("That element has no size on screen (hidden). Pick another or scroll/open whatever hides it.")
+        raise ToolError("Could not use that element: %s" % (r.get("msg") or why))
+
+    def capture(self, full_page=False, clip=None, tag="browser"):
+        params = {"format": "png"}
+        note = ""
+        if clip:
+            params.update(clip=dict(clip, scale=1), captureBeyondViewport=True)
+        elif full_page:
+            m = self.call("Page.getLayoutMetrics")
+            size = m.get("cssContentSize") or m.get("contentSize") or {}
+            w, h = int(size.get("width", self.vp["width"])), int(size.get("height", self.vp["height"]))
+            if h > 8000: note, h = " (page is %dpx tall; the first 8000px are captured)" % h, 8000
+            params.update(clip={"x": 0, "y": 0, "width": max(w, 1), "height": max(h, 1), "scale": 1}, captureBeyondViewport=True)
+        data = self.call("Page.captureScreenshot", params, timeout=45).get("data")
+        if not data: raise ToolError("The browser returned no image.")
+        path, w, h = save_png_bytes(base64.b64decode(data), tag)
+        return path, w, h, note
+
+    def observe(self, header, full=True):
+        """The standard answer after an action: what happened, the page as text, and a screenshot."""
+        parts = []
+        try:
+            text = fmt_snapshot(self.snapshot())
+        except ToolError as e:
+            text = "(page text unavailable: %s)" % e
+        shot = None
+        try:
+            path, w, h, note = self.capture()
+            shot = path
+            header += "\nScreenshot saved: %s (%dx%d px)%s" % (path, w, h, note)
+        except ToolError as e:
+            header += "\n(screenshot failed: %s)" % e
+        parts.append(text_part(header + "\n\n" + text))
+        if shot: parts.append(image_part(shot))
+        return parts
+
+    def key(self, ev):
+        base = dict(ev)
+        cmds = base.pop("commands", None)
+        down = dict(base, type="keyDown" if "text" in base else "rawKeyDown")
+        if cmds: down["commands"] = cmds
+        self.call("Input.dispatchKeyEvent", down)
+        self.call("Input.dispatchKeyEvent", dict(base, type="keyUp"))
+
+    def click_at(self, x, y):
+        self.call("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+        self.call("Input.dispatchMouseEvent", {"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1})
+        self.call("Input.dispatchMouseEvent", {"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1})
+
+
+def kill_group(proc, grace=3):
+    """Terminate a whole process group (the browser and its helpers), then make sure."""
+    try: os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError): pass
+    try: proc.wait(grace)
+    except subprocess.TimeoutExpired:
+        try: os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError): pass
+        try: proc.wait(grace)
+        except subprocess.TimeoutExpired: pass
+    try: os.killpg(proc.pid, signal.SIGKILL)               # helpers that outlived the leader
+    except (ProcessLookupError, PermissionError, OSError): pass
+
+
+def sweep_profile(tmp):
+    """Anything still running on this throwaway profile is ours: kill it."""
+    rc, out, _ = run_cmd(["ps", "-axo", "pid=,command="], timeout=10)
+    if rc != 0: return
+    needle = "--user-data-dir=" + tmp
+    for line in out.splitlines():
+        pid, _, cmd = line.strip().partition(" ")
+        if needle in cmd and pid.isdigit() and int(pid) != os.getpid():
+            try: os.kill(int(pid), signal.SIGKILL)
+            except OSError: pass
+
+
+B = Browser()
+
+
+# --------------------------------------------------------------------- tool registry
+
+TOOLS = {}
+
+
+def P(typ, desc, **extra):
+    d = {"type": typ, "description": desc}
+    d.update(extra)
+    return d
+
+
+def tool(name, desc, props=None, required=(), timeout=60, browser=False):
+    def deco(fn):
+        TOOLS[name] = {"name": name, "description": desc, "fn": fn, "timeout": timeout, "browser": browser,
+                       "inputSchema": {"type": "object", "properties": props or {}, "required": list(required)}}
+        return fn
+    return deco
+
+
+def coerce(args, schema):
+    """Models send "800" for 800 and "true" for true; accept that, and enforce required."""
+    props, out = schema.get("properties", {}), {}
+    for k, v in (args or {}).items():
+        if v is None: continue
+        t = (props.get(k) or {}).get("type")
+        try:
+            if t == "integer" and not isinstance(v, bool): v = int(float(v))
+            elif t == "number" and not isinstance(v, bool): v = float(v)
+            elif t == "boolean" and isinstance(v, str): v = v.strip().lower() in ("1", "true", "yes", "on")
+            elif t == "string" and not isinstance(v, str): v = str(v)
+            elif t == "array" and isinstance(v, str): v = json.loads(v) if v.strip().startswith("[") else [v]
+            elif t == "object" and isinstance(v, str): v = json.loads(v)
+        except (ValueError, TypeError):
+            raise ToolError("Argument %r must be of type %s." % (k, t))
+        out[k] = v
+    for k in schema.get("required", []):
+        if k not in out: raise ToolError("Missing required argument %r." % k)
+    return out
+
+
+def call_tool(name, arguments):
+    """Run one tool -> MCP result. Always returns, whatever the tool does."""
+    t = TOOLS[name]
+    box = {}
+
+    def work():
+        try:
+            args = coerce(arguments, t["inputSchema"])
+            if t["browser"]:
+                with B.lock: res = t["fn"](**args)
+            else:
+                res = t["fn"](**args)
+            box["res"] = [text_part(res)] if isinstance(res, str) else res
+        except ToolError as e:
+            box["err"] = str(e)
+        except Exception as e:
+            sys.stderr.write(traceback.format_exc())
+            box["err"] = "%s failed unexpectedly: %s: %s" % (name, type(e).__name__, e)
+
+    th = threading.Thread(target=work, daemon=True)
+    th.start()
+    th.join(t["timeout"])
+    if th.is_alive():
+        if t["browser"]: threading.Thread(target=B.stop, daemon=True).start()     # unwedge it; the next call starts fresh
+        box = {"err": "%s timed out after %ss.%s" % (name, t["timeout"], " The browser was reset; call browser_open again." if t["browser"] else "")}
+    if "err" in box:
+        return {"content": [text_part(box["err"])], "isError": True}
+    return {"content": box["res"]}
+
+
+# --------------------------------------------------------------------- browser tools
+
+@tool("browser_open",
+      "Open a URL (http, https or file) in a private headless browser and return the page title, final URL, HTTP status, a screenshot and the page as text with numbered clickable elements.",
+      {"url": P("string", "http://, https:// or file:// URL to open."),
+       "width": P("integer", "Viewport width in CSS px (default 1280; omit to keep the current size)."),
+       "height": P("integer", "Viewport height in CSS px (default 800; omit to keep the current size)."),
+       "mobile": P("boolean", "Emulate a phone: touch, 2x pixels, mobile user agent (default false).")},
+      ["url"], timeout=120, browser=True)
+def browser_open(url, width=None, height=None, mobile=None):
+    url = check_url(url)
+    B.ensure()
+    if width or height or mobile is not None:
+        B.vp = {"width": max(100, min(int(width or B.vp["width"]), 4000)),
+                "height": max(100, min(int(height or B.vp["height"]), 4000)),
+                "mobile": B.vp["mobile"] if mobile is None else bool(mobile)}
+        B.apply_viewport()
+    B.status = None
+    r = B.call("Page.navigate", {"url": url}, 40)
+    if r.get("errorText"):
+        raise ToolError("Could not load %s: %s. Is the server running and the URL right?" % (url, r["errorText"]))
+    B.opened = True
+    done = B.wait_loaded(30)
+    B.settle()
+    head = "Opened %s" % url
+    if not done: head += "\n(the page was still loading after 30s; showing what is there)"
+    snap_url = (B.evaluate("location.href").get("value") or url)
+    head += "\nFinal URL: %s" % snap_url
+    if B.status: head += "\nHTTP status: %s" % B.status
+    head += "\nViewport: %dx%d%s" % (B.vp["width"], B.vp["height"], " (mobile)" if B.vp["mobile"] else "")
+    return B.observe(head)
+
+
+@tool("browser_snapshot",
+      "The current page as text only: title, URL, visible text and a numbered list of clickable/typable elements with positions. Numbers are valid until the next snapshot or navigation.",
+      timeout=60, browser=True)
+def browser_snapshot():
+    B.need_page()
+    return fmt_snapshot(B.snapshot())
+
+
+@tool("browser_screenshot",
+      "Screenshot the page (or one element) as an image saved to disk, plus the page as text.",
+      {"full_page": P("boolean", "Capture the whole scrollable page instead of the viewport (default false)."),
+       "element": P(["integer", "string"], "Snapshot number or CSS selector to capture just that element.")},
+      timeout=90, browser=True)
+def browser_screenshot(full_page=False, element=None):
+    B.need_page()
+    clip = None
+    if element not in (None, ""):
+        r = B.resolve(element)
+        clip = {"x": r["px"] + r["left"], "y": r["py"] + r["top"], "width": max(r["w"], 1), "height": max(r["h"], 1)}
+    path, w, h, note = B.capture(full_page=bool(full_page), clip=clip)
+    text = "Screenshot saved: %s (%dx%d px)%s\n\n%s" % (path, w, h, note, fmt_snapshot(B.snapshot()))
+    return [text_part(text), image_part(path)]
+
+
+@tool("browser_click",
+      "Click an element (snapshot number or CSS selector; it is scrolled into view and its centre clicked) or viewport coordinates, then return the new page.",
+      {"element": P(["integer", "string"], "Snapshot number or CSS selector."),
+       "x": P("number", "Viewport x in CSS px (with y)."), "y": P("number", "Viewport y in CSS px (with x).")},
+      timeout=120, browser=True)
+def browser_click(element=None, x=None, y=None):
+    B.need_page()
+    if element not in (None, ""):
+        r = B.resolve(element)
+        cx, cy = r["x"], r["y"]
+    elif x is not None and y is not None:
+        cx, cy = float(x), float(y)
+    else:
+        raise ToolError("browser_click needs element (snapshot number or CSS selector) or both x and y.")
+    hit = B.evaluate("(() => { const e = document.elementFromPoint(%f, %f); return e ? '<' + e.tagName.toLowerCase() + '> ' + "
+                     "(e.innerText || e.value || e.getAttribute('aria-label') || '').trim().slice(0, 40) : 'nothing'; })()" % (cx, cy)).get("value")
+    B.click_at(cx, cy)
+    B.after_action()
+    return B.observe("Clicked %s at %s,%s" % (hit, fmt_num(cx), fmt_num(cy)))
+
+
+@tool("browser_type",
+      "Focus an input (snapshot number or CSS selector) and type text into it; for a <select>, picks the option by its label or value. Optionally press Enter after.",
+      {"element": P(["integer", "string"], "Snapshot number or CSS selector of the field."),
+       "text": P("string", "Text to type."),
+       "submit": P("boolean", "Press Enter afterwards (default false)."),
+       "clear": P("boolean", "Replace what is in the field instead of appending (default true).")},
+      ["element", "text"], timeout=90, browser=True)
+def browser_type(element, text, submit=False, clear=True):
+    B.need_page()
+    B.resolve(element, focus=True)
+    res = B.evaluate(TYPE_JS.replace("__SPEC__", json.dumps({"text": text, "clear": bool(clear)}))).get("value") or {}
+    if not res.get("ok"):
+        if res.get("why") == "nooption":
+            raise ToolError("No option matches %r. Options: %s" % (text, ", ".join(res.get("options") or [])))
+        raise ToolError("That element cannot take text (focused: %s). Pick an input, textarea or select." % (res.get("tag") or res.get("why")))
+    if res.get("insert"):
+        if text: B.call("Input.insertText", {"text": text})
+        elif clear: B.key(parse_key("Backspace"))
+    if submit: B.key(parse_key("Enter"))
+    B.after_action()
+    what = "Selected %r" % res["selected"] if res.get("selected") else "Typed %d characters" % len(text)
+    return B.observe(what + (" and pressed Enter" if submit else ""))
+
+
+@tool("browser_press",
+      "Press a key on the focused element: Enter, Tab, Escape, Backspace, Delete, Arrow keys, Home, End, PageUp, PageDown, Space, one character, or a combination like Control+a.",
+      {"key": P("string", "Key name, e.g. Enter or Control+a.")}, ["key"], timeout=90, browser=True)
+def browser_press(key):
+    B.need_page()
+    B.key(parse_key(key))
+    B.after_action()
+    return B.observe("Pressed %s" % key)
+
+
+@tool("browser_scroll",
+      "Scroll the page (or the scrollable area under x,y) with the mouse wheel and return the new view.",
+      {"dy": P("number", "Pixels to scroll down (negative = up). Default 600."),
+       "dx": P("number", "Pixels to scroll right (negative = left). Default 0."),
+       "x": P("number", "Viewport x of the wheel (default: centre)."), "y": P("number", "Viewport y of the wheel (default: centre).")},
+      timeout=90, browser=True)
+def browser_scroll(dy=600, dx=0, x=None, y=None):
+    B.need_page()
+    px = float(x) if x is not None else B.vp["width"] / 2
+    py = float(y) if y is not None else B.vp["height"] / 2
+    B.call("Input.dispatchMouseEvent", {"type": "mouseWheel", "x": px, "y": py, "deltaX": float(dx), "deltaY": float(dy)})
+    time.sleep(0.4)
+    return B.observe("Scrolled by %s,%s" % (fmt_num(dx), fmt_num(dy)))
+
+
+@tool("browser_back", "Go back one page in the browser history and return the page.", timeout=90, browser=True)
+def browser_back():
+    B.need_page()
+    h = B.call("Page.getNavigationHistory")
+    i = h["currentIndex"]
+    if i <= 0: raise ToolError("There is no earlier page in the history.")
+    B.call("Page.navigateToHistoryEntry", {"entryId": h["entries"][i - 1]["id"]})
+    B.after_action()
+    return B.observe("Went back")
+
+
+@tool("browser_reload", "Reload the current page and return it.", timeout=90, browser=True)
+def browser_reload():
+    B.need_page()
+    B.call("Page.reload")
+    B.after_action()
+    return B.observe("Reloaded")
+
+
+@tool("browser_eval",
+      "Evaluate a JavaScript expression or IIFE in the page (awaits promises) and return the JSON result, e.g. document.querySelectorAll('li').length.",
+      {"js": P("string", "Expression to evaluate; wrap statements in an IIFE to return a value.")},
+      ["js"], timeout=60, browser=True)
+def browser_eval(js):
+    B.need_page()
+    r = B.evaluate(js)
+    if r.get("type") == "undefined": return "undefined"
+    if "value" in r:
+        out = json.dumps(r["value"], ensure_ascii=False, default=str, indent=None)
+    else:
+        out = r.get("unserializableValue") or r.get("description") or "(not serializable: %s)" % r.get("subtype", r.get("type"))
+    return out if len(out) <= 8000 else out[:8000] + "\n...[%d more characters not shown]" % (len(out) - 8000)
+
+
+@tool("browser_console",
+      "Console messages, uncaught exceptions and failed or 4xx/5xx network requests collected since the last call.",
+      {"clear": P("boolean", "Forget what is returned (default true).")}, timeout=30, browser=True)
+def browser_console(clear=True):
+    if not B.running(): return "No browser is open, so there is nothing to report. Call browser_open(url)."
+    lines = list(B.console)
+    if clear: del B.console[:len(lines)]
+    return "\n".join(lines) if lines else "No new console messages, exceptions or failed requests."
+
+
+@tool("browser_resize",
+      "Change the viewport size (and optionally phone emulation); the next browser_snapshot/screenshot reflects it.",
+      {"width": P("integer", "Width in CSS px."), "height": P("integer", "Height in CSS px."),
+       "mobile": P("boolean", "Emulate a phone (default false).")},
+      ["width", "height"], timeout=60, browser=True)
+def browser_resize(width, height, mobile=False):
+    B.vp = {"width": max(100, min(int(width), 4000)), "height": max(100, min(int(height), 4000)), "mobile": bool(mobile)}
+    if B.running():
+        B.apply_viewport()
+        time.sleep(0.3)
+        if B.opened: return B.observe("Viewport is now %dx%d%s" % (B.vp["width"], B.vp["height"], " (mobile)" if mobile else ""))
+    return "Viewport will be %dx%d%s when the browser opens." % (B.vp["width"], B.vp["height"], " (mobile)" if mobile else "")
+
+
+@tool("browser_close", "Close the browser and delete its throwaway profile.", timeout=30)
+def browser_close():
+    B.stop()
+    return "Browser closed."
+
+
+# --------------------------------------------------------------------- iOS Simulator
+
+POINT_SIZES = {   # screenshot pixels (w, h) -> scale; points = pixels / scale
+    (1320, 2868): 3, (1206, 2622): 3, (1260, 2736): 3, (1290, 2796): 3, (1179, 2556): 3, (1284, 2778): 3, (1170, 2532): 3,
+    (1125, 2436): 3, (1242, 2688): 3, (1080, 2340): 3, (828, 1792): 2, (750, 1334): 2, (640, 1136): 2, (1242, 2208): 3,
+    (2048, 2732): 2, (2064, 2752): 2, (1668, 2388): 2, (1668, 2224): 2, (1640, 2360): 2, (1620, 2160): 2, (1488, 2266): 2,
+}
+
+
+def guess_points(w, h):
+    """Device points for a screenshot size when AXe is not there to say; the table covers shipped devices."""
+    for (a, b), s in POINT_SIZES.items():
+        if (w, h) == (a, b) or (w, h) == (b, a): return round(w / s), round(h / s), s
+    s = 2 if min(w, h) >= 1500 or min(w, h) < 1000 else 3
+    return round(w / s), round(h / s), s
+
+
+def runtime_name(key):
+    m = re.search(r"SimRuntime\.([A-Za-z]+)-(\d+)-(\d+)(?:-(\d+))?", key or "")
+    if not m: return key or "unknown", (0, 0, 0)
+    parts = [int(x) for x in m.groups()[1:] if x is not None]
+    return "%s %s" % (m.group(1), ".".join(str(x) for x in parts)), tuple(parts + [0] * (3 - len(parts)))
+
+
+def sim_list():
+    rc, out, err = run_cmd(["xcrun", "simctl", "list", "devices", "available", "-j"], timeout=30)
+    if rc == 127:
+        raise ToolError("xcrun was not found. Install Xcode or the command line tools (xcode-select --install).")
+    if rc != 0: raise ToolError("simctl could not list devices: %s" % tail(err or out))
+    try: data = json.loads(out)
+    except ValueError: raise ToolError("simctl returned unreadable device data: %s" % tail(out, 200))
+    devs = []
+    for key, items in (data.get("devices") or {}).items():
+        label, ver = runtime_name(key)
+        for d in items:
+            if d.get("isAvailable", True):
+                devs.append({"udid": d["udid"], "name": d["name"], "state": d.get("state", ""), "runtime": label, "ver": ver})
+    return devs
+
+
+def pick_device(spec, devs):
+    booted = [d for d in devs if d["state"] == "Booted"]
+    s = (spec or "").strip()
+    if not s or s.lower() == "booted":
+        if len(booted) == 1: return booted[0]
+        if not booted:
+            raise ToolError("No simulator is booted. Call simulator_boot(device) first; simulator_devices lists the names.")
+        raise ToolError("Several simulators are booted (%s). Pass device= with a name or UDID." % "; ".join(
+            "%s [%s] %s" % (d["name"], d["runtime"], d["udid"]) for d in booted))
+    low = s.lower()
+    for d in devs:
+        if d["udid"].lower() == low: return d
+    exact = [d for d in devs if d["name"].lower() == low]
+    pool = exact or [d for d in devs if low in d["name"].lower()]
+    if not pool:
+        raise ToolError("No simulator matches %r. simulator_devices lists the names and UDIDs." % s)
+    if len({d["name"] for d in pool}) > 1:
+        raise ToolError("%r matches several devices: %s. Use a full name or a UDID." % (
+            s, "; ".join(sorted({d["name"] for d in pool})[:8])))
+    pool.sort(key=lambda d: (d["state"] == "Booted", d["ver"]), reverse=True)
+    return pool[0]
+
+
+def booted_device(spec):
+    d = pick_device(spec, sim_list())
+    if d["state"] != "Booted":
+        raise ToolError("%s (%s) is %s. Call simulator_boot(%r) first." % (d["name"], d["runtime"], d["state"].lower() or "not booted", d["name"]))
+    return d
+
+
+def simctl(*args, timeout=60, env=None):
+    return run_cmd(["xcrun", "simctl"] + list(args), timeout=timeout, env=env)
+
+
+def need_ok(rc, out, err, what):
+    if rc != 0:
+        raise ToolError("%s failed: %s" % (what, tail(err or out) or "exit code %s" % rc))
+
+
+@tool("simulator_devices", "List the available iOS Simulator devices grouped by runtime, marking the booted ones.", timeout=60)
+def simulator_devices():
+    devs = sim_list()
+    if not devs: return "No simulator devices are installed. Add a runtime in Xcode > Settings > Components."
+    groups = {}
+    for d in devs: groups.setdefault((d["ver"], d["runtime"]), []).append(d)
+    lines = []
+    for (ver, label) in sorted(groups, reverse=True):
+        lines.append(label)
+        for d in sorted(groups[(ver, label)], key=lambda d: d["name"]):
+            lines.append("  %s %s  %s  %s" % ("*" if d["state"] == "Booted" else " ", d["name"], d["udid"], d["state"].upper() if d["state"] == "Booted" else d["state"]))
+    nb = sum(1 for d in devs if d["state"] == "Booted")
+    lines.append("")
+    lines.append("%d booted (marked *)." % nb if nb else "None booted.")
+    return "\n".join(lines)
+
+
+@tool("simulator_boot",
+      "Boot a simulator by name or UDID and wait until it is ready. Booted simulators use a lot of memory: call simulator_shutdown when done.",
+      {"device": P("string", "Device name (e.g. iPhone 17 Pro) or UDID.")}, ["device"], timeout=330)
+def simulator_boot(device):
+    d = pick_device(device, sim_list())
+    if d["state"] == "Booted": return "%s (%s) is already booted. UDID %s." % (d["name"], d["runtime"], d["udid"])
+    rc, out, err = simctl("boot", d["udid"], timeout=60)
+    if rc != 0 and "current state: Booted" not in err and "current state: Booting" not in err:
+        raise ToolError("Could not boot %s: %s" % (d["name"], tail(err or out)))
+    rc, out, err = simctl("bootstatus", d["udid"], timeout=240)
+    if rc == 124:
+        raise ToolError("%s is still booting after 4 minutes; this Mac is slow or busy. It keeps booting in the background: "
+                        "wait a minute and call simulator_devices to see when it shows Booted." % d["name"])
+    need_ok(rc, out, err, "Waiting for %s to boot" % d["name"])
+    return "Booted %s (%s), UDID %s. Remember simulator_shutdown when finished." % (d["name"], d["runtime"], d["udid"])
+
+
+@tool("simulator_install", "Install a built .app bundle into a booted simulator.",
+      {"app_path": P("string", "Path to the .app (e.g. DerivedData/.../Debug-iphonesimulator/MyApp.app)."),
+       "device": P("string", "Device name or UDID; default = the booted simulator.")}, ["app_path"], timeout=180)
+def simulator_install(app_path, device=None):
+    p = os.path.abspath(os.path.expanduser(app_path))
+    if not (p.endswith(".app") and os.path.isdir(p)):
+        raise ToolError("%s is not a .app bundle directory. Build for the iphonesimulator SDK and pass the .app inside Build/Products/Debug-iphonesimulator." % app_path)
+    d = booted_device(device)
+    rc, out, err = simctl("install", d["udid"], p, timeout=150)
+    need_ok(rc, out, err, "Installing on %s" % d["name"])
+    return "Installed %s on %s." % (os.path.basename(p), d["name"])
+
+
+@tool("simulator_launch", "Launch an installed app by bundle id (restarting it if running) and report its pid.",
+      {"bundle_id": P("string", "Bundle identifier, e.g. com.example.App."),
+       "device": P("string", "Device name or UDID; default = the booted simulator."),
+       "env": P("object", "Environment variables for the app.", additionalProperties={"type": "string"}),
+       "args": P("array", "Launch arguments for the app.", items={"type": "string"}),
+       "terminate_running": P("boolean", "Terminate an already running copy first (default true).")},
+      ["bundle_id"], timeout=90)
+def simulator_launch(bundle_id, device=None, env=None, args=None, terminate_running=True):
+    d = booted_device(device)
+    cmd = ["launch"] + (["--terminate-running-process"] if terminate_running else []) + [d["udid"], bundle_id] + [str(a) for a in (args or [])]
+    e = dict(os.environ)
+    for k, v in (env or {}).items(): e["SIMCTL_CHILD_" + str(k)] = str(v)
+    rc, out, err = simctl(*cmd, timeout=60, env=e)
+    if rc != 0:
+        hint = " Is it installed? Use simulator_install first." if "not found" in (err + out).lower() or "NotFound" in err else ""
+        raise ToolError("Launching %s failed: %s%s" % (bundle_id, tail(err or out), hint))
+    return "Launched %s on %s (%s). Next: simulator_screenshot." % (bundle_id, d["name"], out.strip() or "no pid reported")
+
+
+@tool("simulator_terminate", "Stop a running app in a simulator.",
+      {"bundle_id": P("string", "Bundle identifier."), "device": P("string", "Device name or UDID; default = the booted simulator.")},
+      ["bundle_id"], timeout=60)
+def simulator_terminate(bundle_id, device=None):
+    d = booted_device(device)
+    rc, out, err = simctl("terminate", d["udid"], bundle_id, timeout=30)
+    need_ok(rc, out, err, "Terminating %s" % bundle_id)
+    return "Terminated %s on %s." % (bundle_id, d["name"])
+
+
+@tool("simulator_open_url", "Open a URL or deep link in a booted simulator (web URLs open Safari; app schemes open the app).",
+      {"url": P("string", "URL or custom-scheme deep link."), "device": P("string", "Device name or UDID; default = the booted simulator.")},
+      ["url"], timeout=60)
+def simulator_open_url(url, device=None):
+    d = booted_device(device)
+    rc, out, err = simctl("openurl", d["udid"], url, timeout=30)
+    need_ok(rc, out, err, "Opening %s" % url)
+    return "Opened %s on %s." % (url, d["name"])
+
+
+def sim_screen_text(d, w, h):
+    """Screenshot facts a text-only model needs: what coordinates mean, plus the on-screen elements."""
+    pw, ph, scale = guess_points(w, h) if w and h else (0, 0, 0)
+    lines = []
+    try:
+        backend = input_backend()
+        rc, out, err = run_cmd(describe_cmd(backend, d["udid"]), timeout=20)
+        elements, frame = flatten_ui(out) if rc == 0 else ([], None)
+        if frame: pw, ph = frame
+        if elements:
+            lines.append("On-screen elements, [n] type \"label\" @ x,y WxH in device points:")
+            lines += elements
+        else:
+            lines.append("(no accessibility elements reported%s)" % ("" if rc == 0 else ": " + tail(err, 120)))
+    except ToolError:
+        lines.append("(on-screen element list unavailable without AXe: brew install cameroncooke/axe/axe)")
+    return pw, ph, lines
+
+
+def sim_observe(d, header):
+    path = new_shot_path("sim")
+    rc, out, err = simctl("io", d["udid"], "screenshot", "--type=png", path, timeout=45)
+    need_ok(rc, out, err, "Screenshot of %s" % d["name"])
+    full_w, full_h = png_size(path)                    # device pixels, before any shrinking
+    path, w, h = finish_shot(path)
+    pw, ph, lines = sim_screen_text(d, full_w, full_h)
+    info = "%s\nDevice: %s (%s), %d x %d points. Screenshot saved: %s (%dx%d px)." % (header, d["name"], d["runtime"], pw, ph, path, w, h)
+    if pw and w:
+        info += " Multiply image pixel coordinates by %.2f to get device points." % (pw / float(w))
+    return [text_part(info + "\n" + "\n".join(lines)), image_part(path)]
+
+
+@tool("simulator_screenshot", "Screenshot a booted simulator (works without Simulator.app); also returns the on-screen element list when AXe is installed.",
+      {"device": P("string", "Device name or UDID; default = the only booted simulator.")}, timeout=90)
+def simulator_screenshot(device=None):
+    return sim_observe(booted_device(device), "Simulator screen.")
+
+
+@tool("simulator_shutdown", "Shut down one simulator, or every simulator with device=\"all\". Leaving them booted slows the Mac.",
+      {"device": P("string", "Name, UDID, or \"all\" (default: the only booted simulator).")}, timeout=90)
+def simulator_shutdown(device=None):
+    if (device or "").strip().lower() == "all":
+        rc, out, err = simctl("shutdown", "all", timeout=80)
+        need_ok(rc, out, err, "Shutting down all simulators")
+        return "All simulators shut down."
+    d = pick_device(device, sim_list())
+    if d["state"] != "Booted": return "%s is already shut down." % d["name"]
+    rc, out, err = simctl("shutdown", d["udid"], timeout=60)
+    if rc != 0 and "current state: Shutdown" not in err: need_ok(rc, out, err, "Shutting down %s" % d["name"])
+    return "Shut down %s." % d["name"]
+
+
+@tool("simulator_logs", "Recent log lines for an app (bundle id) or process in a booted simulator; errors only by default. Returns the last ~60 lines.",
+      {"bundle_id_or_process": P("string", "Bundle id (com.example.App) or process name."),
+       "seconds": P("integer", "How many seconds of history to search (default 5)."),
+       "errors_only": P("boolean", "Only error and fault messages (default true)."),
+       "device": P("string", "Device name or UDID; default = the booted simulator.")},
+      ["bundle_id_or_process"], timeout=90)
+def simulator_logs(bundle_id_or_process, seconds=5, errors_only=True, device=None):
+    name = bundle_id_or_process.strip()
+    if not re.fullmatch(r"[\w.\- ]{1,120}", name):
+        raise ToolError("Give a bundle id or process name using only letters, digits, dots, dashes and underscores.")
+    d = booted_device(device)
+    secs = max(1, min(int(seconds), 3600))
+    exe = name
+    if "." in name:
+        rc, out, err = simctl("get_app_container", d["udid"], name, "app", timeout=15)
+        if rc == 0:
+            rc2, out2, _ = run_cmd(["plutil", "-extract", "CFBundleExecutable", "raw", "-o", "-", os.path.join(out.strip(), "Info.plist")], timeout=10)
+            if rc2 == 0 and out2.strip(): exe = out2.strip()
+    pred = '(process == "%s" OR subsystem == "%s")' % (exe, name)
+    if errors_only: pred += " AND (messageType == error OR messageType == fault)"
+    rc, out, err = simctl("spawn", d["udid"], "log", "show", "--last", "%ds" % secs, "--style", "compact", "--predicate", pred, timeout=60)
+    need_ok(rc, out, err, "Reading logs")
+    lines = [l for l in out.splitlines() if l.strip() and not l.startswith(("Timestamp", "Filtering the log", "Log -"))]
+    if not lines: return "No %s log lines for %s in the last %ds on %s." % ("error" if errors_only else "", name, secs, d["name"])
+    return "%d line(s) for %s (last %ds), newest last:\n%s" % (len(lines[-60:]), name, secs, "\n".join(lines[-60:]))
+
+
+# input goes through AXe or idb: simctl cannot tap
+
+def input_backend():
+    for exe in ("axe", "idb"):
+        p = shutil.which(exe)
+        if not p:
+            for root in ("/opt/homebrew/bin", "/usr/local/bin"):
+                if os.access(os.path.join(root, exe), os.X_OK): p = os.path.join(root, exe)
+        if p: return (exe, p)
+    raise ToolError(AXE_MISSING)
+
+
+def describe_cmd(backend, udid):
+    kind, exe = backend
+    return [exe, "describe-ui", "--udid", udid] if kind == "axe" else [exe, "ui", "describe-all", "--udid", udid, "--json"]
+
+
+def input_cmd(backend, action, udid, **a):
+    kind, exe = backend
+    n = fmt_num
+    if kind == "axe":
+        if action == "tap": return [exe, "tap", "-x", n(a["x"]), "-y", n(a["y"]), "--udid", udid]
+        if action == "swipe":
+            return [exe, "swipe", "--start-x", n(a["x1"]), "--start-y", n(a["y1"]), "--end-x", n(a["x2"]), "--end-y", n(a["y2"]),
+                    "--duration", str(a["duration"]), "--udid", udid]
+        if action == "type": return [exe, "type", "--udid", udid, "--", a["text"]]
+        if action == "button": return [exe, "button", a["name"], "--udid", udid]
+    else:
+        if action == "tap": return [exe, "ui", "tap", n(a["x"]), n(a["y"]), "--udid", udid]
+        if action == "swipe":
+            return [exe, "ui", "swipe", n(a["x1"]), n(a["y1"]), n(a["x2"]), n(a["y2"]), "--duration", str(a["duration"]), "--udid", udid]
+        if action == "type": return [exe, "ui", "text", "--udid", udid, a["text"]]
+        if action == "button": return [exe, "ui", "button", a["name"].upper().replace("-", "_"), "--udid", udid]
+    raise ToolError("Unsupported input action %s." % action)
+
+
+def num_list(s):
+    return [float(x) for x in re.findall(r"-?\d+(?:\.\d+)?", s)]
+
+
+def frame_of(node):
+    f = node.get("frame") or node.get("AXFrame")
+    if isinstance(f, dict):
+        try: return float(f["x"]), float(f["y"]), float(f["width"]), float(f["height"])
+        except (KeyError, TypeError, ValueError): return None
+    if isinstance(f, str):
+        v = num_list(f)
+        return tuple(v[:4]) if len(v) >= 4 else None
+    return None
+
+
+INTERACTIVE = {"button", "textfield", "securetextfield", "searchfield", "switch", "slider", "link", "cell", "tab", "tabbutton",
+               "textview", "stepper", "picker", "segmentedcontrol", "toggle", "menuitem", "checkbox", "image", "statictext", "tabbar"}
+
+
+def flatten_ui(raw, limit=150):
+    """AXe/idb accessibility JSON -> (numbered lines, (screen width, height) in points)."""
+    try: data = json.loads(raw)
+    except ValueError: return ([l for l in raw.splitlines() if l.strip()][:limit], None)
+    roots = data if isinstance(data, list) else [data]
+    lines, screen = [], [None]
+
+    def walk(n):
+        if not isinstance(n, dict): return
+        typ = str(n.get("type") or n.get("role") or n.get("role_description") or "").replace("AX", "")
+        label = n.get("AXLabel") or n.get("label") or n.get("title") or n.get("name") or ""
+        val = n.get("AXValue") if n.get("AXValue") is not None else n.get("value")
+        ident = n.get("AXUniqueId") or n.get("identifier") or ""
+        fr = frame_of(n)
+        if fr and typ.lower() in ("application", "window") and screen[0] is None: screen[0] = (round(fr[2]), round(fr[3]))
+        if (label or val or ident or typ.lower() in INTERACTIVE) and typ.lower() not in ("application", "window") and fr and len(lines) < limit:
+            bits = ["[%d] %s" % (len(lines), typ or "element")]
+            if label: bits.append('"%s"' % str(label).replace("\n", " ")[:80])
+            if val not in (None, "", label): bits.append("value=%r" % str(val)[:60])
+            if ident and ident != label: bits.append("id=%s" % ident)
+            if n.get("enabled") is False: bits.append("disabled")
+            bits.append("@ %s,%s %sx%s" % tuple(fmt_num(x) for x in fr))
+            lines.append(" ".join(bits))
+        for c in n.get("children") or []: walk(c)
+
+    for r in roots: walk(r)
+    return lines, screen[0]
+
+
+def sim_input(action, device, header, **a):
+    backend = input_backend()
+    d = booted_device(device)
+    rc, out, err = run_cmd(input_cmd(backend, action, d["udid"], **a), timeout=30)
+    need_ok(rc, out, err, "%s %s" % (backend[0], action))
+    time.sleep(0.7)
+    return sim_observe(d, header)
+
+
+@tool("simulator_tap", "Tap at device-point coordinates (the screenshot's pixels divided by the scale shown in the screenshot text; origin top-left). Needs AXe or idb. Returns the new screen.",
+      {"x": P("number", "X in device points."), "y": P("number", "Y in device points."),
+       "device": P("string", "Device name or UDID; default = the booted simulator.")}, ["x", "y"], timeout=90)
+def simulator_tap(x, y, device=None):
+    return sim_input("tap", device, "Tapped %s,%s." % (fmt_num(x), fmt_num(y)), x=x, y=y)
+
+
+@tool("simulator_swipe", "Swipe between two device-point coordinates (e.g. scroll or go back). Needs AXe or idb. Returns the new screen.",
+      {"x1": P("number", "Start x in device points."), "y1": P("number", "Start y."), "x2": P("number", "End x."), "y2": P("number", "End y."),
+       "duration": P("number", "Seconds (default 0.3)."), "device": P("string", "Device name or UDID; default = the booted simulator.")},
+      ["x1", "y1", "x2", "y2"], timeout=90)
+def simulator_swipe(x1, y1, x2, y2, duration=0.3, device=None):
+    return sim_input("swipe", device, "Swiped %s,%s to %s,%s." % (fmt_num(x1), fmt_num(y1), fmt_num(x2), fmt_num(y2)),
+                     x1=x1, y1=y1, x2=x2, y2=y2, duration=duration)
+
+
+@tool("simulator_type", "Type text into the focused field of the simulator. Needs AXe or idb. Returns the new screen.",
+      {"text": P("string", "Text to type."), "device": P("string", "Device name or UDID; default = the booted simulator.")},
+      ["text"], timeout=90)
+def simulator_type(text, device=None):
+    return sim_input("type", device, "Typed %d characters." % len(text), text=text)
+
+
+BUTTONS = {"home": "home", "lock": "lock", "side": "side-button", "side-button": "side-button", "side_button": "side-button",
+           "siri": "siri", "apple-pay": "apple-pay", "applepay": "apple-pay", "apple_pay": "apple-pay"}
+
+
+@tool("simulator_button", "Press a hardware button: home, lock, side-button, siri or apple-pay. Needs AXe or idb. Returns the new screen.",
+      {"name": P("string", "home, lock, side-button, siri or apple-pay."), "device": P("string", "Device name or UDID; default = the booted simulator.")},
+      ["name"], timeout=90)
+def simulator_button(name, device=None):
+    b = BUTTONS.get(name.strip().lower())
+    if not b: raise ToolError("Unknown button %r. Use home, lock, side-button, siri or apple-pay." % name)
+    return sim_input("button", device, "Pressed %s." % b, name=b)
+
+
+@tool("simulator_ui", "The simulator's accessibility tree as text: numbered elements with type, label, id and frame in device points. Needs AXe or idb.",
+      {"device": P("string", "Device name or UDID; default = the booted simulator.")}, timeout=60)
+def simulator_ui(device=None):
+    backend = input_backend()
+    d = booted_device(device)
+    rc, out, err = run_cmd(describe_cmd(backend, d["udid"]), timeout=30)
+    need_ok(rc, out, err, "%s describe" % backend[0])
+    lines, screen = flatten_ui(out)
+    head = "%s: %s elements%s" % (d["name"], len(lines), ", screen %dx%d points" % screen if screen else "")
+    return head + "\n" + "\n".join(lines) if lines else head + "\n(nothing reported; is an app in the foreground?)"
+
+
+# --------------------------------------------------------------------- Mac windows
+
+WINDOWS_JS = r"""ObjC.import('CoreGraphics');
+function run() {
+  const arr = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo(
+    $.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements, $.kCGNullWindowID)));
+  const out = [];
+  for (const w of arr) {
+    if (w.kCGWindowLayer !== 0) continue;
+    const b = w.kCGWindowBounds || {};
+    out.push({id: w.kCGWindowNumber, app: w.kCGWindowOwnerName || '', pid: w.kCGWindowOwnerPID, title: w.kCGWindowName || '',
+              x: b.X, y: b.Y, w: b.Width, h: b.Height});
+  }
+  return JSON.stringify(out);
+}"""
+
+AX_JS = r"""function run(argv) {
+  const se = Application('System Events');
+  const procs = se.processes.whose({unixId: parseInt(argv[0])});
+  if (!procs.length) return '[]';
+  const out = [], t0 = Date.now();
+  const walk = (el, depth) => {
+    if (out.length >= 80 || depth > 6 || Date.now() - t0 > 5000) return;
+    let kids = [];
+    try { kids = el.uiElements(); } catch (e) {}
+    for (const k of kids) {
+      if (out.length >= 80 || Date.now() - t0 > 5000) return;
+      let role = '', title = '', desc = '', val = '';
+      try { role = String(k.role()); } catch (e) {}
+      try { title = String(k.title() || ''); } catch (e) {}
+      try { desc = String(k.description() || ''); } catch (e) {}
+      try { val = String(k.value() == null ? '' : k.value()); } catch (e) {}
+      if (title || val || /button|text|field|checkbox|menu|tab/i.test(role)) out.push([role.replace(/^AX/, ''), title || desc, val.slice(0, 80)]);
+      walk(k, depth + 1);
+    }
+  };
+  walk(procs[0].windows[0], 0);
+  return JSON.stringify(out);
+}"""
+
+
+def mac_window_list():
+    rc, out, err = run_cmd(["osascript", "-l", "JavaScript", "-e", WINDOWS_JS], timeout=20)
+    if rc != 0:
+        if rc == 127: raise ToolError("osascript is missing; the mac_* tools only work on macOS.")
+        raise ToolError("Could not list windows: %s" % tail(err or out))
+    try: return json.loads(out)
+    except ValueError: raise ToolError("Unreadable window list from macOS: %s" % tail(out, 200))
+
+
+def select_windows(wins, app=None, title_contains=None, window_id=None):
+    out = wins
+    if window_id is not None: return [w for w in out if w["id"] == int(window_id)]
+    if app: out = [w for w in out if app.lower() in w["app"].lower()]
+    if title_contains: out = [w for w in out if title_contains.lower() in w["title"].lower()]
+    return [w for w in out if w["w"] >= 20 and w["h"] >= 20]
+
+
+def fmt_windows(wins):
+    if not wins: return "(no on-screen windows)"
+    return "\n".join('id=%s app="%s" title="%s" pid=%s bounds=%s,%s %sx%s' % (
+        w["id"], w["app"], w["title"], w["pid"], fmt_num(w["x"]), fmt_num(w["y"]), fmt_num(w["w"]), fmt_num(w["h"])) for w in wins)
+
+
+@tool("mac_windows", "List on-screen Mac windows (frontmost first): app, title, window id, bounds and pid. Titles of other apps' windows need Screen Recording permission.",
+      {"app": P("string", "Only windows whose app name contains this (case-insensitive).")}, timeout=30)
+def mac_windows(app=None):
+    allw = mac_window_list()
+    wins = select_windows(allw, app=app)
+    if wins: return fmt_windows(wins)
+    return "No on-screen window for %r.\nAll windows:\n%s" % (app, fmt_windows(allw)) if app else "(no on-screen windows)"
+
+
+def bundle_names(path):
+    names = {os.path.basename(path.rstrip("/"))[:-4]}
+    for key in ("CFBundleName", "CFBundleDisplayName", "CFBundleExecutable"):
+        rc, out, _ = run_cmd(["plutil", "-extract", key, "raw", "-o", "-", os.path.join(path, "Contents", "Info.plist")], timeout=10)
+        if rc == 0 and out.strip(): names.add(out.strip())
+    return names
+
+
+@tool("mac_launch", "Launch a Mac app (a .app path, or an app name) as a new instance, wait for its window and list it. Use mac_screenshot next.",
+      {"app_path_or_name": P("string", "Path to a .app bundle, or an installed app's name."),
+       "args": P("array", "Command-line arguments for the app.", items={"type": "string"}),
+       "wait_for_window_seconds": P("number", "How long to wait for a window (default 10).")},
+      ["app_path_or_name"], timeout=90)
+def mac_launch(app_path_or_name, args=None, wait_for_window_seconds=10):
+    target = os.path.expanduser(app_path_or_name.strip())
+    if target.endswith(".app") or os.path.isdir(target):
+        if not os.path.isdir(target): raise ToolError("%s does not exist. Build the app first, or pass its name." % app_path_or_name)
+        names = bundle_names(os.path.abspath(target))
+        cmd = ["open", "-n", os.path.abspath(target)]
+    else:
+        names = {target}
+        cmd = ["open", "-n", "-a", target]
+    if args: cmd += ["--args"] + [str(a) for a in args]
+    before = {w["id"] for w in mac_window_list()}
+    rc, out, err = run_cmd(cmd, timeout=30)
+    if rc != 0:
+        raise ToolError("Could not launch %s: %s" % (app_path_or_name, tail(err or out) or "open failed"))
+    end = time.time() + max(0.0, min(float(wait_for_window_seconds), 60.0))
+    fresh = []
+    while True:
+        fresh = [w for w in mac_window_list() if w["id"] not in before and w["w"] >= 20 and w["h"] >= 20
+                 and any(n.lower() == w["app"].lower() for n in names)]
+        if fresh or time.time() >= end: break
+        time.sleep(0.5)
+    if fresh:
+        return "Launched %s. Window(s):\n%s\nNext: mac_screenshot(window_id=%s)." % (app_path_or_name, fmt_windows(fresh), fresh[0]["id"])
+    return ("Launched %s but no window appeared within %ss (it may be a menu-bar app, still starting, or crashed). "
+            "Current windows of that app:\n%s" % (app_path_or_name, wait_for_window_seconds,
+                                                 fmt_windows([w for w in mac_window_list() if w["app"] in names]) ))
+
+
+def ax_text(pid):
+    """Best-effort text of the app's first window via Accessibility; None when not permitted."""
+    rc, out, err = run_cmd(["osascript", "-l", "JavaScript", "-e", AX_JS, str(pid)], timeout=12)
+    if rc != 0: return None
+    try: items = json.loads(out)
+    except ValueError: return None
+    return ["[%d] %s \"%s\"%s" % (i, r, t, " value=%r" % v if v else "") for i, (r, t, v) in enumerate(items)]
+
+
+@tool("mac_screenshot",
+      "Capture ONE Mac window (no shadow) as an image saved to disk, with the window's facts and, when Accessibility is allowed, its text. Pick it by app name, title text or window id.",
+      {"app": P("string", "App name contains (case-insensitive)."), "window_id": P("integer", "Exact window id from mac_windows."),
+       "title_contains": P("string", "Window title contains (case-insensitive)."),
+       "ui_text": P("boolean", "Also read the window's labels/buttons through Accessibility (default true).")},
+      timeout=60)
+def mac_screenshot(app=None, window_id=None, title_contains=None, ui_text=True):
+    if app is None and window_id is None and title_contains is None:
+        raise ToolError("Say which window: app=, title_contains= or window_id= (mac_windows lists them).")
+    allw = mac_window_list()
+    wins = select_windows(allw, app=app, title_contains=title_contains, window_id=window_id)
+    if not wins:
+        raise ToolError("No on-screen window matches. Windows that exist:\n%s" % fmt_windows(allw))
+    w = wins[0]
+    path = new_shot_path("mac")
+    rc, out, err = run_cmd(["screencapture", "-x", "-o", "-l", str(w["id"]), path], timeout=30)
+    if rc != 0 or not os.path.isfile(path) or os.path.getsize(path) == 0:
+        msg = tail(err or out, 200)
+        raise ToolError("screencapture failed (%s). If it mentions permission or could not create image, the app that started "
+                        "this server (Orbit or Terminal) needs Screen Recording permission: System Settings > Privacy & Security > "
+                        "Screen Recording, enable it, then restart that app." % (msg or "exit %s" % rc))
+    path, pw, ph = finish_shot(path)
+    text = ["Window id=%s app=\"%s\" title=\"%s\" pid=%s bounds=%s,%s %sx%s points. Screenshot saved: %s (%dx%d px)." % (
+        w["id"], w["app"], w["title"], w["pid"], fmt_num(w["x"]), fmt_num(w["y"]), fmt_num(w["w"]), fmt_num(w["h"]), path, pw, ph)]
+    if len(wins) > 1 and window_id is None:
+        text.append("%d windows matched; this is the frontmost. Others:\n%s" % (len(wins) - 1, fmt_windows(wins[1:6])))
+    if not w["title"] and w["app"]:
+        text.append("(Window titles are hidden without Screen Recording permission for the app that started this server.)")
+    if ui_text:
+        ax = ax_text(w["pid"])
+        text.append("Window text and controls:\n" + "\n".join(ax) if ax else
+                    "(Window text unavailable: Accessibility permission for the app that started this server would enable it.)")
+    return [text_part("\n".join(text)), image_part(path)]
+
+
+@tool("mac_quit", "Politely quit a running Mac app by name (no force kill).",
+      {"app": P("string", "App name, or a .app path.")}, ["app"], timeout=40)
+def mac_quit(app):
+    name = os.path.basename(app.strip().rstrip("/"))
+    name = name[:-4] if name.endswith(".app") else name
+    rc, out, err = run_cmd(["osascript", "-l", "JavaScript", "-e",
+                            'function run(a){try{return Application(a[0]).running()?"yes":"no"}catch(e){return "missing"}}', name], timeout=15)
+    state = out.strip()
+    if state == "missing": raise ToolError("No installed app is named %r. mac_windows shows running app names." % name)
+    if state != "yes": return "%s is not running." % name
+    rc, out, err = run_cmd(["osascript", "-e", "on run argv", "-e", "tell application (item 1 of argv) to quit", "-e", "end run", name], timeout=25)
+    need_ok(rc, out, err, "Quitting %s" % name)
+    return "Asked %s to quit. (If it had unsaved work it may be showing a dialog; check mac_windows.)" % name
+
+
+# --------------------------------------------------------------------- JSON-RPC over stdio
+
+_wlock = threading.Lock()
+
+
+def send(msg):
+    line = json.dumps(msg) + "\n"
+    with _wlock:
+        try:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            shutdown(0)
+
+
+def enabled_tools():
+    """ORBIT_LOOK_GROUPS ("browser,simulator,mac", the default) limits what is offered: every
+    tool listed is a definition the model reads on every message."""
+    want = {g.strip() for g in os.environ.get("ORBIT_LOOK_GROUPS", "browser,simulator,mac").split(",") if g.strip()}
+    return [n for n in TOOLS if n.split("_", 1)[0] in want]
+
+
+def listed_tools():
+    return [{"name": TOOLS[n]["name"], "description": TOOLS[n]["description"], "inputSchema": TOOLS[n]["inputSchema"]}
+            for n in enabled_tools()]
+
+
+def handle(req):
+    """One JSON-RPC message -> its response dict, or None for notifications."""
+    if not isinstance(req, dict): return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "invalid request"}}
+    mid, method, params = req.get("id"), req.get("method"), req.get("params") or {}
+    if mid is None: return None                                   # a notification
+    ok = lambda result: {"jsonrpc": "2.0", "id": mid, "result": result}
+    err = lambda code, m: {"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": m}}
+    try:
+        if method == "initialize":
+            return ok({"protocolVersion": PROTOCOL, "capabilities": {"tools": {}},
+                       "serverInfo": {"name": "orbit-look", "version": VERSION}})
+        if method == "ping": return ok({})
+        if method == "tools/list": return ok({"tools": listed_tools()})
+        if method == "tools/call":
+            name = params.get("name")
+            if name not in TOOLS or name not in enabled_tools(): return err(-32602, "unknown tool %r" % name)
+            return ok(call_tool(name, params.get("arguments") or {}))
+        return err(-32601, "no method %s" % method)
+    except Exception as e:
+        return err(-32000, "%s: %s" % (type(e).__name__, e))
+
+
+def serve_one(req):
+    resp = handle(req)
+    if resp is not None: send(resp)
+
+
+def shutdown(code=0):
+    try: B.stop()
+    finally: os._exit(code)
+
+
+def watch_parent():
+    """Exit when whoever started us is gone, so no browser is ever left running."""
+    ppid = os.getppid()
+    if ppid <= 1: return
+    while True:
+        time.sleep(1.0)
+        if os.getppid() != ppid: shutdown(0)
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if "--selftest" in argv:
+        print("orbit-look %s: %d tools" % (VERSION, len(TOOLS)))
+        for n in TOOLS: print(n)
+        return 0
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, lambda *_: shutdown(0))
+    atexit.register(B.stop)
+    threading.Thread(target=watch_parent, daemon=True).start()
+    for line in sys.stdin:
+        line = line.strip()
+        if not line: continue
+        try: req = json.loads(line)
+        except ValueError:
+            send({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}})
+            continue
+        if isinstance(req, dict) and req.get("method") == "tools/call":
+            threading.Thread(target=serve_one, args=(req,), daemon=True).start()
+        else:
+            serve_one(req)
+    shutdown(0)                                                    # stdin closed: take the browser with us
+
+
+if __name__ == "__main__":
+    sys.exit(main())

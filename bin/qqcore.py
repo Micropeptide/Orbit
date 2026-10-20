@@ -723,13 +723,57 @@ class MCP:
 
 MCPS, MCP_TOOLMAP = {}, {}
 
+# ------------------------------------------------------------------ eyes: bin/orbit-look
+# A browser, the iOS Simulator and Mac app windows as one MCP server, so any agent that can
+# build something can also look at it. Offered to Claude Code, Codex and OpenCode by
+# default; to Orbit's own agent only when asked (each tool is a definition read on every
+# message, and a model on this Mac pays for those in seconds).
+LOOK_PATH = os.path.join(_HERE, "bin", "orbit-look")
+LOOK_GROUPS = ("browser", "simulator", "mac")
+LOOK_DEFAULT_ENGINES = ("claude", "codex", "opencode")
+
+def look_groups():
+    g = S.get("look_groups")
+    return [x for x in (LOOK_GROUPS if g is None else g) if x in LOOK_GROUPS]
+
+def look_enabled(engine):
+    """Whether the look tools go to this engine: "claude", "codex", "opencode" or "orbit"."""
+    if not os.path.exists(LOOK_PATH) or not look_groups(): return False
+    e = S.get("look_engines")
+    return engine in (LOOK_DEFAULT_ENGINES if e is None else e)
+
+def look_env():
+    return {"ORBIT_LOOK_GROUPS": ",".join(look_groups()),
+            "ORBIT_LOOK_DIR": os.path.join(WORKSPACE, ".screenshots", "look")}
+
+def look_server():
+    """The server as an MCP client starts it."""
+    return {"command": sys.executable, "args": [LOOK_PATH], "env": look_env()}
+
+def look_status():
+    """What the look tools can use on this Mac, for Settings."""
+    import shutil
+    chrome = next((p for p in ("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                               "/Applications/Chromium.app/Contents/MacOS/Chromium",
+                               "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+                               "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge")
+                   if os.path.exists(p)), None)
+    return {"installed": os.path.exists(LOOK_PATH), "browser": chrome.split("/")[2][:-4] if chrome else None,
+            "simulator": bool(shutil.which("xcrun")), "taps": bool(shutil.which("axe") or shutil.which("idb")),
+            "groups": look_groups(), "engines": [e for e in ("claude", "codex", "opencode", "orbit") if look_enabled(e)]}
+
 def mcp_config():
-    try: return json.load(open(MCPCFG))
-    except Exception: return {"mcpServers": {}}
+    try: cfg = json.load(open(MCPCFG))
+    except Exception: cfg = {"mcpServers": {}}
+    if look_enabled("orbit"):            # offered, never written to mcp.json
+        cfg = {**cfg, "mcpServers": {**(cfg.get("mcpServers") or {}), "look": look_server()}}
+    return cfg
 
 def mcp_save(cfg):
     # atomic, with the previous version kept: an in-place write cut short left an empty
     # file, mcp_config() then read it as "no servers", and the next Save made that final
+    cfg = {**cfg, "mcpServers": {k: v for k, v in (cfg.get("mcpServers") or {}).items()
+                                 if not (k == "look" and (v.get("args") or [None])[0] == LOOK_PATH)}}
     snapshot_config(MCPCFG); _atomic_write(MCPCFG, cfg, indent=2)
     return cfg
 
@@ -1770,6 +1814,62 @@ def _bionic_waking(spec, emit):
     return True
 
 
+# OpenCode's own provider ids, and what Orbit calls the same providers
+_OPENCODE_PROVIDERS = {"opencode-go": "opencode-go", "opencode": "opencode-zen"}
+
+
+def _cli_account_for(backend, model, messages, tried=()):
+    """Which of your OpenCode Go / Zen accounts an OpenCode run is made as: (env, who), or
+    None to leave it as OpenCode is set up. Only when there is more than one account to
+    choose between; the key goes in as the provider's own setting for this run, which
+    OpenCode honours over the one it has stored (an environment variable it does not)."""
+    if backend != "opencode-cli": return None
+    cfg = {}
+    if look_enabled("opencode"):         # its eyes: a local MCP server, in OpenCode's own config format
+        ls = look_server()
+        cfg["mcp"] = {"orbit-look": {"type": "local", "command": [ls["command"], *ls["args"]],
+                                     "environment": ls["env"], "enabled": True}}
+    pick = _opencode_account(model, messages, tried)
+    if pick:
+        oc, a, pid = pick
+        cfg.setdefault("provider", {}).setdefault(oc, {}).setdefault("options", {})["apiKey"] = a["api_key"]
+    if not cfg: return None
+    try: base = json.loads(os.environ.get("OPENCODE_CONFIG_CONTENT") or "{}")
+    except ValueError: base = {}
+    for k, v in cfg.items(): base[k] = {**(base.get(k) or {}), **v}
+    env = {"OPENCODE_CONFIG_CONTENT": json.dumps(base)}
+    return env, ({"provider": pick[2], "account": pick[1]["id"], "label": pick[1]["label"]} if pick else None)
+
+
+def _opencode_account(model, messages, tried=()):
+    """(opencode provider id, account, orbit provider id) for an OpenCode run, or None to
+    leave it as OpenCode is set up -- when there is only one account to choose between."""
+    oc = (model or "").split("/", 1)[0] if "/" in (model or "") else ""
+    if not oc:
+        try:
+            mk = AGENT_SESSIONS.marker_of(messages, "opencode-cli")
+            oc = (AGENT_SESSIONS.opencode_session_model(mk["id"]) if mk else "").split("/", 1)[0]
+        except Exception:
+            oc = ""
+    pid = _OPENCODE_PROVIDERS.get(oc)
+    p = HARN.providers(ROOT).get(pid) if pid else None
+    if not p or len(HARN.accounts(p)) < 2: return None
+    keys = [a for a in HARN.account_keys(p, secrets_load(), ROOT, pid) if a["id"] not in tried]
+    if pid == "opencode-go" and keys:
+        # OpenCode retries a refused request for minutes before it says anything, so ask
+        # OpenCode Go itself whether the account has room (it marks one that has none)
+        for a in keys[:3]:
+            try: USAGE.go_usage(a["api_key"], a["id"], ROOT, pid, timeout=6)
+            except Exception: pass
+        keys = [a for a in HARN.account_keys(p, secrets_load(), ROOT, pid) if a["id"] not in tried]
+    if not keys: return None
+    return oc, keys[0], pid
+
+
+def _cli_quota(who, message, seconds):
+    USAGE.mark_exhausted(ROOT, who["provider"], who["account"], message, seconds=seconds)
+
+
 def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
                 interrupt=None):
     if think is None: think = getattr(TURN_CTX, "think", None)
@@ -1789,7 +1889,9 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
         out = MODELS.cli_stream(prov["backend"], spec["model"], as_saved,
                                 emit=emit, cancel=stop,
                                 timeout=float(S.get("cli_timeout_s") or 900),
-                                cwd=WORKSPACE, extra_args=["--ephemeral"] if quick else None)
+                                cwd=WORKSPACE, extra_args=["--ephemeral"] if quick else None,
+                                account_for=_cli_account_for, on_quota=_cli_quota,
+                                on_moved=lambda who: HARN.moved_to(ROOT, who["provider"], who["account"]))
         out["model"] = spec.get("label") or spec["model"]
         return out
     if prov.get("kind") == "anthropic":
@@ -1887,10 +1989,17 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
                 if emit: emit("content_delta", dl["content"])
             for tc in dl.get("tool_calls") or []:
                 i = tc.get("index", 0)
+                f = tc.get("function") or {}
+                prior = tcalls.get(i)
+                if prior and f.get("name") and not tc.get("id") and prior["function"]["name"]:
+                    try: json.loads(prior["function"]["arguments"] or "x")
+                    except ValueError: pass
+                    else: i = max(tcalls) + 1       # Gemini: no ids, every call numbered 0 -- a new name is a new call
                 slot = tcalls.setdefault(i, {"id": tc.get("id"), "type": "function",
                                              "function": {"name": "", "arguments": ""}})
                 if tc.get("id"): slot["id"] = tc["id"]
-                f = tc.get("function") or {}
+                # Gemini 3 and later: the call's thought signature, which has to go back with it
+                if tc.get("extra_content"): slot["extra_content"] = tc["extra_content"]
                 if f.get("name"): slot["function"]["name"] = f["name"]
                 if f.get("arguments"): slot["function"]["arguments"] += f["arguments"]
       except (TimeoutError, OSError) as e:
@@ -5593,7 +5702,7 @@ def _tighten_stream(resp, secs):
 # (read_file, run_shell) and Claude Code's there (Read, Bash). A chat that set one would
 # have had it read as the other, so the Claude Code list is named separately.
 PER_CHAT = ("easy_mode", "easy_tools", "claude_easy_tools", "helper_model", "review_model",
-            "auto_review", "verify_turns",
+            "auto_review", "verify_turns", "claude_account",
             "autonomy_mode", "reasoning_effort", "thinking", "parallel_tools")
 
 def chat_setting(key, sid=None, default=None):
@@ -8599,6 +8708,7 @@ def fallback_candidates(mid):
 import harness as HARN
 import agent_sessions as AGENT_SESSIONS
 import harness_usage as USAGE
+import claude_accounts as CA
 HARNESS_PORT = None            # set by orbit-ui when it starts the gateway
 
 _current_model_before_harness = current_model
@@ -9065,6 +9175,18 @@ def limit_reset_at(texts, now=None):
     return None, line
 
 
+def _claude_accounts_back_at(now=None):
+    """When the first of your Claude accounts that is used up comes back, or None when
+    none is marked."""
+    now = now or time.time()
+    try:
+        marks = USAGE._state(ROOT).get("claude") or {}
+        until = [float(v.get("until") or 0) for v in marks.values() if float(v.get("until") or 0) > now]
+        return min(until) if until else None
+    except Exception:
+        return None
+
+
 def _limit_reset_from_accounts(model_id, now=None):
     """When the model's allowance comes back, from what Orbit knows of the account: the
     ChatGPT limits Codex reports, or the soonest OpenCode Go (or other gateway) account
@@ -9090,21 +9212,63 @@ def _limit_reset_from_accounts(model_id, now=None):
     return None
 
 
-def schedule_limit_resume(sid, title, texts, model_id=None, attempt=0, now=None):
-    """If these messages say a usage allowance ran out, schedule this chat to carry on a
-    minute after it resets. Returns the job, or None. One such run per chat at a time: a
-    later limit moves the existing run rather than adding another."""
+def _is_claude_subscription(model_id):
+    return str(model_id or "").startswith("harness:claude/")
+
+
+def limit_switch_plan(model_id, account=None, texts=(), now=None):
+    """What can carry a chat on the moment its Claude allowance runs out, without waiting for
+    the reset: another Claude account that can answer, else the model chosen under Settings
+    → Fallback for "every Claude account used up". None when neither exists (the chat then
+    waits for the reset, as before). The account that hit the limit is marked first, so
+    the run that follows cannot choose it again."""
     now = now or time.time()
-    if not sid or not S.get("resume_after_limit", True): return None
+    if not _is_claude_subscription(model_id) or not account: return None
+    import claude_accounts as CA
+    secrets = secrets_load()
+    if not USAGE.exhausted(ROOT, CA.PROVIDER, account, now):
+        found = limit_reset_at(list(texts), now) if texts else None
+        CA.note_limit(ROOT, account, found[0] if found else None, (found[1] if found else "") or "usage limit")
+    alt = CA.alternative(ROOT, secrets, account)
+    if alt:
+        return {"switch": f"continuing on {alt['label']}", "model": None, "account": alt["id"],
+                "from": CA.label_of(ROOT, account)}
+    fb = S.get("limit_fallback_model") or ""
+    if fb and fb != str(model_id):
+        try: label = next((m.get("label") for m in model_catalogue() if m.get("id") == fb), None) or fb
+        except Exception: label = fb
+        return {"switch": f"every Claude account is used up — continuing on {label}", "model": fb,
+                "account": None, "from": CA.label_of(ROOT, account)}
+    return None
+
+
+def schedule_limit_resume(sid, title, texts, model_id=None, attempt=0, now=None, plan=None):
+    """If these messages say a usage allowance ran out, schedule this chat to carry on a
+    minute after it resets -- or straight away, when `plan` (limit_switch_plan) has another
+    account or model that can answer. Returns the job, or None. One such run per chat at a
+    time: a later limit moves the existing run rather than adding another."""
+    now = now or time.time()
+    if not sid: return None
+    if not plan and not S.get("resume_after_limit", True): return None
     found = limit_reset_at(texts, now)
     if not found: return None
     when, line = found
-    when = when or _limit_reset_from_accounts(model_id, now) or now + LIMIT_UNKNOWN_WAIT
-    if when - now > 8 * 86400: return None                 # a monthly cap: not worth a timer
-    at = max(now + 60, when + 60)
+    if not plan:
+        when = when or _limit_reset_from_accounts(model_id, now) or now + LIMIT_UNKNOWN_WAIT
+        if _is_claude_subscription(model_id):
+            soon = _claude_accounts_back_at(now)               # the first of your accounts to come back
+            if soon: when = min(when, soon)
+        if when - now > 8 * 86400: return None                 # a monthly cap: not worth a timer
+    at = now + 3 if plan else max(now + 60, when + 60)
     if attempt >= LIMIT_MAX_ATTEMPTS: return None
     title = (title or sid)[:40]
     job = None
+    resume_prompt = ("Your usage limit has reset, so you can carry on. Continue from where you "
+                     "stopped — check `plan` and the latest messages above, and don't redo steps "
+                     "that are already done.")
+    switch_prompt = ("The last account hit its usage limit, so this carries on from another one. "
+                     "Continue from where you stopped — check `plan` and the latest messages above, "
+                     "and don't redo steps that are already done.")
     def edit(cfg):
         nonlocal job
         for j in cfg.setdefault("jobs", []):
@@ -9112,18 +9276,23 @@ def schedule_limit_resume(sid, title, texts, model_id=None, attempt=0, now=None)
                 j["at_ts"] = at; j["attempt"] = attempt; j["why"] = line
                 j.pop("last_run", None)
                 job = j
-                return
-        job = {"id": "job" + os.urandom(3).hex(), "kind": "limit_resume", "every": "once", "at_ts": at,
-               "sid": sid, "enabled": True, "created": now, "created_by": "orbit", "attempt": attempt,
-               "why": line, "name": f"continue after usage limit: {title}",
-               "prompt": ("Your usage limit has reset, so you can carry on. Continue from where you "
-                          "stopped — check `plan` and the latest messages above, and don't redo steps "
-                          "that are already done.")}
-        cfg["jobs"].append(job)
+                break
+        else:
+            job = {"id": "job" + os.urandom(3).hex(), "kind": "limit_resume", "every": "once", "at_ts": at,
+                   "sid": sid, "enabled": True, "created": now, "created_by": "orbit", "attempt": attempt,
+                   "why": line, "name": f"continue after usage limit: {title}"}
+            cfg["jobs"].append(job)
+        if plan:                # another account or model takes over now, not at the reset
+            job["switch"], job["prompt"] = plan["switch"], switch_prompt
+            if plan.get("model"): job["model"] = plan["model"]
+            else: job.pop("model", None)
+        else:
+            job.pop("switch", None); job.pop("model", None); job["prompt"] = resume_prompt
     sched_update(edit)
     try:
-        notify("Usage limit reached", f"“{title}” carries on by itself at "
-               f"{time.strftime('%a %H:%M', time.localtime(at))}")
+        if plan: notify("Usage limit reached", f"“{title}” is {plan['switch']}")
+        else: notify("Usage limit reached", f"“{title}” carries on by itself at "
+                     f"{time.strftime('%a %H:%M', time.localtime(at))}")
     except Exception:
         pass
     return job

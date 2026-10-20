@@ -583,6 +583,11 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         # a new chat's folder there, so Codex does not start somewhere else
         import ssh_remote, shlex
         ssh_remote.run(host, "mkdir -p " + shlex.quote(cwd), timeout=45)
+    if not host and not read_only and q.look_enabled("codex"):
+        # eyes: a browser, the iOS Simulator and Mac app windows (bin/orbit-look), as an MCP server
+        # of this thread; its tools run without asking, as Orbit's own look at them is not a risk
+        config = {**(config or {}), "mcp_servers": {**((config or {}).get("mcp_servers") or {}),
+                  "orbit-look": {**q.look_server(), "default_tools_approval_mode": "approve"}}}
     if prefs.get("add_dirs") and sandbox == "workspace-write" and not host:
         config = {**config, "sandbox_workspace_write": {"writable_roots": list(prefs["add_dirs"])}}
     dev = ""
@@ -725,6 +730,10 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         if method == "item/tool/requestUserInput":
             return srv.respond(rid, {"answers": {}})
         if method == "mcpServer/elicitation/request":
+            # the look server asks before each tool when Codex is set that way: looking is
+            # allowed, starting or quitting a Mac app is not decided for you here
+            if "orbit-look" in json.dumps(p) and not re.search(r"mac_(launch|quit)", json.dumps(p)):
+                return srv.respond(rid, {"action": "accept"})
             return srv.respond(rid, {"action": "decline"})
         return srv.respond(rid, error=f"Orbit does not handle {method}")
 

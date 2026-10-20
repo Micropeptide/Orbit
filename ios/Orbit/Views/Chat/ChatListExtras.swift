@@ -33,17 +33,28 @@ enum ChatListSplit {
     }
 }
 
-/// Which "From Claude Code / Codex / OpenCode" sections are open. Folded until
-/// you open one, and remembered.
+/// Which "From Claude Code / Codex / OpenCode" sections are open. Folded until you open
+/// one, and remembered -- except that a section opens by itself while something in it moved
+/// in the last ten minutes (a chat you are carrying on in that agent's own window), unless
+/// you folded it yourself.
 enum ExternalSectionsOpen {
     private static let key = "orbit.extSectionsOpen"
-    static func isOpen(_ s: ExternalSource) -> Bool {
-        (UserDefaults.standard.stringArray(forKey: key) ?? []).contains(s.rawValue)
+    private static let foldedKey = "orbit.extSectionsFolded"
+    static let recent: TimeInterval = 600
+    static func isOpen(_ s: ExternalSource, newest: Double = 0) -> Bool {
+        let d = UserDefaults.standard
+        if (d.stringArray(forKey: key) ?? []).contains(s.rawValue) { return true }
+        if (d.stringArray(forKey: foldedKey) ?? []).contains(s.rawValue) { return false }
+        return newest > 0 && Date().timeIntervalSince1970 - newest < recent
     }
-    static func toggle(_ s: ExternalSource) {
-        var open = Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
-        if open.contains(s.rawValue) { open.remove(s.rawValue) } else { open.insert(s.rawValue) }
-        UserDefaults.standard.set(Array(open).sorted(), forKey: key)
+    static func toggle(_ s: ExternalSource, newest: Double = 0) {
+        let d = UserDefaults.standard
+        var open = Set(d.stringArray(forKey: key) ?? [])
+        var folded = Set(d.stringArray(forKey: foldedKey) ?? [])
+        if isOpen(s, newest: newest) { open.remove(s.rawValue); folded.insert(s.rawValue) }
+        else { open.insert(s.rawValue); folded.remove(s.rawValue) }
+        d.set(Array(open).sorted(), forKey: key)
+        d.set(Array(folded).sorted(), forKey: foldedKey)
     }
 }
 
@@ -56,6 +67,12 @@ struct ExternalChatSection<Row: View>: View {
     @ViewBuilder var row: (ChatSummary) -> Row
     @State private var open = false
 
+    private var newest: Double { chats.map(\.mtime).max() ?? 0 }
+    private var newestAge: String {
+        let f = RelativeDateTimeFormatter(); f.unitsStyle = .abbreviated
+        return f.localizedString(for: Date(timeIntervalSince1970: newest), relativeTo: Date())
+    }
+
     var body: some View {
         Section {
             if open || forceOpen {
@@ -63,8 +80,8 @@ struct ExternalChatSection<Row: View>: View {
             }
         } header: {
             Button {
-                ExternalSectionsOpen.toggle(source)
-                withAnimation { open = ExternalSectionsOpen.isOpen(source) }
+                ExternalSectionsOpen.toggle(source, newest: newest)
+                withAnimation { open = ExternalSectionsOpen.isOpen(source, newest: newest) }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "chevron.right")
@@ -72,6 +89,9 @@ struct ExternalChatSection<Row: View>: View {
                         .rotationEffect(.degrees(open || forceOpen ? 90 : 0))
                     Text(source.label)
                     Text("\(chats.count)").foregroundStyle(.secondary)
+                    if newest > 0 {
+                        Text(newestAge).font(.caption2).foregroundStyle(.tertiary)
+                    }
                     Spacer()
                 }
                 .contentShape(.rect)
@@ -85,7 +105,7 @@ struct ExternalChatSection<Row: View>: View {
                 Text(source.tip).font(.caption2)
             }
         }
-        .onAppear { open = ExternalSectionsOpen.isOpen(source) }
+        .onAppear { open = ExternalSectionsOpen.isOpen(source, newest: newest) }
     }
 }
 

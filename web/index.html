@@ -508,6 +508,7 @@ details.think summary{font-style:normal;font-weight:500}
 .enginebar select.ghost:hover,.enginebar .ghost:hover{background:var(--hover);color:var(--fg)}
 .enginebar #hpick,.enginebar #modelsel{min-width:0;flex-shrink:1}
 .enginebar #hpick #hmodel{color:var(--fg)}
+.enginebar #hacct{min-width:0;flex-shrink:1;max-width:128px}
 .enginebar #modelsel{color:var(--fg)}
 .enginebar #opbadge{margin-left:4px;flex-shrink:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .enginebar .ebsp{flex:1 1 8px;min-width:8px}
@@ -1355,7 +1356,8 @@ table.stbl{border-collapse:collapse;width:100%;font-size:var(--fs-cap);margin:2p
     <button id=hmode title="Claude Code mode: every chat runs through the Claude Code harness, on the provider and model you pick"><span class=dot></span>Claude Code</button>
     <button id=cmode title="Codex mode: every chat runs through Codex's own agent — on your ChatGPT account, or any provider in Orbit's list"><span class=dot></span>Codex</button>
     <span id=hpick><select id=hprov class=ghost title="provider"></select><select id=hmodel class=ghost title="model for this chat"></select>
-      <button class=ghost id=hrefresh title="refresh this provider's model list" style="padding:2px 7px">↻</button></span>
+      <button class=ghost id=hrefresh title="refresh this provider's model list" style="padding:2px 7px">↻</button>
+      <select id=hacct class=ghost style="display:none" title="which Claude account this chat runs on"></select></span>
     <select id=modelsel class=ghost style="max-width:190px" title="model for this chat"></select>
     <select id=agentsel class=ghost style="max-width:150px"><option value="">no agent</option></select>
     <button id=opbadge class=opbadge style="display:none" title="cheaper hours for this model — click for details"></button>
@@ -2310,8 +2312,8 @@ async function apiPost(path, body, what){
    return null}
   return d;
  }catch(e){toast((what||'that')+' failed: '+e); return null}}
-function toast(t){const x=el(`<div class=toast>${esc(t)}</div>`);document.body.appendChild(x);
- setTimeout(()=>x.remove(),2200)}
+function toast(t,ms){const x=el(`<div class=toast>${esc(t)}</div>`);document.body.appendChild(x);
+ setTimeout(()=>x.remove(),ms||2200)}
 function copy(text){navigator.clipboard.writeText(text).then(()=>toast('copied'))}
 
 
@@ -2689,10 +2691,15 @@ function renderSessions(force){
  const ext=$('#extsecs');ext.innerHTML='';
  EXT_SOURCES.forEach(src=>{
   const rs=all_.filter(s=>extSource(s)===src.key&&!inList.has(s.id));if(!rs.length)return;
-  const open=term?true:PREF.get('sec_ext_'+src.key,'0')==='1';
-  const h=el(`<div class="sechead${open?'':' closed'}" title="${esc(src.tip)}"><span class=caret>▾</span><span class=lbl>${esc(src.label)}</span><span class=ct>${rs.length}</span></div>`);
+  // opened by you, or by itself while something there moved in the last ten minutes (a chat
+  // you are carrying on in that agent's own window), so its newest messages are in view
+  const newest=Math.max(...rs.map(s=>s.mtime||0));
+  const pref=PREF.get('sec_ext_'+src.key,'0');          // "1" open, "0" never touched, "x" folded by you
+  const hot=Date.now()/1000-newest<600&&pref!=='x';
+  const open=term?true:(pref==='1'||hot);
+  const h=el(`<div class="sechead${open?'':' closed'}" title="${esc(src.tip)}"><span class=caret>▾</span><span class=lbl>${esc(src.label)}</span><span class=ct>${rs.length}</span><span class=ct style="margin-left:6px;opacity:.7" title="its newest chat">${esc(agoShort(newest))}</span></div>`);
   const body=el(`<div class="secbody${open?'':' closed'}"><div class=slist></div></div>`);
-  h.onclick=()=>{const now=h.classList.contains('closed');PREF.set('sec_ext_'+src.key,now?'1':'0');renderSessions(true)};
+  h.onclick=()=>{const now=h.classList.contains('closed');PREF.set('sec_ext_'+src.key,now?'1':'x');renderSessions(true)};
   ext.appendChild(h);ext.appendChild(body);
   if(open)groupedRows(rs,body.firstChild,src.key+'_',term)});
  // the list is the newest 500: past that, older chats (archived ones too) just were not
@@ -3586,6 +3593,7 @@ async function fillHarnessModels(pid,cur,refresh){
   (recent.length?`<optgroup label="Recent">${recent.map(r=>`<option value="${esc(r.id)}">${esc(r.label)}</option>`).join('')}</optgroup>`:'')+
   `<optgroup label="${esc(d.label||pid)}">`+list.map(m=>
   `<option value="${esc(m.id)}"${m.id===cur?' selected':''}>${esc(m.label)}${m.context?' · '+fmtCtx(m.context):''}${usageShort(m.usage)?' · '+usageShort(m.usage):''}${esc(opSuffix(m.offpeak))}</option>`).join('')+'</optgroup>';
+ drawAcctPick();
  ms.title=`${d.label}: ${d.models.length} models${d.fetched_at?' · list from '+new Date(d.fetched_at*1000).toLocaleDateString():''}`+
   (d.live&&!d.live.error?` · ${d.live.account}: ${liveLong(d.live)} (shared by all models)`:'')+
   (d.ready?'':' — add a key in Settings → Models & keys')}
@@ -3780,6 +3788,41 @@ async function renderHarnessModels(box){
  box.appendChild(el(`<div class=note style="margin-bottom:6px">One list for both modes: in Claude Code mode each model runs through the Claude Code harness; otherwise Orbit talks to it directly. Providers that speak Anthropic's API go straight to Claude Code; the rest — and any provider with several accounts — go through Orbit's gateway on 127.0.0.1:${esc(String(gw.port||'—'))}${gw.error?' — <b style="color:var(--err)">not running: '+esc(gw.error)+'</b>':''}, which adds your key (so it never reaches the Claude process), moves to your next account when one is used up, and counts usage.</div>`));
  const st=(gw.stats||{});
  if(st.requests)box.appendChild(el(`<div class=note>Gateway since Orbit started: ${st.requests} requests${st.errors?`, ${st.errors} failed`:''} · ${esc(Object.entries(st.by_provider||{}).map(([k,v])=>k+' '+v).join(', '))}</div>`));
+ const pol=h.accounts_policy||{auto_switch:true,switch_back:true};
+ const pc=el(`<div class=memrow style="display:block;margin:6px 0;padding:8px 10px;border:1px solid var(--line);border-radius:9px">
+   <b>When an account runs out</b> <span class=note>— for any provider with more than one account: Claude, OpenCode Go…</span>
+   <label style="display:block;margin:5px 0"><input type=checkbox id=pol_auto ${pol.auto_switch?'checked':''}> Move to the next account by itself, and say so in the chat</label>
+   <label style="display:block;margin:5px 0"><input type=checkbox id=pol_back ${pol.switch_back?'checked':''}> Go back to the main account once its limit has reset</label>
+   <div style="margin:5px 0"><span class=note>When every Claude account is used up: </span><select id=pol_fb style="max-width:300px">${modelOptions((INFO.settings||{}).limit_fallback_model||'','wait for the reset',id=>id.startsWith('harness:')&&!id.startsWith('harness:claude/'))}</select>
+   <span class=note> (carries on in that chat with the model chosen)</span></div></div>`);
+ const savePol=async()=>{const d=await apiPost('/api/harness/policy',{auto_switch:pc.querySelector('#pol_auto').checked,switch_back:pc.querySelector('#pol_back').checked},'saving');if(d)toast('saved')};
+ pc.querySelector('#pol_auto').onchange=savePol;pc.querySelector('#pol_back').onchange=savePol;
+ pc.querySelector('#pol_fb').onchange=async e=>{const d=await apiPost('/api/settings',{settings:{limit_fallback_model:e.target.value}},'saving');if(d){toast('saved');INFO=await (await fetch('/api/info')).json()}};
+ box.appendChild(pc);
+ // your Google plan: its own terminal agents sign in with your Google account
+ const gc=el(`<div class=memrow style="display:block;margin:6px 0;padding:8px 10px;border:1px solid var(--line);border-radius:9px">
+   <b>Sign in with Google</b> <span class=note>— the coding plan that comes with Google AI Pro / Ultra, through Google's own terminal agents</span>
+   <div id=gcli class=note style="margin-top:4px">checking…</div>
+   <div class=note>Each opens in Orbit's terminal; the first run asks you to sign in with your Google account in the browser.
+    Their models then appear in the model picker. (An API key from Google AI Studio is the other way in: see <b>Gemini · Google AI</b> below.)</div></div>`);
+ box.appendChild(gc);
+ const drawG=async fresh=>{
+  let d;try{d=await (await fetch('/api/google/cli'+(fresh?'?fresh=1':''))).json()}catch(e){return}
+  const host=gc.querySelector('#gcli');host.innerHTML='';
+  (d.clis||[]).forEach(c=>{
+   const status=!c.installed?'not installed':c.signed_in===true?`✓ signed in${c.models?' · '+c.models+' models':''}`
+    :c.signed_in===false?'installed — not signed in':'installed';
+   const row=el(`<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:5px 0">
+     <b style="min-width:130px">${esc(c.label)}</b><span class=note style="flex:1;min-width:180px">${esc(status)}</span>
+     ${!c.installed?'<button class=ghost data-a=install title="types the install command; you press Enter">Install in the terminal</button>'
+      :c.signed_in===true?'<button class=ghost data-a=login>Open in the terminal</button>'
+      :'<button class=ghost data-a=login>Sign in in the terminal</button>'}
+     <button class=ghost data-a=check>Check again</button></div>`);
+   row.querySelector('[data-a=install]')&&(row.querySelector('[data-a=install]').onclick=()=>terminalDo(c.install,false));
+   row.querySelector('[data-a=login]')&&(row.querySelector('[data-a=login]').onclick=()=>terminalDo(c.login,true));
+   row.querySelector('[data-a=check]').onclick=async()=>{await drawG(true);delete HPROV_CACHE.models;loadModels();toast('checked')};
+   host.appendChild(row)})};
+ drawG(false);
  const hidden=new Set();(h.providers||[]).forEach(p=>p.models.forEach(m=>{if(m.hidden)hidden.add('harness:'+p.id+'/'+m.id)}));
  const saveReg=async patch=>apiPost('/api/harness/save',patch,'saving models');
  (h.providers||[]).forEach(p=>{
@@ -3792,23 +3835,59 @@ async function renderHarnessModels(box){
   card.appendChild(el(`<summary style="cursor:pointer"><b>${esc(p.label)}</b> <span class=note>${status} · ${p.models.length} models${p.auth==='subscription'?' · Claude Code mode only':''}</span></summary>`));
   if(p.docs)card.appendChild(el(`<div class=note style="margin:4px 0">${esc(p.docs)}</div>`));
   if(p.auth==='subscription'){
-   // plain Claude Code on your Claude plan: its own login, or a long-lived token from `claude setup-token`
-   const tr=el(`<div style="margin:6px 0">
-     <div class=note>${p.ready?'✓ signed in':'Not signed in.'} ${p.token_set?'Using the sign-in token saved here.':'Uses the <code>claude</code> command\'s own login.'}
-      If it says not signed in: run <code>claude setup-token</code> in a terminal and paste the token it prints below — Orbit then gives it to Claude Code directly.</div>
-     <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:4px">
-      <input type=password autocomplete=off spellcheck=false placeholder="${p.token_set?'replace the sign-in token':'paste the token from claude setup-token'}" style="flex:1;min-width:220px">
-      <button class=ghost data-a=save>save token</button>${p.token_set?'<button class=ghost data-a=rm>remove</button>':''}<button class=ghost data-a=check>check again</button></div></div>`);
-   const ti=tr.querySelector('input');
-   tr.querySelector('[data-a=save]').onclick=async()=>{if(!ti.value.trim())return;
-    const d=await apiPost('/api/secrets/save',{secrets:{CLAUDE_CODE_OAUTH_TOKEN:ti.value.trim()}},'saving the token');
-    ti.value='';if(d){await fetch('/api/harness?fresh=1');toast('token saved');delete HPROV_CACHE[p.id];loadModels();renderHarnessModels(box)}};
-   const rmb=tr.querySelector('[data-a=rm]');
-   if(rmb)rmb.onclick=async()=>{if(!confirm('Remove the Claude sign-in token from Orbit?'))return;
-    await apiPost('/api/secrets/save',{secrets:{CLAUDE_CODE_OAUTH_TOKEN:''}},'removing');await fetch('/api/harness?fresh=1');renderHarnessModels(box)};
-   tr.querySelector('[data-a=check]').onclick=async()=>{const v=await (await fetch('/api/harness?fresh=1')).json();
-    const c=(v.providers||[]).find(x=>x.id==='claude')||{};toast(c.ready?'signed in':'still not signed in');delete HPROV_CACHE[p.id];loadModels();renderHarnessModels(box)};
-   card.appendChild(tr)}
+   // your Claude accounts: the Mac's own login, and any number of others signed in with a token each
+   const accs=p.accounts||[];
+   const refresh=async()=>{await fetch('/api/harness?fresh=1');delete HPROV_CACHE[p.id];loadModels();renderHarnessModels(box)};
+   const ab=el('<div style="margin:6px 0"></div>');
+   ab.appendChild(el(`<div class=note>${accs.length>1?'Runs use the main account. When Claude says its limit is reached, the next account takes over'+((h.accounts_policy||{}).switch_back===false?'':' and the main one is used again once its limit has reset')+'. ':''}Accounts share your <code>~/.claude</code>, so skills, plugins, MCP servers and every chat's history stay the same; only the account that is billed changes.</div>`));
+   accs.forEach(a=>{
+    const ex=a.exhausted;
+    const how=a.token_set?'sign-in token saved ✓':(a.id==='main'?(p.login==='yes'?"the Mac's own Claude login ✓":'not signed in'):'needs a token');
+    const r=el(`<div style="margin:5px 0;padding:6px 8px;border-radius:8px;${a.home&&accs.length>1?'background:var(--hover,rgba(127,127,127,.08))':''}">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:baseline">
+       <b>${esc(a.label)}</b>${a.home&&accs.length>1?'<span class=note style="flex:none;display:inline-block;border:1px solid var(--line);border-radius:9px;padding:0 7px">main</span>':''}
+       <span class=note>${how}</span>
+       ${ex?`<span style="color:var(--warn);font-size:12px">limit reached — back ${new Date(ex.until*1000).toLocaleString([], {weekday:'short',hour:'numeric',minute:'2-digit'})}</span>`:''}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:5px">
+       <input type=password autocomplete=off spellcheck=false placeholder="${a.token_set?'replace the token':'paste the token from claude setup-token'}" style="flex:1;min-width:200px">
+       <button class=ghost data-a=save>save token</button>
+       ${a.home?'':'<button class=ghost data-a=home>make main</button>'}
+       <button class=ghost data-a=test title="a one-word question to Claude on this account">test</button>
+       ${ex?'<button class=ghost data-a=clear>not used up</button>':''}
+       <button class=ghost data-a=rename>rename</button>
+       ${a.id==='main'?(a.token_set?'<button class=ghost data-a=untoken>remove token</button>':''):'<button class=ghost data-a=remove>remove</button>'}</div></div>`);
+    const inp=r.querySelector('input');
+    r.querySelectorAll('[data-a]').forEach(b=>b.onclick=async()=>{
+     const op=b.dataset.a;
+     if(op==='save'){if(!inp.value.trim())return;
+      const d=await apiPost('/api/secrets/save',{secrets:{[a.key]:inp.value.trim()}},'saving the token');
+      inp.value='';if(d){toast('token saved — press test to check it')}}
+     else if(op==='test'){b.textContent='…';b.disabled=true;
+      const d=await apiPost('/api/claude/accounts',{op:'test',id:a.id},'testing the account');
+      toast(d&&d.ok?`${a.label}: signed in and answering`:`${a.label}: ${(d&&d.detail)||'it did not answer'}`,d&&d.ok?undefined:6000);
+      b.textContent='test';b.disabled=false;return}
+     else if(op==='untoken'){if(!confirm('Remove the saved sign-in token? Claude Code then uses the Mac\'s own login.'))return;
+      await apiPost('/api/secrets/save',{secrets:{[a.key]:''}},'removing the token')}
+     else if(op==='rename'){const label=prompt('Name for this account',a.label);if(!label)return;
+      await apiPost('/api/claude/accounts',{op:'rename',id:a.id,label},'renaming')}
+     else if(op==='remove'){if(!confirm(`Remove ${a.label} and its token from Orbit?`))return;
+      await apiPost('/api/claude/accounts',{op:'remove',id:a.id},'removing the account')}
+     else await apiPost('/api/claude/accounts',{op,id:a.id},'account');
+     refresh()});
+    ab.appendChild(r)});
+   const add=el(`<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0"><button class=ghost style="font-size:11.5px" data-a=add>+ add a Claude account</button>
+     <button class=ghost style="font-size:11.5px" data-a=term title="opens Orbit's terminal and runs: claude setup-token">Sign in in the terminal</button>
+     <button class=ghost style="font-size:11.5px" data-a=cmd title="copies: claude setup-token">copy the sign-in command</button></div>
+     <div class=note>To add one (say a lab or work plan): sign in to that Claude account in your browser (a private window keeps it apart from your own), run <code>claude setup-token</code> in a terminal, approve it in the browser, and paste the token it prints on the new account's row above.</div>`);
+   add.querySelector('[data-a=add]').onclick=async()=>{
+    const label=prompt('A name for the new account (e.g. "Lab")','');if(!label)return;
+    const d=await apiPost('/api/claude/accounts',{op:'add',label},'adding the account');
+    if(d&&d.ok){toast('account added — paste its token');refresh()}};
+   add.querySelector('[data-a=term]').onclick=()=>terminalDo('claude setup-token',true);
+   add.querySelector('[data-a=cmd]').onclick=async()=>{
+    try{await navigator.clipboard.writeText('claude setup-token');toast('copied — paste it in a terminal')}catch(e){toast('run: claude setup-token')}};
+   ab.appendChild(add);
+   card.appendChild(ab)}
   if(p.id==='opencode-go')card.appendChild(el(`<div class=note style="margin:4px 0">An OpenCode Go account has one allowance shared by all its models, in 5-hour, weekly and monthly windows; what is left comes from OpenCode itself and is shown with each account (and in the provider picker). Each model shows roughly what it has cost through Orbit.</div>`));
   if(p.keyless&&p.server){
    // Bionic: its models only answer while its own local server is on
@@ -5383,6 +5462,23 @@ async function openSettings(tab){
      <label>the cluster write access</label><div class=sw><input type=checkbox id=t_h2><span class=note>qsub / qdel / remote commands — read-only status always works ${mode==='full'?'— on anyway, from Full access':''}</span></div>
      <label>Write anywhere</label><div class=sw><input type=checkbox id=t_wany><span class=note>otherwise writes stay in workspace/ ${mode==='full'?'— on anyway, from Full access':''}</span></div>
     </div>
+    <div class=sec>Seeing what it builds <small>— a browser, the iOS Simulator and Mac app windows, for any agent</small></div>
+    <div class=grid>
+     <label>Offer them to</label><div class=sw style="flex-wrap:wrap;gap:12px">
+      <label><input type=checkbox data-le=claude> Claude Code</label>
+      <label><input type=checkbox data-le=codex> Codex</label>
+      <label><input type=checkbox data-le=opencode> OpenCode</label>
+      <label title="each tool is a definition read on every message: a small local model pays for that in seconds"><input type=checkbox data-le=orbit> Orbit's own agent</label></div>
+     <label>Kinds of tool</label><div class=sw style="flex-wrap:wrap;gap:12px">
+      <label><input type=checkbox data-lg=browser> Browser</label>
+      <label><input type=checkbox data-lg=simulator> iPhone simulator</label>
+      <label><input type=checkbox data-lg=mac> Mac app windows</label></div>
+    </div>
+    <div class=hint2 id=lookstat>Checking what this Mac has…</div>
+    <div class=hint2>An agent that builds a web page, an iPhone app or a Mac app can open it, take a screenshot
+     and check the result before it says it works. The browser is a separate throwaway Chrome profile, with none
+     of your logins. A model that cannot read images gets the page's text and a list of what is clickable
+     instead. Looking runs without asking; starting or quitting an app on this Mac asks.</div>
     <div class=sec>Screen control <small>— not covered by Full access; a separate decision</small></div>
     <div class=grid>
      <label>Screen control</label><div class=sw><input type=checkbox id=t_screen>
@@ -5427,6 +5523,16 @@ async function openSettings(tab){
    $('#t_h2').checked=!!draft.cluster_write;
    $('#t_shell').checked=!!draft.shell_enabled;$('#t_wany').checked=!!draft.write_any;
    $('#t_screen').checked=!!draft.computer_use_enabled;
+   {const LE=draft.look_engines||['claude','codex','opencode'],LG=draft.look_groups||['browser','simulator','mac'];
+    body.querySelectorAll('[data-le]').forEach(c=>{c.checked=LE.includes(c.dataset.le);
+     c.onchange=()=>{draft.look_engines=[...body.querySelectorAll('[data-le]')].filter(x=>x.checked).map(x=>x.dataset.le)}});
+    body.querySelectorAll('[data-lg]').forEach(c=>{c.checked=LG.includes(c.dataset.lg);
+     c.onchange=()=>{draft.look_groups=[...body.querySelectorAll('[data-lg]')].filter(x=>x.checked).map(x=>x.dataset.lg)}});
+    fetch('/api/look/status').then(r=>r.json()).then(st=>{const x=$('#lookstat');if(!x)return;
+     x.innerHTML=[st.browser?`Browser: ${esc(st.browser)} ✓`:'Browser: no Chrome, Chromium, Brave or Edge found',
+      st.simulator?'iPhone simulator: Xcode found ✓':'iPhone simulator: Xcode not found',
+      st.taps?'taps and typing in the simulator ✓':'taps and typing in the simulator need AXe: <code>brew install cameroncooke/axe/axe</code>',
+      'Mac app windows: Screen Recording must be granted to the app that runs Orbit (System Settings → Privacy &amp; Security)'].join(' · ')}).catch(()=>{})}
    const rules=draft.permission_rules||{allow:[],deny:[]};
    const rl=$('#rulelist');
    const ruleRow=(kind,r,i)=>{const row=el('<div class=memrow></div>');
@@ -8833,8 +8939,23 @@ let CHATPREFS={};           // the settings this chat keeps for itself
 // Everything on this page that belongs to one chat rather than to Orbit. A chat can
 // change without openSession -- a new chat, the temporary one, burning it -- and each
 // of those used to leave the last chat's easy mode and branch on screen.
+// Which Claude account this chat runs on: shown when there is more than one
+function drawAcctPick(){
+ const s=$('#hacct');if(!s)return;
+ const accs=(HPROV_CACHE.claude||{}).accounts||[];
+ if(codexMode()||!$('#hprov')||$('#hprov').value!=='claude'||accs.length<2){s.style.display='none';return}
+ s.innerHTML='<option value="">Auto account</option>'+accs.map(a=>`<option value="${esc(a.id)}">${esc(a.label)}${a.exhausted?' · limit':''}${a.home?' ★':''}</option>`).join('');
+ s.title='Which Claude account this chat runs on. Auto: the main account (★), and the next one when its limit is reached.';
+ s.value=(CHATPREFS||{}).claude_account||'';
+ s.style.display='';
+ s.onchange=async()=>{const v=s.value;
+  const d=await apiPost('/api/chat/setting',{sid,key:'claude_account',value:v||null},'account');
+  if(d){CHATPREFS=d.prefs||CHATPREFS;
+   toast(v?'This chat runs on '+((accs.find(a=>a.id===v)||{}).label||v)+' (it moves to another if that one runs out)':'Automatic: the main account, then the next')}}}
+
 function chatChanged(prefs,fresh){
  CHATPREFS=prefs||{};
+ drawAcctPick();
  GITSTATE=null;GITSID=null;GITAT=0;
  findClose();
  drawEasyBtn();drawPlanDock();drawWtBadge();
@@ -9429,7 +9550,16 @@ async function newTerm(cwd){
   body:JSON.stringify({sid,cwd:cwd||undefined,cols:100,rows:24})});
  const v=await r.json().catch(()=>({}));
  if(!r.ok){toast(v.error||'could not open a terminal');if(!TERMS.list.length)$('#termdock').style.display='none';return}
- termAttach(v,true)}
+ termAttach(v,true);return v}
+// Open Orbit's own terminal with a command in it: run at once (a sign-in), or typed and left for you
+// to read and press Enter (an installer)
+async function terminalDo(cmd,run){
+ try{closeModal()}catch(e){}
+ const v=await newTerm();
+ if(!v||!v.id)return;
+ await new Promise(r=>setTimeout(r,700));                 // the shell has started
+ await fetch('/api/term/input',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({id:v.id,data:cmd+(run?'\n':'')})})}
 function termAttach(v,show){
  const pane=el('<div class=termpane></div>');$('#termbody').appendChild(pane);
  const css=getComputedStyle(document.documentElement);

@@ -23,9 +23,10 @@ and on the iPhone under Settings → *User guide*.
 Claude Code and Codex are excellent agents, but each is tied to one company's models.
 Orbit runs the **real Claude Code harness** on whatever model you pick:
 
-- your Claude subscription, with no API key;
+- your Claude subscription, with no API key (and several accounts, with automatic switching);
 - DeepSeek, Kimi, GLM, Qwen or MiniMax;
-- OpenCode Go;
+- Gemini, with the model list and token limits read from Google;
+- OpenCode Go (several accounts here too);
 - a local MLX model.
 
 A built-in gateway translates between the APIs. You get Claude Code's tools, skills,
@@ -77,6 +78,50 @@ Pause, Edit and Clear. [More](#goals)
 
 ![The Scheduled tab: a weekly literature digest and a nightly backup, each with its model, last result and next run](docs/screenshots/scheduled.png)
 
+### Several accounts, and a way through the limits
+
+Claude's 5-hour and weekly limits run out, and so do OpenCode Go's. Add a second account
+(a lab or work plan, say "Lab") and Orbit **moves on by itself when one runs out**: the chat
+carries on at once on the next account, or on a model you choose for "every account used up",
+and says so. When the main account's limit has reset, Orbit can **go back to it**. Both are
+switches. The accounts share your `~/.claude`, so skills, plugins, MCP servers and every chat's
+history stay the same; only the account that is billed changes. A chat can also be pinned to
+one account from the menu next to the model picker, on the Mac and the phone.
+[More](#several-accounts)
+
+![Claude accounts in Settings: Personal (main) is used up until 11:52, Lab is ready, with the switch options above](docs/screenshots/accounts.png)
+
+### It looks at what it builds
+
+Claude Code, Codex and OpenCode get **a browser, the iOS Simulator and Mac app windows** as one
+built-in tool set. An agent that builds a web page, an iPhone app or a Mac app can open it,
+take a screenshot and check the result before it says it works. A model that cannot read
+images gets the page's text and a list of what is clickable instead. Looking runs without
+asking; starting or quitting an app on your Mac asks. [More](#seeing-what-it-builds)
+
+<table><tr>
+<td width="68%"><img src="docs/screenshots/looks.png" alt="A chat that wrote a page, opened it in the browser tool and shows the screenshot it took"><br>
+<sub>The agent wrote the page, opened it with the browser tool and shows what it saw.</sub></td>
+<td width="32%"><img src="docs/screenshots/phone-looks.png" alt="The same chat on the iPhone"><br>
+<sub>The same chat on the iPhone.</sub></td>
+</tr></table>
+
+### Gemini and Antigravity, with your key or your login
+
+- **With an API key** (Google AI Studio): the model list and each model's real input and output
+  token limits come from Google and stay current, so `gemini-3.8-flash` and the rest can drive
+  Claude Code (through Orbit's gateway, which carries Gemini's thought signatures through tool
+  calls), Codex and Orbit's own agent.
+- **With your Google sign-in** (the coding plan in AI Pro / Ultra): Settings → Models & keys →
+  **Sign in with Google** opens Orbit's terminal and runs the Antigravity CLI's sign-in (or types
+  the install command for you to read and run); the CLI and its models then show up in the model
+  picker as chats.
+
+<table><tr>
+<td width="50%"><img src="docs/screenshots/google-signin.png" alt="Sign in with Google: Install or sign in to the Antigravity and Gemini CLIs in Orbit's terminal"></td>
+<td width="50%"><img src="docs/screenshots/gemini.png" alt="Gemini in Models & keys: the models Google lists for the key, with their token limits"></td>
+</tr></table>
+
 ### A real Mac app, and an iPhone app
 
 - **Orbit for Mac** has:
@@ -113,6 +158,7 @@ Pause, Edit and Clear. [More](#goals)
 - [Claude Code mode](#claude-code-mode)
 - [Codex mode](#codex-mode)
 - [Chats that talk to each other](#chats-that-talk-to-each-other) · [Goals](#goals)
+- [Several accounts](#several-accounts) · [Seeing what it builds](#seeing-what-it-builds) · [Gemini and Antigravity](#gemini-and-antigravity)
 - [Chats on another machine (SSH)](#chats-on-another-machine-ssh)
 - [Sessions from other agents](#sessions-from-other-agents)
 - [Many chats at once, and the message queue](#many-chats-at-once-and-the-message-queue)
@@ -212,8 +258,9 @@ and line breaks picked up when copying a key are removed.
 | **Claude · your subscription** | plain Claude Code on your own login | No API key; a long-lived token from `claude setup-token` can be saved instead of relying on the Keychain |
 | **OpenCode Go**, **OpenCode Zen** | Orbit's gateway, for every model | Each model on its own API (chat, Messages or Responses); the per-conversation session header OpenCode Go requires is sent for you |
 | **DeepSeek**, **Qwen** (Model Studio), **GLM** (Z.ai / BigModel), **MiniMax**, **Kimi**, **Anthropic** | directly, at their Anthropic-compatible endpoints | Region choice where a provider has two |
+| **Gemini** (Google AI Studio key) | Orbit's gateway, at Google's OpenAI-compatible endpoint | Models and their token limits come from Google's own list; Gemini 3's thought signatures are carried through tool calls |
 | **OpenAI, OpenRouter, Ollama, LM Studio**, any OpenAI-compatible server | natively (Orbit's own agent) | Add your own with a base URL and key name |
-| **CLI agents** — `claude`, `codex`, `opencode`, `qwen` | spawned as subprocesses | Signed-in CLIs, no API key; Codex and OpenCode chats continue their own sessions |
+| **CLI agents** — `claude`, `codex`, `opencode`, `agy` (Antigravity), `gemini`, `qwen` | spawned as subprocesses | Signed-in CLIs, no API key; Codex and OpenCode chats continue their own sessions; `agy` lists the models it offers your Google account |
 | **Your own provider** | directly (Messages API) or through the gateway (OpenAI chat / Responses) | Any base URL, your model list |
 
 - **Model lists** come from [models.dev](https://models.dev) (context window, output
@@ -379,6 +426,70 @@ It works in Orbit's own agent and in Claude Code mode.
 
 ---
 
+<a id="several-accounts"></a>
+## Several accounts
+
+- **Claude:** Settings → Models & keys → *Claude · your subscription* → **Add a Claude account**.
+  Sign in to that account in a browser (a private window keeps it apart from your own), press
+  **Sign in in the terminal** (it runs `claude setup-token` in Orbit's terminal), approve it, and paste the token on the account's row;
+  **test** asks Claude a one-word question to check it. The Mac's own login is the first
+  account ("main"), unless you saved a token for it.
+- **OpenCode Go and Zen:** **+ add another account** under the provider. OpenCode chats begun in
+  the OpenCode CLI continue as the account in use: Orbit gives the run that account's key, and
+  asks OpenCode Go for its real usage first, because OpenCode itself retries a refused request
+  for minutes before it says anything.
+- **Moving on.** When Claude reports that an account's limit is reached, Orbit records it until
+  the reset time Claude gave, and the chat continues at once on the next account that can answer
+  (or on the model you chose for "every account used up"), instead of waiting for the reset.
+  With nothing left to move to, it waits for whichever account is back first. The gateway does
+  the same within a single request for OpenCode Go accounts.
+- **Going back.** Settings → Models & keys → *When an account runs out*: *Move to the next
+  account by itself*, and *Go back to the main account once its limit has reset*. With the
+  second off, the account that took over becomes the main one.
+- **Per chat.** The **Auto account** menu by the model picker (the model sheet on the phone) keeps
+  a chat on one account; if that one runs out it still moves on.
+- **A token is never shown again.** Account lists carry names and states only; a token goes to the
+  Mac and is cleared from the screen.
+
+<a id="seeing-what-it-builds"></a>
+## Seeing what it builds
+
+`bin/orbit-look` is an MCP server (Python standard library only) that any agent can use:
+
+| Kind | Tools |
+|---|---|
+| **Browser** (a throwaway Chrome profile, no logins) | `browser_open`, `browser_snapshot`, `browser_screenshot`, `browser_click`, `browser_type`, `browser_press`, `browser_scroll`, `browser_back`, `browser_reload`, `browser_eval`, `browser_console`, `browser_resize`, `browser_close` |
+| **iOS Simulator** | `simulator_devices`, `_boot`, `_install`, `_launch`, `_terminate`, `_open_url`, `_screenshot`, `_shutdown`, `_logs`; and, with [AXe](https://github.com/cameroncooke/AXe), `_tap`, `_swipe`, `_type`, `_button`, `_ui` |
+| **Mac apps** | `mac_windows`, `mac_launch`, `mac_screenshot`, `mac_quit` |
+
+Screenshots come back as images **and** as text (the page's visible text, a numbered list of what
+can be clicked), so a model that cannot read images can still act. Claude Code, Codex and
+OpenCode get it by default, each in its own config format; Orbit's own agent only when you ask,
+because every tool is a definition read on every message. Settings → Tools → *Seeing what it
+builds* switches each engine and each kind off. Looking runs without asking; `mac_launch` and
+`mac_quit` ask. Window screenshots need Screen Recording granted to the app that runs Orbit.
+
+<a id="gemini-and-antigravity"></a>
+## Gemini and Antigravity
+
+- **API key.** Settings → Models & keys → *Gemini · Google AI*. Orbit asks Google's own
+  `models.list` for what the key can use and each model's `inputTokenLimit` and
+  `outputTokenLimit` (only models that chat: no speech, image, embedding or live models), and
+  refreshes it daily. Claude Code reaches Gemini through the gateway at Google's OpenAI-compatible
+  endpoint. Gemini 3 and later return a *thought signature* with each tool call that has to come
+  back with it; Messages has no field for one, so the gateway carries it inside the tool call's
+  id (Claude Code hands ids back unchanged), and Orbit's own agent and the Codex bridge keep it
+  the same way. Gemini gives parallel calls no ids and numbers them all 0, which the gateway
+  now tells apart.
+- **Google sign-in** (the coding plan in AI Pro / Ultra). *Sign in with Google* in Models & keys
+  shows where the Antigravity CLI and the Gemini CLI stand (installed, signed in, how many models)
+  and opens Orbit's terminal for you: **Install in the terminal** types
+  `curl -fsSL https://antigravity.google/cli/install.sh | bash` (or `npm install -g @google/gemini-cli`)
+  for you to read and run; **Sign in in the terminal** runs `agy`, which asks for your Google
+  account in the browser. Orbit then lists it as a chat, with the models `agy models --output-format json`
+  reports. Credentials stay with the CLI (Orbit never reads them). A subscription is not an API key,
+  so these run as their own agents, not inside Claude Code.
+
 ## Chats on another machine (SSH)
 
 A Claude Code chat can run on a cluster's login node or a lab server, as Claude Code's
@@ -419,6 +530,12 @@ section:
 | **From Claude Code** | The Claude CLI and Claude's desktop app (`~/.claude/projects`) — in Claude Code mode, every such session | `claude --resume`, on the model the session used (Claude models continue on your subscription) |
 | **From Codex** | `~/.codex/sessions` | `codex exec resume` |
 | **From OpenCode** | OpenCode's database | `opencode run --session` |
+
+Each section's header shows how long ago its newest chat moved, and a section opens by itself
+while something in it moved in the last ten minutes (unless you folded it): a chat you are
+carrying on in that agent's own window is in view, on the Mac and on the phone. The lists
+refresh every few seconds. Ran out of tokens there? Pick another account or model in Orbit
+and carry on in the same chat.
 
 Programs' one-shot calls (from temporary folders, SDK scripts, single-message runs)
 are left out. A chat that moves to another model and back tells the agent what was said

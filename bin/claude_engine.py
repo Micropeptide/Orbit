@@ -178,21 +178,43 @@ def _harness():
     return harness
 
 
-def harness_target(spec=None):
+def claude_account_for(sid=None, account=None):
+    """Which of your Claude accounts a run for this chat takes (claude_accounts.choose):
+    {"account", "reason", "home"}. `account` forces one, as the retry after a limit does."""
+    import claude_accounts as CA
+    try: secrets = Q.secrets_load() or {}
+    except Exception: secrets = {}
+    if account:
+        row = next((a for a in CA.accounts(Q.ROOT) if a["id"] == account), None)
+        if row: return {"account": row, "reason": "pinned", "home": CA.home(Q.ROOT)}
+    pinned = None
+    if sid:
+        try: pinned = Q.chat_setting("claude_account", sid) or None
+        except Exception: pinned = None
+    return CA.choose(Q.ROOT, secrets, pinned=pinned)
+
+
+def harness_target(spec=None, sid=None, account=None):
     """Where a Claude Code run for this model sends its requests: base URL, the
     model ids for Claude's tiers, context window, credentials, extra env, and
     whether it is the local server (which may need waking)."""
     spec = spec or {}
     pc = spec.get("provider_cfg") or {}
     if spec.get("provider") == "harness" and pc.get("subscription"):
-        # plain Claude Code on your own login: no base URL, no key, Claude's own windows
-        token = ""
-        try: token = (Q.secrets_load() or {}).get("CLAUDE_CODE_OAUTH_TOKEN") or ""
-        except Exception: pass
+        # plain Claude Code on your own login: no base URL, no key, Claude's own windows.
+        # Which login -- the Mac's own or one of the accounts you added -- is decided per run.
+        import claude_accounts as CA
+        got = claude_account_for(sid, account)
+        try: secrets = Q.secrets_load() or {}
+        except Exception: secrets = {}
+        env = CA.env_for(secrets, got["account"])
         return {"url": None, "model": pc.get("model") or "sonnet", "small": "haiku",
                 "ctx": int(pc.get("context") or 200000), "local": False, "provider": "claude",
-                "auth": {}, "env": ({"CLAUDE_CODE_OAUTH_TOKEN": token} if token else {}),
-                "key_missing": False, "subscription": True, "token": bool(token),
+                "auth": {}, "env": env,
+                "key_missing": False, "subscription": True, "token": bool(env.get("CLAUDE_CODE_OAUTH_TOKEN")),
+                "account": {"id": got["account"]["id"], "label": got["account"]["label"],
+                            "reason": got["reason"], "home": got["home"],
+                            "many": len(CA.accounts(Q.ROOT)) > 1, "pick": got},
                 "cli_model": pc.get("model") or "sonnet"}
     if spec.get("provider") != "harness" or pc.get("local"):
         url, model, ctx = model_endpoint()
@@ -273,6 +295,11 @@ def harness_env(url, model, ctx, extra=None, small=None, auth=None):
         "CLAUDE_CODE_SUBAGENT_MODEL": model,
         "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(ctx),
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        # Claude Code's server-side auto-mode checks exist only on Anthropic's own API: through
+        # Orbit's gateway or another provider's endpoint they can never arrive, and it says so
+        # ("this session isn't eligible because your requests go through 127.0.0.1…") and holds
+        # the first action. Orbit's own permission gate decides these runs, so say so.
+        "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
         "DISABLE_AUTOUPDATER": "1",
         "DISABLE_TELEMETRY": "1",
         "DISABLE_ERROR_REPORTING": "1",
@@ -320,6 +347,32 @@ def remote_target_env(target, env):
     renv = harness_env(url, model, target.get("ctx") or 128000, extra=dict(target.get("env") or {}), small=small,
                        auth={"ANTHROPIC_AUTH_TOKEN": gateway_token()})
     return ssh_remote.remote_env(renv), (rport, gateway_port())
+
+
+def test_account(account):
+    """One tiny question to Claude Code on this account, to see that its sign-in works.
+    {"ok", "detail"}; the answer is a word, so it uses next to none of the allowance."""
+    exe = which_claude()
+    if not exe: return {"ok": False, "detail": "Claude Code is not installed."}
+    t = harness_target({"provider": "harness", "provider_cfg": {"subscription": True, "model": "haiku",
+                                                                 "context": 200000}}, account=account)
+    if not t.get("token") and not (t.get("account") or {}).get("id") == "main":
+        return {"ok": False, "detail": "No token saved for this account yet."}
+    try:
+        r = subprocess.run([exe, "-p", "Reply with the single word OK.", "--model", "haiku", "--output-format", "json",
+                            "--setting-sources", "", "--disable-slash-commands", "--max-turns", "1"],
+                           env=target_env(t), cwd=_work_dir(), capture_output=True, text=True, timeout=90,
+                           stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "detail": "No answer in 90 seconds."}
+    except OSError as e:
+        return {"ok": False, "detail": str(e)}
+    try: out = json.loads(r.stdout or "{}")
+    except ValueError: out = {}
+    if r.returncode == 0 and not out.get("is_error"):
+        return {"ok": True, "detail": "Signed in and answering."}
+    why = str(out.get("result") or r.stderr or r.stdout or "no reason given").strip()
+    return {"ok": False, "detail": why[:300]}
 
 
 def target_env(target, extra=None):
@@ -839,6 +892,10 @@ def decide(tool, inp, ctx, req=None):
                        "the user switches plan mode off when they want it carried out.", None, None)
     if tool.startswith("mcp__orbit__"):
         return True, "", inp, None           # the bridge applies Orbit's own checks
+    if tool.startswith("mcp__orbit-look__") and tool.split("__", 2)[-1] not in ("mac_launch", "mac_quit"):
+        # a throwaway browser, the simulator and screenshots of windows: nothing of yours to
+        # protect. Running or quitting an app on this Mac is the exception, and asks.
+        return True, "", inp, None
     if ctx["read_only"] and tool in WRITE_TOOLS:
         return False, "Plan mode is on, so nothing may be changed. Describe the change instead.", None, None
     fn, args = orbit_view(tool, inp)
@@ -1432,7 +1489,7 @@ def _system_parts(project):
     return parts
 
 
-def _orbit_append(project, c, orbit_tools, chat_instructions=None, kind="local"):
+def _orbit_append(project, c, orbit_tools, chat_instructions=None, kind="local", look=False):
     """What Orbit adds to Claude's system prompt: the launcher's note, this chat's
     own instructions (/sysprompt), and Orbit's own context only when that extra is
     turned on."""
@@ -1447,7 +1504,15 @@ def _orbit_append(project, c, orbit_tools, chat_instructions=None, kind="local")
         extra.append("- Orbit's tools are available as mcp__orbit__*. mcp__orbit__chat_create and "
                      "mcp__orbit__chat_send hand work to other chats -- usually on cheaper models -- "
                      "and return their answers; the person can open and talk to those chats too.")
+    if look:
+        extra.append("# Seeing what you build\n- mcp__orbit-look__* lets you look at your work: browser_open then "
+                     "browser_screenshot/browser_snapshot for a web page; simulator_boot, simulator_install, "
+                     "simulator_launch and simulator_screenshot for an iPhone app; mac_launch and mac_screenshot "
+                     "for a Mac app. Check the result on screen before you say it works.")
     return launcher_append(c, extra, kind)
+
+
+_LAST_ACCOUNT = {}                 # chat id -> the Claude account its last run used
 
 
 def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None, inbox=None,
@@ -1471,8 +1536,16 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     spec = q.current_model() or {}
     label = (spec.get("label") or "Claude Code · local Qwen").replace(" · CLI", "")
     if not label.startswith("Claude Code"): label = "Claude Code · " + label
-    emit("model", {"id": spec.get("id"), "label": label, "provider": "Claude Code"})
-    target = harness_target(spec)
+    target = harness_target(spec, sid=sid)
+    acct = target.get("account") or {}
+    if acct.get("many"): label += " · " + acct["label"]          # which of your accounts answered
+    emit("model", {"id": spec.get("id"), "label": label, "provider": "Claude Code",
+                   **({"account": {"id": acct["id"], "label": acct["label"]}} if acct else {})})
+    if acct and acct.get("many") and _LAST_ACCOUNT.get(sid) not in (None, acct["id"]):
+        why = {"switched": " — your main account cannot answer right now",
+               "pinned": ""}.get(acct["reason"], " — your main account is back" if acct["id"] == acct["home"] else "")
+        emit("notice", {"msg": f"Continuing on {acct['label']}{why}.", "kind": "account"})
+    if sid and acct: _LAST_ACCOUNT[sid] = acct["id"]
     if target["local"]:
         # A model on this Mac pays for the system prompt in seconds, not fractions of a
         # cent: measured here, "standard" gave Claude Code a 40k-token prompt of MCP
@@ -1483,7 +1556,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         _wake_model(emit)
     elif target.get("subscription") and _harness().claude_login(
             max_age=30, token=(target.get("env") or {}).get("CLAUDE_CODE_OAUTH_TOKEN")) != "yes":
-        msg = ("The `claude` command is not signed in to your Claude account. In a terminal run "
+        msg = ("The `claude` command is not signed in to your Claude account"
+               + (f" ({acct['label']})" if acct.get("many") else "") + ". In a terminal run "
                "`claude setup-token`, then paste the token in Orbit → Settings → Models & keys → "
                "Claude · your subscription (or run `claude auth login`), and send this again.")
         messages.append({"role": "user", "content": user_content, "t": time.time()})
@@ -1496,6 +1570,10 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         messages.append({"role": "user", "content": user_content, "t": time.time()})
         emit("error", msg); emit("done", None)
         return msg
+
+    if acct.get("pick"):
+        import claude_accounts as CA
+        CA.settle(Q.ROOT, acct["pick"])      # moved over for good, if "switch back" is off
 
     prev = marker_of(messages) or {}
     used, old_id = int(prev.get("ctx") or 0), prev.get("model")
@@ -1646,6 +1724,11 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         servers["orbit"] = {"type": "stdio", "command": sys.executable,
                             "args": [os.path.join(os.path.dirname(os.path.abspath(__file__)), "orbit-mcp")],
                             "env": {"ORBIT_MCP_URL": bridge_url(), "ORBIT_MCP_TOKEN": token}}
+    # eyes: a browser, the iOS Simulator and Mac app windows (bin/orbit-look). Not on a small
+    # local model (every tool is a definition it reads on every message), nor in easy mode
+    look = bool(not remote and q.look_enabled("claude") and (c.get("profile") or "standard") != "lean"
+                and not easy_mode(sid))
+    if look: servers["orbit-look"] = {"type": "stdio", **q.look_server()}
     # on another machine Claude uses that machine's own setup (settings, skills, MCP)
     settings_path, mcp_path = (None, None) if remote else launcher_files(c, mk["session"], skills=chosen,
                                                                           extra_servers=servers, sid=sid)
@@ -1659,7 +1742,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                       model=target.get("cli_model"), kind=kind, remote=bool(remote), sid=sid,
                       effort=getattr(T, "effort", None) or q.chat_setting("reasoning_effort", sid),
                       settings_path=settings_path, mcp_path=mcp_path, add_dirs=prefs.get("add_dirs"),
-                      append=_orbit_append(project, c, orbit_tools, prefs.get("instructions"), kind),
+                      append=_orbit_append(project, c, orbit_tools, prefs.get("instructions"), kind, look=look),
                       bridge=orbit_tools)
     if fork: argv.append("--fork-session")
     if resume_at: argv += ["--resume-session-at", resume_at]
@@ -1695,7 +1778,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                           [a for i, a in enumerate(argv[1:]) if a not in ("--resume", "--session-id")
                            and argv[i] not in ("--resume", "--session-id")],
                           sorted((k, v) for k, v in env.items() if k.startswith(("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT",
-                                 "CLAUDE_CODE_MAX_CONTEXT", "CLAUDE_CODE_SUBAGENT")))])
+                                 "CLAUDE_CODE_MAX_CONTEXT", "CLAUDE_CODE_SUBAGENT", "ORBIT_CLAUDE_ACCOUNT")))])
     if keep or local_kept:
         live = LIVE.get(sid)
         if live and (live["sig"] != sig or live["proc"].poll() is not None or fork or resume_at):
@@ -2139,8 +2222,16 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                     kind = {"five_hour": "5-hour", "seven_day": "weekly", "seven_day_opus": "weekly Opus",
                             "seven_day_sonnet": "weekly Sonnet"}.get(info.get("rateLimitType"), "usage")
                     when = time.strftime("%a %H:%M", time.localtime(float(info["resetsAt"])))
-                    emit("notice", {"msg": f"Claude's {kind} limit reached — it resets {when}",
-                                    "kind": "limit", "resets_at": float(info["resetsAt"])})
+                    who = target.get("account") or {}
+                    if who:
+                        try:
+                            import claude_accounts as CA
+                            CA.note_limit(Q.ROOT, who["id"], float(info["resetsAt"]), f"{kind} limit")
+                        except Exception: pass
+                    emit("notice", {"msg": f"Claude's {kind} limit reached"
+                                           + (f" on {who['label']}" if who.get("many") else "") + f" — it resets {when}",
+                                    "kind": "limit", "resets_at": float(info["resetsAt"]),
+                                    **({"account": who["id"]} if who else {})})
                 continue
 
             if t == "result":
@@ -2976,7 +3067,7 @@ def model_for_session(models):
         for name in reversed(names):
             hits = [(pid, p) for pid, p in provs.items() if pid != "claude" and any(x["id"] == name for x in p["models"])]
             if not hits: continue
-            hits.sort(key=lambda h: (h[0] == "local", not harness._ready(h[0], h[1], secrets_)))
+            hits.sort(key=lambda h: (h[0] == "local", not harness._ready(h[0], h[1], secrets_, Q.ROOT)))
             pid = hits[0][0]
             return f"{BACKEND}:default" if pid == "local" else f"harness:{pid}/{name}"
     except Exception:

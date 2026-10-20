@@ -14,7 +14,7 @@ and a call to it goes back to Codex with its namespace and name restored.
 """
 import json, re, time, uuid
 
-from harness_gateway import repair_json, _data_lines
+from harness_gateway import repair_json, _data_lines, with_signature, split_signature, _signature_of
 
 
 # ------------------------------------------------------------------ tools
@@ -152,11 +152,14 @@ def responses_to_chat(body):
             last.setdefault("tool_calls", [])
             if last.get("content") == "": last["content"] = None
             if pending_reasoning: last["reasoning_content"], pending_reasoning = pending_reasoning, ""
-            last["tool_calls"].append({"id": v.get("call_id") or v.get("id") or "call_" + uuid.uuid4().hex[:16],
-                                       "type": "function",
-                                       "function": {"name": _flat_of(v, names), "arguments": _call_args(v)}})
+            cid, sig = split_signature(v.get("call_id") or v.get("id") or "call_" + uuid.uuid4().hex[:16])
+            call = {"id": cid, "type": "function",
+                    "function": {"name": _flat_of(v, names), "arguments": _call_args(v)}}
+            if sig: call["extra_content"] = {"google": {"thought_signature": sig}}    # Gemini 3: it comes back
+            last["tool_calls"].append(call)
         elif kind == "result":
-            msgs.append({"role": "tool", "tool_call_id": v.get("call_id"), "content": _output_text(v.get("output"))})
+            msgs.append({"role": "tool", "tool_call_id": split_signature(v.get("call_id"))[0],
+                         "content": _output_text(v.get("output"))})
     if system: msgs.insert(0, {"role": "system", "content": "\n\n".join(system)})
     out = {"model": body.get("model"), "messages": msgs, "stream": True, "stream_options": {"include_usage": True}}
     if tools:
@@ -344,11 +347,12 @@ class ResponseStream:
         yield _ev("response.output_text.delta", item_id=self.msg["id"], output_index=self.msg["index"],
                   content_index=0, delta=text)
 
-    def tool(self, key, call_id=None, name=None, args=""):
+    def tool(self, key, call_id=None, name=None, args="", sig=None):
         c = self.calls.setdefault(key, {"call_id": call_id, "name": name or "", "args": ""})
         if call_id and not c["call_id"]: c["call_id"] = call_id
         if name and not c["name"]: c["name"] = name
         c["args"] += args or ""
+        if sig: c["sig"] = sig
         return
         yield
 
@@ -365,10 +369,11 @@ class ResponseStream:
                 try: inp = json.loads(args).get("input", "")
                 except (ValueError, AttributeError): inp = c["args"]
                 item = {"type": "custom_tool_call", "id": "ctc_" + uuid.uuid4().hex[:24], "status": "completed",
-                        "call_id": c["call_id"] or "call_" + uuid.uuid4().hex[:20], "name": ns[1], "input": inp}
+                        "call_id": with_signature(c["call_id"] or "call_" + uuid.uuid4().hex[:20], c.get("sig")),
+                        "name": ns[1], "input": inp}
             else:
                 item = {"type": "function_call", "id": "fc_" + uuid.uuid4().hex[:24], "status": "completed",
-                        "call_id": c["call_id"] or "call_" + uuid.uuid4().hex[:20],
+                        "call_id": with_signature(c["call_id"] or "call_" + uuid.uuid4().hex[:20], c.get("sig")),
                         "name": ns[1] if ns else c["name"], "arguments": args}
                 if ns: item["namespace"] = ns[0]
             yield _ev("response.output_item.added", output_index=self.index, item={**item, "status": "in_progress",
@@ -421,7 +426,13 @@ def chat_stream_to_responses(lines, model, names=None):
                     key = (idx, tc["id"])          # some providers number every parallel call 0
                 if tc.get("id"):
                     ids[idx], keys[idx] = tc["id"], key
-                yield from rs.tool(key, tc.get("id"), fn.get("name"), fn.get("arguments") or "")
+                prior = rs.calls.get(key)
+                if fn.get("name") and not tc.get("id") and prior and prior["name"]:
+                    try: json.loads(prior["args"] or "x")
+                    except ValueError: pass
+                    else:                          # no ids, every call numbered 0 (Gemini): a new name is a new call
+                        key = (idx, "n%d" % len(rs.calls)); keys[idx] = key
+                yield from rs.tool(key, tc.get("id"), fn.get("name"), fn.get("arguments") or "", _signature_of(tc))
             if c.get("finish_reason") == "length": incomplete = True
     yield from rs.finish(incomplete)
 

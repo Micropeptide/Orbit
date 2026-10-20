@@ -874,9 +874,15 @@ class H(http.server.BaseHTTPRequestHandler):
                 if keys_:
                     live = {"account": keys_[0]["label"],
                             **(q.USAGE.go_usage(keys_[0]["api_key"], keys_[0]["id"], q.ROOT) or {})}
+            accounts = q.CA.public(q.ROOT, secrets_) if pid == "claude" else None
             return self._send(200, jdump({"provider": pid, "label": pr["label"], "models": models, "live": live,
-                                          "ready": q.HARN._ready(pid, pr, secrets_), "key": pr.get("key"),
+                                          "accounts": accounts,
+                                          "ready": q.HARN._ready(pid, pr, secrets_, q.ROOT), "key": pr.get("key"),
                                           "fetched_at": pr.get("fetched_at")}))
+        if p.split("?")[0] == "/api/google/cli":
+            return self._send(200, jdump({"clis": q.MODELS.google_cli_status(fresh="fresh=1" in self.path)}))
+        if p == "/api/look/status":
+            return self._send(200, jdump(q.look_status()))
         if p.split("?")[0] == "/api/harness":
             if "fresh=1" in self.path: q.HARN._LOGIN["at"] = 0      # "check again": ask claude now
             view = q.HARN.public_view(q.ROOT, q.secrets_load(), q.local_model_name())
@@ -1755,6 +1761,39 @@ class H(http.server.BaseHTTPRequestHandler):
             over["accounts"] = accts
             q.HARN.save(q.ROOT, cfg)
             return self._send(200, jdump({"ok": True, "accounts": accts, "id": aid}))
+        if p == "/api/harness/policy":
+            # what every provider with several accounts does when one runs out
+            return self._send(200, jdump({"ok": True, "policy": q.HARN.set_policy(
+                q.ROOT, **{k: d.get(k) for k in ("auto_switch", "switch_back") if k in d})}))
+        if p == "/api/claude/accounts":
+            # your Claude accounts: names and which is main; a token's value goes through
+            # /api/secrets/save under the account's key name, like any other key
+            CA = q.CA
+            op, aid = d.get("op", ""), str(d.get("id") or "")
+            if op == "add":
+                row = CA.add(q.ROOT, d.get("label"))
+                return self._send(200, jdump({"ok": True, "account": row}))
+            if not any(a["id"] == aid for a in CA.accounts(q.ROOT)):
+                return self._send(404, jdump({"error": "no such account"}))
+            if op == "rename":
+                CA.rename(q.ROOT, aid, d.get("label"))
+            elif op == "home":
+                CA.set_home(q.ROOT, aid)
+                q.USAGE.clear_exhausted(q.ROOT, CA.PROVIDER, aid)
+            elif op == "clear":
+                q.USAGE.clear_exhausted(q.ROOT, CA.PROVIDER, aid)
+            elif op == "remove":
+                key = CA.remove(q.ROOT, aid)
+                if key is None: return self._send(400, jdump({"error": "the main account stays; remove its token instead"}))
+                merged = dict(q.secrets_load())
+                if merged.pop(key, None) is not None: q.secrets_save(merged)
+                os.environ.pop(key, None)
+                q.USAGE.clear_exhausted(q.ROOT, CA.PROVIDER, aid)
+            elif op == "test":
+                return self._send(200, jdump(q.CE.test_account(aid)))
+            else:
+                return self._send(400, jdump({"error": f"unknown op {op}"}))
+            return self._send(200, jdump({"ok": True}))
         if p == "/api/harness/test":
             # one tiny request to a model, through the same route a chat uses
             spec = q.HARN.resolve(q.ROOT, d.get("id", ""), q.secrets_load(), q.local_model_name())
@@ -2367,7 +2406,8 @@ class H(http.server.BaseHTTPRequestHandler):
                 if not _re.match(r"^[A-Z][A-Z0-9_]{1,63}$", str(k)): continue
                 # a key or token never contains spaces: one copied across a wrapped terminal
                 # line comes with a space (or line break) inside it, and is then rejected
-                if v: merged[k] = re.sub(r"\s+", "", str(v)) if k.endswith(("_KEY", "_TOKEN")) else str(v).strip()
+                # (a second account's key ends in a number: OPENCODE_API_KEY_2)
+                if v: merged[k] = re.sub(r"\s+", "", str(v)) if _re.search(r"_(KEY|TOKEN)(_\d+)?$", k) else str(v).strip()
                 else: merged.pop(k, None); os.environ.pop(k, None)
             return self._send(200, jdump(q.secrets_save(merged)))
         if p == "/api/schedule/save":
@@ -3763,7 +3803,7 @@ _PREF_ON = {"auto_review": "changes", "verify_turns": "tools"}
 _PREF_SHAPES = {
     "easy_mode": bool, "thinking": bool, "parallel_tools": bool,
     "easy_tools": list, "claude_easy_tools": list,
-    "helper_model": str, "auto_review": str, "verify_turns": str,
+    "helper_model": str, "auto_review": str, "verify_turns": str, "claude_account": str,
     "autonomy_mode": ("ask", "auto", "full"),
     "reasoning_effort": ("low", "medium", "high", "xhigh", "max"),
 }
@@ -4050,7 +4090,8 @@ def _start_gateway():
                                                log=lambda m: print("  gateway: " + m),
                                                token=q.CE.gateway_token(),
                                                hooks={"usage": lambda pr, ac, mo, u: q.USAGE.record(q.ROOT, pr, ac, mo, u),
-                                                      "exhausted": lambda pr, ac, msg, secs=None: q.USAGE.mark_exhausted(q.ROOT, pr, ac, msg, seconds=secs)})
+                                                      "exhausted": lambda pr, ac, msg, secs=None: q.USAGE.mark_exhausted(q.ROOT, pr, ac, msg, seconds=secs),
+                                                      "moved": lambda pr, ac: q.HARN.moved_to(q.ROOT, pr, ac)})
         q.HARNESS_PORT = GATEWAY["srv"].server_address[1]
         print(f"  harness gateway on 127.0.0.1:{q.HARNESS_PORT}")
     except OSError as e:
@@ -4063,7 +4104,8 @@ def _start_gateway():
                                                    log=lambda m: print("  gateway: " + m),
                                                    token=q.CE.gateway_token(),
                                                    hooks={"usage": lambda pr, ac, mo, u: q.USAGE.record(q.ROOT, pr, ac, mo, u),
-                                                          "exhausted": lambda pr, ac, msg, secs=None: q.USAGE.mark_exhausted(q.ROOT, pr, ac, msg, seconds=secs)})
+                                                          "exhausted": lambda pr, ac, msg, secs=None: q.USAGE.mark_exhausted(q.ROOT, pr, ac, msg, seconds=secs),
+                                                      "moved": lambda pr, ac: q.HARN.moved_to(q.ROOT, pr, ac)})
             q.HARNESS_PORT = GATEWAY["srv"].server_address[1]
             GATEWAY["error"] = ""
             print(f"  harness gateway on 127.0.0.1:{q.HARNESS_PORT} "
@@ -4100,19 +4142,25 @@ def _live_view(st):
 class _LimitWatch:
     """Listens to an answer's events for a used-up plan allowance, so the chat can carry on
     by itself when it resets (q.schedule_limit_resume)."""
-    KINDS = ("error", "notice", "retry", "stream_error", "fallback")
+    KINDS = ("error", "notice", "retry", "stream_error", "fallback", "model")
 
     def __init__(self):
         self.texts, self.errored, self.limited = [], False, False
+        self.account = None          # the Claude account this answer ran on
 
     def see(self, k, p):
         if k not in self.KINDS: return
+        if k == "model":
+            who = (p or {}).get("account") if isinstance(p, dict) else None
+            if isinstance(who, dict) and who.get("id"): self.account = who["id"]
+            return
         if k == "fallback":
             # another model took over: what failed before it no longer ends the answer
             self.errored = self.limited = False
             return
         if k == "error": self.errored = True
         if isinstance(p, dict):
+            if isinstance(p.get("account"), str): self.account = p["account"]
             if p.get("resets_at"):          # the engine read the reset time itself: it wins
                 self.texts.insert(0, f"usage limit reached|{int(float(p['resets_at']))}")
                 self.limited = True
@@ -4131,14 +4179,22 @@ class _LimitWatch:
                  if m.get("role") == "assistant" and isinstance(m.get("content"), str) and len(m["content"]) < 400]
         said = [t for t in short if q.limit_reset_at([t])]
         if not (self.errored or self.limited or said): return None   # it got past the limit (another account, a fallback)
+        mdl = model or (st.model if st else None)
+        try:
+            # another Claude account, or your fallback model, can take over right now
+            plan = q.limit_switch_plan(mdl, self.account, self.texts + said)
+        except Exception:
+            plan = None
         try:
             return q.schedule_limit_resume(sid or st.sid, title if title is not None else st.title,
-                                           self.texts + said, model or (st.model if st else None), attempt)
+                                           self.texts + said, mdl, attempt, plan=plan)
         except Exception:
             return None
 
 
 def _limit_note(job):
+    if job.get("switch"):
+        return f"Usage limit reached — {job['switch']}."
     when = time.strftime("%a %H:%M", time.localtime(job["at_ts"]))
     return (f"Usage limit reached — this chat carries on by itself at {when}, a minute after it resets. "
             "Change or cancel it in Scheduled.")

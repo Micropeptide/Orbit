@@ -203,6 +203,21 @@ def opencode_sessions():
     return list(rows)
 
 
+def opencode_session_model(session):
+    """"providerID/modelID" an OpenCode session last ran on, or "" when unknown."""
+    if not os.path.exists(OPENCODE_DB): return ""
+    try:
+        con = _oc_connect()
+        try:
+            row = con.execute("select model from session where id = ?", (session,)).fetchone()
+        finally:
+            con.close()
+        mj = json.loads(row[0]) if row and row[0] else {}
+        return f"{mj.get('providerID')}/{mj.get('id') or mj.get('modelID')}" if isinstance(mj, dict) and mj.get("providerID") else ""
+    except (sqlite3.Error, ValueError):
+        return ""
+
+
 def opencode_convert(session):
     msgs, cwd, model = [], HOME, ""
     con = _oc_connect()

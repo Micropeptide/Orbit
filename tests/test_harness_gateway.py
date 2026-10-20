@@ -279,6 +279,25 @@ class TestServer(unittest.TestCase):
         prov, acct, model, usage = seen["usage"][0]
         self.assertEqual((prov, acct, model, usage["input_tokens"], usage["output_tokens"]), ("go", "two", "m", 120, 9))
 
+    def test_a_request_that_got_through_on_a_later_account_says_which(self):
+        """So Orbit can make that account the main one, when "switch back" is off."""
+        Upstream.script = [{"status": 429, "error": {"error": {"message": "Monthly usage limit exceeded"}}},
+                           {"chunks": [delta(content="ok"),
+                                       {"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}]}]
+        base = f"http://127.0.0.1:{self.up.server_address[1]}/v1"
+        moved = []
+        gw = G.serve(0, lambda p, m: {"base": base, "format": "chat", "api_key": "k1",
+                                      "accounts": [{"id": "main", "api_key": "k1"}, {"id": "two", "api_key": "k2"}]},
+                     hooks={"moved": lambda *a: moved.append(a)})
+        self.addCleanup(gw.shutdown)
+        req = urllib.request.Request(f"http://127.0.0.1:{gw.server_address[1]}/h/go/v1/messages",
+                                     data=json.dumps({"model": "m", "max_tokens": 50, "stream": True,
+                                                      "messages": [{"role": "user", "content": "hi"}]}).encode(),
+                                     headers={"content-type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            r.read()
+        self.assertEqual(moved, [("go", "two")])
+
     def test_every_request_carries_a_stable_conversation_id(self):
         Upstream.seen.clear()
         done = {"id": "c", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}

@@ -51,6 +51,24 @@ struct ModelsKeysView: View {
                 }
 
                 Section {
+                    Toggle("Move to the next account by itself", isOn: Binding(
+                        get: { overview?.autoSwitch ?? true },
+                        set: { v in Task { await run("saved") {
+                            try await state.requireServer().accountsPolicy(
+                                autoSwitch: v, switchBack: overview?.switchBack ?? true) } } }))
+                    Toggle("Go back to the main account when its limit resets", isOn: Binding(
+                        get: { overview?.switchBack ?? true },
+                        set: { v in Task { await run("saved") {
+                            try await state.requireServer().accountsPolicy(
+                                autoSwitch: overview?.autoSwitch ?? true, switchBack: v) } } }))
+                } header: {
+                    Text("When an account runs out")
+                } footer: {
+                    Text("For any provider with more than one account: Claude, OpenCode Go. The chat says "
+                         + "which account took over.")
+                }
+
+                Section {
                     NavigationLink("When a model keeps failing") { FallbackView() }
                     NavigationLink("More models for Orbit's own chat") { OtherModelsView() }
                     NavigationLink("Add your own provider") {
@@ -133,7 +151,7 @@ struct ProviderDetailView: View {
                 }
 
                 if p.keyless, let sv = p.server { localServer(p, sv) }
-                if p.isSubscription { subscription(p) }
+                if p.isSubscription { claudeAccounts(p) }
                 if p.takesKeys { accounts(p) }
                 if p.takesKeys { modelList(p) }
                 if p.takesKeys, !p.altBases.isEmpty { region(p) }
@@ -153,8 +171,7 @@ struct ProviderDetailView: View {
                 if let a = renaming {
                     let label = renameText.trimmingCharacters(in: .whitespaces)
                     Task { await act("renamed") {
-                        try await state.requireServer().harnessAccount(provider: providerID, op: "rename",
-                                                                       id: a.id, label: label)
+                        try await accountCall("rename", id: a.id, label: label)
                     } }
                 }
                 renaming = nil
@@ -165,8 +182,9 @@ struct ProviderDetailView: View {
             TextField("Name, e.g. Work", text: $newAccountName)
             Button("Add") {
                 let label = newAccountName.trimmingCharacters(in: .whitespaces)
-                Task { await act("account added — paste its key") {
-                    try await state.requireServer().harnessAccount(provider: providerID, op: "add", label: label)
+                Task { await act(p?.isSubscription == true ? "account added — paste its token"
+                                                           : "account added — paste its key") {
+                    try await accountCall("add", label: label)
                 } }
             }
             Button("Cancel", role: .cancel) {}
@@ -180,7 +198,8 @@ struct ProviderDetailView: View {
                 Button("Remove \(a.label)", role: .destructive) {
                     Task { await act("removed") {
                         let s = try state.requireServer()
-                        if p.accounts.count == 1 { try await s.saveSecret(name: a.key, value: "") }
+                        if p.isSubscription { try await s.claudeAccount(op: "remove", id: a.id) }
+                        else if p.accounts.count == 1 { try await s.saveSecret(name: a.key, value: "") }
                         else { try await s.harnessAccount(provider: p.id, op: "remove", id: a.id) }
                     } }
                     removing = nil
@@ -270,31 +289,92 @@ struct ProviderDetailView: View {
         }
     }
 
-    @ViewBuilder private func subscription(_ p: HarnessProvider) -> some View {
+    /// Your Claude accounts: the Mac's own login, and any others, each signed in with a token.
+    @ViewBuilder private func claudeAccounts(_ p: HarnessProvider) -> some View {
         Section {
-            LabeledContent("Signed in", value: p.ready ? "yes" : "no")
-            LabeledContent("Token saved in Orbit", value: (p.tokenSet ?? false) ? "yes" : "no")
-            SecretEntry(placeholder: (p.tokenSet ?? false) ? "Replace the sign-in token"
-                                                           : "Paste the token from claude setup-token") { v in
-                await actResult("token saved", fresh: true) {
-                    try await state.requireServer().saveSecret(name: "CLAUDE_CODE_OAUTH_TOKEN", value: v)
+            ForEach(p.accounts) { a in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text(a.label).font(.body.weight(.medium))
+                        if a.active && p.accounts.count > 1 {
+                            Text("main").font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                .background(.tint.opacity(0.15), in: .capsule)
+                        }
+                        Spacer()
+                        Menu {
+                            if !a.active {
+                                Button("Make main") { Task { await act("now the main account") {
+                                    try await accountCall("home", id: a.id) } } }
+                            }
+                            Button("Test") { Task { await testClaude(a) } }
+                            if a.exhaustedUntil != nil {
+                                Button("Not used up") { Task { await act("cleared") {
+                                    try await accountCall("clear", id: a.id) } } }
+                            }
+                            Button("Rename") { renameText = a.label; renaming = a }
+                            if a.id == "main" {
+                                if a.tokenSet { Button("Remove token", role: .destructive) { confirmRemoveToken = true } }
+                            } else {
+                                Button("Remove", role: .destructive) { removing = a }
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                        }
+                    }
+                    Text(a.tokenSet ? "Sign-in token saved"
+                         : a.id == "main" ? (p.login == "yes" ? "The Mac's own Claude login" : "Not signed in")
+                         : "Needs a token")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if let until = a.exhaustedUntil {
+                        Text("Limit reached — back " + Date(timeIntervalSince1970: until)
+                                .formatted(date: .abbreviated, time: .shortened))
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                    SecretEntry(placeholder: a.tokenSet ? "Replace the token" : "Paste the token from claude setup-token",
+                                buttonTitle: "Save token") { v in
+                        await actResult("token saved — try Test", fresh: true) {
+                            try await state.requireServer().saveSecret(name: a.key, value: v)
+                        }
+                    }
                 }
+                .padding(.vertical, 4)
             }
+            Button {
+                newAccountName = ""
+                addingAccount = true
+            } label: { Label("Add a Claude account", systemImage: "plus") }
             Button("Check again") {
                 Task {
                     await reload(fresh: true)
-                    note = (p.ready || (self.p?.ready ?? false)) ? "signed in" : "still not signed in"
+                    note = (self.p?.ready ?? false) ? "signed in" : "still not signed in"
                 }
             }
-            if p.tokenSet ?? false {
-                Button("Remove token", role: .destructive) { confirmRemoveToken = true }
-            }
         } header: {
-            Text("Claude sign-in")
+            Text("Claude accounts")
         } footer: {
-            Text("Uses the claude command's own login on the Mac. If it says not signed in, run "
-                 + "claude setup-token in a terminal on the Mac and paste the token it prints here.")
+            Text("Runs use the main account; when its limit is reached the next takes over. All share the "
+                 + "Mac's ~/.claude, so skills, MCP servers and chat history stay the same. To add one: sign "
+                 + "in to that Claude account in a browser on the Mac, run claude setup-token in a terminal "
+                 + "there, and paste the token it prints.")
         }
+    }
+
+    /// One tiny question to Claude on this account, to see that its sign-in works.
+    private func testClaude(_ a: HarnessAccount) async {
+        note = "Testing \(a.label)…"
+        do {
+            let v = try await state.requireServer().claudeAccount(op: "test", id: a.id)
+            note = (v["ok"]?.bool ?? false) ? "\(a.label): signed in and answering"
+                                              : "\(a.label): " + (v["detail"]?.string ?? "it did not answer")
+        } catch { note = error.localizedDescription }
+    }
+
+    /// An account change, through the endpoint of the kind of provider it is.
+    private func accountCall(_ op: String, id: String? = nil, label: String? = nil) async throws {
+        let s = try state.requireServer()
+        if p?.isSubscription ?? false { try await s.claudeAccount(op: op, id: id, label: label) }
+        else { try await s.harnessAccount(provider: providerID, op: op == "home" ? "activate" : op, id: id, label: label) }
     }
 
     @ViewBuilder private func accounts(_ p: HarnessProvider) -> some View {

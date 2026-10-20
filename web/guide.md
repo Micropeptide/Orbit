@@ -41,6 +41,8 @@ Right-click a row (or use its ⋯) to rename, pin, tag, archive, move to a proje
 
 **Projects** group related chats. A project can carry its own instructions and folder, which apply to every chat in it. Drag a chat onto a project to file it.
 
+**Chats from other agents.** Sessions you began in Claude Code (the CLI or Claude's desktop app), Codex or OpenCode appear in their own sections at the bottom of the chat list, on the Mac and on the phone: *From Claude Code*, *From Codex*, *From OpenCode*, each showing how long ago its newest chat moved. A section opens by itself while something in it is active, and refreshes every few seconds. Open one to read it and carry on in that agent's own session. If you ran out of tokens there, pick another account (or model) in Orbit and keep going in the same chat.
+
 ## Writing a message
 
 Type and press **Enter** to send; **Shift+Enter** for a new line. While an answer is running, Enter **queues** your message (it starts when the answer is done) and **⌘Enter** slips it into the running answer as a note it reads at its next step.
@@ -82,6 +84,29 @@ Give a chat a **goal** and it carries on by itself, answer after answer, until t
 A chat can start other chats and hand them work, for example sending a routine task to a cheaper model and waiting for its answer. It can also message an existing chat, wait for replies, and set goals on the chats it starts. You can talk to any of those chats yourself at any time.
 
 The dock above the message box lists the chats this one talks to and what each is doing; a "waiting for…" line shows whom it is waiting on. Messages one chat sends another are marked **from** the sender, with a link back.
+
+## When an account runs out: several accounts
+
+Claude's 5-hour and weekly limits, and OpenCode Go's allowances, run out. Give Orbit more than one account and it moves on for you.
+
+- **Claude:** Settings → Models & keys → *Claude · your subscription* → **Add a Claude account** (say, "Lab"). Sign in to that Claude account in a browser (a private window keeps it apart from your own), press **Sign in in the terminal** (it runs `claude setup-token` in Orbit's terminal), approve it, and paste the token it prints on the account's row. Press **test** to check it. All accounts share your `~/.claude`, so skills, plugins, MCP servers and every chat's history stay the same; only the account that is billed changes.
+- **OpenCode Go and Zen:** the same page, **+ add another account** under the provider; each gets its own key, and OpenCode chats started from the Mac or the phone run as the account in use.
+- **The main account** is the one runs start on (*make main* to change it). When Claude says its limit is reached, the chat carries on at once on the next account, or on a model you choose for "every account used up", and says so. Under **When an account runs out** you can turn the switching off, or have Orbit **go back to the main account once its limit has reset**.
+- **One chat on one account:** in Claude Code mode, the **Auto account** menu next to the model picker (on the phone, the model sheet) pins a chat to an account. If that account runs out, it still moves on.
+
+## Seeing what it builds
+
+Any agent that builds something can look at it: Claude Code, Codex and OpenCode get a **browser**, the **iOS Simulator** and **Mac app windows** (Orbit's own agent only when you ask). It can open a page and take a screenshot, run an iPhone app in the simulator and look at it, or launch a Mac app and capture its window, then check the result before it says it works.
+
+- The browser is a throwaway Chrome profile with none of your logins. A model that cannot read images gets the page's text and a list of what can be clicked instead.
+- Looking runs without asking; starting or quitting an app on the Mac asks first.
+- Tapping and typing in the simulator needs [AXe](https://github.com/cameroncooke/AXe) (`brew install cameroncooke/axe/axe`); screenshots, launching and installing need nothing extra. Window screenshots need Screen Recording granted to the app that runs Orbit (System Settings → Privacy & Security).
+- Settings → Tools → *Seeing what it builds* turns each engine and each kind of tool on or off.
+
+## Gemini and Antigravity
+
+- **With an API key:** Settings → Models & keys → *Gemini · Google AI*, with a key from Google AI Studio. Orbit lists the models your key can use with each one's real input and output limits, and keeps the list current. Claude Code (through Orbit's gateway), Codex and Orbit's own agent can all use them, for example `gemini-3.8-flash`.
+- **With your Google sign-in** (the coding plan in Google AI Pro / Ultra): Settings → Models & keys → **Sign in with Google**. **Install in the terminal** opens Orbit's terminal with the Antigravity CLI's install command typed for you to read and run; **Sign in in the terminal** then runs `agy`, which asks you to sign in with your Google account in the browser. **Check again** and it appears in the model picker as a chat, with the models it reports for your account. The Gemini CLI works the same way. A subscription is not an API key, so these run as their own agents rather than inside Claude Code.
 
 ## Files, Library and Scheduled
 

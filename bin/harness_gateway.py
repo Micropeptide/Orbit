@@ -12,7 +12,7 @@ and the gateway, according to the model's format:
 It listens on loopback only. Keys come from the resolver (Orbit's secrets) and
 are never seen by the Claude process. Standard library only.
 """
-import http.server, json, re, socket, ssl, threading, time, urllib.error, urllib.parse, urllib.request, uuid
+import base64, http.server, json, re, socket, ssl, threading, time, urllib.error, urllib.parse, urllib.request, uuid
 
 STOP = {"stop": "end_turn", "tool_calls": "tool_use", "function_call": "tool_use", "length": "max_tokens",
         "content_filter": "refusal"}
@@ -22,6 +22,29 @@ ERROR_TYPES = {400: "invalid_request_error", 401: "authentication_error", 403: "
 
 
 # ------------------------------------------------------------------ requests
+
+# Gemini 3 and later give each tool call a "thought signature" that must come back with it, and
+# Messages has no field to hold one. Claude Code does hand a tool call's id back unchanged, so
+# the signature rides in the id: "<call id>__gsig_<url-safe base64>".
+SIG_TAG = "__gsig_"
+
+
+def with_signature(call_id, sig):
+    if not sig: return call_id
+    return f"{call_id}{SIG_TAG}{base64.urlsafe_b64encode(str(sig).encode()).decode().rstrip('=')}"
+
+
+def split_signature(call_id):
+    """(the call's own id, its thought signature or None)."""
+    if not isinstance(call_id, str) or SIG_TAG not in call_id: return call_id, None
+    cid, _, enc = call_id.partition(SIG_TAG)
+    try: return cid, base64.urlsafe_b64decode(enc + "=" * (-len(enc) % 4)).decode()
+    except Exception: return call_id, None
+
+
+def _signature_of(tc):
+    return (((tc.get("extra_content") or {}).get("google") or {}).get("thought_signature")) or None
+
 
 def _text_of(content):
     if isinstance(content, str): return content
@@ -58,8 +81,11 @@ def to_openai(body):
                 if t == "text": text.append(b.get("text") or "")
                 elif t in ("thinking", "redacted_thinking"): think.append(b.get("thinking") or "")
                 elif t == "tool_use":
-                    calls.append({"id": b.get("id"), "type": "function",
-                                  "function": {"name": b.get("name"), "arguments": json.dumps(b.get("input") or {})}})
+                    cid, sig = split_signature(b.get("id"))
+                    call = {"id": cid, "type": "function",
+                            "function": {"name": b.get("name"), "arguments": json.dumps(b.get("input") or {})}}
+                    if sig: call["extra_content"] = {"google": {"thought_signature": sig}}
+                    calls.append(call)
             a = {"role": "assistant", "content": "".join(text) or (None if calls else "")}
             # reasoning models (DeepSeek) want their own reasoning back within a tool loop
             if think: a["reasoning_content"] = "".join(think)
@@ -72,7 +98,7 @@ def to_openai(body):
             if t == "tool_result":
                 txt = _text_of(b.get("content"))
                 if b.get("is_error"): txt = "Error: " + txt
-                tool_msgs.append({"role": "tool", "tool_call_id": b.get("tool_use_id"), "content": txt})
+                tool_msgs.append({"role": "tool", "tool_call_id": split_signature(b.get("tool_use_id"))[0], "content": txt})
             elif t == "text":
                 parts.append({"type": "text", "text": b.get("text") or ""})
             elif t == "image":
@@ -92,8 +118,12 @@ def to_openai(body):
         if body.get(k) is not None: out[k] = body[k]
     if body.get("stop_sequences"): out["stop"] = body["stop_sequences"]
     if body.get("tools"):
+        def schema(t):
+            sc = dict(t.get("input_schema") or {"type": "object"})
+            sc.pop("$schema", None)              # a draft marker some providers (Gemini) refuse
+            return sc
         out["tools"] = [{"type": "function", "function": {"name": t.get("name"), "description": t.get("description") or "",
-                                                          "parameters": t.get("input_schema") or {"type": "object"}}}
+                                                          "parameters": schema(t)}}
                         for t in body["tools"] if t.get("name")]
         tc = body.get("tool_choice") or {}
         if tc.get("type") == "any": out["tool_choice"] = "required"
@@ -228,7 +258,8 @@ class _Blocks:
         calls, self.calls = self.calls, {}
         self.ids, self.keys = {}, {}
         for c in calls.values():
-            yield from self.begin("tool", {"type": "tool_use", "id": c["id"], "name": c["name"], "input": {}})
+            yield from self.begin("tool", {"type": "tool_use", "id": with_signature(c["id"], c.get("sig")),
+                                           "name": c["name"], "input": {}})
             yield _sse("content_block_delta", {"type": "content_block_delta", "index": self.idx,
                                                "delta": {"type": "input_json_delta",
                                                          "partial_json": repair_json(c["args"])}})
@@ -248,8 +279,16 @@ class _Blocks:
         yield _sse("content_block_delta", {"type": "content_block_delta", "index": self.idx,
                                            "delta": {"type": "text_delta", "text": text}})
 
-    def tool(self, index, cid=None, name=None, args=""):
+    def tool(self, index, cid=None, name=None, args="", sig=None):
         key = self.keys.get(index, index)
+        if name and not cid and key in self.calls and self.calls[key]["name"]:
+            # a provider that gives a call no id and numbers every call 0 (Gemini): a second
+            # name, once the first call's arguments are whole, is a second call
+            try: json.loads(self.calls[key]["args"] or "x")
+            except ValueError: pass
+            else:
+                key = (index, "n%d" % len(self.calls))
+                self.keys[index] = key
         if cid and index in self.ids and self.ids[index] != cid:
             # some providers number every parallel call 0: a new call id at a used
             # index is a new call, not more arguments for the previous one
@@ -263,6 +302,7 @@ class _Blocks:
         c = self.calls[key]
         if name and not c["name"]: c["name"] = name
         if args: c["args"] += args
+        if sig: c["sig"] = sig
         return
         yield
 
@@ -300,7 +340,8 @@ def stream_to_anthropic(lines, model):
             if d.get("content"): yield from b.text(d["content"])
             for tc in d.get("tool_calls") or []:
                 fn = tc.get("function") or {}
-                yield from b.tool(tc.get("index", 0), tc.get("id"), fn.get("name"), fn.get("arguments") or "")
+                yield from b.tool(tc.get("index", 0), tc.get("id"), fn.get("name"), fn.get("arguments") or "",
+                                  _signature_of(tc))
             if c.get("finish_reason"): stop = STOP.get(c["finish_reason"], "end_turn")
     if b.had_tools and stop == "end_turn": stop = "tool_use"
     yield from b.finish(stop, usage)
@@ -346,7 +387,8 @@ def complete_to_anthropic(obj, model):
         fn = tc.get("function") or {}
         try: args = json.loads(fn.get("arguments") or "{}")
         except ValueError: args = {"_raw": fn.get("arguments")}
-        content.append({"type": "tool_use", "id": tc.get("id") or ("toolu_" + uuid.uuid4().hex[:20]),
+        content.append({"type": "tool_use",
+                        "id": with_signature(tc.get("id") or ("toolu_" + uuid.uuid4().hex[:20]), _signature_of(tc)),
                         "name": fn.get("name"), "input": args})
     stop = STOP.get(c.get("finish_reason") or "stop", "end_turn")
     if any(x["type"] == "tool_use" for x in content): stop = "tool_use"
@@ -577,7 +619,11 @@ def make_handler(resolver, log=None, token=None, hooks=None):
             for n, acct in enumerate(accounts):
                 self.account = acct.get("id") or ""
                 try:
-                    return self._post(route, path, data, acct.get("api_key") or "", extra_headers)
+                    out = self._post(route, path, data, acct.get("api_key") or "", extra_headers)
+                    if n and hooks.get("moved"):         # got through on another account than the first
+                        try: hooks["moved"](self.provider, self.account)
+                        except Exception: pass
+                    return out
                 except urllib.error.HTTPError as e:
                     try: raw = e.read().decode("utf-8", "replace")
                     except Exception: raw = ""
@@ -847,7 +893,8 @@ def serve(port, resolver, log=None, token=None, hooks=None):
     """Start the gateway in a background thread on 127.0.0.1:<port> (0 = any free port).
     With a token, requests must carry it (Authorization: Bearer or x-api-key).
     hooks: "usage"(provider, account, model, usage) after each answer,
-           "exhausted"(provider, account, message) when an account's quota is used up."""
+           "exhausted"(provider, account, message) when an account's quota is used up,
+           "moved"(provider, account) when a request got through on a later account."""
     srv = Server(("127.0.0.1", int(port)), make_handler(resolver, log, token, hooks))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv

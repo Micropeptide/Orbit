@@ -222,7 +222,9 @@ def is_quota_error(status, message):
     return quota_block(status, message) is not None
 
 
-def mark_exhausted(root, provider, account, message="", hours=None, seconds=None):
+def mark_exhausted(root, provider, account, message="", hours=None, seconds=None, until=None):
+    """Remember that an account's allowance is used up: until an exact time when the
+    provider said when it resets, else for a stretch read from its message."""
     msg = (message or "").lower()
     if seconds is not None:
         hours = float(seconds) / 3600
@@ -230,8 +232,8 @@ def mark_exhausted(root, provider, account, message="", hours=None, seconds=None
         hours = 24 * 7 if "week" in msg else 24 * 30 if "month" in msg else 5 if ("5" in msg and "hour" in msg) else 1
     with _LOCK:
         st = _state(root)
-        st.setdefault(provider, {})[account] = {"until": time.time() + hours * 3600, "why": str(message)[:200],
-                                                "at": time.time()}
+        st.setdefault(provider, {})[account] = {"until": float(until) if until else time.time() + hours * 3600,
+                                                "why": str(message)[:200], "at": time.time()}
         tmp = _state_path(root) + ".tmp"
         with open(tmp, "w") as fh: json.dump(st, fh, indent=1)
         os.replace(tmp, _state_path(root))

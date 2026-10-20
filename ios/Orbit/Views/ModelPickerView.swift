@@ -132,8 +132,35 @@ struct ModelPickerView: View {
         }
     }
 
+    /// Your Claude accounts, when this chat runs on the subscription and there is more than one.
+    private var claudeAccounts: [HarnessAccount] {
+        guard onPick == nil, (tickedID ?? "").hasPrefix("harness:claude/") else { return [] }
+        let accs = state.usage.overview?.providers.first { $0.id == "claude" }?.accounts ?? []
+        return accs.count > 1 ? accs : []
+    }
+
     private var list: some View {
         List {
+            if !claudeAccounts.isEmpty {
+                Section {
+                    Picker("Account", selection: Binding(
+                        get: { state.chatExtras.prefs["claude_account"]?.string ?? "" },
+                        set: { v in Task { await state.setChatSetting(
+                            "claude_account", v.isEmpty ? nil : v,
+                            saying: v.isEmpty ? "Automatic: the main account, then the next"
+                                              : "This chat runs on \(claudeAccounts.first { $0.id == v }?.label ?? v)") } })) {
+                        Text("Automatic").tag("")
+                        ForEach(claudeAccounts) { a in
+                            Text(a.label + (a.exhaustedUntil != nil ? " · limit reached" : "")
+                                 + (a.active ? " · main" : "")).tag(a.id)
+                        }
+                    }
+                } header: {
+                    Text("Claude account")
+                } footer: {
+                    Text("Automatic uses the main account, and the next one when its limit is reached.")
+                }
+            }
             if !recent.isEmpty {
                 Section("Recent") {
                     ForEach(recent, id: \.0.id) { r, m in

@@ -115,6 +115,25 @@ CLI_BACKENDS = {
         "model_flag": "--model", "system_flag": None,
         "models": [("", "OpenCode (default model)")],
     },
+    # Google's two agents, signed in with your Google account (AI Pro / Ultra): no API key.
+    # `agy -p` answers once on stdout; every flag goes before -p, which takes the prompt.
+    "agy-cli": {
+        "label": "Antigravity CLI", "bin": "agy",
+        "argv": [], "prompt_flag": "-p", "plain": True,
+        "model_flag": "--model", "system_flag": None,
+        "models": [("", "Antigravity · its default model")],
+        "note": "your Google sign-in (AI Pro/Ultra) — no API key. Install: "
+                "curl -fsSL https://antigravity.google/cli/install.sh | bash, then run agy once to sign in",
+    },
+    "gemini-cli": {
+        "label": "Gemini CLI", "bin": "gemini",
+        "argv": [], "prompt_flag": "-p", "plain": True,
+        "model_flag": "-m", "system_flag": None,
+        "models": [("", "Gemini CLI · its default model"), ("gemini-3.8-flash", "Gemini 3.8 Flash"),
+                   ("gemini-3.1-pro-preview", "Gemini 3.1 Pro"), ("gemini-2.5-pro", "Gemini 2.5 Pro"),
+                   ("gemini-2.5-flash", "Gemini 2.5 Flash")],
+        "note": "your Google sign-in — no API key (npm i -g @google/gemini-cli, then run gemini once to sign in)",
+    },
     "qwen-cli": {
         "label": "Qwen Code CLI", "bin": "qwen",
         "argv": ["-p"], "model_flag": "-m", "system_flag": None,
@@ -127,6 +146,7 @@ CLI_BACKENDS = {
 # `qwen` in /opt/homebrew/bin were invisible to the server while being right
 # there in the terminal. Look in the usual places too.
 EXTRA_BIN_DIRS = ["~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin",
+                  "~/.antigravity/bin", "~/.gemini/antigravity-cli/bin",
                   "~/.opencode/bin", "~/.bun/bin", "~/.npm-global/bin", "~/bin",
                   "~/.volta/bin", "~/.nvm/versions/node"]
 
@@ -174,7 +194,64 @@ def _cli_routes(bid, b):
             known = []
         seen = {r for r, _ in routes}
         routes += [(slug, f"Codex · {name}") for slug, name in known if slug not in seen]
+    elif bid == "agy-cli":
+        seen = {r for r, _ in routes}
+        routes += [(slug, f"Antigravity · {name}") for slug, name in agy_models() if slug not in seen]
     return routes
+
+
+_AGY = {"at": 0.0, "rows": []}
+
+GOOGLE_CLIS = (
+    {"id": "agy-cli", "bin": "agy", "label": "Antigravity CLI", "login": "agy",
+     "install": "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+     "note": "the coding plan that comes with Google AI Pro / Ultra"},
+    {"id": "gemini-cli", "bin": "gemini", "label": "Gemini CLI", "login": "gemini",
+     "install": "npm install -g @google/gemini-cli",
+     "note": "Google's older terminal agent; the same Google sign-in"},
+)
+
+
+def google_cli_status(fresh=False):
+    """Where each of Google's terminal agents stands, for Settings: installed, signed in (the
+    models it lists for your account; the Gemini CLI has no list, so its sign-in file stands in),
+    and the commands to install it and to sign in. Never reads a credential."""
+    if fresh: _AGY["at"] = 0.0
+    out = []
+    for g in GOOGLE_CLIS:
+        exe = which(g["bin"])
+        row = {"id": g["id"], "label": g["label"], "note": g["note"], "installed": bool(exe),
+               "install": g["install"], "login": g["login"], "models": 0, "signed_in": None}
+        if exe and g["id"] == "agy-cli":
+            row["models"] = len(agy_models(max_age=0 if fresh else 3600))
+            row["signed_in"] = row["models"] > 0
+        elif exe:
+            row["signed_in"] = os.path.exists(os.path.expanduser("~/.gemini/oauth_creds.json")) or None
+        out.append(row)
+    return out
+
+
+def agy_models(max_age=3600):
+    """The models Antigravity offers this account, from `agy models --output-format json`:
+    [(slug, label)], kept for an hour. Empty when the CLI is missing or says nothing usable."""
+    import subprocess, time
+    if time.time() - _AGY["at"] < max_age: return list(_AGY["rows"])
+    exe = which("agy")
+    rows = []
+    if exe:
+        try:
+            r = subprocess.run([exe, "models", "--output-format", "json"], capture_output=True, text=True,
+                               timeout=20, env=cli_env(exe), stdin=subprocess.DEVNULL)
+            d = json.loads(r.stdout or "[]")
+            for m in (d if isinstance(d, list) else (d.get("models") or d.get("data") or [])):
+                if isinstance(m, str): rows.append((m, m))
+                elif isinstance(m, dict):
+                    slug = m.get("slug") or m.get("id") or m.get("name")
+                    if slug: rows.append((str(slug), str(m.get("displayName") or m.get("display_name") or m.get("name") or slug)))
+        except Exception:
+            rows = []
+    _AGY.update(at=time.time(), rows=rows)
+    return list(rows)
 
 
 def cli_models():
@@ -239,9 +316,48 @@ def _cli_text(ev):
     return (None, "")
 
 
+class CliQuotaError(RuntimeError):
+    """The CLI's provider said this account's allowance is used up. `seconds` is how long
+    to leave the account alone; `message` is what the provider said."""
+    def __init__(self, message, seconds=None):
+        super().__init__(message)
+        self.seconds = seconds
+
+
 def cli_stream(backend, model, messages, emit=None, cancel=None, timeout=900,
-               cwd=None, extra_args=None):
-    """Run one turn through a CLI agent and stream what it says."""
+               cwd=None, extra_args=None, account_for=None, on_quota=None, on_moved=None):
+    """Run one turn through a CLI agent and stream what it says.
+
+    With several accounts for the agent's provider, `account_for(backend, model, messages,
+    tried)` names the one to run as -- (extra env, who) -- or None to run as the CLI is
+    set up. When the provider says that account's allowance is used up, `on_quota(who,
+    message, seconds)` records it and the turn goes again on the next account."""
+    emit = emit or (lambda k, p: None)
+    tried = []
+    for _ in range(6):
+        pick = account_for(backend, model, messages, tried) if account_for else None
+        env_extra, who = pick if pick else ({}, None)
+        try:
+            out = _cli_stream_once(backend, model, messages, emit=emit, cancel=cancel, timeout=timeout, cwd=cwd,
+                                   extra_args=extra_args, env_extra=env_extra)
+            if tried and who and on_moved:
+                try: on_moved(who)
+                except Exception: pass
+            return out
+        except CliQuotaError as e:
+            if not who: raise
+            if on_quota:
+                try: on_quota(who, str(e), e.seconds)
+                except Exception: pass
+            tried.append(who["account"])
+            nxt = account_for(backend, model, messages, tried) if account_for else None
+            if not nxt: raise
+            emit("notice", {"msg": f"{who['label']} is used up — continuing on {nxt[1]['label']}.", "kind": "account"})
+    raise RuntimeError("every account for this agent is used up")
+
+
+def _cli_stream_once(backend, model, messages, emit=None, cancel=None, timeout=900,
+                     cwd=None, extra_args=None, env_extra=None):
     import signal, subprocess, threading
     emit = emit or (lambda k, p: None)
     b = CLI_BACKENDS.get(backend)
@@ -283,12 +399,14 @@ def cli_stream(backend, model, messages, emit=None, cancel=None, timeout=900,
         if system and b.get("system_flag"):
             argv += [b["system_flag"], system[:6000]]
         argv += list(extra_args or [])
+        if b.get("prompt_flag"): argv.append(b["prompt_flag"])        # the flag that takes the prompt comes last
         argv.append(prompt if (system and b.get("system_flag")) else
                     ((system + "\n\n" + prompt) if system else prompt))
     session_id = None
 
     proc = subprocess.Popen(argv, cwd=cwd or None, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=cli_env(exe),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env={**cli_env(exe), **(env_extra or {})},
                             start_new_session=True)   # own group, so cancel kills children
 
     killed = {"why": None}
@@ -307,15 +425,21 @@ def cli_stream(backend, model, messages, emit=None, cancel=None, timeout=900,
                 if cancel.wait(0.4): stop("cancelled"); return
         threading.Thread(target=watch, daemon=True).start()
 
-    live, whole, final, think = [], [], None, []
+    live, whole, final, think, errs = [], [], None, [], []
     try:
         for raw in proc.stdout:
+            if b.get("plain"):                 # a CLI that answers in plain text, not events
+                chunk = raw.decode("utf-8", "replace")
+                live.append(chunk); emit("content_delta", chunk)
+                continue
             line = raw.decode("utf-8", "replace").strip()
             if not line: continue
             try: ev = json.loads(line)
             except ValueError:
                 continue                       # progress chatter, not an event
             if not isinstance(ev, dict): continue
+            if ev.get("type") == "error" and isinstance(ev.get("error"), dict):
+                errs.append(ev["error"])       # what OpenCode says when its provider refuses
             if not session_id:
                 # the session the CLI answered in, so the next message continues it
                 session_id = (ev.get("thread_id") if ev.get("type") == "thread.started" else None) \
@@ -344,6 +468,7 @@ def cli_stream(backend, model, messages, emit=None, cancel=None, timeout=900,
         rc = proc.wait()
 
     text = final or ("".join(live) if live else "\n\n".join(whole))
+    if b.get("plain"): text = text.strip()
 
     # A signed-out CLI exits 0 and prints its complaint as the answer, which then
     # gets saved as though the model had said it. Surface it as the failure it is.
@@ -361,6 +486,17 @@ def cli_stream(backend, model, messages, emit=None, cancel=None, timeout=900,
                 f"Open a terminal, run `{b['bin']}`, {fix}, then try again.")
     if killed["why"] == "timeout" and not text:
         raise RuntimeError(f"{b['bin']} produced nothing within {timeout}s")
+    if not text and errs:
+        d = errs[-1].get("data") if isinstance(errs[-1].get("data"), dict) else {}
+        said = str(d.get("message") or errs[-1].get("message") or errs[-1].get("name") or "")
+        try:
+            import harness_usage
+            hdrs = d.get("responseHeaders") if isinstance(d.get("responseHeaders"), dict) else {}
+            wait = harness_usage.quota_block(d.get("statusCode"), d.get("responseBody") or said, hdrs.get("retry-after"))
+        except Exception:
+            wait = None
+        if wait is not None: raise CliQuotaError(said or "usage limit reached", wait)
+        raise RuntimeError(f"{b['bin']}: {said[:300] or 'it reported an error'}")
     if not text and rc not in (0, None):
         tail = err.decode("utf-8", "replace").strip().splitlines()
         raise RuntimeError(f"{b['bin']} exited {rc}: " + (tail[-1][:300] if tail else "no output"))

@@ -75,6 +75,21 @@ extension OrbitServer {
         return try await postChecked("/api/harness/account", body)
     }
 
+    /// Your Claude accounts: add | rename | home | clear | remove | test. A token's value goes
+    /// through `saveSecret` under the account's key name, like any other key.
+    @discardableResult
+    func claudeAccount(op: String, id: String? = nil, label: String? = nil) async throws -> JSONValue {
+        var body: [String: Any] = ["op": op]
+        if let id { body["id"] = id }
+        if let label { body["label"] = label }
+        return try await postChecked("/api/claude/accounts", body, timeout: op == "test" ? 120 : nil)
+    }
+
+    /// What happens when an account's allowance runs out: move on by itself, and return.
+    func accountsPolicy(autoSwitch: Bool, switchBack: Bool) async throws {
+        try await postChecked("/api/harness/policy", ["auto_switch": autoSwitch, "switch_back": switchBack])
+    }
+
     /// One tiny request to a model, through the route a chat would take.
     func harnessTest(modelID: String) async throws -> HarnessTestResult {
         let data = try await settingsCall("/api/harness/test", method: "POST",

@@ -106,14 +106,22 @@ struct HarnessOverview: Decodable {
     var gatewayError: String?
     /// Requests the gateway passed on since it started, and how many failed.
     var gatewayStats: GatewayStats?
+    /// What happens when an account's allowance runs out, for every provider with several.
+    var autoSwitch = true
+    var switchBack = true
 
-    enum CodingKeys: String, CodingKey { case providers, proxy, gateway }
+    enum CodingKeys: String, CodingKey { case providers, proxy, gateway, accounts_policy }
+    struct Policy: Decodable { var auto_switch: Bool?; var switch_back: Bool? }
     enum GW: String, CodingKey { case port, error, stats }
 
     init(from d: Decoder) throws {
         let c = try d.container(keyedBy: CodingKeys.self)
         providers = c.lenient([HarnessProvider].self, .providers) ?? []
         proxy = c.lenient(String.self, .proxy)
+        if let pol = c.lenient(Policy.self, .accounts_policy) {
+            autoSwitch = pol.auto_switch ?? true
+            switchBack = pol.switch_back ?? true
+        }
         if let g = try? c.nestedContainer(keyedBy: GW.self, forKey: .gateway) {
             gatewayPort = g.lenient(Int.self, .port)
             gatewayError = g.lenient(String.self, .error)
@@ -245,8 +253,11 @@ struct HarnessAccount: Decodable, Identifiable, Hashable {
     var monthSpent: Double?
     /// Spend through Orbit per window (5 hours, week, month).
     var usage: OrbitSpend?
+    /// Claude accounts: a sign-in token is saved for it, and it can answer right now.
+    var tokenSet = false
+    var ready = false
 
-    enum CodingKeys: String, CodingKey { case id, label, key, key_set, active, exhausted, live, usage }
+    enum CodingKeys: String, CodingKey { case id, label, key, key_set, active, exhausted, live, usage, token_set, ready }
     struct Exhausted: Decodable, Hashable { var until: Double? }
     struct Usage: Decodable, Hashable {
         struct Window: Decodable, Hashable { var spent: Double? }
@@ -264,6 +275,8 @@ struct HarnessAccount: Decodable, Identifiable, Hashable {
         live = c.lenient(LiveUsage.self, .live)
         monthSpent = c.lenient(Usage.self, .usage)?.windows?["month"]?.spent
         usage = c.lenient(OrbitSpend.self, .usage)
+        tokenSet = c.lenient(Bool.self, .token_set) ?? false
+        ready = c.lenient(Bool.self, .ready) ?? false
     }
 }
 

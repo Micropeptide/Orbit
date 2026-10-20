@@ -130,6 +130,19 @@ PRESETS = {
         "docs": ".ai and .cn keys are not interchangeable.",
         "models": [_m("kimi-k2.7-code", "messages")],
     },
+    "gemini": {
+        "label": "Gemini · Google AI", "base": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "key": "GEMINI_API_KEY", "auth": "gateway", "small": "gemini-3.5-flash-lite",
+        "keys_url": "https://aistudio.google.com/apikey",
+        "docs": "Google's Gemini API, with a key from Google AI Studio. Its models speak OpenAI's chat API, so "
+                "Claude Code reaches them through Orbit's gateway, which carries each tool call's thought "
+                "signature back as Gemini 3 and later require. The model list and each model's token limits "
+                "come from Google itself. A Google AI Pro/Ultra subscription is not an API key: "
+                "to use that login as it is, run Antigravity or the Gemini CLI (shown under CLI agents).",
+        "models": [_m(x, "chat", 1048576) for x in ("gemini-4-argon", "gemini-3.8-flash", "gemini-3.6-flash",
+                                                     "gemini-3.5-flash-lite", "gemini-3.1-pro-preview",
+                                                     "gemini-2.5-pro", "gemini-2.5-flash")],
+    },
     "anthropic": {
         "label": "Anthropic", "base": "https://api.anthropic.com", "key": "ANTHROPIC_API_KEY",
         "auth": "api_key", "small": "claude-haiku-4-5", "keys_url": "https://console.anthropic.com/settings/keys",
@@ -152,7 +165,7 @@ def _path(root):
 MODELS_DEV_URL = "https://models.dev/api.json"
 MODELS_DEV_ID = {"opencode-go": "opencode-go", "opencode-zen": "opencode", "deepseek": "deepseek",
                  "qwen": "alibaba", "glm": "zai", "minimax": "minimax", "kimi": "moonshotai",
-                 "anthropic": "anthropic"}
+                 "anthropic": "anthropic", "gemini": "google"}
 
 
 def _fetched_path(root):
@@ -171,6 +184,32 @@ def _http_json(url, headers=None, timeout=20):
     req = urllib.request.Request(url, headers={"User-Agent": "orbit", **(headers or {})})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
+
+
+GEMINI_NOT_CHAT = ("embedding", "tts", "image", "audio", "live", "robotics", "aqa", "veo", "imagen", "lyria",
+                   "deep-research", "computer-use")
+
+
+def gemini_models(key, timeout=20):
+    """What this key can use, from Google's own list: [{"id", "label", "context", "output",
+    "reasoning"}]. Only models that generate text for a chat (no embeddings, speech, images,
+    live audio): the OpenAI-style /models route names models but says nothing of their limits."""
+    out, token = [], None
+    for _ in range(6):                                           # pages of up to 1000
+        url = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000"
+        if token: url += "&pageToken=" + token
+        d = _http_json(url, {"x-goog-api-key": key}, timeout)
+        for m in d.get("models") or []:
+            mid = str(m.get("name") or "").replace("models/", "", 1)
+            if not mid.startswith("gemini") or any(w in mid for w in GEMINI_NOT_CHAT): continue
+            if "generateContent" not in (m.get("supportedGenerationMethods") or []): continue
+            out.append({"id": mid, "label": m.get("displayName") or _label(mid),
+                        "context": int(m.get("inputTokenLimit") or 0) or None,
+                        "output": int(m.get("outputTokenLimit") or 0) or None,
+                        "reasoning": bool(m.get("thinking"))})
+        token = d.get("nextPageToken")
+        if not token: break
+    return out
 
 
 def models_dev(root, max_age=86400, timeout=30):
@@ -207,9 +246,16 @@ def refresh_models(root, pid, secrets=None, timeout=20):
     base_p = providers(root).get(pid)
     if not base_p or base_p.get("auth") in ("local", "subscription"): return 0, "not a remote provider"
     dev = (models_dev(root).get(MODELS_DEV_ID.get(pid, pid)) or {}).get("models") or {}
-    live, note = None, ""
+    live, note, own = None, "", {}
     key = _key_value(base_p, secrets)
-    if key and base_p.get("base"):
+    if key and pid == "gemini":
+        try:
+            rows = gemini_models(key, timeout)
+            own = {r["id"]: r for r in rows}
+            live = [r["id"] for r in rows]
+        except Exception as e:
+            note = f"live list unavailable ({type(e).__name__})"
+    elif key and base_p.get("base"):
         try:
             base = base_p["base"].rstrip("/")
             url = base + ("/v1/models" if base.endswith("/anthropic") else "/models")
@@ -219,6 +265,8 @@ def refresh_models(root, pid, secrets=None, timeout=20):
         except Exception as e:
             note = f"live list unavailable ({type(e).__name__})"
     ids = live if live else list(dev.keys())
+    if pid == "gemini":                  # whichever list it came from: only models that can drive a chat
+        ids = [i for i in ids if str(i).startswith("gemini") and not any(w in str(i) for w in GEMINI_NOT_CHAT)]
     if not ids: return 0, note or "no models found"
     preset = {m["id"]: m for m in PRESETS.get(pid, {}).get("models") or []}
     out = []
@@ -227,16 +275,19 @@ def refresh_models(root, pid, secrets=None, timeout=20):
         lim = info.get("limit") or {}
         if base_p.get("auth") == "api_key":
             fmt = "messages"                              # these endpoints are Anthropic-compatible
+        elif pid == "gemini":
+            fmt = "chat"                                  # OpenAI's chat API, at Google's /openai endpoint
         elif mid in preset:
             fmt = preset[mid]["format"]
         else:
             fmt = _format_from_npm((info.get("provider") or {}).get("npm") if isinstance(info.get("provider"), dict)
                                    else None)
         if fmt is None: continue
-        out.append({"id": mid, "format": fmt, "label": info.get("name") or _label(mid),
-                    "context": int(lim.get("context") or (preset.get(mid) or {}).get("context") or 128000),
-                    "output": int(lim.get("output") or 0) or None,
-                    "reasoning": bool(info.get("reasoning")), "free": "free" in mid})
+        mine = own.get(mid) or {}                            # the provider's own word first
+        out.append({"id": mid, "format": fmt, "label": mine.get("label") or info.get("name") or _label(mid),
+                    "context": int(mine.get("context") or lim.get("context") or (preset.get(mid) or {}).get("context") or 128000),
+                    "output": int(mine.get("output") or lim.get("output") or 0) or None,
+                    "reasoning": bool(mine.get("reasoning") or info.get("reasoning")), "free": "free" in mid})
     out.sort(key=lambda m: (m["free"], m["id"]))
     cache = fetched(root)
     cache[pid] = {"at": time.time(), "source": ("live+models.dev" if live else "models.dev"), "models": out, "note": note}
@@ -255,11 +306,13 @@ def load(root):
         d = {}
     return {"custom": d.get("custom") or {}, "providers": d.get("providers") or {},
             "hidden": d.get("hidden") or [], "contexts": d.get("contexts") or {},
-            "gateway_port": d.get("gateway_port") or 8897, "proxy": d.get("proxy") or ""}
+            "gateway_port": d.get("gateway_port") or 8897, "proxy": d.get("proxy") or "",
+            "accounts_policy": d.get("accounts_policy") or {}}
 
 
 def save(root, cfg):
-    keep = {k: cfg.get(k) for k in ("custom", "providers", "hidden", "contexts", "gateway_port", "proxy")}
+    keep = {k: cfg.get(k) for k in ("custom", "providers", "hidden", "contexts", "gateway_port", "proxy",
+                                    "accounts_policy")}
     for c in (keep.get("custom") or {}).values():          # a key value never goes in this file
         c.pop("api_key", None)
     p = _path(root)
@@ -397,6 +450,35 @@ def _secret(name, secrets):
     return ((secrets or {}).get(name) or os.environ.get(name) or "") if name else ""
 
 
+def policy(root):
+    """What happens when an account's allowance runs out, for every provider with accounts
+    (Claude, OpenCode Go, ...): move to the next account by itself ("auto_switch"), and
+    return to the main one once its allowance is back ("switch_back")."""
+    got = load(root).get("accounts_policy") or {}
+    return {k: got[k] if isinstance(got.get(k), bool) else True for k in ("auto_switch", "switch_back")}
+
+
+def set_policy(root, **kw):
+    cfg = load(root)
+    cur = dict(policy(root))
+    cur.update({k: v for k, v in kw.items() if k in cur and isinstance(v, bool)})
+    cfg["accounts_policy"] = cur
+    save(root, cfg)
+    return cur
+
+
+def moved_to(root, pid, account):
+    """A request had to leave the main account and went ahead on another. When "switch back"
+    is off, the account that took over is the main one from now on."""
+    if policy(root)["switch_back"]: return False
+    cfg = load(root)
+    over = cfg["providers"].setdefault(pid, {})
+    if over.get("active") == account: return False
+    over["active"] = account
+    save(root, cfg)
+    return True
+
+
 def accounts(p):
     """A provider's accounts, the active one first: [{id, label, key}]."""
     rows = [a for a in (p.get("accounts") or []) if isinstance(a, dict) and a.get("key")]
@@ -417,7 +499,10 @@ def account_keys(p, secrets, root=None, pid=None):
         try:
             import harness_usage
             for a in out: a["exhausted"] = harness_usage.exhausted(root, pid, a["id"])
-            out.sort(key=lambda a: bool(a.get("exhausted")))
+            if policy(root)["auto_switch"]:
+                out.sort(key=lambda a: bool(a.get("exhausted")))
+            else:
+                out = out[:1]          # no moving on by itself: the main account, and its limit shows
         except Exception:
             pass
     return out
@@ -471,9 +556,16 @@ def _bionic():
         return None
 
 
-def _ready(pid, p, secrets):
+def _ready(pid, p, secrets, root=None):
     if p.get("auth") == "local" or p.get("keyless"): return True
-    if p.get("auth") == "subscription": return claude_login(token=_secret(TOKEN_KEY, secrets)) == "yes"
+    if p.get("auth") == "subscription":
+        if root:                                   # any of your Claude accounts will do
+            try:
+                import claude_accounts
+                return any(claude_accounts.usable(a, secrets) for a in claude_accounts.accounts(root))
+            except Exception:
+                pass
+        return claude_login(token=_secret(TOKEN_KEY, secrets)) == "yes"
     return bool(_key_value(p, secrets))
 
 
@@ -482,7 +574,7 @@ def catalogue(root, secrets=None, local_name=None, include_unready=False):
     cfg = load(root)
     out = []
     for pid, p in providers(root, local_name).items():
-        ready = _ready(pid, p, secrets)
+        ready = _ready(pid, p, secrets, root)
         if not ready and not include_unready: continue
         # the local model is already in the picker as "Claude Code · local Qwen"
         if pid == "local" and not include_unready: continue
@@ -514,7 +606,7 @@ def resolve(root, mid, secrets=None, local_name=None):
         auth = "gateway"               # several accounts: the gateway can move to the next
     return {"id": mid, "provider": "harness", "model": f"{pid}/{model}",
             "label": f"{m['label']} · {p['label']}", "context": m["context"], "kind": "harness",
-            "provider_label": "Claude Code · " + p["label"], "ready": _ready(pid, p, secrets),
+            "provider_label": "Claude Code · " + p["label"], "ready": _ready(pid, p, secrets, root),
             "provider_cfg": {"kind": "harness", "provider": pid, "model": model, "base": p.get("base") or "",
                              "format": m["format"], "auth": auth,
                              "key_name": (keys[0]["key_name"] if keys else p.get("key") or ""),
@@ -576,14 +668,25 @@ def public_view(root, secrets=None, local_name=None):
     for pid, p in providers(root, local_name).items():
         out.append({"id": pid, "label": p["label"], "base": p.get("base"), "alt_bases": p.get("alt_bases") or [],
                     "key": p.get("key"), "key_set": bool(_key_value(p, secrets)), "auth": p.get("auth"),
-                    "keyless": bool(p.get("keyless")), "ready": _ready(pid, p, secrets),
+                    "keyless": bool(p.get("keyless")), "ready": _ready(pid, p, secrets, root),
                     "login": claude_login(token=_secret(TOKEN_KEY, secrets)) if p.get("auth") == "subscription" else None,
                     "token_set": bool(_secret(TOKEN_KEY, secrets)) if p.get("auth") == "subscription" else None,
-                    "accounts": [{"id": a["id"], "label": a["label"], "key": a["key"],
-                                  "key_set": bool(_secret(a["key"], secrets)),
-                                  "active": i == 0, "exhausted": _exhausted(root, pid, a["id"])}
-                                 for i, a in enumerate(accounts(p))],
+                    "accounts": (_claude_rows(root, secrets) if p.get("auth") == "subscription" else
+                                 [{"id": a["id"], "label": a["label"], "key": a["key"],
+                                   "key_set": bool(_secret(a["key"], secrets)),
+                                   "active": i == 0, "exhausted": _exhausted(root, pid, a["id"])}
+                                  for i, a in enumerate(accounts(p))]),
                     "docs": p.get("docs") or "", "keys_url": p.get("keys_url") or "", "custom": bool(p.get("custom")),
                     "env": p.get("env") or {}, "small": p.get("small") or "", "fetched_at": p.get("fetched_at"),
                     "models": [{**m, "hidden": f"harness:{pid}/{m['id']}" in cfg["hidden"]} for m in p["models"]]})
-    return {"providers": out, "gateway_port": cfg["gateway_port"], "proxy": cfg["proxy"]}
+    return {"providers": out, "gateway_port": cfg["gateway_port"], "proxy": cfg["proxy"],
+            "accounts_policy": policy(root)}
+
+
+def _claude_rows(root, secrets):
+    import claude_accounts
+    rows = claude_accounts.public(root, secrets)
+    for r in rows:                      # what older clients read an account's state from
+        r["key_set"] = bool(r["token_set"] or r["ready"])
+        r["active"] = r["home"]
+    return rows

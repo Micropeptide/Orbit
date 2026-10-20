@@ -420,6 +420,16 @@ class TestOnlyTheLocalModelLosesItsClassifier(unittest.TestCase):
         self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
         self.assertTrue(q.CE.orbit_is_the_gate("auto", "local"))
 
+    def test_asking_first_has_to_be_said_on_every_kind_of_model(self):
+        """Claude Code 2.1.x starts in auto when no mode is stated, with or without any
+        settings, so "ask first" is only what it says: the explicit mode is passed, and
+        Orbit's gate stays off (every question goes to the person)."""
+        for kind in ("local", "provider", "subscription"):
+            with self.subTest(kind=kind):
+                argv = q.CE.build_argv(dict(q.CE.DEFAULTS), kind=kind, mode="default")
+                self.assertEqual(argv[argv.index("--permission-mode") + 1], "default")
+                self.assertFalse(q.CE.orbit_is_the_gate("default", kind))
+
 
 if __name__ == "__main__":
     unittest.main()

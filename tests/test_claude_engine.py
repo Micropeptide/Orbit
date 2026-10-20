@@ -41,7 +41,9 @@ class TestClaudeEngine(unittest.TestCase):
         cls.saved_workdir = CE._work_dir
         wd = os.path.join(cls.tmp, "engine-files"); os.makedirs(wd)
         CE._work_dir = lambda: wd                               # nor into Orbit's config
-        q.S["claude_qwen"] = {"mcp_servers": [], "permission_mode": ""}      # ask first: these tests check approvals
+        # Ask first: these tests check approvals. Said out loud -- "" is Claude's own mode,
+        # and Claude Code 2.1.x starts in auto (its classifier) when nothing states one.
+        q.S["claude_qwen"] = {"mcp_servers": [], "permission_mode": "default"}
         q.S["autonomy_mode"] = "ask"
 
     @classmethod
