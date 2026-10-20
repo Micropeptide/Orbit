@@ -1110,19 +1110,19 @@ Details, including the idle watchdog that stops the local model when unused:
 ## Tests
 
 ```bash
-venv/bin/python -m unittest discover -s tests -p "test_*.py"
+venv/bin/python -m pytest tests/ -q -p no:cacheprovider
 ```
 
-Over 300 tests, none needing a model or network: the core agent loop, safety, sessions
-and ordering, the provider registry, the gateway's translations and account failover,
-the message queue, scheduled messages and tasks (editing, validation, starvation),
-model fallback, Codex mode against a stand-in app-server, the Responses gateway
-translations, concurrent chats, finding and previewing the
-files a chat names (and refusing secrets or paths outside a preview's folder),
-Codex/OpenCode session import and resume, the SSH
-wrapper and its watchdog, and Claude Code end to end — the real `claude` binary against a
-scripted stand-in for the Messages API. `tests/test_endpoints.py` and `tests/test_api.py`
-check a running app and clean up after themselves.
+About a thousand tests, none needing a model, a key or the network: the core agent loop, safety,
+sessions and ordering, the provider registry, the gateway's translations and account failover
+(Claude, OpenCode Go and Gemini accounts, thought signatures), the look-tools server against a
+real Chrome, the message queue, scheduled messages and tasks, model fallback, Codex mode against
+a stand-in app-server, the Responses gateway translations, concurrent chats, finding and
+previewing the files a chat names, Codex/OpenCode/Antigravity session import and resume with
+stand-in CLIs, the SSH wrapper and its watchdog, and Claude Code end to end — the real `claude`
+binary against a scripted stand-in for the Messages API. `tests/test_api.py` and
+`tests/test_endpoints.py` are for a running app (`venv/bin/python tests/test_api.py`): pytest skips
+the first, which creates and removes real data.
 
 ---
 
