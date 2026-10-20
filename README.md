@@ -1110,6 +1110,7 @@ Details, including the idle watchdog that stops the local model when unused:
 ## Tests
 
 ```bash
+venv/bin/pip install pytest        # once
 venv/bin/python -m pytest tests/ -q -p no:cacheprovider
 ```
 
