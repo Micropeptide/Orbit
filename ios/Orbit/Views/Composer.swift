@@ -78,6 +78,9 @@ struct Composer: View {
     var body: some View {
         VStack(spacing: 0) {
             if !state.queue.items.isEmpty { QueueStrip() }
+            // a row that can scroll: the model, context, cheaper-hours and send-later chips together
+            // are wider than a phone at larger text sizes, and used to run off the screen's edge
+            ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
             // Which model answers is the single fact you most want in view, so it
             // lives here rather than in a toolbar that folds it away when cramped.
@@ -109,6 +112,8 @@ struct Composer: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Send later")
             }
+            }
+            .padding(.horizontal, 12)
             }
             .padding(.top, 6)
             ContextLowLine()
@@ -434,6 +439,7 @@ struct Composer: View {
                             replaceToken(n, with: "")
                         } label: { Image(systemName: "xmark.circle.fill").font(.caption) }
                             .buttonStyle(.plain).foregroundStyle(.secondary)
+                            .accessibilityLabel("Remove")
                             .accessibilityLabel("Remove the paste")
                     }
                     .padding(.horizontal, 9).padding(.vertical, 5)
@@ -519,6 +525,7 @@ struct Composer: View {
                             state.attachments.removeAll { $0.id == a.id }
                         } label: { Image(systemName: "xmark.circle.fill").font(.caption) }
                             .buttonStyle(.plain).foregroundStyle(.secondary)
+                            .accessibilityLabel("Remove")
                     }
                     .padding(.leading, 6).padding(.trailing, 9).padding(.vertical, 5)
                     .background(.quaternary.opacity(0.5), in: .capsule)

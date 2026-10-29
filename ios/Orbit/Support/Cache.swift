@@ -33,6 +33,12 @@ enum Cache {
         read("chats.json", as: [ChatSummary].self) ?? []
     }
 
+    // ------------------------------------------------------------ shared projects
+
+    static func saveShared(_ snap: SharedSnapshot) { write(snap, to: "shared.json") }
+    static func loadShared() -> SharedSnapshot? { read("shared.json", as: SharedSnapshot.self) }
+    static func clearShared() { try? FileManager.default.removeItem(at: file("shared.json")) }
+
     // ------------------------------------------------------------ messages
 
     static func saveMessages(_ messages: [Message], for sid: String) {

@@ -346,6 +346,15 @@ struct ChatRowMenu: View {
         } label: {
             Label("Project", systemImage: "folder")
         }
+        if state.shared.visible {
+            Menu {
+                ForEach(state.shared.projects) { p in
+                    Button(p.name) {
+                        Task { await state.shared.prepareShare(chat: chat.id, into: p, using: state.server) }
+                    }
+                }
+            } label: { Label("Add to a shared project…", systemImage: "person.2") }
+        }
         Button {
             Task {
                 guard let server = state.server else { return }

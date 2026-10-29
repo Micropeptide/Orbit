@@ -14,7 +14,7 @@ import claude_engine as CE
 
 class Switches(unittest.TestCase):
     def setUp(self):
-        self.saved = {k: q.S.get(k) for k in ("look_engines", "look_groups")}
+        self.saved = {k: q.S.get(k) for k in ("look_engines", "look_groups", "computer_use_enabled")}
         for k in self.saved: q.S.pop(k, None)
         self.addCleanup(self.restore)
 

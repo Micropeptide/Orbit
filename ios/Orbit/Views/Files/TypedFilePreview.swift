@@ -85,6 +85,7 @@ struct TypedFilePreview: View {
                         }
                         Button { share() } label: { Label("Share", systemImage: "square.and.arrow.up") }
                     } label: { Image(systemName: "ellipsis.circle") }
+                    .accessibilityLabel("More")
                 }
             }
             .sheet(item: $shareURL) { ActivityView(items: [$0]).ignoresSafeArea() }

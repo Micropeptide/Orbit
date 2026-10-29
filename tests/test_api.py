@@ -127,6 +127,11 @@ try:
           sess.get("easy_mode") is True and (sess.get("prefs") or {}).get("easy_mode") is True, sess)
     d = post("/api/chat/setting", {"sid": pc, "key": "easy_mode", "value": None})
     check("clearing it follows Orbit again", "easy_mode" not in (d.get("prefs") or {}), d)
+    d = post("/api/chat/setting", {"sid": pc, "key": "no_fallback", "value": True})
+    check("a chat can stay on its model (no fallback) for itself", d.get("effective") is True, d)
+    check("and that is not everyone's", not get("/api/info")["settings"].get("no_fallback"))
+    d = post("/api/chat/setting", {"sid": pc, "key": "no_fallback", "value": None})
+    check("auto puts it back to Settings", "no_fallback" not in (d.get("prefs") or {}), d)
     d = post_raw("/api/chat/setting", {"sid": pc, "key": "workspace", "value": "/"})
     check("a chat cannot keep its own copy of a global setting", bool(d.get("error")), d)
 

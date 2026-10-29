@@ -72,7 +72,17 @@ struct ScheduledView: View {
                     Text("Tasks")
                 }
 
-                ClusterJobsSection()
+                Section {
+                    NavigationLink { ClusterScreen() } label: {
+                        Label("Cluster", systemImage: "server.rack")
+                    }
+                    NavigationLink { CrewView() } label: {
+                        Label("Crew", systemImage: "person.3")
+                    }
+                } footer: {
+                    Text("Cluster: your jobs, its GPUs, disk and queue, and the models running on it. "
+                         + "Crew: a builder and a reviewer improving a folder until you stop them.")
+                }
             }
             .listStyle(.insetGrouped)
             .overlay {

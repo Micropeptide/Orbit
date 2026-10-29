@@ -1,0 +1,3 @@
+#!/bin/sh
+# Kept so muscle memory and old scripts keep working; `orbit` is the real name.
+exec "$(dirname "$0")/orbit" "$@"

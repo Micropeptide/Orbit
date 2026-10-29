@@ -9,8 +9,18 @@ struct Pairing: Codable, Equatable {
     var name: String         // the Mac's name, for the UI
     /// Other addresses the same Mac answers on; tried when `url` fails.
     var alts: [String]? = nil
+    /// The Cloudflare Access service token for a Mac reached over the internet (an https name the Mac gave in the QR).
+    /// Cloudflare asks every request to that one host for it; no other address ever receives it.
+    var aid: String? = nil
+    var asec: String? = nil
+    var ahost: String? = nil
 
     var base: URL? { URL(string: url) }
+
+    func accessHeaders(for url: URL?) -> [String: String] {
+        guard let aid, let asec, let ahost, let url, url.scheme == "https", url.host == ahost else { return [:] }
+        return ["CF-Access-Client-Id": aid, "CF-Access-Client-Secret": asec]
+    }
 }
 
 struct ChatSummary: Identifiable, Codable, Hashable {
@@ -157,6 +167,26 @@ struct Message: Identifiable, Codable, Hashable {
 private struct FailableMessage: Decodable {
     let value: Message?
     init(from d: Decoder) throws { value = try? Message(from: d) }
+}
+
+extension Message {
+    /// The Mac sends no id, so every reload used to hand every message a new one: SwiftUI
+    /// then tore down and rebuilt every row, and a long chat flickered and stuttered each time
+    /// anything changed. A message that reads the same as the one at its place keeps its id.
+    static func keepingIDs(_ new: [Message], from old: [Message]) -> [Message] {
+        guard !old.isEmpty, !new.isEmpty else { return new }
+        var out = new
+        func same(_ a: Message, _ b: Message) -> Bool { a.role == b.role && a.text == b.text }
+        var head = 0
+        while head < min(old.count, out.count), same(old[head], out[head]) {
+            out[head].id = old[head].id; head += 1
+        }
+        var o = old.count - 1, n = out.count - 1
+        while o >= head, n >= head, same(old[o], out[n]) {
+            out[n].id = old[o].id; o -= 1; n -= 1
+        }
+        return out
+    }
 }
 
 struct ChatDetail: Codable {

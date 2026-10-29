@@ -20,16 +20,12 @@ def check(path):
     except OSError as e:
         print(f"cannot read {path}: {e}")
         return 2
-    blocks = re.findall(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", src, re.S)
-    if not blocks:
-        print(f"{path}: no inline script to check")
-        return 0
-    bad = 0
-    for i, b in enumerate(blocks):
-        if len(b.strip()) < 20:
-            continue
+    webdir = os.path.dirname(os.path.abspath(path))
+
+    def node_check(code, label):
+        """Run `node --check` on a chunk of JS; print a failure. 0 ok, 1 bad, 2 no node."""
         with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
-            f.write(b)
+            f.write(code)
             tmp = f.name
         try:
             r = subprocess.run(["node", "--check", tmp], capture_output=True, text=True)
@@ -39,13 +35,38 @@ def check(path):
         finally:
             os.unlink(tmp)
         if r.returncode:
-            bad += 1
-            # node names the line inside the block; say where the block starts too
-            before = src[:src.find(b)].count("\n")
-            print(f"{path}: inline block {i} (starts at line {before + 1}) does not parse:")
+            print(f"{path}: {label} does not parse:")
             print(r.stderr.rstrip()[:2000])
+            return 1
+        return 0
+
+    bad = 0
+    # inline scripts (no src)
+    blocks = re.findall(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", src, re.S)
+    for i, b in enumerate(blocks):
+        if len(b.strip()) < 20:
+            continue
+        before = src[:src.find(b)].count("\n")
+        rc = node_check(b, f"inline block {i} (starts at line {before + 1})")
+        if rc == 2:
+            return 2
+        bad += rc
+    # the app's own external scripts (local, not the vendored libraries)
+    local = [u for u in re.findall(r'<script[^>]*\bsrc=["\']([^"\']+)["\']', src)
+             if u.startswith("/") and not u.startswith("/vendor/")]
+    for u in local:
+        fp = os.path.join(webdir, u.lstrip("/"))
+        if not os.path.exists(fp):
+            print(f"{path}: {u} is referenced but missing")
+            bad += 1
+            continue
+        rc = node_check(open(fp, encoding="utf-8").read(), u)
+        if rc == 2:
+            return 2
+        bad += rc
     if not bad:
-        print(f"{path}: {len(blocks)} inline block(s) parse")
+        n = len([b for b in blocks if len(b.strip()) >= 20])
+        print(f"{path}: {n} inline block(s), {len(local)} local script(s) parse")
     return 1 if bad else 0
 
 

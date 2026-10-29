@@ -32,7 +32,9 @@ EXPECTED_TOOLS = {
     "simulator_devices", "simulator_boot", "simulator_install", "simulator_launch", "simulator_terminate",
     "simulator_open_url", "simulator_screenshot", "simulator_shutdown", "simulator_logs", "simulator_tap",
     "simulator_swipe", "simulator_type", "simulator_button", "simulator_ui",
+    "simulator_tap_element", "simulator_long_press", "simulator_drag", "simulator_key", "simulator_gesture",
     "mac_windows", "mac_launch", "mac_screenshot", "mac_quit",
+    "screen_look", "screen_click", "screen_move", "screen_drag", "screen_type", "screen_key", "screen_scroll",
 }
 try: CHROME = look.find_chrome()
 except look.ToolError: CHROME = None
@@ -71,7 +73,7 @@ class TestProtocol(unittest.TestCase):
         self.assertEqual(r["result"]["serverInfo"]["name"], "orbit-look")
         self.assertEqual(look.handle({"jsonrpc": "2.0", "id": 2, "method": "ping"})["result"], {})
         tools = look.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})["result"]["tools"]
-        self.assertEqual({t["name"] for t in tools}, EXPECTED_TOOLS)
+        self.assertEqual({t["name"] for t in tools}, {n for n in EXPECTED_TOOLS if not n.startswith("screen_")})
         bad = look.handle({"jsonrpc": "2.0", "id": 4, "method": "resources/list"})
         self.assertEqual(bad["error"]["code"], -32601)
         self.assertEqual(look.handle({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {"name": "nope"}})["error"]["code"], -32602)
@@ -103,7 +105,7 @@ class TestProtocol(unittest.TestCase):
             r = json.loads(p.stdout.readline())
             got[r["id"]] = r
         self.assertEqual(got[2]["result"], {})
-        self.assertEqual(len(got[3]["result"]["tools"]), len(EXPECTED_TOOLS))
+        self.assertEqual(len(got[3]["result"]["tools"]), len([n for n in EXPECTED_TOOLS if not n.startswith("screen_")]))
         self.assertEqual(got[4]["error"]["code"], -32601)
         self.assertEqual(got[None]["error"]["code"], -32700)
         p.stdin.close()
@@ -526,6 +528,40 @@ class TestSimulator(TmpDirTest):
             self.assertEqual(text_of(res), "Tapping needs AXe: brew install cameroncooke/axe/axe")
             self.assertEqual(fake.simctl(), [])
 
+    def test_the_other_actions_need_axe_too(self):
+        for name, args in (("simulator_tap_element", {"label": "Send"}), ("simulator_long_press", {"x": 1, "y": 2}),
+                           ("simulator_drag", {"x1": 1, "y1": 2, "x2": 3, "y2": 4}), ("simulator_key", {"key": "return"}),
+                           ("simulator_gesture", {"preset": "scroll-down"})):
+            res, fake = self.run_tool(name, args)
+            self.assertTrue(res["isError"], name)
+            self.assertEqual(text_of(res), "Tapping needs AXe: brew install cameroncooke/axe/axe", name)
+
+    def test_the_other_actions_through_axe(self):
+        axe = ("axe", "/x/axe")
+        self.assertEqual(look.input_cmd(axe, "tap_element", "U", label="Send", id=None, value=None, element_type="Button"),
+                         ["/x/axe", "tap", "--label", "Send", "--element-type", "Button", "--udid", "U"])
+        self.assertEqual(look.input_cmd(axe, "long_press", "U", x=10, y=20, seconds=1.5),
+                         ["/x/axe", "touch", "-x", "10", "-y", "20", "--down", "--up", "--delay", "1.5", "--udid", "U"])
+        self.assertEqual(look.input_cmd(axe, "drag", "U", x1=1, y1=2, x2=3, y2=4, duration=0.6),
+                         ["/x/axe", "drag", "--start-x", "1", "--start-y", "2", "--end-x", "3", "--end-y", "4", "--duration", "0.6", "--udid", "U"])
+        self.assertEqual(look.input_cmd(axe, "key", "U", code=40), ["/x/axe", "key", "40", "--udid", "U"])
+        self.assertEqual(look.input_cmd(axe, "key_combo", "U", modifiers=[227], code=4),
+                         ["/x/axe", "key-combo", "--modifiers", "227", "--key", "4", "--udid", "U"])
+        self.assertEqual(look.input_cmd(axe, "gesture", "U", preset="scroll-up", screen=(393, 852)),
+                         ["/x/axe", "gesture", "scroll-up", "--screen-width", "393", "--screen-height", "852", "--udid", "U"])
+        with self.assertRaises(look.ToolError): look.input_cmd(("idb", "/x/idb"), "long_press", "U", x=1, y=2, seconds=1)
+
+    def test_key_names_become_hid_codes(self):
+        self.assertEqual([look.KEYCODES[k] for k in ("return", "delete", "a", "z", "1", "0", "up")], [40, 42, 4, 29, 30, 39, 82])
+        res, _ = self.run_tool("simulator_key", {"key": "banana"}, which={"axe": "/opt/axe"})
+        self.assertTrue(res["isError"]); self.assertIn("Unknown key", text_of(res))
+        res, _ = self.run_tool("simulator_key", {"key": "a", "modifiers": ["hyper"]}, which={"axe": "/opt/axe"})
+        self.assertIn("Unknown modifier", text_of(res))
+        res, _ = self.run_tool("simulator_gesture", {"preset": "teleport"}, which={"axe": "/opt/axe"})
+        self.assertIn("Unknown gesture", text_of(res))
+        res, _ = self.run_tool("simulator_tap_element", {}, which={"axe": "/opt/axe"})
+        self.assertIn("label, an id or a value", text_of(res))
+
     def test_input_commands_through_axe_and_idb(self):
         axe = ("axe", "/x/axe")
         self.assertEqual(look.input_cmd(axe, "tap", "U", x=10, y=20.5), ["/x/axe", "tap", "-x", "10", "-y", "20.5", "--udid", "U"])
@@ -560,6 +596,15 @@ class TestSimulator(TmpDirTest):
         self.assertEqual(lines[1], "[1] TextField \"Email\" value='a@b.c' @ 10,80 300x44")
         self.assertEqual(len(lines), 2)
         self.assertEqual(look.flatten_ui("not json at all")[0], ["not json at all"])
+
+    def test_elements_off_the_screen_do_not_crowd_out_the_ones_on_it(self):
+        rows = [{"type": "StaticText", "AXLabel": "old %d" % i, "frame": {"x": 0, "y": -3000 + i * 10, "width": 100, "height": 8}} for i in range(300)]
+        tree = json.dumps([{"type": "Application", "frame": {"x": 0, "y": 0, "width": 402, "height": 874}, "children": rows + [
+            {"type": "TextField", "AXLabel": "Message", "frame": {"x": 10, "y": 800, "width": 300, "height": 44}}]}])
+        lines, screen = look.flatten_ui(tree)
+        self.assertEqual(lines[0], '[0] TextField "Message" @ 10,800 300x44')
+        self.assertEqual(lines[-1], "(300 more elements are off-screen: scroll to reach them)")
+        self.assertEqual(len(lines), 2)
 
     def test_point_sizes(self):
         self.assertEqual(look.guess_points(1206, 2622)[:2], (402, 874))
@@ -862,9 +907,10 @@ class TestSimulatorSmoke(TmpDirTest):
 class TestGroups(unittest.TestCase):
     """Only the kinds of tool you switched on are offered, listed and callable."""
     def test_every_group_by_default(self):
+        # the screen group is the exception: Orbit lists it only when Screen control is on
         old = os.environ.pop("ORBIT_LOOK_GROUPS", None)
         try:
-            self.assertEqual(len(look.listed_tools()), len(look.TOOLS))
+            self.assertEqual(len(look.listed_tools()), len([n for n in look.TOOLS if not n.startswith("screen_")]))
         finally:
             if old is not None: os.environ["ORBIT_LOOK_GROUPS"] = old
 

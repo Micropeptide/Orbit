@@ -19,6 +19,13 @@ struct ChatListView: View {
     @State private var filter: ChatFilter = .active
     @State private var tagFilter: String? = nil
     @StateObject private var listModel = ChatListModel()
+    @Environment(\.dynamicTypeSize) private var typeSize
+    /// Which shared projects are folded in the list, remembered between launches.
+    @AppStorage("shared.collapsed") private var collapsedRaw = ""
+    private var collapsedShared: Set<String> {
+        get { Set(collapsedRaw.split(separator: ",").map(String.init)) }
+        nonmutating set { collapsedRaw = newValue.sorted().joined(separator: ",") }
+    }
 
     /// A full hostname does not fit a phone title bar and says nothing
     /// useful past the first word.
@@ -81,6 +88,9 @@ struct ChatListView: View {
                         }
                     }
                     FileSearchSection(query: search, preview: $filePreview)
+                    if showsShared {
+                        ForEach(state.shared.projects) { p in sharedSection(p) }
+                    }
                     ForEach(dayGroups, id: \.0) { day, chats in
                      Section {
                       ForEach(chats) { chat in listRow(chat) }
@@ -229,8 +239,78 @@ struct ChatListView: View {
                     await state.loadChatsIfChanged()
                 }
             }
+            .task {
+                // who is here and what is new in the shared projects, as the Shared tab keeps it
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 30_000_000_000)
+                    if Task.isCancelled { break }
+                    if state.reachable != false { await state.shared.refresh(using: state.server, quiet: true) }
+                }
+            }
             .onAppear { listModel.refreshSeen() }
             .modifier(ChatListHost(model: listModel))
+        }
+    }
+
+    /// Shared projects sit above the day groups, except while the list is narrowed to something else.
+    private var showsShared: Bool {
+        state.shared.visible && search.trimmingCharacters(in: .whitespaces).isEmpty
+            && project == nil && tagFilter == nil && (filter == .active || filter == .all)
+    }
+
+    /// The chats of a shared project, folded under its name, the way the web sidebar shows them.
+    @ViewBuilder private func sharedSection(_ p: SharedProject) -> some View {
+        let detail = state.shared.detail(p.id)
+        let open = !collapsedShared.contains(p.id)
+        Section {
+            if open {
+                Button {
+                    Haptics.tap()
+                    state.sharedTarget = SharedTarget(project: p, chat: nil)
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "arrow.up.forward.app").foregroundStyle(Color.accentColor).frame(width: 20)
+                        Text("Open the project").foregroundStyle(Color.accentColor)
+                        Spacer(minLength: 0)
+                    }.font(.subheadline)
+                }
+                ForEach(detail.chats) { c in
+                    Button {
+                        Haptics.tap()
+                        state.sharedTarget = SharedTarget(project: p, chat: c.id)
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "number").foregroundStyle(.secondary).frame(width: 20)
+                            Text(c.displayName).foregroundStyle(.primary).lineLimit(1)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                }
+            }
+        } header: {
+            Button {
+                Haptics.tap()
+                withAnimation(.snappy) {
+                    if open { collapsedShared.insert(p.id) } else { collapsedShared.remove(p.id) }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right").font(.caption2.weight(.bold))
+                        .rotationEffect(.degrees(open ? 90 : 0))
+                    Text("Shared · \(p.name)").lineLimit(typeSize.isAccessibilitySize ? 3 : 1)
+                    Spacer()
+                    if detail.unread > 0 {
+                        Text(detail.unreadMore ? "\(detail.unread)+" : "\(detail.unread)")
+                            .font(.caption2.weight(.semibold)).foregroundStyle(.white)
+                            .padding(.horizontal, 6).padding(.vertical, 1)
+                            .background(Color.accentColor, in: Capsule())
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Shared project \(p.name)\(detail.unread > 0 ? ", \(detail.unread) new" : "")")
+            .accessibilityHint(open ? "Collapse" : "Expand")
+            .accessibilityAddTraits(.isHeader)
         }
     }
 
@@ -370,17 +450,34 @@ struct ChatListView: View {
 
     private var empty: some View {
         VStack(spacing: 8) {
-            Image(systemName: "bubble.left.and.bubble.right")
-                .font(.largeTitle).foregroundStyle(.secondary)
-            Text(search.isEmpty ? "No chats yet" : "Nothing matches “\(search)”")
-                .foregroundStyle(.secondary)
-            if search.isEmpty {
-                Text("Tap the pencil to start one.")
-                    .font(.footnote).foregroundStyle(.tertiary)
+            if state.chats.isEmpty, search.isEmpty, state.reachable == nil {
+                // still asking the Mac: a spinner, not "No chats yet"
+                ProgressView()
+                Text("Connecting to \(state.macDisplayName)")
+                    .font(.footnote).foregroundStyle(.secondary)
+            } else if state.chats.isEmpty, search.isEmpty, state.reachable == false {
+                Image(systemName: "wifi.slash")
+                    .font(.largeTitle).foregroundStyle(.secondary)
+                Text("Can't reach \(state.macDisplayName)")
+                    .foregroundStyle(.secondary)
+                Text("It may be asleep, or this phone may be off the tailnet.")
+                    .font(.footnote).foregroundStyle(.tertiary).multilineTextAlignment(.center)
+                Button("Try again") { Haptics.tap(); Task { await state.refreshEverything() } }
+                    .buttonStyle(.bordered)
+            } else {
+                Image(systemName: "bubble.left.and.bubble.right")
+                    .font(.largeTitle).foregroundStyle(.secondary)
+                Text(search.isEmpty ? "No chats yet" : "Nothing matches “\(search)”")
+                    .foregroundStyle(.secondary)
+                if search.isEmpty {
+                    Text("Tap the pencil to start one.")
+                        .font(.footnote).foregroundStyle(.tertiary)
+                }
             }
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 50)
+        .padding(.horizontal, 20)
         .listRowSeparator(.hidden)
     }
 }

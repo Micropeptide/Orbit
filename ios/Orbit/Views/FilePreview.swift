@@ -30,7 +30,7 @@ struct FilePreviewSheet: View {
                 } else if let shown {
                     switch shown {
                     case .image(let img): ZoomingImage(image: img)
-                    case .page(let url): WebPage(url: url).ignoresSafeArea(edges: .bottom)
+                    case .page(let url): WebPage(url: url, pairing: state.pairing).ignoresSafeArea(edges: .bottom)
                     }
                 } else if loading {
                     ProgressView("Asking your Mac").frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -110,7 +110,7 @@ struct FilePreviewSheet: View {
         guard let link, let url = await server.absolute(link) else { return }
         previewPath = link
         if kind == "image" {
-            if let (data, _) = try? await URLSession.shared.data(from: url), let img = UIImage(data: data) {
+            if let data = try? await server.perform(URLRequest(url: url)), let img = UIImage(data: data) {
                 shown = .image(img); return
             }
         }
@@ -138,19 +138,22 @@ struct FilePreviewSheet: View {
 /// A page from the Mac, in a web view — PDFs and HTML render natively.
 struct WebPage: UIViewRepresentable {
     let url: URL
+    var pairing: Pairing? = nil      // for a Mac reached over the internet: Cloudflare Access wants its cookie before the page loads
 
     func makeUIView(context: Context) -> WKWebView {
         let cfg = WKWebViewConfiguration()
         cfg.websiteDataStore = .nonPersistent()
         let v = WKWebView(frame: .zero, configuration: cfg)
         v.allowsBackForwardNavigationGestures = true
-        v.load(URLRequest(url: url))
+        let page = url, store = cfg.websiteDataStore.httpCookieStore, pairing = pairing
+        Task { @MainActor in
+            if let access = await AccessCookie.fetch(pairing: pairing) { await store.setCookie(access) }
+            v.load(URLRequest(url: page))
+        }
         return v
     }
 
-    func updateUIView(_ v: WKWebView, context: Context) {
-        if v.url == nil { v.load(URLRequest(url: url)) }
-    }
+    func updateUIView(_ v: WKWebView, context: Context) {}
 }
 
 /// Fit to the screen; pinch or double-tap to look closer.

@@ -1,0 +1,87 @@
+#!/bin/sh
+# Run the Codex harness against this machine's MTPLX-served Qwen model.
+set -eu
+
+SCRIPT_PATH=$0
+while [ -L "$SCRIPT_PATH" ]; do
+  SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
+  LINK_TARGET=$(readlink "$SCRIPT_PATH")
+  case "$LINK_TARGET" in
+    /*) SCRIPT_PATH=$LINK_TARGET ;;
+    *)  SCRIPT_PATH=$SCRIPT_DIR/$LINK_TARGET ;;
+  esac
+done
+ORBIT_ROOT=$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")/.." && pwd)
+MODEL_PORT=${ORBIT_MODEL_PORT:-8011}
+BRIDGE_PORT=${CODEX_QWEN_BRIDGE_PORT:-8012}
+MODEL_URL="http://127.0.0.1:${MODEL_PORT}/v1"
+BRIDGE_URL="http://127.0.0.1:${BRIDGE_PORT}"
+MODEL_ID="mtplx-qwen38-27b-optimized-speed"
+BRIDGE_PID=""
+
+cleanup() {
+  if [ -n "$BRIDGE_PID" ]; then
+    kill "$BRIDGE_PID" 2>/dev/null || true
+    wait "$BRIDGE_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT HUP INT TERM
+
+if ! curl -fsS --max-time 2 "$MODEL_URL/models" >/dev/null 2>&1; then
+  echo "Starting the local Qwen model..." >&2
+  "$ORBIT_ROOT/venv/bin/python" -c \
+    "import sys; sys.path.insert(0, '$ORBIT_ROOT/bin'); import qqcore as q; print(q.ensure_model(lambda s: print(s, flush=True)) or 'model failed to start')"
+fi
+
+if ! curl -fsS --max-time 2 "$BRIDGE_URL/health" >/dev/null 2>&1; then
+  "$ORBIT_ROOT/venv/bin/python" "$ORBIT_ROOT/bin/codex-qwen-proxy.py" \
+    --port "$BRIDGE_PORT" --upstream "$MODEL_URL" \
+    >>"$ORBIT_ROOT/logs/codex-qwen-proxy.log" 2>&1 &
+  BRIDGE_PID=$!
+  tries=0
+  until curl -fsS --max-time 2 "$BRIDGE_URL/health" >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    if [ "$tries" -ge 50 ] || ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
+      echo "codex-qwen: compatibility bridge failed to start; see logs/codex-qwen-proxy.log" >&2
+      exit 1
+    fi
+    sleep 0.1
+  done
+fi
+
+# Shared options have to follow `exec`/`review` on current Codex releases;
+# otherwise that subcommand's option parser discards the parent overrides.
+case "${1:-}" in
+  exec|review|resume|fork)
+    CODEX_SUBCOMMAND=$1
+    shift
+    set -- "$CODEX_SUBCOMMAND" \
+      -c 'model_provider="local_qwen"' \
+      -c "model=\"$MODEL_ID\"" \
+      -c 'model_reasoning_effort="none"' \
+      -c 'model_context_window=131072' \
+      -c 'model_auto_compact_token_limit=100000' \
+      -c 'model_providers.local_qwen.name="Local Qwen via MTPLX"' \
+      -c "model_providers.local_qwen.base_url=\"$BRIDGE_URL/v1\"" \
+      -c 'model_providers.local_qwen.wire_api="responses"' \
+      -c 'model_providers.local_qwen.requires_openai_auth=false' \
+      -c 'model_providers.local_qwen.supports_websockets=false' \
+      "$@"
+    ;;
+  *)
+    set -- \
+      -c 'model_provider="local_qwen"' \
+      -c "model=\"$MODEL_ID\"" \
+      -c 'model_reasoning_effort="none"' \
+      -c 'model_context_window=131072' \
+      -c 'model_auto_compact_token_limit=100000' \
+      -c 'model_providers.local_qwen.name="Local Qwen via MTPLX"' \
+      -c "model_providers.local_qwen.base_url=\"$BRIDGE_URL/v1\"" \
+      -c 'model_providers.local_qwen.wire_api="responses"' \
+      -c 'model_providers.local_qwen.requires_openai_auth=false' \
+      -c 'model_providers.local_qwen.supports_websockets=false' \
+      "$@"
+    ;;
+esac
+
+codex "$@"

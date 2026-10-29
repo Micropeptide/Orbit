@@ -143,12 +143,11 @@ class TestAntigravityChat(Fake):
         self.assertIn("the model refused", str(cm.exception))
 
 
-class TestGeminiCli(Fake):
-    def test_its_models_and_the_flag_order(self):
-        ms = [m["model"] for m in P.cli_models() if m["provider"] == "gemini-cli"]
-        self.assertIn("gemini-3.8-flash", ms)
-        out = self.ask("gemini-cli", "gemini-2.5-pro")
-        self.assertIn("flags=-m gemini-2.5-pro | prompt=User: hello", out["content"])
+class TestGeminiCliIsRetired(Fake):
+    """Google stopped letting the Gemini CLI sign in ("migrate to the Antigravity suite"): it is not offered."""
+    def test_it_is_not_offered_even_when_installed(self):
+        self.assertEqual([m for m in P.cli_models() if m["provider"] == "gemini-cli"], [])
+        self.assertNotIn("gemini-cli", [r["id"] for r in P.google_cli_status(fresh=True)])
 
 
 if __name__ == "__main__":
@@ -184,4 +183,3 @@ class TestSigningIn(Fake):
         r = self.row("agy-cli")
         self.assertEqual((r["installed"], r["signed_in"]), (False, None))
         self.assertIn("antigravity.google/cli/install.sh", r["install"])
-        self.assertIn("gemini-cli", self.row("gemini-cli")["install"])

@@ -74,6 +74,37 @@ class TestTranslate(unittest.TestCase):
         self.assertEqual(o["tool_choice"], "auto")
         self.assertTrue(o["stream"]); self.assertEqual(o["stream_options"], {"include_usage": True})
 
+    def test_tool_search_results_and_deferred_placeholders_reach_a_plain_model_in_words(self):
+        """With Claude Code's tool search on, the model is not sent every MCP tool: a search loads one, and Claude
+        Code answers with a tool_reference block and a placeholder tool marked defer_loading."""
+        body = {"model": "m", "max_tokens": 10, "messages": [
+            {"role": "user", "content": "load word"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "ToolSearch", "input": {"query": "word"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1",
+                                          "content": [{"type": "tool_reference", "tool_name": "mcp__word__create_document"}]}]}],
+            "tools": [{"name": "ToolSearch", "input_schema": {"type": "object"}},
+                      {"name": "DeferredToolPlaceholder", "input_schema": {"type": "object"}, "defer_loading": True},
+                      {"name": "mcp__word__create_document", "input_schema": {"type": "object"}}]}
+        for out, names in ((G.to_openai(body), lambda o: [t["function"]["name"] for t in o["tools"]]),
+                           (G.to_responses(body), lambda o: [t["name"] for t in o["tools"]])):
+            self.assertEqual(names(out), ["ToolSearch", "mcp__word__create_document"])
+        said = next(m for m in G.to_openai(body)["messages"] if m["role"] == "tool")["content"]
+        self.assertIn("mcp__word__create_document", said)
+
+    def test_a_system_message_in_the_middle_becomes_a_user_reminder(self):
+        """Claude Code sends a hook's added context as a message with the role system, between others. Qwen's chat
+        template refuses a system message anywhere but first: 'System message must be at the beginning'."""
+        body = {"model": "m", "system": "be brief", "messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "system", "content": "SessionStart hook additional context: you have superpowers"},
+            {"role": "assistant", "content": "hello"},
+            {"role": "system", "content": [{"type": "text", "text": "another reminder"}]},
+            {"role": "user", "content": "what can you do"}]}
+        out = G.to_openai(body)["messages"]
+        self.assertEqual([m["role"] for m in out], ["system", "user", "user", "assistant", "user", "user"])
+        self.assertIn("you have superpowers", out[2]["content"]); self.assertIn("system-reminder", out[2]["content"])
+        self.assertEqual(sum(m["role"] == "system" for m in out), 1)
+
     def test_streamed_thinking_text_and_two_tools(self):
         chunks = [delta(role="assistant"), delta(reasoning_content="Let me "), delta(reasoning_content="think."),
                   delta(content="Doing it."),

@@ -82,7 +82,7 @@ struct WelcomeView: View {
                 .font(.body).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 14) {
                 step(1, "On your Mac, open Orbit and go to Settings → Phone.")
-                step(2, "Choose Tailscale (works anywhere) or Local network (same Wi-Fi).")
+                step(2, "Choose Internet (works anywhere, no VPN), Tailscale or Local network (same Wi-Fi).")
                 step(3, "Scan the QR code it shows with this app.")
             }
             .padding(16)

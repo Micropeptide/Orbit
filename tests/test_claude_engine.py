@@ -268,6 +268,69 @@ class TestClaudeEngine(unittest.TestCase):
             CE.close_live("test-ce")
             CE.set_chat_pref("test-ce", host=None, cwd=None, permission_mode=None, remote_last_uuid=None)
 
+    def test_a_chat_on_another_machine_can_delegate_through_a_tunnel(self):
+        """A chat on a server gets the delegate tool and its hooks as inline JSON (the server has no Orbit files),
+        a second reverse tunnel to Orbit, and the same token and port on every message of the kept process."""
+        import ssh_remote
+        self.serve([[{"text": "ok"}], [{"text": "again"}]])
+        seen = {"args": [], "forward": []}
+        clean = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE", "ANTHROPIC"))}
+        clean["CLAUDE_CONFIG_DIR"] = self.cfgdir
+        starts = []
+        def fake_popen(host, claude_path, cwd, args, env, forward=None):
+            seen["args"].append(args); seen["forward"].append(forward)
+            p = subprocess.Popen(["bash", "-c", ssh_remote.WRAPPER, "orbit", *args], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, env=clean)
+            p.stdin.write(ssh_remote.env_line({"ORBIT_CLAUDE": claude_path, "ORBIT_CWD": cwd, **env}).encode())
+            p.stdin.flush(); starts.append(p)
+            return p
+        saved = (ssh_remote.popen, ssh_remote.probe, CE.remote_target_env, getattr(q, "UI_PORT", None), dict(q.S))
+        ssh_remote.popen = fake_popen
+        ssh_remote.probe = lambda host, **k: {"ok": True, "claude": CLAUDE, "home": os.path.expanduser("~")}
+        CE.remote_target_env = lambda target, env: (ssh_remote.remote_env(env), (4001, 4002))
+        q.UI_PORT = 4999
+        q.S["delegation"] = {"enabled": True}
+        CE.set_chat_pref("test-ce", host="testhost", cwd=self.work)
+        spec = {"type": "function", "function": {"name": "delegate", "description": "hand a task on",
+                                                 "parameters": {"type": "object", "properties": {}}}}
+        msgs = [{"role": "system", "content": "s"}]
+        def turn(text):
+            return CE.run_turn(msgs, text, [spec], emit=lambda k, p: None,
+                               approve=lambda *a: True, cancel=threading.Event(), sid="test-ce", project=None)
+        try:
+            self.assertEqual(turn("hello"), "ok")
+            self.assertEqual(turn("and again"), "again")
+            self.assertEqual(len(starts), 1, "the token or port changed, so the process was restarted")
+            argv = seen["args"][0]
+            settings = json.loads(argv[argv.index("--settings") + 1])
+            mcp = json.loads(argv[argv.index("--mcp-config") + 1])
+            self.assertNotIn("--strict-mcp-config", argv)       # the server's own MCP servers stay
+            srv = mcp["mcpServers"]["orbit"]
+            self.assertEqual(srv["command"], "python3")
+            self.assertIn("mcp_bridge", srv["env"]["ORBIT_MCP_URL"])
+            rport = int(srv["env"]["ORBIT_MCP_URL"].split(":")[2].split("/")[0])
+            self.assertIn((rport, 4999), seen["forward"][0])     # the tunnel to Orbit, besides the model's
+            self.assertIn((4001, 4002), seen["forward"][0])
+            # the hook runs by itself, with only python3: it puts the triage in front, then reminds after a run
+            cmd = settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+            home = tempfile.mkdtemp(prefix="orbit-hook-")
+            self.addCleanup(shutil.rmtree, home, True)
+            env = {**os.environ, "HOME": home}
+            out = subprocess.run(cmd, shell=True, input=json.dumps({"session_id": "s1"}), capture_output=True,
+                                 text=True, env=env, cwd=home).stdout
+            self.assertIn("Delegation triage", json.loads(out)["hookSpecificOutput"]["additionalContext"])
+            self.assertIn("not on testhost", out)
+            tool = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+            notes = [subprocess.run(tool, shell=True, input=json.dumps({"session_id": "s1", "tool_name": "Bash"}),
+                                    capture_output=True, text=True, env=env, cwd=home).stdout for _ in range(6)]
+            self.assertEqual([bool(n) for n in notes], [False] * 5 + [True])
+            self.assertEqual(CE.REMOTE_HOSTS["test-ce"], "testhost")
+        finally:
+            CE.close_live("test-ce")
+            ssh_remote.popen, ssh_remote.probe, CE.remote_target_env, q.UI_PORT = saved[:4]
+            q.S.clear(); q.S.update(saved[4])
+            CE.set_chat_pref("test-ce", host=None, cwd=None, remote_last_uuid=None)
+
     def test_todo_list_becomes_the_plan(self):
         self.serve([
             [{"tool_use": {"name": "TaskCreate", "input": {"subject": "Read the data", "description": "d"}}}],
@@ -343,6 +406,26 @@ class TestClaudeEngine(unittest.TestCase):
         self.assertLess(time.time() - t0, 20)
         self.assertIn("(stopped)", out)
         self.assertEqual(ev[-1][0], "done")
+
+    def test_a_note_folded_into_the_answer_does_not_leave_the_turn_open(self):
+        """A message sent while Claude works is folded into that answer: one result comes back for
+        two messages. The turn must still end (it once stayed 'running' for good)."""
+        import collections
+        self.serve([[{"text": "Running it."},
+                     {"tool_use": {"name": "Bash", "input": {"command": "sleep 4", "description": "wait"}}}],
+                    [{"text": "Done, and noted."}]])
+        saved = CE.SETTLE_S; CE.SETTLE_S = 3
+        self.addCleanup(setattr, CE, "SETTLE_S", saved)
+        inbox = collections.deque()
+        threading.Timer(1.5, lambda: inbox.append({"text": "also mind the bypass mode"})).start()
+        events, msgs = [], [{"role": "system", "content": "s"}]
+        t0 = time.time()
+        out = CE.run_turn(msgs, "run it", [], emit=lambda k, p: events.append((k, p)),
+                          approve=lambda *a: True, cancel=threading.Event(), inbox=inbox,
+                          sid="test-settle", project=None, read_only=False)
+        self.assertLess(time.time() - t0, 60)
+        self.assertEqual(out, "Done, and noted.")
+        self.assertEqual(events[-1][0], "done")
 
     def test_plan_mode_refuses_writes(self):
         target = os.path.join(self.work, "planned.txt")
@@ -712,6 +795,17 @@ class TestClaudeEngineOffline(unittest.TestCase):
         a = CE._orbit_append(None, dict(CE.DEFAULTS), False, "Answer in French.")
         self.assertIn("Answer in French.", a)
         self.assertNotIn("standing instructions", a)      # Orbit's own instructions stay out
+
+    def test_tool_search_is_on_for_other_models_so_mcp_tools_do_not_fill_the_window(self):
+        """Claude Code defers MCP tools only for Anthropic's own API. For anything else it sent all of them with every
+        request: 300,000 tokens from a few servers, so a 262,144-token model failed on "hi"."""
+        for name, target, kind, want in (("a provider's model", {"model": "x"}, "provider", {"ENABLE_TOOL_SEARCH": "true"}),
+                                         ("the Claude subscription", {"subscription": True}, "subscription", {}),
+                                         ("the small local model", {"local": True}, "local", {})):
+            self.assertEqual(CE.tool_search_env(target, kind), want, name)
+        import ssh_remote
+        renv, _ = CE.remote_target_env({"model": "x", "provider": "p", "ctx": 1000}, {})
+        self.assertEqual(renv.get("ENABLE_TOOL_SEARCH"), "true")
 
     def test_argv_profiles(self):
         c = {**CE.DEFAULTS}

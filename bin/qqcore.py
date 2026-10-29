@@ -9,7 +9,17 @@ import atexit, fnmatch, hashlib, json, os, subprocess, sys, threading, time, url
 warnings.filterwarnings("ignore")
 
 _HERE     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ROOT      = os.path.abspath(os.path.expanduser(os.environ.get("ORBIT_HOME") or _HERE))
+CODE_ROOT = _HERE                           # where Orbit's own files are (bin/, web/, docs/): read-only in a packaged app
+_HOME_ENV = os.environ.get("ORBIT_HOME")
+# A release (scripts/make-release writes a VERSION file into it) must never write its data into its own folder -- inside an app bundle
+# that is not allowed and not wanted -- so without ORBIT_HOME it keeps its data in the user's Application Support folder. The dev tree has
+# no VERSION file and keeps using its own folder, as it always has.
+if not _HOME_ENV and os.path.exists(os.path.join(_HERE, "VERSION")):
+    _HOME_ENV = "~/Library/Application Support/Orbit"
+ROOT      = os.path.abspath(os.path.expanduser(_HOME_ENV or _HERE))   # the data folder: config, sessions, memory, logs, workspace
+# A sandbox copy of Orbit (see docs/SANDBOX.md): its own data folder and port, and nothing that reaches outside it -- no
+# Tailscale or Bonjour, no backups to iCloud, no desktop or phone notices, a simulated cluster instead of a real one.
+SANDBOX = os.environ.get("ORBIT_SANDBOX") == "1"
 CONFIG    = os.path.join(ROOT, "config")
 SESSIONS  = os.path.join(ROOT, "sessions")
 LOGS      = os.path.join(ROOT, "logs")
@@ -96,6 +106,10 @@ DEFAULTS = {
   # an answer stopped by a used-up plan allowance (Claude's 5-hour or weekly limit, a
   # ChatGPT limit, an OpenCode Go allowance) carries on by itself once it resets
   "resume_after_limit": True,
+  # never move an answer to another model: wait on the chosen one and retry until it is back
+  # (a connection lost to the cluster model, say). A chat can set this for itself.
+  "no_fallback": False,
+  "hold_max_hours": 12,       # ...but not for ever: after this long a held answer stops and says so
   # after a substantial answer, extract durable facts and save them as new
   # memory notes by itself — the model rarely stops mid-task to call remember
   "auto_memory": True,
@@ -736,19 +750,26 @@ def look_groups():
     g = S.get("look_groups")
     return [x for x in (LOOK_GROUPS if g is None else g) if x in LOOK_GROUPS]
 
+def screen_control_on():
+    """Settings -> Tools -> Screen control: the look server then also offers screen_look/click/type/..."""
+    return bool(S.get("computer_use_enabled"))
+
 def look_enabled(engine):
     """Whether the look tools go to this engine: "claude", "codex", "opencode" or "orbit"."""
-    if not os.path.exists(LOOK_PATH) or not look_groups(): return False
+    if not os.path.exists(LOOK_PATH): return False
+    if not look_groups() and not (screen_control_on() and engine in SCREEN_ENGINES): return False
     e = S.get("look_engines")
     return engine in (LOOK_DEFAULT_ENGINES if e is None else e)
 
-def look_env():
-    return {"ORBIT_LOOK_GROUPS": ",".join(look_groups()),
+SCREEN_ENGINES = ("claude", "codex")     # the engines that ask before a screen action; Orbit's own agent has screen_* built in
+
+def look_env(engine=None):
+    return {"ORBIT_LOOK_GROUPS": ",".join(look_groups() + (["screen"] if screen_control_on() and engine in SCREEN_ENGINES else [])),
             "ORBIT_LOOK_DIR": os.path.join(WORKSPACE, ".screenshots", "look")}
 
-def look_server():
-    """The server as an MCP client starts it."""
-    return {"command": sys.executable, "args": [LOOK_PATH], "env": look_env()}
+def look_server(engine=None):
+    """The server as an MCP client starts it. `engine` ("claude", "codex") adds the screen-control tools."""
+    return {"command": sys.executable, "args": [LOOK_PATH], "env": look_env(engine)}
 
 def look_status():
     """What the look tools can use on this Mac, for Settings."""
@@ -1087,9 +1108,15 @@ def t_run_shell(command, timeout=None):
     bad = _interactive(command)
     if bad: return bad
     secs = min(max(int(timeout or 180), 1), 900)
+    cx = collab_context()
     try:
-        r = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=secs,
-                           cwd=chat_folder(), env=_batch_env(), stdin=subprocess.DEVNULL)
+        if cx is not None:             # a member's command runs inside the jail, or not at all
+            jail = cx.get("jail")
+            if jail is None: return "Error: commands cannot run for a shared project on this Mac, because the sandbox that holds them is not available."
+            r = subprocess.run(jail.argv_shell(command), capture_output=True, text=True, timeout=secs, cwd=cx["cwd"], env=jail.env(_batch_env()), stdin=subprocess.DEVNULL)
+        else:
+            r = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=secs,
+                               cwd=chat_folder(), env=_batch_env(), stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return (f"Error: no answer after {secs}s, so it was stopped. Raise `timeout` (up to 900) "
                 "if it genuinely takes that long, or start it with run_shell_background and "
@@ -1339,10 +1366,14 @@ def t_python(code, timeout=120):
         return "Error: code execution is disabled in Settings -> Tools."
     import tempfile
     t0 = time.time() - 1          # 1s slack for filesystem timestamp granularity
-    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, dir=WORKSPACE) as f:
+    cx = collab_context()
+    jail = cx.get("jail") if cx is not None else None
+    if cx is not None and jail is None: return "Error: code cannot run for a shared project on this Mac, because the sandbox that holds it is not available."
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, dir=(jail.tmp if jail else WORKSPACE)) as f:
         f.write(code); path = f.name
     try:
-        r = subprocess.run([sys.executable, path], capture_output=True, text=True,
+        if jail: r = subprocess.run(jail.argv_exec([sys.executable, path]), capture_output=True, text=True, timeout=int(timeout), cwd=cx["cwd"], env=jail.env(_batch_env()), stdin=subprocess.DEVNULL)
+        else: r = subprocess.run([sys.executable, path], capture_output=True, text=True,
                            timeout=int(timeout), cwd=WORKSPACE)
         out = (r.stdout or "")           # _truncate_output keeps head and tail and files the rest
         if r.stderr: out += "\n--- stderr ---\n" + r.stderr
@@ -1709,6 +1740,8 @@ def active_tools():
         specs = [t for t in specs if t["function"]["name"] not in BG_NAMES]
     if not S.get("computer_use_enabled"):
         specs = [t for t in specs if not t["function"]["name"].startswith("screen_")]
+    if not meta_key_set():                 # Muse Image and SAM need a Meta key: nothing to offer without one
+        specs = [t for t in specs if t["function"]["name"] not in META_TOOLS]
     mcp_specs, errors = load_mcp()
     specs += [t for t in mcp_specs if en.get(t["function"]["name"], True)]
     return specs, errors
@@ -1815,7 +1848,7 @@ def _bionic_waking(spec, emit):
 
 
 # OpenCode's own provider ids, and what Orbit calls the same providers
-_OPENCODE_PROVIDERS = {"opencode-go": "opencode-go", "opencode": "opencode-zen"}
+_OPENCODE_PROVIDERS = {"opencode-go": "opencode-go", "opencode": "opencode-zen", "meta": "meta"}
 
 
 def _cli_account_for(backend, model, messages, tried=()):
@@ -1823,6 +1856,10 @@ def _cli_account_for(backend, model, messages, tried=()):
     None to leave it as OpenCode is set up. Only when there is more than one account to
     choose between; the key goes in as the provider's own setting for this run, which
     OpenCode honours over the one it has stored (an environment variable it does not)."""
+    if backend == "muse-cli":
+        # Muse Code signs in with Meta's browser flow, or reads META_API_KEY: the saved key goes in for this run
+        k = MAPI.api_key(secrets_load())
+        return ({"META_API_KEY": k}, None) if k else None
     if backend != "opencode-cli": return None
     cfg = {}
     if look_enabled("opencode"):         # its eyes: a local MCP server, in OpenCode's own config format
@@ -1833,6 +1870,9 @@ def _cli_account_for(backend, model, messages, tried=()):
     if pick:
         oc, a, pid = pick
         cfg.setdefault("provider", {}).setdefault(oc, {}).setdefault("options", {})["apiKey"] = a["api_key"]
+    elif str(model or "").startswith("meta/") and MAPI.api_key(secrets_load()):
+        # OpenCode's built-in Meta provider, with the key saved in Orbit instead of one typed into /connect
+        cfg.setdefault("provider", {}).setdefault("meta", {}).setdefault("options", {})["apiKey"] = MAPI.api_key(secrets_load())
     if not cfg: return None
     try: base = json.loads(os.environ.get("OPENCODE_CONFIG_CONTENT") or "{}")
     except ValueError: base = {}
@@ -1870,6 +1910,17 @@ def _cli_quota(who, message, seconds):
     USAGE.mark_exhausted(ROOT, who["provider"], who["account"], message, seconds=seconds)
 
 
+def _cli_cwd():
+    """Where a CLI agent (Antigravity, Muse Code, ...) works: the folder this chat was given, else Orbit's workspace."""
+    try:
+        sid = getattr(TURN_CTX, "sid", None)
+        c = os.path.expanduser(str((CE.chat_prefs(sid) or {}).get("cwd") or "")) if sid else ""
+        if c and os.path.isdir(c): return c
+    except Exception:
+        pass
+    return WORKSPACE
+
+
 def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
                 interrupt=None):
     if think is None: think = getattr(TURN_CTX, "think", None)
@@ -1886,10 +1937,17 @@ def stream_call(messages, tools, think=None, emit=None, cancel=None, model=None,
         # a quick call with no tools (a title, a note, a summary) leaves no session behind
         # in the agent's own history -- the Codex app listed every chat title as a session
         quick = tools is None and prov["backend"] == "codex-cli"
+        # a temporary chat: the agent is told to keep no session (or its session is deleted afterwards)
+        temp_ = is_temp(getattr(TURN_CTX, "sid", None))
+        temp_args = {"codex-cli": ["--ephemeral"], "claude-cli": ["--no-session-persistence"],
+                     "claude-qwen-cli": ["--no-session-persistence"]}.get(prov["backend"]) if temp_ else None
         out = MODELS.cli_stream(prov["backend"], spec["model"], as_saved,
-                                emit=emit, cancel=stop,
+                                emit=emit, cancel=stop, temp=temp_,
+                                effort=getattr(TURN_CTX, "effort", None) or chat_setting("reasoning_effort", default=None),
+                                read_only=bool(getattr(TURN_CTX, "read_only", False)),
+                                autonomy=chat_setting("autonomy_mode", default="ask"),
                                 timeout=float(S.get("cli_timeout_s") or 900),
-                                cwd=WORKSPACE, extra_args=["--ephemeral"] if quick else None,
+                                cwd=_cli_cwd(), extra_args=["--ephemeral"] if quick else temp_args,
                                 account_for=_cli_account_for, on_quota=_cli_quota,
                                 on_moved=lambda who: HARN.moved_to(ROOT, who["provider"], who["account"]))
         out["model"] = spec.get("label") or spec["model"]
@@ -2248,6 +2306,7 @@ def _run_one_tool(tc, fn, args, messages, emit, approve, seen_calls):
         auto = (bool(by_rule) and not _never_auto(fn, reason)) or \
                (mode == "full" and not _never_auto(fn, reason)) or \
                (mode == "auto" and _auto_approvable(fn, args, reason))
+        if collab_context(): auto = False        # a shared project's action is answered by its approvers, never by this Mac's own autonomy or rules
         if auto:
             emit("auto_approved", {"name": fn, "args": args, "reason": reason, "call_id": tid,
                                    "rule": by_rule["note"] or by_rule["pattern"] if by_rule else None})
@@ -2303,6 +2362,14 @@ def _run_one_tool(tc, fn, args, messages, emit, approve, seen_calls):
 
 TURN_CTX = threading.local()   # which chat the running answer belongs to, for tools
 
+# Temporary chats promise to leave nothing behind: not on disk, not in Orbit's logs or backups, and not in
+# the CLIs they run through. Their ids are kept here so every writer can look before it records anything.
+TEMP_SIDS = set()
+TEMP_ENGINE_IDS = set()          # session ids a temporary chat's CLI used: never copied by a backup, whatever turns up
+
+def is_temp(sid):
+    return bool(sid) and sid in TEMP_SIDS
+
 def pinned_model():
     """The model this thread's answer was started with. Several chats answer at
     once, each on its own thread: ACTIVE_MODEL is shared, so a chat that started a
@@ -2345,7 +2412,7 @@ def _release_awake(took):
 
 def notify(title, text):
     """A macOS notification, for news worth hearing when the tab isn't in front."""
-    if sys.platform != "darwin": return
+    if sys.platform != "darwin" or SANDBOX: return
     script = (f"display notification {json.dumps(str(text)[:200], ensure_ascii=False)} "
               f"with title {json.dumps(str(title)[:80], ensure_ascii=False)}")
     try:
@@ -2571,6 +2638,20 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                 fails = seen_calls.get("__stream_fail__", 0) + 1
                 seen_calls["__stream_fail__"] = fails
                 give_up = {"auth": 1, "setup": 1, "bad_request": 2, "overflow": 2}.get(kind, 5)
+                # "no fallback": a dropped connection is waited out on the same model, not given up on
+                if kind == "transient" and no_fallback(sid):
+                    since = seen_calls.setdefault("__hold_since__", time.time())
+                    if time.time() - since < _hold_limit_s():
+                        wait = _hold_wait(fails, getattr(e, "retry_after", 0))
+                        emit("stream_error", {"error": err, "attempt": fails, "kind": kind, "of": None})
+                        emit("retry", {"attempt": fails, "of": None, "wait": round(wait, 1), "error": err[:300],
+                                       "kind": kind, "hold": True, "waited": int(time.time() - since)})
+                        end = time.time() + wait
+                        while time.time() < end and not cancel.is_set(): time.sleep(0.2)
+                        if not remote and not probe(3):
+                            try: ensure_model()
+                            except Exception: pass
+                        continue
                 emit("stream_error", {"error": err, "attempt": fails, "kind": kind, "of": give_up})
                 # a provider that keeps failing: carry on with another model (fallback_*)
                 if kind in FALLBACK_KINDS and fails >= min(give_up, _fallback_after()):
@@ -2615,7 +2696,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
                     try: ensure_model()
                     except Exception: pass
                 continue
-            seen_calls.pop("__stream_fail__", None)
+            seen_calls.pop("__stream_fail__", None); seen_calls.pop("__hold_since__", None)
             used = msg.pop("_prompt_tokens", None)
             if used and sid: SESSION_TOKENS[sid] = used
             for k, v in (msg.pop("_usage", None) or {}).items(): usage[k] = usage.get(k, 0) + v
@@ -2942,6 +3023,7 @@ def turn(messages, user_content, tools, emit=None, approve=None, cancel=None,
         _release_awake(awake)
 
 def LOG_SAFETY(fn, args, verdict, reason):
+    if is_temp(getattr(TURN_CTX, "sid", None)): return          # a temporary chat leaves no record, not even this
     try:
         with open(os.path.join(LOGS, "safety.log"), "a") as f:
             f.write(json.dumps({"t": time.strftime("%Y-%m-%d %H:%M:%S"), "tool": fn,
@@ -3953,11 +4035,11 @@ DESTRUCTIVE = [
     (r"open\([^)]*['\"]w['\"]\)[^\n]{0,40}truncate", "truncating write"),
 ]
 # Paths that must never be recursively touched
-PROTECTED = ["/", "/Users", os.path.expanduser("~"), "~", "$HOME", "/u/home", "/u/project",
+PROTECTED = ["/", "/Users", os.path.expanduser("~"), "~", "$HOME", "/u/home", "/path/to/project",
              "/home", "/scratch"] + (S.get("protected_paths") or [])
 
 # Roots with no legitimate use at all, not even nested — unlike /Users or
-# /u/project (which legitimately contain Orbit's own workspace/cluster_workdir,
+# /path/to/project (which legitimately contain Orbit's own workspace/cluster_workdir,
 # so only the bare root is blocked below), nothing Orbit does ever needs to
 # reach inside these, so a target anywhere underneath is blocked too.
 NESTED_PROTECTED = ["/System", "/Applications", "/Library"]
@@ -5016,6 +5098,7 @@ def support_check(answer, sources):
 LEDGER = os.path.join(LOGS, "ledger.jsonl")
 
 def ledger_add(sid, **kw):
+    if is_temp(sid): return
     try:
         rec = {"t": time.time(), "sid": sid}; rec.update(kw)
         open(LEDGER, "a").write(json.dumps(rec) + "\n")
@@ -5546,6 +5629,13 @@ def context_state(messages=None, sid=None, model=None):
     was picked last somewhere else)."""
     spec = current_model(model)
     reported = chat_window(sid)
+    # A model behind a URL of yours has the window stated for it (or its server reported), not whatever a previous model of
+    # this chat had (Sonnet's 1,000,000 stayed on the meter after switching a chat to the cluster's Qwen) and not what Claude
+    # Code reports for a custom endpoint (128,000).
+    try:
+        mid = str((spec or {}).get("id") or model or "")
+        if mid.startswith("harness:") and mid[len("harness:"):].partition("/")[0] in (HARN.load(ROOT).get("custom") or {}): reported = None
+    except Exception: pass
     mx = reported or (spec or {}).get("context") or S["server"].get("context_window") or 1
     if messages is not None:
         # tool schemas ride along on every request; leaving them out made the
@@ -5703,7 +5793,7 @@ def _tighten_stream(resp, secs):
 # have had it read as the other, so the Claude Code list is named separately.
 PER_CHAT = ("easy_mode", "easy_tools", "claude_easy_tools", "helper_model", "review_model",
             "auto_review", "verify_turns", "claude_account",
-            "autonomy_mode", "reasoning_effort", "thinking", "parallel_tools")
+            "autonomy_mode", "reasoning_effort", "thinking", "parallel_tools", "delegation", "no_fallback")
 
 def chat_setting(key, sid=None, default=None):
     """This chat's value for a setting, or the one Orbit uses everywhere."""
@@ -6483,13 +6573,15 @@ BACKUP_PARTS = ("sessions", "memory", "skills", "knowledge", "config")
 def backup_config():
     c = dict(S.get("backup") or {})
     have_icloud = os.path.isdir(ICLOUD)
-    c.setdefault("enabled", have_icloud)
+    c.setdefault("enabled", have_icloud and not SANDBOX)
     c.setdefault("every_hours", 24)
     c.setdefault("keep", 14)
-    c.setdefault("dest", os.path.join(ICLOUD, "Orbit Backups") if have_icloud
+    c.setdefault("dest", os.path.join(ICLOUD, "Orbit Backups") if have_icloud and not SANDBOX
                          else os.path.join(ROOT, "backups", "auto"))
     c.setdefault("include_workspace", False)
     c.setdefault("include_secrets", False)
+    c.setdefault("include_external", True)       # the chats other programs keep: Claude Code, Codex, Antigravity
+    c.setdefault("external", {})
     return c
 
 def backup_list(cfg=None):
@@ -6542,11 +6634,27 @@ def _newest_change():
                 except OSError: pass
     return newest
 
+_EXTERNAL_LOCK = threading.Lock()
+
+def backup_external(cfg=None, deadline_s=600):
+    """Mirror the chats other programs keep (see chat_mirror). Never a temporary chat's. One run at a time."""
+    cfg = cfg or backup_config()
+    if not _EXTERNAL_LOCK.acquire(blocking=False): return {"busy": True}
+    try:
+        return MIRROR.mirror(cfg, skip_ids=set(TEMP_ENGINE_IDS) | set(TEMP_SIDS), deadline_s=deadline_s)
+    finally:
+        _EXTERNAL_LOCK.release()
+
 def backup_auto():
     """Maintenance chore. Skips when disabled, when the last archive is recent,
     or when nothing has changed since it — so an idle Mac adds no archives."""
     cfg = backup_config()
     if not cfg.get("enabled"): return
+    # the other programs' chats: a mirror, only what changed, as often as the archives are due
+    if cfg.get("include_external", True):
+        if time.time() - float(MIRROR.state(cfg).get("at") or 0) >= float(cfg.get("every_hours") or 24) * 3600 / 4:
+            try: backup_external(cfg)
+            except Exception as e: LOG_SAFETY("backup", {"part": "external"}, "failed", f"{type(e).__name__}: {e}")
     lst = backup_list(cfg)
     last = lst[-1]["mtime"] if lst else 0
     if time.time() - last < float(cfg.get("every_hours") or 24) * 3600: return
@@ -6556,15 +6664,21 @@ def backup_auto():
 def backup_status():
     cfg = backup_config()
     lst = backup_list(cfg)
+    on = set(MIRROR.enabled(cfg))
     return {**cfg, "icloud": os.path.isdir(ICLOUD),
             "in_icloud": cfg["dest"].startswith(ICLOUD),
             "count": len(lst), "last": (lst[-1] if lst else None),
-            "backups": lst[::-1][:20], "total_bytes": sum(b["bytes"] for b in lst)}
+            "backups": lst[::-1][:20], "total_bytes": sum(b["bytes"] for b in lst),
+            "external_sources": [{"id": k, "label": v[0], "on": k in on, "note": v[2]} for k, v in MIRROR.SOURCES.items()],
+            "external_state": MIRROR.state(cfg)}
 
 def backup_set(changes):
     cfg = backup_config()
-    for k in ("enabled", "include_workspace", "include_secrets"):
+    for k in ("enabled", "include_workspace", "include_secrets", "include_external"):
         if k in changes: cfg[k] = bool(changes[k])
+    if isinstance(changes.get("external"), dict):
+        cfg["external"] = {**(cfg.get("external") or {}),
+                           **{k: bool(v) for k, v in changes["external"].items() if k in MIRROR.SOURCES}}
     for k in ("every_hours", "keep"):
         if k in changes:
             try: cfg[k] = max(1, int(changes[k]))
@@ -7920,6 +8034,7 @@ def expand_prompt(text, prompts=None):
 
 # ------------------------------------------------------------------ usage stats
 def _tool_log(fn, secs, ok, sid=None):
+    if is_temp(sid): return
     try:
         with open(TOOL_LOG, "a") as f:
             f.write(json.dumps({"t": time.time(), "sid": sid, "tool": fn,
@@ -8162,10 +8277,114 @@ def t_chat_list(query=""):
     if err: return err
     return CHATS.list(parent=_this_chat(), query=str(query or ""))
 
-CHAT_TOOLS = ("chat_create", "chat_send", "chat_wait", "chat_list", "read_chat", "goal_set", "goal_status")
-BUILTIN.update({"chat_create": t_chat_create, "chat_send": t_chat_send, "chat_wait": t_chat_wait,
-                "chat_list": t_chat_list, "goal_set": t_goal_set, "goal_status": t_goal_status})
+def t_claude_usage(refresh=False):
+    """How much of each Claude plan has been used: the 5-hour and weekly windows, per account."""
+    out = []
+    secrets = secrets_load()
+    for a in CA.accounts(ROOT):
+        v = CL.view(ROOT, a["id"])
+        if (refresh or not v or v["age"] > CL.MAX_AGE or a.get("usage_dir")) and CE.which_claude():
+            got = CL.refresh(ROOT, secrets, a["id"], CE.which_claude(), force=bool(refresh))
+            v = got if "error" not in (got or {}) else (v or got)
+        line = (CL.summary(v) if v and "error" not in v else (v or {}).get("error") or "no figures yet")
+        age = f" (as of {max(1, v['age'] // 60)} min ago)" if v and v.get("age", 0) > 120 else ""
+        out.append(f"{a['label']}{' (main)' if a['id'] == CA.home(ROOT) else ''}: {line}{age}")
+    return "Claude plan usage\n" + "\n".join(out)
+
+# ------------------------------------------------------------------ Meta: Muse Image and SAM 3.1
+#
+# Not chat models, so they are tools. The key is the one the Muse chat models use (MODEL_API_KEY).
+
+import meta_api as MAPI
+
+META_TOOLS = ("meta_image", "meta_segment")
+
+def meta_key_set():
+    return bool(MAPI.api_key(secrets_load()))
+
+def _meta_out_dir():
+    return os.path.join(WORKSPACE, "meta-images")
+
+def _meta_path(p):
+    p = os.path.expanduser(str(p or "").strip())
+    if p.startswith(("http://", "https://", "data:")) or os.path.isabs(p): return p
+    for base in (WORKSPACE, os.getcwd()):
+        if os.path.isfile(os.path.join(base, p)): return os.path.join(base, p)
+    return p
+
+def t_meta_image(prompt, images=None, size=None, n=1, format="png"):
+    """Muse Image: make an image from a prompt, or change the ones in `images`."""
+    try:
+        keep = secrets_load()
+        srcs = [_meta_path(i) for i in ([images] if isinstance(images, str) else (images or [])) if i]
+        paths = (MAPI.edit_image(prompt, srcs, _meta_out_dir(), size=size, n=n, fmt=format, secrets=keep) if srcs
+                 else MAPI.generate_image(prompt, _meta_out_dir(), size=size, n=n, fmt=format, secrets=keep))
+    except MAPI.MetaError as e:
+        return f"Error: {e}"
+    for fp in paths: record_file(os.path.relpath(fp, WORKSPACE), "meta_image")
+    LAST_IMAGES[_this_chat()] = paths
+    return ("Muse Image saved %d image%s:\n%s\nThe person can open them from these paths." %
+            (len(paths), "" if len(paths) == 1 else "s", "\n".join("- " + fp for fp in paths)))
+
+def t_meta_segment(concept, image):
+    """SAM 3.1: find every `concept` in the image, with a box (and a mask) for each."""
+    try:
+        src = _meta_path(image)
+        res = MAPI.segment(concept, src, secrets=secrets_load())
+    except MAPI.MetaError as e:
+        return f"Error: {e}"
+    objs = res["objects"]
+    if not objs: return f"SAM 3.1 found no \"{concept}\" in {image}."
+    lines = [f"SAM 3.1 found {len(objs)} \"{concept}\" in {image}"
+             + (f" ({res['size'][0]}x{res['size'][1]} px)" if res.get("size") else "") + ". Boxes are x1,y1,x2,y2 in image pixels:"]
+    for o in objs:
+        lines.append("- #%d box %s%s" % (o["object"], ",".join(str(v) for v in o["box"]),
+                                          f" confidence {o['confidence']}" if "confidence" in o else ""))
+    if not src.startswith(("http://", "https://", "data:")):
+        out = MAPI.overlay(src, res, os.path.join(_meta_out_dir(), f"sam-{int(time.time() * 1000)}.png")) \
+            if os.path.isfile(src) and (os.makedirs(_meta_out_dir(), exist_ok=True) or True) else None
+        if out:
+            record_file(os.path.relpath(out, WORKSPACE), "meta_segment")
+            LAST_IMAGES[_this_chat()] = [out]
+            lines.append("Overlay with the matches boxed and numbered: " + out)
+    return "\n".join(lines)
+
+BUILTIN.update({"meta_image": t_meta_image, "meta_segment": t_meta_segment})
 ALL_SPECS += [
+ {"type": "function", "function": {"name": "meta_image",
+  "description": "Make an image with Meta's Muse Image (about $0.01 each), or edit and combine existing images. "
+                 "Muse Image can look things up on the web first, so real places, products and current facts come out right. "
+                 "Saves the image as a file and returns its path. Pass `images` (paths or URLs) to change or combine them.",
+  "parameters": {"type": "object", "properties": {
+     "prompt": {"type": "string", "description": "what the image should show, or what to change"},
+     "images": {"type": "array", "items": {"type": "string"}, "description": "existing images to edit or combine (paths or URLs); leave out to make a new one"},
+     "size": {"type": "string", "description": "shape as width x height, e.g. 1024x1024 or 1536x1024; only the aspect ratio counts"},
+     "n": {"type": "integer", "description": "how many images (1-4)"},
+     "format": {"type": "string", "description": "png (default), jpeg or webp"}},
+   "required": ["prompt"]}}},
+ {"type": "function", "function": {"name": "meta_segment",
+  "description": "Find every instance of an object in an image with Meta's SAM 3.1 (about $0.0025 per image): "
+                 "name it as a short noun phrase (\"yellow school bus\", \"duck\") and get a box and a mask for each match, "
+                 "plus an overlay image with the matches boxed and numbered. For pixel regions and counts, not for "
+                 "describing a scene.",
+  "parameters": {"type": "object", "properties": {
+     "concept": {"type": "string", "description": "a short noun phrase naming one kind of object"},
+     "image": {"type": "string", "description": "an image path or URL"}},
+   "required": ["concept", "image"]}}},
+]
+
+CHAT_TOOLS = ("chat_create", "chat_send", "chat_wait", "chat_list", "read_chat", "goal_set", "goal_status",
+              "claude_usage")
+BUILTIN.update({"chat_create": t_chat_create, "chat_send": t_chat_send, "chat_wait": t_chat_wait,
+                "chat_list": t_chat_list, "goal_set": t_goal_set, "goal_status": t_goal_status,
+                "claude_usage": t_claude_usage})
+ALL_SPECS += [
+ {"type": "function", "function": {"name": "claude_usage",
+  "description": "How much of the person's Claude plan is used, for each Claude account: the 5-hour and the "
+                 "weekly window (percent used, when each resets). Use it when they ask how much usage or "
+                 "allowance is left. Claude Code's own /usage cannot be read from inside a session; this can.",
+  "parameters": {"type": "object", "properties": {"refresh": {"type": "boolean",
+     "description": "ask Claude now with one tiny question instead of using the last figures it reported"}}}}},
  {"type": "function", "function": {"name": "chat_list",
   "description": "List chats you can hand work to (id, title, model, whether it is answering, "
                  "which chat started it) and the models a new chat can use, marked cheap/local. "
@@ -8628,6 +8847,7 @@ def _engine_turn_with_fallback(messages, user_content, tools, emit=None, cancel=
     failed attempt's error stays hidden unless there is nothing left to try."""
     emit = emit or (lambda k, p: None)
     tried = []
+    holds, since = 0, None
     while True:
         run = CX.run_turn if CX.is_engine(current_model()) else CE.run_turn
         n0 = len(messages)
@@ -8643,6 +8863,20 @@ def _engine_turn_with_fallback(messages, user_content, tools, emit=None, cancel=
                                                 "not signed in", "not installed", "no `claude`", "could not start on",
                                                 "Codex could not start", "Could not reach", "Could not install Codex"))
         nxt = None
+        if failed and no_fallback() and (not local_problem or any(m in why for m in ("SSH", "ssh", "tunnel", "Could not reach"))) \
+                and _holdable(why):
+            # stay on this model: wait for it to come back, then ask again from the same message
+            holds += 1
+            since = since or time.time()
+            if time.time() - since < _hold_limit_s():
+                wait = _hold_wait(holds)
+                del messages[n0:]
+                if run is CX.run_turn: TURN_CTX.codex_fresh = True
+                emit("retry", {"attempt": holds, "of": None, "wait": round(wait, 1), "error": why[:300],
+                               "kind": "transient", "hold": True, "waited": int(time.time() - since)})
+                end = time.time() + wait
+                while time.time() < end and not cancel.is_set(): time.sleep(0.2)
+                if not cancel.is_set(): continue
         if failed and not local_problem:
             cur = getattr(TURN_CTX, "model", None) or pinned_model()
             tried.append(cur)
@@ -8680,11 +8914,38 @@ def _model_name(m):
     name = str((m or {}).get("model") or "").split("/")[-1].lower()
     return name[:-7] if name.endswith("-latest") else name
 
+def no_fallback(sid=None):
+    """True when this chat stays on the model it was given: no switch to another model,
+    however often it fails. It waits and retries instead (a lost connection to the cluster)."""
+    try: return bool(chat_setting("no_fallback", sid))
+    except Exception: return False
+
+def _hold_limit_s():
+    try: return max(60.0, float(S.get("hold_max_hours") or 12) * 3600)
+    except (TypeError, ValueError): return 12 * 3600.0
+
+def _hold_wait(attempt, retry_after=0):
+    """Seconds to wait before asking a held model again: quick at first, then every 30 s at most."""
+    return min(float(retry_after or 0) or _backoff(min(attempt, 6)), 30.0)
+
+# What a held answer waits out; a key that is wrong or a CLI that is not installed is not one of these.
+_HOLD_NEVER = ("not signed in", "not installed", "no `claude`", "Could not start Claude Code", "does not fit",
+               "Could not install Codex", "Codex could not start", "could not start on")
+
+def _holdable(why):
+    why = str(why or "")
+    if any(m in why for m in _HOLD_NEVER): return False
+    return classify_error(RuntimeError(why)) == "transient"
+
 def fallback_candidates(mid):
     """Where an answer goes when its model keeps failing, best first: the same model
     from another provider, then your fallback list -- each in the chat's own engine
     (Orbit, Claude Code, Codex), ready to use, the local model last."""
     if not S.get("fallback_enabled", True) or not mid: return []
+    try:                                  # a chat whose model was chosen on purpose (a crew's, a delegated worker's) stays on it
+        if no_fallback(getattr(TURN_CTX, "sid", None)): return []
+    except Exception:
+        pass
     engine = _engine_of(mid)
     try: cat = [m for m in model_catalogue() if m.get("ready") and not m.get("switch")]
     except Exception: return []
@@ -8709,6 +8970,8 @@ import harness as HARN
 import agent_sessions as AGENT_SESSIONS
 import harness_usage as USAGE
 import claude_accounts as CA
+import claude_limits as CL
+import chat_mirror as MIRROR
 HARNESS_PORT = None            # set by orbit-ui when it starts the gateway
 
 _current_model_before_harness = current_model
@@ -8755,7 +9018,33 @@ def model_catalogue():
                         "label": m["label"], "note": ""})
     except Exception:
         pass
-    return cat
+    try: return order_models(cat, cluster_provider_ids())
+    except Exception: return cat
+
+
+def cluster_provider_ids():
+    """The providers that are models of yours on a server (Settings -> Cluster models): the custom Claude Code providers,
+    and an Orbit provider that is a tunnel to this Mac's own port other than the local server itself."""
+    ids = set((HARN.load(ROOT).get("custom") or {}).keys())
+    try:
+        for pid, p in (json.load(open(os.path.join(ROOT, "config", "models.json"))).get("providers") or {}).items():
+            if pid != "local" and _re.search(r"//(127\.0\.0\.1|localhost)[:/]", str(p.get("base_url") or "")): ids.add(pid)
+    except (OSError, ValueError): pass
+    return ids
+
+
+def order_models(cat, cluster):
+    """The pickers' order: what runs on this Mac first, then your models on a server, then everyone else's (stable, so each
+    group keeps its order)."""
+    def provider(m):
+        mid = str(m.get("id") or "")
+        for pre in ("harness:", "harness-direct:", "codex:"):
+            if mid.startswith(pre): return mid[len(pre):].split("/")[0].split(":")[0]
+        return m.get("provider")
+    def rank(m):
+        if m.get("provider") in ("local", "claude-qwen-cli") or str(m.get("provider_label") or "").startswith("Local"): return 0
+        return 1 if provider(m) in cluster else 2
+    return sorted(cat, key=rank)
 
 _model_is_local_before_harness = model_is_local
 def model_is_local(mid=None):
@@ -9094,7 +9383,8 @@ def model_catalogue():
     for m in cat:
         op = offpeak_for(m)
         if op: m["offpeak"] = {k: op.get(k) for k in ("active", "what", "label", "ends_at", "starts_at", "fraction", "quota", "windows", "windows_local", "peak")}
-    return cat
+    try: return order_models(cat, cluster_provider_ids())      # last, so Codex's entries are in order too
+    except Exception: return cat
 
 
 
@@ -9216,7 +9506,7 @@ def _is_claude_subscription(model_id):
     return str(model_id or "").startswith("harness:claude/")
 
 
-def limit_switch_plan(model_id, account=None, texts=(), now=None):
+def limit_switch_plan(model_id, account=None, texts=(), now=None, sid=None):
     """What can carry a chat on the moment its Claude allowance runs out, without waiting for
     the reset: another Claude account that can answer, else the model chosen under Settings
     → Fallback for "every Claude account used up". None when neither exists (the chat then
@@ -9233,7 +9523,7 @@ def limit_switch_plan(model_id, account=None, texts=(), now=None):
     if alt:
         return {"switch": f"continuing on {alt['label']}", "model": None, "account": alt["id"],
                 "from": CA.label_of(ROOT, account)}
-    fb = S.get("limit_fallback_model") or ""
+    fb = "" if no_fallback(sid) else (S.get("limit_fallback_model") or "")     # a chat that stays on its model waits for the reset
     if fb and fb != str(model_id):
         try: label = next((m.get("label") for m in model_catalogue() if m.get("id") == fb), None) or fb
         except Exception: label = fb
@@ -9296,3 +9586,214 @@ def schedule_limit_resume(sid, title, texts, model_id=None, attempt=0, now=None,
     except Exception:
         pass
     return job
+
+
+# ==================================================================== DELEGATION
+# The expensive model decides and does the hard parts; cheaper ones do the small ones (bin/delegate.py).
+# The setting is global (Settings → Tools → Delegation) and each chat can differ (/delegate on|off).
+import delegate as DELEG
+
+DELEGATE_TOOLS = ("delegate",)
+
+def delegation_on(sid=None):
+    sid = sid or getattr(TURN_CTX, "sid", None)
+    try:
+        pref = (CE.chat_prefs(sid) or {}).get("delegation") if sid else None
+    except Exception:
+        pref = None
+    return bool(pref) if pref is not None else DELEG.settings(S)["enabled"]
+
+def _delegate_spec():
+    return next((t for t in ALL_SPECS if t["function"]["name"] == "delegate"), None)
+
+def t_delegate(task, tier="light", context="", write=False, wait=True, timeout_minutes=None):
+    """Hand a small task to a cheaper model and return its answer."""
+    err = _chats_ready()
+    if err: return err
+    if not delegation_on():
+        return "Error: delegation is off for this chat. Do the task yourself."
+    timeout = min(float(timeout_minutes or 30), 24 * 60)
+    return CHATS.delegate(parent=_this_chat(), task=task, tier=tier, context=context, write=bool(write), wait=bool(wait),
+                          timeout=timeout, cancel=getattr(TURN_CTX, "cancel", None))
+
+BUILTIN.update({"delegate": t_delegate})
+ALL_SPECS += [
+ {"type": "function", "function": {"name": "delegate",
+  "description": DELEG.DELEGATE_DESCRIPTION,
+  "parameters": {"type": "object", "properties": {
+     "task": {"type": "string", "description": "everything the worker needs: what to do, where (paths), what done looks like, the format to return"},
+     "tier": {"type": "string", "enum": ["light", "standard"], "description": "light (default): the cheapest models, for mechanical or read-only work. standard: a mid-priced model, for work that needs some care"},
+     "context": {"type": "string", "description": "background the worker needs, pasted in (it has not seen this conversation)"},
+     "write": {"type": "boolean", "description": "true lets the worker change files and run commands; false (default) is read-only"},
+     "wait": {"type": "boolean", "description": "false hands it off and returns at once with the worker's chat id; collect the answer later with chat_wait. Use it to run independent tasks side by side"},
+     "timeout_minutes": {"type": "number", "description": "how long to wait for the answer (default 30)"}},
+   "required": ["task"]}}},
+]
+
+_turn_before_delegation = turn
+def turn(messages, user_content, tools, emit=None, approve=None, cancel=None, **kw):
+    """The `delegate` tool is there for the chats that have delegation on, and only those."""
+    try:
+        on = delegation_on(kw.get("sid"))
+        have = any((t.get("function") or {}).get("name") == "delegate" for t in tools or [])
+        if on and not have and _delegate_spec() and not getattr(TURN_CTX, "depth", 0):
+            tools = list(tools or []) + [_delegate_spec()]
+        elif not on and have:
+            tools = [t for t in tools if (t.get("function") or {}).get("name") != "delegate"]
+        # the same for orbit_improve: there when Orbit's self-improvement is on
+        imp_on = self_improve_mode() != "off"
+        imp = next((t for t in ALL_SPECS if t["function"]["name"] == "orbit_improve"), None)
+        has_imp = any((t.get("function") or {}).get("name") == "orbit_improve" for t in tools or [])
+        if imp_on and not has_imp and imp and not getattr(TURN_CTX, "depth", 0):
+            tools = list(tools or []) + [imp]
+        elif not imp_on and has_imp:
+            tools = [t for t in tools if (t.get("function") or {}).get("name") != "orbit_improve"]
+    except Exception:
+        pass
+    return _turn_before_delegation(messages, user_content, tools, emit=emit, approve=approve, cancel=cancel, **kw)
+
+
+# ==================================================================== ORBIT IMPROVING ITSELF
+# An agent that meets a limit or a bug in Orbit proposes the fix (bin/selfimprove.py): it is tried in a private copy, scanned,
+# reviewed by another model and only then applied -- or left for the person when it touches anything protected.
+import selfimprove as SELFIMP_MOD
+
+SELFIMP = None                          # the pipeline, set by orbit-ui
+SELFIMP_TOOLS = ("orbit_improve",)
+
+def self_improve_mode():
+    return SELFIMP_MOD.settings(S)["mode"]
+
+def t_orbit_improve(action="status", title="", problem="", changes=None, id="", wait=True, timeout_minutes=None):
+    """Propose a change to Orbit itself, or see where a proposal stands."""
+    if SELFIMP is None: return "Error: self-improvement is not running."
+    mode = self_improve_mode()
+    if mode == "off": return "Error: Orbit's self-improvement is off. Ask the person to turn it on in Settings → Tools → Orbit improvements."
+    action = str(action or "status").lower()
+    if action == "list":
+        rows = SELFIMP.listing()[:15]
+        return "\n".join(f"{r['id']} [{r['status']}] {r['title']}" + (f" — {r['why']}" if r.get("why") else "") for r in rows) or "No proposals yet."
+    if action == "status":
+        p = SELFIMP.get(str(id))
+        if not p: return "Error: no such proposal. orbit_improve(action=\"list\") shows them."
+        return _improve_report(p)
+    if action != "propose": return "Error: action is propose, status or list."
+    try:
+        p = SELFIMP.propose(title, problem, changes, proposer=(current_model() or {}).get("id") or getattr(TURN_CTX, "model", "") or "agent",
+                            run=True)
+    except SELFIMP_MOD.ProposalError as e:
+        return f"Error: {e}"
+    if not wait:
+        return f"Proposal {p['id']} is being tested and reviewed. orbit_improve(action=\"status\", id=\"{p['id']}\") shows where it stands."
+    end = time.time() + min(float(timeout_minutes or 25), 120) * 60
+    cancel = getattr(TURN_CTX, "cancel", None)
+    while time.time() < end:
+        cur = SELFIMP.get(p["id"]) or p
+        if cur["status"] not in ("queued", "testing", "reviewing", "approved"): break
+        if cancel is not None and cancel.is_set(): return f"Stopped waiting. Proposal {p['id']} carries on; status shows it."
+        time.sleep(3)
+    return _improve_report(SELFIMP.get(p["id"]) or p)
+
+def _improve_report(p):
+    tests = (p.get("tests") or {})
+    lines = [f"Proposal {p['id']}: {p['title']} — {p['status'].upper()}" + (f" ({p['why']})" if p.get("why") else "")]
+    if tests: lines.append("Tests in a private copy of Orbit: " + ("passed" if tests.get("ok") else "FAILED\n" + str(tests.get("tail", ""))[-900:]))
+    for f in (p.get("scan") or [])[:6]: lines.append(f"scan [{f['severity']}] {f['what']} — {f['path']}: {f['line']}")
+    for h in p.get("protected") or []: lines.append("protected: " + h)
+    for v in p.get("verdicts") or []:
+        lines.append(f"reviewer: {'approve' if v['approve'] else 'no'}, danger {v['danger']}. " + "; ".join((v["concerns"] + v["reasons"])[:3]))
+    st = p["status"]
+    if st == "applied": lines.append("Applied." + (" Orbit restarts when nothing is answering." if (p.get("applied") or {}).get("restart") else " It is live now."))
+    elif st == "needs_person": lines.append("It is waiting for the person to approve it in Settings → Tools → Orbit improvements. Carry on without it.")
+    elif st == "rejected": lines.append("Not applied. Fix what is listed above and propose again if it is still worth it.")
+    return "\n".join(lines)
+
+BUILTIN.update({"orbit_improve": t_orbit_improve})
+ALL_SPECS += [
+ {"type": "function", "function": {"name": "orbit_improve",
+  "description": "Orbit is the app running you, and you may improve it. If a limitation or bug in Orbit itself blocks you or the work "
+                 "(a missing ability, a wrong behaviour, an error in its code) -- not a problem in the project you are working on -- propose the "
+                 "fix with this tool instead of working around it or editing Orbit's files yourself. A proposal is tried in a private copy of Orbit "
+                 "(the whole test suite must pass), scanned, and reviewed by another model for danger; if all is well it is applied, with a backup "
+                 "and automatic rollback if Orbit fails to restart. Anything touching Orbit's safety rules, secrets, remote access or the terminal "
+                 "is never applied without the person. action=propose needs title, problem (what limitation or bug, with evidence) and changes: a list "
+                 "of {path, old, new} (an exact replacement that matches once) or {path, content} (a whole file), paths relative to Orbit's folder "
+                 "under bin/, web/, tools/, tests/ or docs/. New abilities usually belong in a new file in tools/ (loaded at once, no restart): "
+                 "TOOLS = [{\"name\": ..., \"description\": ..., \"parameters\": {JSON schema}, \"run\": a function taking those arguments and returning "
+                 "text}] -- never mark it \"safe\": True, that is for the person to decide. Add or update tests in tests/ for what you change. action=status (id) and action=list show proposals.",
+  "parameters": {"type": "object", "properties": {
+     "action": {"type": "string", "enum": ["propose", "status", "list"]},
+     "title": {"type": "string", "description": "one line: what this changes"},
+     "problem": {"type": "string", "description": "the limitation or bug it fixes, and how you know"},
+     "changes": {"type": "array", "items": {"type": "object"}, "description": "[{path, old, new}] or [{path, content}]"},
+     "id": {"type": "string", "description": "a proposal id, for status"},
+     "wait": {"type": "boolean", "description": "wait for the verdict (default true; it can take several minutes)"},
+     "timeout_minutes": {"type": "number"}},
+   "required": ["action"]}}},
+]
+
+
+# ==================================================================== SHARED PROJECTS: THE GATE
+# A turn that belongs to a shared project (bin/collab_policy.py, docs/collab/DESIGN.md) runs with the rights of the people who caused it,
+# and every tool call is checked against them before anything else. Without a shared-project context on the thread (or, for an engine whose
+# permission prompts arrive on another thread, registered under the chat's id) this changes nothing: risk_check is exactly what it was.
+# It is the LAST wrapper, so it sees the final word of every rule above, and it can only make an answer stricter: a deny or an ask for a
+# person's approval (which the host's own prompt cannot give on a member's behalf) is a block.
+_risk_check_before_collab = risk_check
+COLLAB_TURNS = {}          # chat id -> {"policy", "grant", "cwd", ...}
+
+
+def collab_context():
+    c = getattr(TURN_CTX, "collab", None)
+    if c is None:
+        try: c = COLLAB_TURNS.get(getattr(TURN_CTX, "sid", None))
+        except Exception: c = None
+    return c
+
+
+def risk_check(fn, args):
+    ctx = collab_context()
+    if not ctx:
+        return _risk_check_before_collab(fn, args)
+    try:
+        grant = ctx["grant"]() if callable(ctx["grant"]) else ctx["grant"]            # a callable is asked every time: a grant lowered mid-answer applies at once
+        d = ctx["policy"].decide(grant, {"tool": fn, "args": args if isinstance(args, dict) else {}, "cwd": ctx["cwd"]},
+                                 base=_risk_check_before_collab)
+    except Exception as e:                                           # fail closed
+        return ("block", f"shared-project check failed ({type(e).__name__})")
+    if d["verdict"] in ("allow", "ask") and ctx.get("guard"):               # the owner's guard sees it next, and can only make the answer stricter
+        try:
+            import collab_guard as _G
+            g = ctx["guard"](fn, args if isinstance(args, dict) else {}, d)
+        except Exception: g = {"verdict": "ask", "reason": "the guard could not be reached, so a person decides"}
+        if g:
+            final = _G.combine(d["verdict"], g["verdict"])
+            if final != d["verdict"] or g["verdict"] == "deny": d = dict(d, verdict=final, reason=f"{g['reason']} (the project's guard)")
+    if d["verdict"] == "allow":
+        return (None, "")
+    who = ctx.get("who") or "this project's rules"
+    if d["verdict"] == "ask":
+        if ctx.get("can_ask"):
+            ctx["ask_flags"] = list(d.get("flags") or [])                      # which kinds of risk this is about: the project may want two approvers for some
+            return ("confirm", d["reason"])                                    # the turn engine puts it to the project's approvers
+        return ("block", f"{d['reason']} — this needs an approver's OK in the shared project, and none can be asked here")
+    return ("block", f"{d['reason']} (for {who})")
+
+
+_project_folder_before_collab = project_folder
+
+
+def project_folder(pid=None):
+    """Inside a shared-project turn the working folder is the project's, whatever Orbit project is on screen."""
+    ctx = collab_context()
+    return ctx["cwd"] if ctx else _project_folder_before_collab(pid)
+
+
+_ckpt_rel_before_collab = _ckpt_rel
+def _ckpt_rel(p):
+    """In a shared-project turn a file in the project's folder is checkpointed under .collab/<project>/..., so the host can undo what a member's request had the model change."""
+    ctx = collab_context()
+    if ctx and ctx.get("cwd") and ctx.get("project"):
+        p, folder = os.path.abspath(p), os.path.abspath(ctx["cwd"]).rstrip(os.sep)
+        if p.startswith(folder + os.sep): return os.path.join(".collab", str(ctx["project"]), os.path.relpath(p, folder))
+    return _ckpt_rel_before_collab(p)

@@ -139,6 +139,32 @@ struct ModelPickerView: View {
         return accs.count > 1 ? accs : []
     }
 
+    private static func effortName(_ v: String) -> String {
+        ["low": "low", "medium": "medium", "high": "high", "xhigh": "extra high", "max": "max"][v] ?? v
+    }
+
+    /// "" follows the Mac's setting, "stay" holds this chat on its model, "switch" allows a fallback.
+    private var fallbackChoice: Binding<String> {
+        Binding<String>(
+            get: {
+                guard let b = state.chatExtras.prefs["no_fallback"]?.bool else { return "" }
+                return b ? "stay" : "switch"
+            },
+            set: { v in
+                let value: Bool? = v.isEmpty ? nil : (v == "stay")
+                let note = Self.fallbackNote(v)
+                Task { await state.setChatSetting("no_fallback", value, saying: note) }
+            })
+    }
+
+    private static func fallbackNote(_ v: String) -> String {
+        switch v {
+        case "stay": return "This chat stays on its model and retries until it answers"
+        case "switch": return "This chat may switch to a fallback model"
+        default: return "Fallback follows the Mac's setting"
+        }
+    }
+
     private var list: some View {
         List {
             if !claudeAccounts.isEmpty {
@@ -159,6 +185,40 @@ struct ModelPickerView: View {
                     Text("Claude account")
                 } footer: {
                     Text("Automatic uses the main account, and the next one when its limit is reached.")
+                }
+            }
+            if onPick == nil {
+                Section {
+                    Picker("Effort", selection: Binding(
+                        get: { state.chatExtras.prefs["reasoning_effort"]?.string ?? "" },
+                        set: { v in Task { await state.setChatSetting(
+                            "reasoning_effort", v.isEmpty ? nil : v,
+                            saying: v.isEmpty ? "Effort back to the default"
+                                              : "This chat now thinks at \(Self.effortName(v)) effort") } })) {
+                        Text("Default").tag("")
+                        Text("Low").tag("low")
+                        Text("Medium").tag("medium")
+                        Text("High").tag("high")
+                        Text("Extra high").tag("xhigh")
+                        Text("Max").tag("max")
+                    }
+                } header: {
+                    Text("Effort")
+                } footer: {
+                    Text("How hard this chat thinks. Higher is slower and uses more of your allowance. Default is Claude's, Codex's or Orbit's own.")
+                }
+            }
+            if onPick == nil {
+                Section {
+                    Picker("When the model drops out", selection: fallbackChoice) {
+                        Text("Follow Mac setting").tag("")
+                        Text("Stay and retry").tag("stay")
+                        Text("Switch to a fallback").tag("switch")
+                    }
+                } header: {
+                    Text("Fallback")
+                } footer: {
+                    Text("Stay and retry keeps this chat on its model, such as Qwen on the cluster. If the connection drops it waits, asks again, and carries on by itself when the model is back. Stop cancels the wait.")
                 }
             }
             if !recent.isEmpty {

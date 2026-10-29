@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""Orbit's internet door: a Cloudflare Tunnel fronted by Cloudflare Access.
+
+    orbit-tunnel setup --host phone.example.com --email you@example.com
+    orbit-tunnel status
+    orbit-tunnel rotate        new service-token secret for the phone app (re-pair the phone afterwards)
+    orbit-tunnel remove        take it all down again
+
+What it builds (see docs/INTERNET_DOOR.md):
+  - a tunnel: cloudflared on this Mac dials OUT to Cloudflare, so no port is opened on the Mac or the router;
+  - a proxied DNS name for it;
+  - a Cloudflare Access application on that name, with two allow rules and nothing else: your email (a one-time code
+    is sent to it) for browsers, and one service token for the phone app. Everyone else is stopped at Cloudflare's edge;
+  - the settings Orbit reads (~/.config/orbit/tunnel.json), so Orbit also checks Access's signed token on every request;
+  - a LaunchAgent that keeps cloudflared running.
+Secrets: the Cloudflare API token and the service token's secret live in the Keychain, the tunnel's run token in a 0600 file.
+Nothing secret is printed. Needs a Cloudflare API token in the Keychain item `orbit-cloudflare-token` that may edit
+Tunnels, DNS and Access."""
+import argparse, json, os, plistlib, shutil, subprocess, sys, time, urllib.error, urllib.request
+
+API = "https://api.cloudflare.com/client/v4"
+CF_KEYCHAIN = "orbit-cloudflare-token"
+ACCESS_KEYCHAIN = "orbit-tunnel-access"
+CONF_DIR = os.path.expanduser("~/.config/orbit")
+CONF = os.path.join(CONF_DIR, "tunnel.json")
+RUN_TOKEN = os.path.join(CONF_DIR, "tunnel-token")
+LABEL = "com.orbit.tunnel"
+PLIST = os.path.expanduser(f"~/Library/LaunchAgents/{LABEL}.plist")
+APP_NAME = "Orbit phone door"
+TOKEN_NAME = "Orbit phone app"
+PORT = int(os.environ.get("ORBIT_UI_PORT") or 8899)
+
+
+def die(msg):
+    sys.exit("orbit-tunnel: " + msg)
+
+
+def keychain_get(service):
+    return subprocess.run(["security", "find-generic-password", "-s", service, "-w"], capture_output=True, text=True).stdout.strip()
+
+
+def keychain_put(service, value):
+    subprocess.run(["security", "add-generic-password", "-U", "-s", service, "-a", "orbit", "-w", value], check=True, capture_output=True)
+
+
+def keychain_del(service):
+    subprocess.run(["security", "delete-generic-password", "-s", service], capture_output=True)
+
+
+_TOK = None
+
+def call(method, path, body=None):
+    global _TOK
+    _TOK = _TOK or keychain_get(CF_KEYCHAIN)
+    if len(_TOK) < 20: die(f"no Cloudflare API token in the Keychain item {CF_KEYCHAIN}")
+    req = urllib.request.Request(API + path, method=method, data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"Authorization": "Bearer " + _TOK, "Content-Type": "application/json", "User-Agent": "orbit-tunnel"})
+    try:
+        return json.loads(urllib.request.urlopen(req, timeout=60).read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try: j = json.loads(e.read() or b"{}")
+        except ValueError: j = {}
+        j["success"] = False; j["http"] = e.code
+        return j
+
+
+def ok(r, what):
+    if not r.get("success"):
+        errs = "; ".join(f"{e.get('code')}: {e.get('message')}" for e in r.get("errors") or [])[:300]
+        die(f"{what} failed (HTTP {r.get('http')}) {errs}")
+    return r.get("result")
+
+
+def ids(host):
+    acct = ok(call("GET", "/accounts"), "listing accounts")[0]["id"]
+    zone_name = ".".join(host.split(".")[-2:])
+    zones = ok(call("GET", f"/zones?name={zone_name}"), "finding the DNS zone")
+    if not zones: die(f"{zone_name} is not a zone on this Cloudflare account")
+    return acct, zones[0]["id"]
+
+
+def cloudflared():
+    for p in (shutil.which("cloudflared"), "/opt/homebrew/bin/cloudflared", "/usr/local/bin/cloudflared"):
+        if p and os.path.exists(p): return p
+    die("cloudflared is not installed: brew install cloudflared")
+
+
+def load():
+    try: return json.load(open(CONF))
+    except (OSError, ValueError): return {}
+
+
+def save(cfg):
+    os.makedirs(CONF_DIR, mode=0o700, exist_ok=True)
+    fd = os.open(CONF, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f: json.dump(cfg, f, indent=2)
+    os.chmod(CONF, 0o600)
+
+
+def write_secret_file(path, text):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f: f.write(text)
+    os.chmod(path, 0o600)
+
+
+# ------------------------------------------------------------------ steps
+
+def ensure_tunnel(acct, name):
+    found = ok(call("GET", f"/accounts/{acct}/cfd_tunnel?name={name}&is_deleted=false"), "listing tunnels")
+    if found:
+        tid = found[0]["id"]
+    else:
+        tid = ok(call("POST", f"/accounts/{acct}/cfd_tunnel", {"name": name, "config_src": "cloudflare"}), "creating the tunnel")["id"]
+    run_token = ok(call("GET", f"/accounts/{acct}/cfd_tunnel/{tid}/token"), "reading the tunnel's run token")
+    write_secret_file(RUN_TOKEN, run_token)
+    return tid
+
+
+def set_ingress(acct, tid, host):
+    cfg = {"config": {"ingress": [
+        {"hostname": host, "service": f"http://127.0.0.1:{PORT}"},
+        {"service": "http_status:404"}]}}
+    ok(call("PUT", f"/accounts/{acct}/cfd_tunnel/{tid}/configurations", cfg), "setting what the tunnel serves")
+
+
+def ensure_dns(zone, host, tid):
+    target = f"{tid}.cfargotunnel.com"
+    recs = ok(call("GET", f"/zones/{zone}/dns_records?name={host}"), "reading DNS")
+    body = {"type": "CNAME", "name": host, "content": target, "proxied": True, "comment": "Orbit internet door"}
+    if not recs:
+        ok(call("POST", f"/zones/{zone}/dns_records", body), "creating the DNS record")
+    elif len(recs) == 1 and recs[0]["type"] == "CNAME" and recs[0]["content"].endswith(".cfargotunnel.com"):
+        if recs[0]["content"] != target or not recs[0].get("proxied"):
+            ok(call("PUT", f"/zones/{zone}/dns_records/{recs[0]['id']}", body), "updating the DNS record")
+    else:
+        die(f"{host} already has a DNS record that is not an Orbit tunnel; pick another name or remove it first")
+
+
+def ensure_one_time_pin(acct):
+    idps = ok(call("GET", f"/accounts/{acct}/access/identity_providers"), "listing sign-in methods")
+    if not any(i.get("type") == "onetimepin" for i in idps):
+        ok(call("POST", f"/accounts/{acct}/access/identity_providers", {"name": "One-time PIN", "type": "onetimepin", "config": {}}),
+           "turning on the emailed one-time code")
+
+
+def new_service_token(acct):
+    """A fresh token for the phone app, replacing any earlier one of ours. The secret exists only in this response."""
+    for t in ok(call("GET", f"/accounts/{acct}/access/service_tokens"), "listing service tokens"):
+        if t.get("name") == TOKEN_NAME:
+            ok(call("DELETE", f"/accounts/{acct}/access/service_tokens/{t['id']}"), "removing the old service token")
+    t = ok(call("POST", f"/accounts/{acct}/access/service_tokens", {"name": TOKEN_NAME, "duration": "8760h"}), "creating the service token")
+    keychain_put(ACCESS_KEYCHAIN, t["client_secret"])
+    return t["id"], t["client_id"]
+
+
+def ensure_app(acct, host, email, token_uuid):
+    apps = ok(call("GET", f"/accounts/{acct}/access/apps"), "listing Access applications")
+    mine = [a for a in apps if a.get("domain") == host]
+    body = {"name": APP_NAME, "domain": host, "type": "self_hosted", "session_duration": "12h", "app_launcher_visible": False,
+            "http_only_cookie_attribute": True, "skip_interstitial": True, "service_auth_401_redirect": False,
+            "policies": [
+                {"name": "Owner email", "decision": "allow", "precedence": 1, "include": [{"email": {"email": email}}]},
+                {"name": "Phone app service token", "decision": "non_identity", "precedence": 2,
+                 "include": [{"service_token": {"token_id": token_uuid}}]}]}
+    if mine:
+        r = ok(call("PUT", f"/accounts/{acct}/access/apps/{mine[0]['id']}", body), "updating the Access application")
+    else:
+        r = ok(call("POST", f"/accounts/{acct}/access/apps", body), "creating the Access application")
+    return r["id"], r["aud"]
+
+
+def team_domain(acct):
+    return ok(call("GET", f"/accounts/{acct}/access/organizations"), "reading the Zero Trust organisation")["auth_domain"]
+
+
+def install_agent():
+    plist = {"Label": LABEL, "RunAtLoad": True, "KeepAlive": True, "ProcessType": "Background",
+             "ProgramArguments": [cloudflared(), "tunnel", "--no-autoupdate", "--protocol", "http2", "--loglevel", "warn", "run", "--token-file", RUN_TOKEN],
+             "StandardOutPath": os.path.expanduser("~/Library/Logs/orbit-tunnel.log"), "StandardErrorPath": os.path.expanduser("~/Library/Logs/orbit-tunnel.log")}
+    os.makedirs(os.path.dirname(PLIST), exist_ok=True)
+    with open(PLIST, "wb") as f: plistlib.dump(plist, f)
+    dom = f"gui/{os.getuid()}"
+    subprocess.run(["launchctl", "bootout", f"{dom}/{LABEL}"], capture_output=True)
+    for _ in range(10):                      # bootout returns before the old agent has gone
+        r = subprocess.run(["launchctl", "bootstrap", dom, PLIST], capture_output=True, text=True)
+        if not r.returncode: break
+        time.sleep(1)
+    if r.returncode: die("could not start cloudflared: " + (r.stderr or r.stdout).strip()[:200])
+
+
+def agent_running():
+    return subprocess.run(["launchctl", "print", f"gui/{os.getuid()}/{LABEL}"], capture_output=True, text=True).returncode == 0
+
+
+# ------------------------------------------------------------------ commands
+
+def cmd_setup(a):
+    host = a.host.strip().lower()
+    acct, zone = ids(host)
+    name = "orbit-" + (subprocess.run(["scutil", "--get", "LocalHostName"], capture_output=True, text=True).stdout.strip().lower() or "mac")
+    print(f"tunnel      {name}")
+    tid = ensure_tunnel(acct, name)
+    set_ingress(acct, tid, host)
+    print(f"dns         {host} -> tunnel (proxied)")
+    ensure_dns(zone, host, tid)
+    ensure_one_time_pin(acct)
+    prev = load()
+    if prev.get("host") == host and prev.get("access_id") and keychain_get(ACCESS_KEYCHAIN) and not a.rotate:
+        token_uuid, client_id = prev["access_token_id"], prev["access_id"]
+    else:
+        token_uuid, client_id = new_service_token(acct)
+    app_id, aud = ensure_app(acct, host, a.email, token_uuid)
+    print(f"access      only {a.email} (emailed code) and the phone app's service token may pass")
+    save({"host": host, "team": team_domain(acct), "aud": aud, "tunnel_id": tid, "app_id": app_id,
+          "access_id": client_id, "access_token_id": token_uuid, "email": a.email})
+    install_agent()
+    print("cloudflared running at login (LaunchAgent " + LABEL + ")")
+    print("\nNext: restart Orbit (Settings -> Save & restart server), then show the QR in Settings -> Phone.")
+
+
+def cmd_status(a):
+    cfg = load()
+    if not cfg: print("not set up"); return
+    print(f"host        {cfg['host']}")
+    print(f"cloudflared {'running' if agent_running() else 'NOT running'}")
+    print(f"service key {'in the Keychain' if keychain_get(ACCESS_KEYCHAIN) else 'MISSING (run setup --rotate)'}")
+    acct = ok(call("GET", "/accounts"), "listing accounts")[0]["id"]
+    t = ok(call("GET", f"/accounts/{acct}/cfd_tunnel/{cfg['tunnel_id']}"), "reading the tunnel")
+    print(f"tunnel      {t.get('status')} ({len(t.get('connections') or [])} connections)")
+
+
+def cmd_remove(a):
+    cfg = load()
+    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
+    for p in (PLIST, RUN_TOKEN):
+        try: os.remove(p)
+        except OSError: pass
+    if cfg:
+        acct, zone = ids(cfg["host"])
+        if cfg.get("app_id"): call("DELETE", f"/accounts/{acct}/access/apps/{cfg['app_id']}")
+        if cfg.get("access_token_id"): call("DELETE", f"/accounts/{acct}/access/service_tokens/{cfg['access_token_id']}")
+        for r in ok(call("GET", f"/zones/{zone}/dns_records?name={cfg['host']}"), "reading DNS"):
+            if r["type"] == "CNAME" and r["content"].endswith(".cfargotunnel.com"): call("DELETE", f"/zones/{zone}/dns_records/{r['id']}")
+        if cfg.get("tunnel_id"):
+            call("DELETE", f"/accounts/{acct}/cfd_tunnel/{cfg['tunnel_id']}/connections")
+            call("DELETE", f"/accounts/{acct}/cfd_tunnel/{cfg['tunnel_id']}")
+    keychain_del(ACCESS_KEYCHAIN)
+    try: os.remove(CONF)
+    except OSError: pass
+    print("removed: the tunnel, DNS name, Access application and service token are gone")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="orbit-tunnel", description=__doc__.split("\n\n")[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("setup"); s.add_argument("--host", required=True); s.add_argument("--email", required=True)
+    s.add_argument("--rotate", action="store_true", help="make a new service token even if one exists")
+    sub.add_parser("rotate"); sub.add_parser("status"); sub.add_parser("remove")
+    a = ap.parse_args()
+    if a.cmd == "rotate":
+        cfg = load()
+        if not cfg: die("not set up")
+        a = argparse.Namespace(host=cfg["host"], email=cfg.get("email") or "", rotate=True)
+        if not a.email: die("run setup --host ... --email ... --rotate once more (the email was not saved)")
+        return cmd_setup(a)
+    {"setup": cmd_setup, "status": cmd_status, "remove": cmd_remove}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    main()

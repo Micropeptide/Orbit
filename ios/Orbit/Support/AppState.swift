@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import SwiftUI
 import PhotosUI
 import UserNotifications
@@ -108,6 +109,12 @@ final class AppState: ObservableObject {
     @Published var work = WorkExtras()
     /// Allowance, spend and cheaper hours for the model picker (AppState+Usage.swift).
     @Published var usage = UsageState()
+    /// A shared project (and perhaps one of its chats) to show full screen.
+    @Published var sharedTarget: SharedTarget?
+    /// The owner's shared projects (Support/Shared.swift). Its own object so a refresh
+    /// redraws only what shows it; views read `state.shared.…` and a change redraws them.
+    let shared = SharedStore()
+    private var sharedSub: AnyCancellable?
 
     private(set) var server: OrbitServer?
     private var streamTask: Task<Void, Never>?
@@ -119,11 +126,13 @@ final class AppState: ObservableObject {
     /// Mac is the thing compared; it moves when anyone sends or answers.
     private var watchTask: Task<Void, Never>?
     private var watchedCount: Int?
+    private var watchedMtime: Double?
 
     init() {
         pairing = Keychain.load()
         rebuildServer()
         chats = Cache.loadChats()
+        sharedSub = shared.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
     private func rebuildServer() {
@@ -143,6 +152,9 @@ final class AppState: ObservableObject {
     /// A pairing link that would replace the Mac this phone is paired with, waiting for
     /// you to say yes (RootView asks).
     @Published var pendingPair: (url: URL, host: String)?
+    /// While a scanned code is being traded with the Mac, and why it did not work (the pairing screen shows both).
+    @Published var pairingBusy = false
+    @Published var pairingProblem: String?
 
     /// Accept `orbit://pair?url=…&token=…&name=…`, from a QR scan or a tapped link.
     ///
@@ -166,6 +178,7 @@ final class AppState: ObservableObject {
         // the phone trades it for its token (Links.swift). An older Mac sends the token.
         let token = map["token"] ?? ""
         let code = map["code"] ?? ""
+        let aid = map["aid"], asec = map["asec"]       // Cloudflare Access service token, when the Mac is on the internet
         guard !token.isEmpty || !code.isEmpty else { return false }
         if !confirmed, let cur = pairing, cur.url != clean || (!token.isEmpty && cur.token != token) {
             pendingPair = (url, URL(string: clean)?.host ?? clean)
@@ -173,12 +186,13 @@ final class AppState: ObservableObject {
         }
         pendingPair = nil
         if token.isEmpty {
-            Task { await claimPairing(url: clean, alts: alts, code: code, name: map["name"] ?? "Mac") }
+            Task { await claimPairing(url: clean, alts: alts, code: code, name: map["name"] ?? "Mac", aid: aid, asec: asec) }
             return true
         }
         pairing = Pairing(url: clean,
                           token: token, name: map["name"] ?? "Mac",
-                          alts: alts.isEmpty ? nil : alts)
+                          alts: alts.isEmpty ? nil : alts,
+                          aid: aid, asec: asec, ahost: aid == nil ? nil : URL(string: clean)?.host)
         Task { await refreshEverything() }
         return true
     }
@@ -202,6 +216,8 @@ final class AppState: ObservableObject {
         models = []; projects = []; attachments = []
         currentModel = nil; defaultModel = nil; deepLink = nil
         remoteHosts = []; hostProbes = [:]; probeErrors = [:]; harnessMode = .orbit
+        sharedTarget = nil
+        shared.clear()
         work = WorkExtras()
         localServer = LocalServer()
     }
@@ -232,6 +248,8 @@ final class AppState: ObservableObject {
         await loadChats()
         await loadModels()
         await loadProjects()
+        // the shared projects take a few small calls each; the list should not wait for them
+        Task { [shared, server] in await shared.refresh(using: server, quiet: true) }
     }
 
     func checkReachable() async {
@@ -263,7 +281,9 @@ final class AppState: ObservableObject {
                 candidates += ["https://\(host):8443", "https://\(host)"]
             }
             for alt in candidates where alt != p.url {
-                let probe = OrbitServer(pairing: Pairing(url: alt, token: p.token, name: p.name, alts: p.alts))
+                var probing = p
+                probing.url = alt
+                let probe = OrbitServer(pairing: probing)
                 if (try? await probe.health()) == true {
                     var swapped = p
                     swapped.url = alt
@@ -340,7 +360,7 @@ final class AppState: ObservableObject {
 
     func loadModels() async {
         guard let server else { return }
-        if let m = try? await server.models() {
+        if let m = try? await server.models(for: openChat?.sid) {
             models = m.models
             defaultModel = m.default
             // a chat with no choice of its own answers with the default, and the
@@ -448,14 +468,16 @@ final class AppState: ObservableObject {
     private func watch(_ id: String, loaded: Int?) {
         watchTask?.cancel()
         watchedCount = loaded
+        watchedMtime = nil
         watchTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
                 guard let self, !Task.isCancelled, self.openChat?.sid == id,
                       !self.backgrounded, let server = self.server else { continue }
                 guard let s = try? await server.stamp(id), self.openChat?.sid == id else { continue }
                 if self.streaming {
                     self.watchedCount = s.n                                  // our own turn moves it
+                    self.watchedMtime = s.mtime
                     // a stream silent for well over a long tool call while the Mac still answers
                     // has died without saying so: follow the answer by polling instead
                     if s.running, self.liveSid == id, self.streamTask != nil,
@@ -470,7 +492,8 @@ final class AppState: ObservableObject {
                 }
                 if s.running, self.liveSid == nil {
                     await self.rejoin(id)                                   // someone else's turn
-                } else if let seen = self.watchedCount, s.n != seen {
+                } else if let seen = self.watchedCount,
+                          s.n != seen || (self.watchedMtime != nil && s.mtime > (self.watchedMtime ?? 0)) {
                     // changed elsewhere: read it without moving what the Mac has open
                     if let d = try? await server.peek(id) {
                         self.messages = self.withPendingNotes(d.messages, sid: id)
@@ -483,8 +506,25 @@ final class AppState: ObservableObject {
                 // a waiting message may have gone out, or been added on the Mac
                 if s.n != self.watchedCount || !(self.queue.items.isEmpty) { await self.loadQueue() }
                 self.watchedCount = s.n
+                self.watchedMtime = s.mtime
             }
         }
+    }
+
+    /// Back from the lock screen or another app: the open chat may have moved on while the app
+    /// slept, and waiting for the next poll left it showing the old copy for a few seconds.
+    func reconcileOpenChat() async {
+        guard let server, let id = openChat?.sid, !streaming else { return }
+        guard let s = try? await server.stamp(id), openChat?.sid == id, !streaming else { return }
+        if s.running, liveSid == nil { await rejoin(id); return }
+        let moved = s.n != watchedCount || (watchedMtime != nil && s.mtime > (watchedMtime ?? 0))
+        watchedCount = s.n
+        watchedMtime = s.mtime
+        guard moved, let d = try? await server.peek(id), openChat?.sid == id, !streaming else { return }
+        messages = withPendingNotes(d.messages, sid: id)
+        learnPlan(id, from: d.messages)
+        if let t = d.title { openChat?.title = t }
+        Cache.saveMessages(d.messages, for: id)
     }
 
     // ------------------------------------------------------------ sending

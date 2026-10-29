@@ -16,7 +16,7 @@ is therefore off until you turn it on, and when it is on it holds to three rules
 Pairing is a QR code: the phone scans a URL carrying host, port and token, and
 never asks you to type a secret on a phone keyboard.
 """
-import hashlib, hmac, json, os, secrets, socket, subprocess, threading, time, urllib.request
+import hashlib, hmac, json, os, secrets, shutil, socket, subprocess, threading, time, urllib.request
 
 TOKEN_BYTES = 32
 TAILSCALE_BINS = ["/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale",
@@ -115,6 +115,14 @@ def _dev_save(root, d):
     with open(tmp, "w") as f: json.dump(d, f, indent=1)
     try: os.chmod(tmp, 0o600)
     except OSError: pass
+    # Keep the list as it was while it still had devices in it, so a list emptied by mistake (a button, a bug) can be put back: copy
+    # devices.json.bak over devices.json while Orbit is stopped. Only a version WITH devices replaces the backup, so emptying the list
+    # never empties its backup too.
+    try:
+        with open(p) as f: before = json.load(f)
+        if isinstance(before, dict) and before.get("devices"):
+            bak = p + ".bak"; shutil.copy2(p, bak); os.chmod(bak, 0o600)
+    except (OSError, ValueError): pass
     os.replace(tmp, p)
     _DEV.update(at=None)
 
@@ -234,13 +242,27 @@ def address_is_local(ip):
         s.close()
 
 
+_TS_DOWN = {"until": 0.0}
+
+def _ts_out(b, *args, timeout=3):
+    """stdout of a read-only tailscale CLI call. When the CLI hangs (the app is starting, the daemon is busy) that
+    costs one short wait, not one per question: for 30 s afterwards the other calls fail at once, and the callers
+    already treat a failure as "Tailscale not answering"."""
+    if time.time() < _TS_DOWN["until"]:
+        raise OSError("tailscale is not answering")
+    try:
+        return subprocess.run([b, *args], capture_output=True, text=True, timeout=timeout).stdout
+    except subprocess.TimeoutExpired:
+        _TS_DOWN["until"] = time.time() + 30
+        raise
+
+
 def tailscale_ip():
     """This Mac's tailnet address, or "" when Tailscale is not actually up."""
     for b in TAILSCALE_BINS:
         if not os.path.exists(b): continue
         try:
-            out = subprocess.run([b, "ip", "-4"], capture_output=True, text=True,
-                                 timeout=5).stdout.strip().splitlines()
+            out = _ts_out(b, "ip", "-4").strip().splitlines()
         except Exception:
             continue
         for line in out:
@@ -255,8 +277,7 @@ def tailscale_name():
     for b in TAILSCALE_BINS:
         if not os.path.exists(b): continue
         try:
-            st = json.loads(subprocess.run([b, "status", "--json"],
-                            capture_output=True, text=True, timeout=5).stdout)
+            st = json.loads(_ts_out(b, "status", "--json"))
         except Exception:
             continue
         dns = ((st.get("Self") or {}).get("DNSName") or "").rstrip(".")
@@ -295,7 +316,8 @@ def bind_addresses(mode):
     Loopback is always one of them — binding only the tailnet address would take
     the desktop app away from you. The remote address is a *second* socket rather
     than 0.0.0.0, so in tailscale mode the port genuinely is not on the café
-    Wi-Fi: it is bound to the tailnet interface and nowhere else.
+    Wi-Fi: it is bound to the tailnet interface and nowhere else. In internet
+    mode there is no second socket at all: the tunnel's program reaches loopback.
     """
     addrs = ["127.0.0.1"]
     if mode == "tailscale":
@@ -304,6 +326,85 @@ def bind_addresses(mode):
     elif mode == "lan":
         addrs = ["0.0.0.0"]                  # one socket already covers loopback
     return addrs
+
+
+# ------------------------------------------------------------------ the internet door (Cloudflare Tunnel + Access)
+#
+# An outbound-only tunnel (no port opened on this Mac) fronted by Cloudflare Access: a browser proves itself with an emailed
+# one-time code, the phone app with a service token. Access signs a JWT for every request it lets through, and Orbit checks that
+# signature itself (access_jwt_ok), so a request that skipped Access -- a misconfigured hostname, a second route to the tunnel --
+# is refused here. Behind both sits the per-device pairing token, as for every other address.
+# The settings live in a file outside the repo, written by `bin/orbit-tunnel setup`.
+
+def tunnel_file():
+    return os.environ.get("ORBIT_TUNNEL_FILE") or os.path.expanduser("~/.config/orbit/tunnel.json")
+
+_HOST_RE = __import__("re").compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+
+def tunnel_config():
+    """{"host", "team", "aud", ...} when the internet door is set up, else {}. Anything malformed counts as not set up."""
+    try:
+        c = json.load(open(tunnel_file()))
+    except (OSError, ValueError):
+        return {}
+    host, team, aud = (str(c.get(k) or "").strip().lower() for k in ("host", "team", "aud"))
+    if not (_HOST_RE.match(host) and _HOST_RE.match(team) and len(aud) >= 32): return {}
+    return {**c, "host": host, "team": team, "aud": aud}
+
+
+def tunnel_host():
+    return tunnel_config().get("host", "")
+
+
+ACCESS_KEYCHAIN = "orbit-tunnel-access"        # the service token's secret (the id is in tunnel.json)
+
+def access_credentials():
+    """(client id, client secret) of the service token the phone app presents, or ("", "")."""
+    cid = str(tunnel_config().get("access_id") or "")
+    if not cid: return "", ""
+    try:
+        sec = subprocess.run(["security", "find-generic-password", "-s", ACCESS_KEYCHAIN, "-w"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+    except Exception:
+        sec = ""
+    return (cid, sec) if sec else ("", "")
+
+
+_ACCESS_KEYS = {"at": 0.0, "tried": 0.0, "keys": {}}
+
+def _fetch_access_keys(team):
+    raw = urllib.request.urlopen(f"https://{team}/cdn-cgi/access/certs", timeout=8).read()
+    return {k["kid"]: k for k in json.loads(raw).get("keys", []) if k.get("kid")}
+
+def _access_key(team, kid, fetch=None):
+    """The signing key Cloudflare used, cached for an hour; an unknown key id refetches at most once a minute."""
+    now = time.time()
+    stale = now - _ACCESS_KEYS["at"] > 3600
+    if (stale or kid not in _ACCESS_KEYS["keys"]) and now - _ACCESS_KEYS["tried"] > 60:
+        _ACCESS_KEYS["tried"] = now
+        try:
+            _ACCESS_KEYS["keys"] = (fetch or _fetch_access_keys)(team); _ACCESS_KEYS["at"] = now
+        except Exception:
+            pass
+    return _ACCESS_KEYS["keys"].get(kid)
+
+
+def access_jwt_ok(token, cfg=None, fetch=None):
+    """True only for a live Cloudflare Access token for this application: signed by the team's key, for this audience and
+    issuer, not expired. Fails closed on anything else (no token, no network to fetch the key, a different algorithm)."""
+    cfg = cfg or tunnel_config()
+    if not cfg or not token or len(token) > 8192: return False
+    try:
+        import jwt
+        kid = jwt.get_unverified_header(token).get("kid")
+        jwk = _access_key(cfg["team"], kid, fetch)
+        if not jwk: return False
+        key = jwt.PyJWK.from_dict(jwk).key
+        jwt.decode(token, key, algorithms=["RS256"], audience=cfg["aud"], issuer="https://" + cfg["team"],
+                   options={"require": ["exp", "iat", "aud", "iss"]})
+        return True
+    except Exception:
+        return False
 
 
 def reachable_hosts(mode, port):
@@ -320,11 +421,16 @@ def reachable_hosts(mode, port):
         if ip: hosts.add(f"{ip}:{port}")
         hosts.add(f"{socket.gethostname()}:{port}")
         hosts.add(f"{socket.gethostname()}.local:{port}")
+    if mode != "off" and tunnel_host():
+        hosts.add(tunnel_host())             # the tunnel hands us the public name as Host
     return hosts
 
 
 def best_url(mode, port):
-    """The address to hand a phone. MagicDNS first — it outlives a DHCP lease."""
+    """The address to hand a phone. The internet door when it is set up (it works on any network, no VPN app), then
+    MagicDNS -- it outlives a DHCP lease."""
+    if mode != "off" and tunnel_host():
+        return "https://" + tunnel_host()
     if mode == "tailscale":
         for host, p in serve_map(port):          # HTTPS with a real certificate
             return f"https://{host}" if p == 443 else f"https://{host}:{p}"
@@ -344,8 +450,7 @@ def serve_map(port):
     for b in TAILSCALE_BINS:
         if not os.path.exists(b): continue
         try:
-            st = json.loads(subprocess.run([b, "serve", "status", "--json"],
-                            capture_output=True, text=True, timeout=5).stdout or "{}")
+            st = json.loads(_ts_out(b, "serve", "status", "--json") or "{}")
         except Exception:
             continue
         out = []
@@ -441,7 +546,9 @@ def status(root, mode, port):
     ts_ip, ts_name = tailscale_ip(), tailscale_name()
     ts_installed = any(os.path.exists(b) for b in TAILSCALE_BINS)
     hint = ""
-    if mode == "tailscale" and not ts_ip:
+    if mode == "internet" and not tunnel_host():
+        hint = "The internet door is not set up yet — run bin/orbit-tunnel setup (see docs/INTERNET_DOOR.md)."
+    elif mode == "tailscale" and not ts_ip:
         hint = ("Tailscale is installed but not connected — open it and sign in, "
                 "then restart Orbit." if ts_installed else
                 "Tailscale is not installed. Use LAN mode, or install Tailscale "
@@ -453,6 +560,7 @@ def status(root, mode, port):
         "token_set": bool(load_token(root)),
         "tailscale": {"running": bool(ts_ip), "ip": ts_ip, "name": ts_name,
                       "installed": ts_installed},
+        "tunnel": {"host": tunnel_host(), "set_up": bool(tunnel_host()), "credentials": bool(access_credentials()[1])},
         "lan_ip": lan_ip(),
         "mac_name": mac_name(),
         "port": port,
@@ -476,20 +584,28 @@ def pair_uri(root, mode, port):
     p = pair_payload(root, mode, port)
     if not p: return ""
     from urllib.parse import quote
-    uri = (f"orbit://pair?url={quote(p['url'])}&code={quote(p['code'])}"
-           f"&name={quote(p['name'])}")
-    if p.get("alts"):
-        uri += "&alts=" + quote(",".join(p["alts"]))
+    # Kept as short as it can be: a phone camera reads a QR by its squares, and every extra character makes them smaller. The Mac's name
+    # and its other addresses are not in it: the app learns both from the Mac as soon as it is paired.
+    uri = f"orbit://pair?url={quote(p['url'])}&code={quote(p['code'])}"
+    if not tunnel_host() or p["url"] != "https://" + tunnel_host():
+        uri += f"&name={quote(p['name'])}"
+        if p.get("alts"): uri += "&alts=" + quote(",".join(p["alts"]))
+    if tunnel_host() and p["url"] == "https://" + tunnel_host():
+        # the app must present these to Cloudflare Access on every request to that address (and to no other)
+        cid, sec = access_credentials()
+        if sec: uri += f"&aid={quote(cid)}&asec={quote(sec)}"
     return uri
 
 
-def pair_qr_png(root, mode, port, box=8):
+def pair_qr_png(root, mode, port, box=10):
     """QR as PNG bytes, rendered locally — the token never leaves this Mac."""
     uri = pair_uri(root, mode, port)
     if not uri: return b""
     import io
     import qrcode
-    img = qrcode.make(uri, box_size=box, border=2)
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=box, border=3)       # shown big on a screen, with a quiet border; medium repair for a camera's blur and glare
+    qr.add_data(uri); qr.make(fit=True)
+    img = qr.make_image()
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()

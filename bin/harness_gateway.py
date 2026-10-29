@@ -53,6 +53,8 @@ def _text_of(content):
         if isinstance(b, dict):
             if b.get("type") == "text": out.append(b.get("text") or "")
             elif b.get("type") == "image": out.append("[image]")
+            elif b.get("type") == "tool_reference":      # Claude Code's tool search loaded a tool: say which
+                out.append(f"Loaded tool {b.get('tool_name')}: it is now in your tool list; call it by that name.")
     return "\n".join(out)
 
 
@@ -71,6 +73,13 @@ def to_openai(body):
         msgs.append({"role": "system", "content": _text_of(sys_) if not isinstance(sys_, str) else sys_})
     for m in body.get("messages") or []:
         role, content = m.get("role"), m.get("content")
+        if role == "system":
+            # Claude Code puts what a hook added (a SessionStart hook's context, say) into the conversation as a
+            # message of its own with the role "system". A chat template (Qwen's) accepts a system message only
+            # first and refuses the request otherwise ("System message must be at the beginning"), so it goes in
+            # where it was said, as a reminder in a user message.
+            role = "user"
+            if isinstance(content, str): content = f"<system-reminder>\n{content}\n</system-reminder>"
         if isinstance(content, str):
             msgs.append({"role": role, "content": content})
             continue
@@ -124,7 +133,7 @@ def to_openai(body):
             return sc
         out["tools"] = [{"type": "function", "function": {"name": t.get("name"), "description": t.get("description") or "",
                                                           "parameters": schema(t)}}
-                        for t in body["tools"] if t.get("name")]
+                        for t in body["tools"] if t.get("name") and not t.get("defer_loading")]
         tc = body.get("tool_choice") or {}
         if tc.get("type") == "any": out["tool_choice"] = "required"
         elif tc.get("type") == "tool": out["tool_choice"] = {"type": "function", "function": {"name": tc.get("name")}}
@@ -171,7 +180,8 @@ def to_responses(body):
     if body.get("max_tokens"): out["max_output_tokens"] = body["max_tokens"]
     if body.get("tools"):
         out["tools"] = [{"type": "function", "name": t.get("name"), "description": t.get("description") or "",
-                         "parameters": t.get("input_schema") or {"type": "object"}} for t in body["tools"] if t.get("name")]
+                         "parameters": t.get("input_schema") or {"type": "object"}} for t in body["tools"]
+                        if t.get("name") and not t.get("defer_loading")]
     return out
 
 
@@ -440,7 +450,71 @@ def _drop_unsigned_thinking(messages):
     return out
 
 
-def passthrough_body(body, strict=True):
+# What Meta's Messages endpoint takes (https://dev.meta.ai/docs/protocols/messages). It refuses
+# stop_sequences, top_k, container and inference_geo with a 400, and any unknown top-level field.
+META_KEYS = ("model", "messages", "system", "max_tokens", "metadata", "stream", "temperature", "top_p", "tools",
+             "tool_choice", "thinking", "output_config", "service_tier")
+META_EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "xhigh"}
+
+
+def _without_cache_control(x):
+    """Meta caches the stable prefix by itself; the markers Claude Code adds are not part of its API."""
+    if isinstance(x, list): return [_without_cache_control(i) for i in x]
+    if isinstance(x, dict): return {k: _without_cache_control(v) for k, v in x.items() if k != "cache_control"}
+    return x
+
+
+def meta_body(body):
+    """A Claude Code request, cut to what Meta Model API accepts."""
+    out = {k: v for k, v in body.items() if k in META_KEYS}
+    if isinstance(out.get("metadata"), dict):
+        out["metadata"] = {k: v for k, v in out["metadata"].items() if isinstance(v, str)}
+    if "temperature" in out:
+        out.pop("top_p", None)                           # one of them, not both
+        try: out["temperature"] = max(0.0, min(1.0, float(out["temperature"])))
+        except (TypeError, ValueError): out.pop("temperature")
+    th = out.get("thinking")
+    if isinstance(th, dict):
+        if th.get("type") == "enabled":
+            mt, bt = int(out.get("max_tokens") or 0), int(th.get("budget_tokens") or 0)
+            out["thinking"] = {"type": "enabled", "budget_tokens": bt} if 1024 <= bt < mt else {"type": "adaptive"}
+        elif th.get("type") == "adaptive":
+            out["thinking"] = {"type": "adaptive", **({"display": th["display"]} if th.get("display") else {})}
+        else:
+            out.pop("thinking")                          # it always reasons: "disabled" is a 400
+    oc = out.get("output_config")
+    if isinstance(oc, dict):
+        keep = {}
+        if oc.get("effort") in META_EFFORT: keep["effort"] = META_EFFORT[oc["effort"]]
+        if oc.get("format"): keep["format"] = oc["format"]
+        if keep: out["output_config"] = keep
+        else: out.pop("output_config")
+    tc = out.get("tool_choice")
+    if isinstance(tc, dict) and tc.get("type") == "tool":
+        out["tool_choice"] = {"type": "any", **({"disable_parallel_tool_use": tc["disable_parallel_tool_use"]}
+                                                if "disable_parallel_tool_use" in tc else {})}
+    tools = []
+    for t in out.get("tools") or []:
+        if not isinstance(t, dict): continue
+        typ = str(t.get("type") or "custom")
+        if typ in ("custom", "function") or "input_schema" in t:
+            tools.append({k: v for k, v in t.items() if k in ("name", "description", "input_schema", "strict", "defer_loading")})
+        elif typ.startswith("web_search"):
+            tools.append({"type": "web_search", **({"user_location": t["user_location"]} if t.get("user_location") else {})})
+        elif typ.startswith("tool_search"):
+            tools.append({"type": "tool_search"})
+        # Anthropic's own bash/editor/computer tools do not exist here: Claude Code runs those itself
+    if "tools" in out:
+        if tools: out["tools"] = tools
+        else: out.pop("tools"); out.pop("tool_choice", None)
+    out["messages"] = _drop_unsigned_thinking(_without_cache_control(out.get("messages")))
+    if "system" in out: out["system"] = _without_cache_control(out["system"])
+    return out
+
+
+def passthrough_body(body, strict=True, profile=None):
+    if profile == "meta":
+        return meta_body(body)
     if not strict:
         return {**body, "messages": _drop_unsigned_thinking(body.get("messages"))} if body.get("messages") else body
     out = {k: v for k, v in body.items() if k in PASSTHROUGH_KEYS}
@@ -687,7 +761,8 @@ def make_handler(resolver, log=None, token=None, hooks=None):
                 if self.headers.get(h): extra[h] = self.headers[h]
             extra.setdefault("anthropic-version", "2023-06-01")
             try:
-                r = self._upstream(route, "/messages", passthrough_body(body, route.get("strict", True)), extra)
+                r = self._upstream(route, "/messages", passthrough_body(body, route.get("strict", True),
+                                                                        route.get("profile")), extra)
             except UpstreamError as e:
                 return self._relay_error(e)
             self.send_response(r.status)
@@ -709,19 +784,21 @@ def make_handler(resolver, log=None, token=None, hooks=None):
         def _responses(self, route, body):
             """Codex's Responses request, answered by this provider in its own format."""
             import responses_bridge as RB
-            fmt, model = route["format"], body.get("model") or ""
+            # a provider can speak a different format to Codex than to Claude Code (Meta: Messages for
+            # Claude Code, but Responses, which carries reasoning across turns, for Codex)
+            fmt, model = route.get("responses_format") or route["format"], body.get("model") or ""
             if fmt == "chat":
                 payload, names = RB.responses_to_chat(body)
                 path, conv = "/chat/completions", RB.chat_stream_to_responses
                 extra = None
             elif fmt == "messages":
                 payload, names = RB.responses_to_messages(body, int(route.get("max_output") or 32000))
-                payload = passthrough_body(payload, route.get("strict", True))
+                payload = passthrough_body(payload, route.get("strict", True), route.get("profile"))
                 path, conv = "/messages", RB.messages_stream_to_responses
                 extra = {"anthropic-version": "2023-06-01"}
             else:
                 openai = "api.openai.com" in (route.get("base") or "")
-                payload, names = RB.responses_for_provider(body, openai=openai)
+                payload, names = RB.responses_for_provider(body, openai=openai, keep_reasoning=route.get("profile") == "meta")
                 payload["stream"] = True
                 path, conv, extra = "/responses", None, None
             payload.update(route.get("extra_body") or {})

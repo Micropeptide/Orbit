@@ -63,6 +63,27 @@ class TestTheWindow(Patch):
         self.assertEqual(st["max"], 128000)
 
 
+class TestAChatSwitchedToAServerOfYours(Patch):
+    """A chat that started on Sonnet (1,000,000) and was switched to the cluster's Qwen (262,144) kept the 1,000,000
+    on its meter, so 244,509 tokens read "25%" when the real limit was 93% away."""
+    def setUp(self):
+        self.addCleanup(q.SESSION_TOKENS.pop, "s1", None); self.addCleanup(q.SESSION_WINDOW.pop, "s1", None)
+        import harness as H
+        self.patch(H, "load", lambda root: {"custom": {"hpc": {}}, "providers": {}, "hidden": [], "contexts": {}})
+        q.SESSION_WINDOW["s1"] = 1000000                 # what the earlier model's answers reported
+        q.SESSION_TOKENS["s1"] = 244509
+
+    def test_the_servers_window_is_the_limit(self):
+        self.patch(q, "current_model", lambda mid=None: {"id": "harness:hpc/qwen", "context": 262144})
+        st = q.context_state([{"role": "user", "content": "x"}], "s1", model="harness:hpc/qwen")
+        self.assertEqual((st["used"], st["max"]), (244509, 262144)); self.assertGreater(st["pct"], 90)
+
+    def test_claudes_own_models_keep_what_they_reported(self):
+        self.patch(q, "current_model", lambda mid=None: {"id": "harness:claude/sonnet", "context": 200000})
+        st = q.context_state([{"role": "user", "content": "x"}], "s1", model="harness:claude/sonnet")
+        self.assertEqual(st["max"], 1000000)
+
+
 class TestAfterARestart(Patch):
     """Nothing measured in memory yet: the figures saved with the chat, not an estimate
     over Orbit's copy of a transcript that Claude Code has long since compacted."""

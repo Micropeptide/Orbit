@@ -32,6 +32,33 @@ struct RootView: View {
         #endif
     }
 
+    private var scheduledTab: some View {
+        ScheduledView().tabItem { Label("Scheduled", systemImage: "clock") }.tag("scheduled")
+    }
+    private var filesTab: some View {
+        FilesView().tabItem { Label("Files", systemImage: "folder") }.tag("files")
+    }
+    private var libraryTab: some View {
+        LibraryView().tabItem { Label("Library", systemImage: "books.vertical") }.tag("library")
+    }
+    private var settingsTab: some View {
+        SettingsView().tabItem { Label("Settings", systemImage: "gearshape") }.tag("settings")
+    }
+    /// Only when the Mac has shared projects: nothing to explain to anyone who does not.
+    private var sharedTab: some View {
+        SharedView()
+            .tabItem { Label("Shared", systemImage: "person.2") }
+            .badge(state.shared.totalUnread)
+            .tag("shared")
+    }
+
+    private func offerTips() {
+        Task {
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            if state.isPaired, !tipsShown, welcomed || Self.skipWelcome { state.work.showTips = true }
+        }
+    }
+
     var body: some View {
         LockGate {
         Group {
@@ -46,18 +73,21 @@ struct RootView: View {
                     }
                     .tabItem { Label("Chats", systemImage: "bubble.left.and.bubble.right") }
                     .tag("chats")
-                    ScheduledView()
-                        .tabItem { Label("Scheduled", systemImage: "clock") }
-                        .tag("scheduled")
-                    FilesView()
-                        .tabItem { Label("Files", systemImage: "folder") }
-                        .tag("files")
-                    LibraryView()
-                        .tabItem { Label("Library", systemImage: "books.vertical") }
-                        .tag("library")
-                    SettingsView()
-                        .tabItem { Label("Settings", systemImage: "gearshape") }
-                        .tag("settings")
+                    // Five tabs fit the bar; a sixth sends the rest into "More". With shared projects,
+                    // Shared takes a place on the bar and the two quietest tabs go behind More, so
+                    // Settings never does.
+                    if state.shared.visible {
+                        sharedTab
+                        filesTab
+                        settingsTab
+                        scheduledTab
+                        libraryTab
+                    } else {
+                        scheduledTab
+                        filesTab
+                        libraryTab
+                        settingsTab
+                    }
                 }
                 // `/tasks`, from anywhere: set state.work.showTasks (AppState+Work.swift)
                 .sheet(isPresented: $state.work.showTasks) { TasksSheet() }
@@ -69,13 +99,19 @@ struct RootView: View {
             }
         }
         .animation(.default, value: state.isPaired)
+        .onChange(of: state.shared.visible) { _, visible in
+            // the Shared tab goes away when the last project does; do not leave it selected
+            if !visible, state.tab == "shared" { state.tab = "chats" }
+        }
         .onChange(of: state.isPaired) { _, paired in
             // a moment after the list appears, not over the pairing screen as it goes
             guard paired, !tipsShown else { return }
-            Task {
-                try? await Task.sleep(nanoseconds: 700_000_000)
-                if state.isPaired, !tipsShown { state.work.showTips = true }
-            }
+            offerTips()
+        }
+        // the welcome is a full-screen cover: a second sheet over it is refused by SwiftUI, so
+        // the tips wait until it is closed
+        .onChange(of: welcomed) { _, now in
+            if now, state.isPaired, !tipsShown { offerTips() }
         }
         }
         .fullScreenCover(isPresented: Binding(get: { !welcomed && !Self.skipWelcome }, set: { if !$0 { welcomed = true } })) {
@@ -93,6 +129,16 @@ struct RootView: View {
                  + "Your chats, prompts and attachments would go there instead of \(state.pairing?.name ?? "your Mac"). "
                  + "Only continue if you just showed this code on your own Mac.")
         }
+        // a shared project is the Mac's own page for it, full screen
+        .fullScreenCover(item: $state.sharedTarget) { target in
+            if let p = state.pairing, let screen = SharedWebScreen(target: target, pairing: p) {
+                screen.environmentObject(state)
+            } else {
+                ContentUnavailableView("Can't open the project", systemImage: "wifi.exclamationmark",
+                                       description: Text("This phone isn't paired with a Mac."))
+            }
+        }
+        .sharePlanAlerts()
         .environment(\.blockActions, blockActions)
         .onAppear {
             blockActions.state = state

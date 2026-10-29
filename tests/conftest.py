@@ -19,8 +19,9 @@ collect_ignore = ["test_api.py"]
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin"))
 
-# Settings that call out to a model or a service when they are set.
-_REACHES_OUT = ("review_model",)
+# Settings that call out to a model or a service when they are set, or that change what a run is
+# given (delegation turns on a tool and a Claude Code subagent model): a test that needs one sets it.
+_REACHES_OUT = ("review_model", "delegation")
 
 
 @pytest.fixture(autouse=True)

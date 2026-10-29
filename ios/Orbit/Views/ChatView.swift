@@ -151,6 +151,9 @@ struct ChatView: View {
                         Button { makePDF() } label: {
                             Label("Share as PDF", systemImage: "doc.richtext")
                         }
+                        Button { Task { await state.copyHandoff(for: sid) } } label: {
+                            Label("Hand off to Claude desktop", systemImage: "arrow.left.arrow.right")
+                        }
                         Button { showLibrary = true } label: {
                             Label("Agent, instructions, memory", systemImage: "books.vertical")
                         }
@@ -165,6 +168,15 @@ struct ChatView: View {
                         }
                         .disabled(state.streaming)
                         ChatMenuItems(sid: sid, model: actionsModel)
+                        if state.shared.visible {
+                            Menu {
+                                ForEach(state.shared.projects) { p in
+                                    Button(p.name) {
+                                        Task { await state.shared.prepareShare(chat: sid, into: p, using: state.server) }
+                                    }
+                                }
+                            } label: { Label("Add to a shared project…", systemImage: "person.2") }
+                        }
                         Divider()
                         Button(role: .destructive) { confirmBin = true } label: {
                             Label("Move to bin", systemImage: "trash")
@@ -571,8 +583,10 @@ struct ChatView: View {
             }
             Button { step(-1) } label: { Image(systemName: "chevron.up") }
                 .disabled(findMatches.isEmpty)
+                .accessibilityLabel("Previous match")
             Button { step(1) } label: { Image(systemName: "chevron.down") }
                 .disabled(findMatches.isEmpty)
+                .accessibilityLabel("Next match")
             Button("Done") { finding = false; findText = ""; flashed = nil }
                 .font(.callout.weight(.semibold))
         }

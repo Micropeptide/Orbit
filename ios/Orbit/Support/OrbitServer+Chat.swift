@@ -205,6 +205,14 @@ extension OrbitServer {
         return (prefs.compactMapValues { JSONValue(any: $0) }, JSONValue(any: r["effective"]))
     }
 
+    /// A note to paste into a Claude desktop chat that missed this chat's latest turns: where the session
+    /// is, how to resume it, what just happened. Nil when the chat has no Claude session yet.
+    func handoffNote(_ sid: String) async throws -> String? {
+        let enc = sid.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? sid
+        let r = try await getJSON("/api/handoff?sid=\(enc)") as? [String: Any]
+        return r?["text"] as? String
+    }
+
     /// A temporary chat: nothing written to disk. Returns its id.
     func temporaryChat(on: Bool = true) async throws -> String {
         let r = try await postJSON("/api/temp", ["on": on])

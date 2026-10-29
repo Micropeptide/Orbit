@@ -12,11 +12,13 @@ struct MacSettingsSection: View {
             }
             NavigationLink { MacGeneralView() } label: { Label("General", systemImage: "slider.horizontal.3") }
             NavigationLink { LocalServerView() } label: { Label("Local server", systemImage: "cpu") }
+            NavigationLink { ClusterModelsView() } label: { Label("Cluster models", systemImage: "server.rack") }
             NavigationLink { ToolsRulesView() } label: { Label("Tools & rules", systemImage: "wrench.and.screwdriver") }
             NavigationLink { EasyModeView() } label: { Label("Easy mode", systemImage: "wrench") }
             NavigationLink { MCPServersView() } label: { Label("MCP servers", systemImage: "puzzlepiece.extension") }
             NavigationLink { ClaudeCodeSettingsView() } label: { Label("Claude Code", systemImage: "terminal") }
             NavigationLink { CodexSettingsView() } label: { Label("Codex", systemImage: "chevron.left.forwardslash.chevron.right") }
+            NavigationLink { HelpersView() } label: { Label("Helpers", systemImage: "person.2.wave.2") }
             NavigationLink { PhoneAccessView() } label: { Label("Phone access", systemImage: "iphone.radiowaves.left.and.right") }
             NavigationLink { StatusHealthView() } label: { Label("Status & health", systemImage: "stethoscope") }
         } header: {
@@ -28,7 +30,7 @@ struct MacSettingsSection: View {
 }
 
 #if DEBUG
-/// Development only: `ORBIT_SETTINGS_PAGE=models|fallback|general|tools|easy|mcp|claude|codex|phone|status`
+/// Development only: `ORBIT_SETTINGS_PAGE=models|fallback|general|tools|easy|mcp|claude|codex|phone|status|cluster|cluster-models|helpers|crew`
 /// (with `ORBIT_TAB=settings`) opens that page, so each can be screenshotted without a finger.
 ///
 /// This belongs to the whole Settings screen, not to one of its sections. A
@@ -49,6 +51,10 @@ struct DebugSettingsDestination: ViewModifier {
                 case "fallback": FallbackView()
                 case "general": MacGeneralView()
                 case "server": LocalServerView()
+                case "cluster-models": ClusterModelsView()
+                case "helpers": HelpersView()
+                case "crew": CrewView()
+                case "cluster": ClusterScreen()
                 case "tools": ToolsRulesView()
                 case "easy": EasyModeView()
                 case "mcp": MCPServersView()

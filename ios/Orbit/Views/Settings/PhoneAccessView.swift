@@ -16,6 +16,8 @@ struct PhoneAccessView: View {
 
     private let modes: [(id: String, label: String, why: String)] = [
         ("off", "Off", "Only the Mac itself can reach Orbit. The default."),
+        ("internet", "Internet (no Tailscale)", "Reachable from any network at the Mac's own web address, through a "
+            + "Cloudflare tunnel only you can pass. The Mac opens no port. Needs the one-time setup on the Mac."),
         ("tailscale", "Tailscale", "Reachable from anywhere on your tailnet, and bound to the tailnet "
             + "interface only — the port is not on whatever Wi-Fi the Mac is using."),
         ("lan", "Local network", "Reachable from the Mac's Wi-Fi. Simplest at home; don't use it on a "

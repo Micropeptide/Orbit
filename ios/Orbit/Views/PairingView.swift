@@ -53,6 +53,12 @@ struct PairingView: View {
                     Button("Enter the address by hand") { manual = true }
                         .font(.footnote)
 
+                    if state.pairingBusy {
+                        HStack(spacing: 10) { ProgressView(); Text("Pairing with your Mac…").font(.footnote).foregroundStyle(.secondary) }
+                    }
+                    if let problem = state.pairingProblem {
+                        Text(problem).font(.footnote).foregroundStyle(.red).multilineTextAlignment(.center)
+                    }
                     if let failed {
                         Text(failed).font(.footnote).foregroundStyle(.red)
                             .multilineTextAlignment(.center)
@@ -96,7 +102,7 @@ struct PairingView: View {
     private var steps: some View {
         VStack(alignment: .leading, spacing: 12) {
             step(1, "On your Mac, open Orbit → Settings → Phone.")
-            step(2, "Choose Tailscale (works anywhere) or Local network (same Wi-Fi), then restart.")
+            step(2, "Choose Internet (works anywhere, no VPN), Tailscale or Local network (same Wi-Fi), then restart.")
             step(3, "Scan the QR code it shows.")
         }
         .padding(16)

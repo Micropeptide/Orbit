@@ -518,6 +518,20 @@ def _cwd_for(sid, project, mk):
 RUNS = {}          # chat id -> {"thread", "turn", "srv"} while it answers
 
 
+def forget_thread_files(thread, home=None):
+    """A temporary chat's Codex thread, removed from Codex's own session folders (a Codex that does not
+    know `ephemeral` writes it anyway). Returns the paths removed."""
+    import glob
+    if not re.fullmatch(r"[0-9a-fA-F-]{8,64}", str(thread or "")): return []
+    base = os.path.join(home or os.path.expanduser("~"), ".codex")
+    removed = []
+    for pat in (f"sessions/**/rollout-*{thread}*.jsonl", f"archived_sessions/**/rollout-*{thread}*.jsonl"):
+        for pth in glob.glob(os.path.join(base, pat), recursive=True):
+            try: os.remove(pth); removed.append(pth)
+            except OSError: pass
+    return removed
+
+
 def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None, inbox=None,
              interrupt=None, sid=None, checkpoint=None, project=None, max_minutes=None,
              read_only=None, **_):
@@ -587,7 +601,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         # eyes: a browser, the iOS Simulator and Mac app windows (bin/orbit-look), as an MCP server
         # of this thread; its tools run without asking, as Orbit's own look at them is not a risk
         config = {**(config or {}), "mcp_servers": {**((config or {}).get("mcp_servers") or {}),
-                  "orbit-look": {**q.look_server(), "default_tools_approval_mode": "approve"}}}
+                  "orbit-look": {**q.look_server("codex"), "default_tools_approval_mode": "approve"}}}
     if prefs.get("add_dirs") and sandbox == "workspace-write" and not host:
         config = {**config, "sandbox_workspace_write": {"writable_roots": list(prefs["add_dirs"])}}
     dev = ""
@@ -623,7 +637,9 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
             r = srv.request("thread/start", {"cwd": cwd, "model": model, "modelProvider": provider_key,
                                              "config": config or None, "approvalPolicy": policy, "sandbox": sandbox,
                                              "approvalsReviewer": reviewer,
-                                             "developerInstructions": dev or None, "serviceName": "orbit"}, timeout=180)
+                                             "developerInstructions": dev or None, "serviceName": "orbit",
+                                             # a temporary chat's thread is never written to Codex's history
+                                             **({"ephemeral": True} if q.is_temp(sid) else {})}, timeout=180)
         except CodexError as e:
             return fail(f"Codex could not start a thread: {e}")
         thread = (r.get("thread") or {}).get("id")
@@ -732,7 +748,13 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         if method == "mcpServer/elicitation/request":
             # the look server asks before each tool when Codex is set that way: looking is
             # allowed, starting or quitting a Mac app is not decided for you here
-            if "orbit-look" in json.dumps(p) and not re.search(r"mac_(launch|quit)", json.dumps(p)):
+            blob = json.dumps(p)
+            act = re.search(r"screen_(click|move|drag|type|key|scroll)", blob)
+            if "orbit-look" in blob and act:             # driving the screen asks, as it does in Orbit's own chats
+                ok, _always = _ask(approve, "screen_" + act.group(1), {}, "Codex wants to control the screen (%s)" % act.group(1),
+                                   "orbit-look")
+                return srv.respond(rid, {"action": "accept" if ok else "decline"})
+            if "orbit-look" in blob and not re.search(r"mac_(launch|quit)", blob):
                 return srv.respond(rid, {"action": "accept"})
             return srv.respond(rid, {"action": "decline"})
         return srv.respond(rid, error=f"Orbit does not handle {method}")
@@ -893,6 +915,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         srv.used = time.time()
         srv.unsubscribe(thread)
         RUNS.pop(sid or thread, None)
+        if q.is_temp(sid): forget_thread_files(thread)
         # a tool call that never reported back still gets an answer, or the next
         # model this chat moves to is sent a call with no result
         answered_ids = {m.get("tool_call_id") for m in messages if m.get("role") == "tool"}

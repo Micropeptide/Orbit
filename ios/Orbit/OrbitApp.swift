@@ -71,6 +71,7 @@ struct OrbitApp: App {
                         Task {
                             await state.refreshEverything()
                             if fromBackground { await state.resyncLive() }   // the stream rarely survives the lock screen
+                            await state.reconcileOpenChat()                  // and the open chat may have moved on
                         }
                     case .background:
                         state.wentToBackground = true

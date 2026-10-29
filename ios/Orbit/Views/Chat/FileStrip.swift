@@ -200,7 +200,7 @@ struct FileMenuItems: View {
             if link == nil { link = try await server.fileAction(sid: sid, path: path, action: "preview").url }
             guard let link else { return }
             guard let url = await server.absolute(link) else { return }
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let data = try await server.perform(URLRequest(url: url))
             UIPasteboard.general.string = String(decoding: data, as: UTF8.self)
             Haptics.success()
             state.toast("Contents copied")

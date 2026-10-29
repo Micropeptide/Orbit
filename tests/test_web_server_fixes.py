@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.join(ROOT, "bin"))
 
 import qqcore as q
 
+import pagejs
+
 
 def load_ui():
     loader = importlib.machinery.SourceFileLoader("orbit_ui_webfix", os.path.join(ROOT, "bin", "orbit-ui"))
@@ -72,8 +74,19 @@ class TestStreamsSayTheyAreAlive(unittest.TestCase):
         src = open(os.path.join(ROOT, "bin", "orbit-ui")).read()
         self.assertIn("Q.get(timeout=15)", src)
         self.assertIn('b": ping\\n\\n"', src)
-        page = open(os.path.join(ROOT, "web", "index.html")).read()
-        self.assertIn("Date.now()-lastByte>60000", page, "the page never notices a dead stream")
+        self.assertIn("Date.now()-lastByte>60000", pagejs.js(), "the page never notices a dead stream")
+
+
+class TestTheSplitWebAssetsAreServed(Base):
+    """index.html is split (app.css, app*.js) so it fits the update pipeline; the server
+    serves those files by name, and nothing else from the top of web/."""
+    def test_app_js_and_css_are_served(self):
+        for name in ("/app.js", "/app2.js", "/app.css"):
+            r = self.call("get", name)
+            self.assertEqual(r.code, 200, name)
+            self.assertEqual(r.body, open(os.path.join(ROOT, "web", name.lstrip("/")), "rb").read())
+    def test_a_name_the_app_does_not_ship_is_not_served(self):
+        self.assertEqual(self.call("get", "/app99.js").code, 404)
 
 
 class TestOneAlertPerPrompt(unittest.TestCase):

@@ -243,10 +243,15 @@ def responses_to_messages(body, max_tokens=32000):
 
 # ------------------------------------------------------------------ -> Responses (other providers)
 
-def responses_for_provider(body, openai=False):
+def responses_for_provider(body, openai=False, keep_reasoning=False):
     """A Responses request an OpenAI-compatible provider that is not OpenAI accepts:
-    namespaces flattened, built-in tools and OpenAI-only fields left out."""
-    out = {k: v for k, v in body.items() if k not in ("client_metadata", "prompt_cache_key", "include", "store", "service_tier")}
+    namespaces flattened, built-in tools and OpenAI-only fields left out.
+
+    keep_reasoning: the provider seals its own reasoning (`reasoning.encrypted_content`) and wants
+    it sent back next turn, as Meta Model API does -- so `include` stays and so do sealed items."""
+    drop = ("client_metadata", "prompt_cache_key", "service_tier") if keep_reasoning else \
+           ("client_metadata", "prompt_cache_key", "include", "store", "service_tier")
+    out = {k: v for k, v in body.items() if k not in drop}
     names = {}
     if openai:
         out["store"] = body.get("store", False)
@@ -261,7 +266,7 @@ def responses_for_provider(body, openai=False):
             if isinstance(it, dict) and it.get("type") == "function_call" and it.get("namespace"):
                 it = {**{k: v for k, v in it.items() if k != "namespace"}, "name": _flat_of(it, names)}
             if isinstance(it, dict) and it.get("type") == "reasoning" and it.get("encrypted_content") \
-                    and not it.get("summary") and not it.get("content"):
+                    and not it.get("summary") and not it.get("content") and not keep_reasoning:
                 continue                   # another provider's sealed reasoning means nothing here
             items.append(it)
         out["input"] = items

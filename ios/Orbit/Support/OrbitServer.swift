@@ -57,9 +57,21 @@ actor OrbitServer {
         return r
     }
 
+    /// The request, with the Cloudflare Access service token added when it goes to the Mac's internet address.
+    func signed(_ req: URLRequest) -> URLRequest {
+        let extra = pairing.accessHeaders(for: req.url)
+        guard !extra.isEmpty else { return req }
+        var r = req
+        for (k, v) in extra { r.setValue(v, forHTTPHeaderField: k) }
+        return r
+    }
+
+    /// For a web view, which cannot be given the token any other way: the headers for its first request.
+    func accessHeaders(for url: URL?) -> [String: String] { pairing.accessHeaders(for: url) }
+
     func run(_ req: URLRequest) async throws -> Data {
         do {
-            let (data, resp) = try await session.data(for: req)
+            let (data, resp) = try await session.data(for: signed(req))
             let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
             if code == 401 { throw Failure.unauthorised }
             guard (200..<300).contains(code) else {
@@ -123,10 +135,12 @@ actor OrbitServer {
     }
 
     /// Has this chat changed on the Mac? Cheap enough to ask every few seconds.
-    func stamp(_ id: String) async throws -> (n: Int, running: Bool) {
-        struct S: Codable { var n: Int; var running: Bool }
+    /// `mtime` says when the Mac last saved it: a chat can change without its message count
+    /// moving (an answer edited, a file change undone), and a Mac that predates it sends none.
+    func stamp(_ id: String) async throws -> (n: Int, running: Bool, mtime: Double) {
+        struct S: Codable { var n: Int; var running: Bool; var mtime: Double? }
         let s = try await get("/api/stamp/\(id)", as: S.self)
-        return (s.n, s.running)
+        return (s.n, s.running, s.mtime ?? 0)
     }
 
     func trash() async throws -> [TrashItem] {
@@ -138,8 +152,12 @@ actor OrbitServer {
         return (try? JSONDecoder().decode(R.self, from: try await post("/api/trash/restore", ["name": name])))?.ok ?? false
     }
 
-    func models() async throws -> ModelList {
-        try await get("/api/models", as: ModelList.self)
+    /// The catalogue, with `current` being the named chat's own model -- not whichever chat the Mac
+    /// last had open, which another window or this phone's other chat may have moved.
+    func models(for sid: String? = nil) async throws -> ModelList {
+        let q = (sid?.isEmpty == false)
+            ? "?sid=" + (sid!.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? sid!) : ""
+        return try await get("/api/models" + q, as: ModelList.self)
     }
 
     func projects() async throws -> [ProjectInfo] {
@@ -405,7 +423,7 @@ actor OrbitServer {
                     req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
                     req.timeoutInterval = 3600
 
-                    let (bytes, resp) = try await session.bytes(for: req)
+                    let (bytes, resp) = try await session.bytes(for: signed(req))
                     let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                     if code == 401 { throw Failure.unauthorised }
                     guard (200..<300).contains(code) else {

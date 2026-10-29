@@ -195,7 +195,9 @@ struct MarkdownText: View {
     @ObservedObject private var links = FileLinks.shared
 
     var body: some View {
-        let blocks = Block.parse(raw)
+        // A live answer redraws the whole transcript about twenty times a second, and every
+        // finished message used to be parsed again each time. Finished ones come from a cache.
+        let blocks = sid != nil ? MarkdownCache.blocks(raw) : Block.parse(raw)
         VStack(alignment: .leading, spacing: 10) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
                 view(for: block)
@@ -307,10 +309,13 @@ struct MarkdownText: View {
     }
 
     static func attributed(_ s: String) -> AttributedString {
-        (try? AttributedString(
+        if let hit = MarkdownCache.inlineHit(s) { return hit }
+        let out = (try? AttributedString(
             markdown: s,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
         ?? AttributedString(s)
+        MarkdownCache.inlineStore(s, out)
+        return out
     }
 
     struct ListItem {
@@ -586,5 +591,33 @@ struct QuoteBlock<Content: View>: View {
         }
         .fixedSize(horizontal: false, vertical: true)
         .background(kind == nil ? Color.clear : tint.opacity(0.07), in: .rect(cornerRadius: 8))
+    }
+}
+
+
+/// Parsed Markdown, kept for the messages that are finished. Parsing is the expensive part of
+/// drawing a long answer, and SwiftUI asks for it again whenever anything on screen changes.
+enum MarkdownCache {
+    private final class Blocks { let value: [MarkdownText.Block]; init(_ v: [MarkdownText.Block]) { value = v } }
+    private final class Inline { let value: AttributedString; init(_ v: AttributedString) { value = v } }
+    private static let blockCache: NSCache<NSString, Blocks> = {
+        let c = NSCache<NSString, Blocks>(); c.countLimit = 300; return c
+    }()
+    private static let inlineCache: NSCache<NSString, Inline> = {
+        let c = NSCache<NSString, Inline>(); c.countLimit = 1500; return c
+    }()
+
+    static func blocks(_ raw: String) -> [MarkdownText.Block] {
+        let key = raw as NSString
+        if let hit = blockCache.object(forKey: key) { return hit.value }
+        let parsed = MarkdownText.Block.parse(raw)
+        blockCache.setObject(Blocks(parsed), forKey: key)
+        return parsed
+    }
+
+    static func inlineHit(_ s: String) -> AttributedString? { inlineCache.object(forKey: s as NSString)?.value }
+    static func inlineStore(_ s: String, _ v: AttributedString) {
+        // a short piece, not the half-written paragraph of an answer still arriving
+        if s.count < 4000 { inlineCache.setObject(Inline(v), forKey: s as NSString) }
     }
 }

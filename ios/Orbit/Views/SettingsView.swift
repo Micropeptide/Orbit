@@ -136,6 +136,23 @@ struct SettingsView: View {
                 .id("faceid")
 
                 Section {
+                    NavigationLink {
+                        SharedView(embedded: true)
+                    } label: {
+                        HStack {
+                            Text("Shared projects")
+                            Spacer()
+                            if state.shared.enabled == true {
+                                Text("\(state.shared.projects.count)").foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                } footer: {
+                    Text("Projects you work on with other people. They live on your Mac; this opens the same page your collaborators see.")
+                }
+                .id("shared")
+
+                Section {
                     NavigationLink("Bin") { BinView() }
                 } header: {
                     Text("Bin on the Mac")

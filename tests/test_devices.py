@@ -133,3 +133,19 @@ class TestEachDeviceAlone(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDeviceListBackup(Base):
+    """A device list emptied by mistake can be put back: the last version that still had devices is kept beside it."""
+    def test_the_last_list_with_devices_survives_being_emptied(self):
+        tok, did = R.claim_code(self.root, R.new_pair_code(self.root), "My phone")
+        R.revoke_device(self.root, did)                                  # a normal revoke empties the list
+        p = R.devices_path(self.root)
+        self.assertEqual(json.load(open(p))["devices"], {})
+        bak = json.load(open(p + ".bak")); self.assertIn(did, bak["devices"]); self.assertEqual(bak["devices"][did]["name"], "My phone")
+        self.assertEqual(oct(os.stat(p + ".bak").st_mode & 0o777), "0o600")                    # tokens' hashes: private, like the list itself
+
+    def test_a_second_empty_save_does_not_empty_the_backup(self):
+        tok, did = R.claim_code(self.root, R.new_pair_code(self.root), "My phone"); R.revoke_device(self.root, did)
+        R.new_pair_code(self.root); R.unpair_everything(self.root)
+        self.assertIn(did, json.load(open(R.devices_path(self.root) + ".bak"))["devices"])

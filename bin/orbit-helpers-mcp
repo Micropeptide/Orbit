@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Orbit's helper tools as a local (stdio) MCP server, for agents that start a command instead of connecting to an address (Claude Science's "Local command", Claude Code's
+`claude mcp add orbit -- <this>`). It holds no tools: each message is passed to Orbit's helper door on this Mac and the answer is passed back.
+
+The app's token is read from Orbit's own settings file, so nothing has to be copied or pasted. Which app this is: --app NAME, or ORBIT_HELPERS_APP, or the first app in
+Settings > Helpers. ORBIT_HELPERS_URL / ORBIT_HELPERS_TOKEN override the address and token. Standard library only.
+"""
+import json, os, re, sys, urllib.error, urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+BAKED_HOME = None          # Orbit's installer writes the data folder here when it copies this file somewhere else
+TIMEOUT_S = 700            # orbit_wait and orbit_job may wait up to 600 s inside Orbit
+
+
+def norm(s): return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+
+def home():
+    return os.environ.get("ORBIT_HOME") or BAKED_HOME or os.path.join(HERE, "..")
+
+
+def settings(app):
+    """-> (url, token) from Orbit's settings file."""
+    url, tok = os.environ.get("ORBIT_HELPERS_URL"), os.environ.get("ORBIT_HELPERS_TOKEN")
+    if url and tok: return url, tok
+    path = os.path.join(home(), "config", "science_bridge.json")
+    try: cfg = json.load(open(path))
+    except (OSError, ValueError): raise SystemExit(f"Orbit's helper settings were not found at {path}. Open Orbit, Settings > Helpers, and turn it on.")
+    clients = [c for c in cfg.get("clients") or [] if isinstance(c, dict) and isinstance(c.get("token"), str)]
+    if not clients and isinstance(cfg.get("token"), str): clients = [{"name": "Claude Science", "token": cfg["token"]}]
+    if not clients: raise SystemExit("Orbit has no app set up for helpers. Open Settings > Helpers and add one.")
+    pick = next((c for c in clients if app and norm(c.get("name")) == norm(app)), None) if app else clients[0]
+    if pick is None: raise SystemExit(f"No app named {app!r} in Settings > Helpers (have: {', '.join(str(c.get('name')) for c in clients)}).")
+    return url or f"http://127.0.0.1:{int(cfg.get('port') or 8455)}/mcp", tok or pick["token"]
+
+
+def forward(url, token, msg):
+    req = urllib.request.Request(url, data=json.dumps(msg).encode(), headers={"Content-Type": "application/json", "Authorization": "Bearer " + token}, method="POST")
+    with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
+        raw = r.read()
+        return json.loads(raw) if raw.strip() else None
+
+
+def main(argv):
+    app = os.environ.get("ORBIT_HELPERS_APP") or None
+    if "--app" in argv and argv.index("--app") + 1 < len(argv): app = argv[argv.index("--app") + 1]
+    url, token = settings(app)
+    for line in sys.stdin:
+        line = line.strip()
+        if not line: continue
+        try: msg = json.loads(line)
+        except ValueError: continue
+        mid = msg.get("id") if isinstance(msg, dict) else None
+        try: out = forward(url, token, msg)
+        except urllib.error.HTTPError as e:
+            why = "Orbit's helper door refused this app's token (it was replaced or the app was removed): open Settings > Helpers." if e.code == 401 else f"Orbit's helper door answered {e.code}."
+            out = {"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": why}} if mid is not None else None
+        except (urllib.error.URLError, OSError):
+            out = {"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": "Orbit is not running, or Settings > Helpers is switched off."}} if mid is not None else None
+        except ValueError:
+            out = {"jsonrpc": "2.0", "id": mid, "error": {"code": -32000, "message": "Orbit's helper door sent something unreadable."}} if mid is not None else None
+        if out is not None:
+            sys.stdout.write(json.dumps(out) + "\n"); sys.stdout.flush()
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

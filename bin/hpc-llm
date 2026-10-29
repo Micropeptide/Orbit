@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+"""Run the Qwen model on a HPC GPU and reach it from Orbit at 127.0.0.1:8012.
+
+    hpc-llm start [options]   pick a GPU setup, submit the job, wait, open the tunnel, hand Orbit the key
+    hpc-llm plan  [options]   show what start would choose (and why), submit nothing
+    hpc-llm status            job, GPUs, tunnel, and whether the model answers
+    hpc-llm stop              cancel the job, close the tunnel, forget the key
+
+options for start / plan:
+    --gpus N        force N cards (the model is split across them); default: the best setup that fits
+    --max-len L     context length wanted, in tokens (default 262144, the model's maximum)
+    --min-len L     smallest context worth running (default 65536); a setup that cannot reach it is skipped
+    --mem 64G       host memory to ask for
+    --no-wait       do not wait: refuse when the earliest start is more than 30 minutes away (default: wait for a GPU)
+    --debug         keep a server log (has the text of chats: testing only)
+    --eager         skip compiling and graph capture: starts in about 2 minutes instead of 8-10, answers more slowly
+
+How it picks: it reads which GPUs the cluster has (type, memory, how many are free), works out which setups can hold the
+model plus a cache for the context you want (one card, or split across 2, 3...), asks the scheduler when each would start
+(sbatch --test-only), and takes the earliest that fits; a better setup that starts within 15 minutes of the earliest wins
+(fewer cards, more memory). Orbit's context settings are then set to what was really served.
+
+Only the text of each request reaches the cluster. Nothing is saved there: request
+logging is off, the server's stdout goes to /dev/null, scratch lives in the job's own
+/work folder and is removed when the job ends. The one thing kept between jobs is the compiled-kernel
+cache (qwen-server/cache): code the GPU runs, nothing from any request. --debug keeps a server log for testing.
+"""
+import datetime, json, os, re, subprocess, sys, time, urllib.request
+
+HOST = "hpc"
+DIR = "/path/to/project/user/Models/qwen-server"
+LOCAL_PORT = 8012
+ROOT = os.path.expanduser("~/Rdirectory/Qwen")
+SECRETS = ROOT + "/config/secrets.json"
+KEYNAME = "HPC_LLM_KEY"
+
+# what the model needs, from what vLLM reported (GiB)
+WEIGHTS_GIB = 29.3          # FP8 weights, whole model
+KV_GIB_PER_TOKEN = 17.64 / 262144   # cache for one sequence of that length (hybrid model with a small attention share)
+OVERHEAD_GIB = 4.0          # per card: activations, CUDA graphs, drafter
+UTIL = 0.90                 # share of a card's memory vLLM may use (GPUUTIL in serve.sbatch)
+MODEL_MAX = 262144
+CPUS = 16
+BAD_STATES = ("DOWN", "DRAIN", "FAIL", "MAINT", "INVALID", "NOT_RESPONDING", "RESERVED", "PLANNED")
+
+
+def ssh(cmd, check=True, timeout=60):
+    try:
+        r = subprocess.run(["ssh", "-o", "ConnectTimeout=20", HOST, cmd], capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if check: sys.exit("ssh timed out")
+        return None
+    if r.returncode:
+        if check: sys.exit("ssh failed: " + (r.stderr or r.stdout).strip()[:300])
+        return None
+    return r.stdout.strip()
+
+
+def set_key(value):
+    d = json.load(open(SECRETS))
+    if value: d[KEYNAME] = value
+    else: d.pop(KEYNAME, None)
+    tmp = SECRETS + ".tmp"
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        json.dump(d, f, indent=1)
+    os.replace(tmp, SECRETS)
+
+
+def job_state(jid):
+    """'' when the job is gone, None when the cluster could not be asked (a network blip is not a dead job)."""
+    out = ssh(f"squeue -j {jid} -h -o '%T'", check=False)
+    return None if out is None else ("" if out == "COMPLETING" else out)
+
+
+def my_job():
+    """[id, state, node, gres] | None (no job) | False (cluster unreachable)."""
+    out = ssh("squeue -u $USER -h -n qwen-serve -o '%i %T %N %b'", check=False)
+    if out is None: return False
+    rows = [l.split() for l in out.splitlines() if l.split()[1:2] != ["COMPLETING"]]
+    return rows[0] if rows else None
+
+
+def tunnel_pids():
+    r = subprocess.run(["pgrep", "-f", "--", f"-L {LOCAL_PORT}:127.0.0.1:"], capture_output=True, text=True)
+    return r.stdout.split()
+
+
+def answers(key):
+    try:
+        rq = urllib.request.Request(f"http://127.0.0.1:{LOCAL_PORT}/v1/models", headers={"Authorization": "Bearer " + key})
+        return urllib.request.urlopen(rq, timeout=5).status == 200
+    except Exception:
+        return False
+
+
+# ------------------------------------------------------------------ choosing the GPUs
+
+def cluster_gpus():
+    """Live GPU inventory: nodes with type, memory per card, cards free now, and the per-user GPU cap."""
+    out = ssh("echo '##NOW'; date +%Y-%m-%dT%H:%M:%S; echo '##QOS'; sacctmgr -n -P show qos campus24 format=maxtrespu; "
+              "echo '##NODES'; scontrol show node -o | grep -i 'gres/gpu'", check=False)
+    if out is None: return None
+    sec = {}
+    cur = None
+    for line in out.splitlines():
+        if line.startswith("##"): cur = line[2:]; sec[cur] = []
+        elif cur: sec[cur].append(line)
+    m = re.search(r"gres/gpu=(\d+)", " ".join(sec.get("QOS", [])))
+    cap = int(m.group(1)) if m else 2
+    nodes = []
+    for line in sec.get("NODES", []):
+        kv = dict(re.findall(r"(\w+)=(\S+)", line))
+        feats = kv.get("AvailableFeatures", "").split(",")
+        if "campus" not in feats: continue
+        if any(b in kv.get("State", "") for b in BAD_STATES): continue
+        vm = next((int(re.match(r"vmem(\d+)G", f).group(1)) for f in feats if re.match(r"vmem\d+G", f)), None)
+        tot = int((re.search(r"gres/gpu=(\d+)", kv.get("CfgTRES", "")) or [0, 0])[1])
+        used = int((re.search(r"gres/gpu=(\d+)", kv.get("AllocTRES", "")) or [0, 0])[1])
+        if not vm or not tot: continue
+        kind = next((f for f in feats if f not in ("campus", "gpu", "pi_shared") and not f.startswith(("vmem", "cuda_cc", "amd-", "intel-")) and not f.startswith("pi_")), "GPU")
+        nodes.append({"name": kv["NodeName"], "vram": vm, "kind": kind, "gpus": tot, "free": tot - used, "state": kv.get("State", ""),
+                      "cpu_free": int(kv.get("CPUEfctv", kv.get("CPUTot", 0))) - int(kv.get("CPUAlloc", 0)),
+                      "mem_free_gib": (int(kv.get("RealMemory", 0)) - int(kv.get("AllocMem", 0))) / 1024})
+    return {"now": sec.get("NOW", [""])[0], "cap": cap, "nodes": nodes}
+
+
+def max_len_for(vram_gb, n):
+    """Longest context n cards of this size can hold next to the weights (GiB-based, conservative: the label rounds up)."""
+    per_card = UTIL * vram_gb * 0.97 - OVERHEAD_GIB
+    room = n * per_card - WEIGHTS_GIB
+    return max(0, int(room / KV_GIB_PER_TOKEN)) if room > 0 else 0
+
+
+def plan(a):
+    info = cluster_gpus()
+    if info is None or not info["nodes"]:
+        print("could not read the GPU list from the cluster: falling back to one 97 GB card")
+        return [{"vram": 97, "n": 1, "maxlen": min(a["max_len"], MODEL_MAX), "start": None, "node": "?", "why": "fallback"}], None
+    cands = []
+    for vram in sorted({n["vram"] for n in info["nodes"]}, reverse=True):
+        group = [n for n in info["nodes"] if n["vram"] == vram]
+        for n in range(1, min(info["cap"], max(g["gpus"] for g in group)) + 1):
+            if a["gpus"] and n != a["gpus"]: continue
+            ml = min(max_len_for(vram, n), MODEL_MAX)
+            kind = group[0]["kind"]
+            c = {"vram": vram, "n": n, "kind": kind, "maxlen": min(ml, a["max_len"]), "cap_len": ml,
+                 "free_now": any(g["free"] >= n and g["cpu_free"] >= CPUS and g["mem_free_gib"] >= 60 for g in group)}
+            if ml < a["min_len"]:
+                c["why"] = f"{n} x {vram} GB holds only {ml} tokens (< {a['min_len']})"
+            cands.append(c)
+    a["cap"] = info["cap"]
+    ok = [c for c in cands if "why" not in c]
+    # ask the scheduler when each would start
+    now = datetime.datetime.fromisoformat(info["now"])
+    cmd = "; ".join(f"echo '##{i}'; sbatch --test-only --constraint=vmem{c['vram']}G --gres=gpu:{n} -c {CPUS} --mem={a['mem']} -t 24:00:00 --wrap='sleep 1' 2>&1"
+                    .replace("{n}", str(c["n"])) for i, c in enumerate(ok))
+    out = ssh(cmd, check=False, timeout=120) if ok else ""
+    sec, cur = {}, None
+    for line in (out or "").splitlines():
+        if line.startswith("##"): cur = int(line[2:]); sec[cur] = ""
+        elif cur is not None: sec[cur] += line + "\n"
+    for i, c in enumerate(ok):
+        m = re.search(r"to start at (\S+) using .* on nodes (\S+)", sec.get(i, ""))
+        if m:
+            c["start"] = datetime.datetime.fromisoformat(m.group(1)); c["node"] = m.group(2)
+        else:
+            c["why"] = "scheduler: " + (sec.get(i, "").strip().splitlines() or ["no answer"])[-1][:90]
+    ok = [c for c in ok if "why" not in c]
+    if ok:
+        first = min(c["start"] for c in ok)
+        near = [c for c in ok if c["start"] <= first + datetime.timedelta(minutes=15)]
+        # in the window: the full context first, then fewer cards, then more memory per card
+        near.sort(key=lambda c: (c["maxlen"] < a["max_len"], c["n"], -c["vram"], c["start"]))
+        pick = near[0]
+    else:
+        pick = None
+    return cands, pick, now
+
+
+def show_plan(cands, pick, now, a):
+    print(f"wanted: {a['max_len']} tokens of context, at least {a['min_len']}; the cluster allows {a.get('cap', '?')} cards per user\n")
+    print(f"  {'setup':<26}{'context':>9}  {'starts':<22}where")
+    for c in sorted(cands, key=lambda c: (c.get("start") is None, c.get("start") or now, c["n"])):
+        name = f"{c['n']} x {c['vram']} GB {c.get('kind', '')}"
+        if "why" in c:
+            print(f"  {name:<26}{'-':>9}  {'-':<22}skipped: {c['why']}")
+            continue
+        s = c.get("start")
+        when = "now" if s and (s - now).total_seconds() < 120 else (s.strftime("%a %H:%M") if s else "?")
+        mark = "  <== chosen" if c is pick else ""
+        print(f"  {name:<26}{c['maxlen']:>9}  {when:<22}{c.get('node', '')}{mark}")
+    print()
+
+
+def parse_args(argv):
+    a = {"gpus": 0, "max_len": MODEL_MAX, "min_len": 65536, "mem": "64G", "debug": False, "eager": False, "no_wait": False}
+    i = 0
+    while i < len(argv):
+        k = argv[i]
+        if k == "--gpus": a["gpus"] = int(argv[i + 1]); i += 1
+        elif k == "--max-len": a["max_len"] = int(argv[i + 1]); i += 1
+        elif k == "--min-len": a["min_len"] = int(argv[i + 1]); i += 1
+        elif k == "--mem": a["mem"] = argv[i + 1]; i += 1
+        elif k == "--debug": a["debug"] = True
+        elif k == "--eager": a["eager"] = True
+        elif k == "--no-wait": a["no_wait"] = True
+        elif k == "--queue": pass                       # waiting is the default now; kept so old commands still work
+        else: sys.exit(f"unknown option {k}\n\n{__doc__}")
+        i += 1
+    return a
+
+
+# ------------------------------------------------------------------ Orbit follows what was really served
+
+def sync_orbit(maxlen):
+    """Chat and Claude Code lists get the real context length; Claude Code compacts well before it."""
+    def rw(path, fn):
+        d = json.load(open(path)); fn(d)
+        tmp = path + ".tmp"; json.dump(d, open(tmp, "w"), indent=1); os.replace(tmp, path)
+    def models(d):
+        for m in d.get("models", []):
+            if m.get("provider") == "hpc": m["context"] = maxlen
+    def harness(d):
+        c = d.get("custom", {}).get("hpc")
+        if not c: return
+        for m in c.get("models", []): m["context"] = maxlen
+        env = c.setdefault("env", {})
+        env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(int(maxlen * 0.82) // 1000 * 1000)
+        env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "16000"
+    try:
+        rw(ROOT + "/config/models.json", models)
+        rw(ROOT + "/config/harness.json", harness)
+    except Exception as e:
+        print("could not update Orbit's context settings:", e)
+
+
+def why_it_died(jid):
+    out = ssh(f"grep -h -E 'Error|error:|OOM|out of memory' {DIR}/logs/errors.{jid}.log 2>/dev/null | grep -v -E 'Traceback|^\\s+File|expandable_segments' | tail -3 | cut -c1-260", check=False)
+    return out or f"no error log; re-run with --debug and read {DIR}/run/debug.log"
+
+
+# ------------------------------------------------------------------ commands
+
+def connect(jid, maxlen=None):
+    """Wait for the job to run, open the tunnel, hand Orbit the key and the real context length."""
+    info, t0 = None, time.time()
+    while time.time() - t0 < 30 * 3600:
+        time.sleep(10)
+        st = job_state(jid)
+        if st is None: continue
+        if not st: sys.exit("job ended before it started; check `sacct -j %s`" % jid)
+        info = ssh(f"cat {DIR}/run/{jid} 2>/dev/null", check=False)
+        if st == "RUNNING" and info: break
+    else:
+        sys.exit("timed out waiting for the job; it is still queued, run `hpc-llm stop` to cancel")
+    node, port, key = info.split()
+    print(f"running on {node}; opening tunnel (model load takes a few minutes)...")
+    # Mac -> login node -> compute node: the compute node does not accept the Mac's key, the login node's reaches it
+    for attempt in range(1, 4):
+        r = subprocess.run(["ssh", "-f", "-tt", "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=30",
+                            "-o", "ServerAliveCountMax=4", "-o", "ConnectTimeout=20", "-L", f"{LOCAL_PORT}:127.0.0.1:{port}", HOST,
+                            f"exec ssh -N -o BatchMode=yes -o ConnectTimeout=20 -o ExitOnForwardFailure=yes -L {port}:127.0.0.1:{port} {node}"],
+                           capture_output=True, text=True)
+        if r.returncode == 0: break
+        print(f"tunnel attempt {attempt} failed: {(r.stderr or r.stdout).strip()[:200]}")
+        time.sleep(15)
+    else:
+        sys.exit(f"could not open the tunnel to {node}; the job {jid} is still running. Run `hpc-llm start` again to attach.")
+    set_key(key)
+    t1 = time.time()
+    while time.time() - t1 < 3600:
+        if answers(key):
+            try:
+                rq = urllib.request.Request(f"http://127.0.0.1:{LOCAL_PORT}/v1/models", headers={"Authorization": "Bearer " + key})
+                served = json.load(urllib.request.urlopen(rq, timeout=5))["data"][0].get("max_model_len") or maxlen
+            except Exception:
+                served = maxlen         # None for an adopted job whose length could not be read: Orbit keeps its settings
+            if served: sync_orbit(served)
+            print(f"ready: http://127.0.0.1:{LOCAL_PORT}/v1 (model 'qwen', {served} tokens of context); pick 'Qwen · HPC' in Orbit")
+            return
+        if job_state(jid) == "":
+            sys.exit("the job died while loading:\n" + why_it_died(jid))
+        time.sleep(10)
+    sys.exit("model did not come up in time")
+
+
+def start(a):
+    j = my_job()
+    if j is False: sys.exit("cannot reach the cluster's login node right now (network); nothing was submitted")
+    if j:
+        print(f"a qwen-serve job is already queued or running (job {j[0]}, {j[1]}): attaching to it")
+        return connect(j[0])
+    cands, pick, now = plan(a)
+    if not pick:
+        show_plan(cands, None, now or datetime.datetime.now(), a)
+        sys.exit("no setup fits right now. Try --min-len lower, or --gpus.")
+    if now: show_plan(cands, pick, now, a)
+    n, vram, maxlen = pick["n"], pick["vram"], pick["maxlen"]
+    if now and pick.get("start") and (pick["start"] - now).total_seconds() > 1800:
+        if a["no_wait"]:
+            sys.exit(f"the earliest start is {pick['start'].strftime('%a %H:%M')}, more than 30 minutes away. "
+                     "Run without --no-wait to queue and wait for it.")
+        print(f"no GPU is free before {pick['start'].strftime('%a %H:%M')}: queuing now and waiting (Ctrl-C leaves the job queued; `hpc-llm stop` cancels it)")
+    env = f"ALL,GPUS={n},MAXLEN={maxlen},CONSTRAINT=vmem{vram}G" + (f",SERVE_LOG={DIR}/run/debug.log" if a["debug"] else "") + (",EAGER=1" if a["eager"] else "")
+    jid = ssh(f"sbatch --parsable --export={env} --constraint=vmem{vram}G --gres=gpu:{n} -c {CPUS} --mem={a['mem']} {DIR}/serve.sbatch 2>/dev/null").split(";")[0]
+    print(f"submitted job {jid} ({n} x {vram} GB, {maxlen} tokens); waiting for a GPU...")
+    connect(jid, maxlen)
+
+
+def status():
+    j = my_job()
+    if j is False: print("job: unknown (the cluster's login node is not reachable from here right now)")
+    else: print("job:", " ".join(j) if j else "none")
+    print("tunnel:", "open" if tunnel_pids() else "closed")
+    key = json.load(open(SECRETS)).get(KEYNAME, "")
+    print("model answers:", answers(key) if key and key != "offline" else False)
+
+
+def stop():
+    ssh("scancel -u $USER -n qwen-serve", check=False)
+    for p in tunnel_pids():
+        subprocess.run(["kill", p])
+    set_key("offline")
+    print("stopped; job cancelled, tunnel closed, key reset")
+
+
+if __name__ == "__main__":
+    argv = sys.argv[1:]
+    cmd = argv[0] if argv else ""
+    if cmd == "start": start(parse_args(argv[1:]))
+    elif cmd == "plan":
+        a = parse_args(argv[1:]); c, p, n = plan(a)
+        if n: show_plan(c, p, n, a)
+    elif cmd == "status": status()
+    elif cmd == "stop": stop()
+    else: print(__doc__)

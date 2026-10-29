@@ -34,6 +34,8 @@ struct FallbackView: View {
                          + "and Codex retry on their own first.")
                 }
 
+                StayOnModelSection()
+
                 Section {
                     Toggle(isOn: Binding(get: { resumeAfterLimit },
                                          set: { resumeAfterLimit = $0; save() })) {

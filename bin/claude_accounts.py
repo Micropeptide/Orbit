@@ -13,6 +13,7 @@ next account that can answer; once the main account's mark has passed, runs go b
 one. Both are Settings → Models & keys switches that OpenCode Go's accounts follow too
 (harness.policy). A chat can also be pinned to one account.
 """
+import os
 import time
 
 import harness as H
@@ -35,10 +36,22 @@ def accounts(root):
         if isinstance(a, dict) and a.get("id") and a["id"] not in seen:
             seen.add(a["id"])
             rows.append({"id": str(a["id"]), "label": str(a.get("label") or a["id"])[:60],
-                         "key": a.get("key") or ""})
+                         "key": a.get("key") or "", "usage_dir": str(a.get("usage_dir") or "")})
     main = next((a for a in rows if a["id"] == MAIN), None) or {"id": MAIN, "label": "Main", "key": MAIN_KEY}
     main["key"] = MAIN_KEY
     return [main] + [a for a in rows if a["id"] != MAIN]
+
+
+def set_usage_dir(root, account, path):
+    """The folder of a full `claude auth login` for this account (its own CLAUDE_CONFIG_DIR). The token Orbit
+    answers with can only chat; that login can also read the account's usage -- a usage-based plan's
+    monthly credits are not reported any other way."""
+    rows = accounts(root)
+    if not any(a["id"] == account for a in rows): return False
+    for a in rows:
+        if a["id"] == account: a["usage_dir"] = str(path or "")
+    _write(root, rows)
+    return True
 
 
 def home(root):
@@ -187,6 +200,7 @@ def public(root, secrets, login=None, now=None):
     for a in accounts(root):
         has = bool(_token(secrets, a))
         out.append({"id": a["id"], "label": a["label"], "key": a["key"], "token_set": has,
+                    "usage_login": bool(a.get("usage_dir") and os.path.isdir(a["usage_dir"])),
                     "method": "token" if has else ("login" if a["id"] == MAIN else "none"),
                     "ready": usable(a, secrets, login), "home": a["id"] == hid,
                     "exhausted": U.exhausted(root, PROVIDER, a["id"], now)})

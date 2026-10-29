@@ -18,6 +18,8 @@ Three ways in:
 Everything above this layer keeps speaking the OpenAI message shape; the
 Anthropic adapter translates on the way in and out.
 """
+import re
+import glob
 import json, os, urllib.request, urllib.error
 
 # ------------------------------------------------------------------ registry
@@ -38,6 +40,12 @@ BUILTIN_PROVIDERS = {
     "openai": {"label": "OpenAI", "kind": "openai",
                "base_url": "https://api.openai.com/v1", "key": "OPENAI_API_KEY",
                "keys_url": "https://platform.openai.com/api-keys"},
+    # Meta Model API: OpenAI-shaped chat/completions (Muse Wonder, Muse Spark). Muse Image and
+    # SAM 3.1 are not chat models; they are tools (bin/meta_api.py). The same key drives the
+    # Claude Code harness ("meta" in bin/harness.py) and Muse Code.
+    "meta": {"label": "Meta · Muse", "kind": "openai",
+             "base_url": "https://api.meta.ai/v1", "key": "MODEL_API_KEY",
+             "keys_url": "https://dev.meta.ai/api-keys/"},
     "openrouter": {"label": "OpenRouter", "kind": "openai",
                    "base_url": "https://openrouter.ai/api/v1", "key": "OPENROUTER_API_KEY",
                    "keys_url": "https://openrouter.ai/keys"},
@@ -49,6 +57,11 @@ BUILTIN_PROVIDERS = {
     # Bionic keeps its models on this Mac and serves them at the same OpenAI
     # endpoint LM Studio does; base_url is filled in from the port its server
     # actually reports, and the server is switched on when a model is picked.
+    # Muse Glimmer (Meta's open-weight 30B) appears here while a server on this Mac is serving it
+    # (Ollama, LM Studio, llama.cpp); bin/glimmer.py looks, and the base URL is that server's.
+    "glimmer": {"label": "Muse Glimmer · this Mac", "kind": "openai", "managed": True,
+                "base_url": "", "key": "",
+                "note": "Meta's open-weight Muse Glimmer, running on this Mac"},
     "bionic": {"label": "Bionic · this Mac", "kind": "openai", "managed": True,
                "base_url": "", "key": "",
                "note": "the models Bionic runs on this Mac"},
@@ -64,6 +77,10 @@ SEED_MODELS = [
      "context": 1000000, "thinking": True},
     {"provider": "anthropic", "model": "claude-haiku-4-5", "label": "Claude Haiku 4.5",
      "context": 200000, "thinking": False},
+    {"provider": "meta", "model": "muse-wonder-1.0", "label": "Muse Wonder",
+     "context": 1048576, "thinking": True},
+    {"provider": "meta", "model": "muse-spark-1.3", "label": "Muse Spark 1.3",
+     "context": 1048576, "thinking": True},
 ]
 
 # Claude models that take adaptive thinking and output_config.effort. Anything
@@ -115,7 +132,8 @@ CLI_BACKENDS = {
         "model_flag": "--model", "system_flag": None,
         "models": [("", "OpenCode (default model)")],
     },
-    # Google's two agents, signed in with your Google account (AI Pro / Ultra): no API key.
+    # Google's agent, signed in with your Google account (AI Pro / Ultra): no API key. (The Gemini CLI is retired:
+    # Google no longer lets it sign in -- "migrate to the Antigravity suite" -- so it is no longer offered.)
     # `agy -p` answers once on stdout; every flag goes before -p, which takes the prompt.
     "agy-cli": {
         "label": "Antigravity CLI", "bin": "agy",
@@ -125,14 +143,18 @@ CLI_BACKENDS = {
         "note": "your Google sign-in (AI Pro/Ultra) — no API key. Install: "
                 "curl -fsSL https://antigravity.google/cli/install.sh | bash, then run agy once to sign in",
     },
-    "gemini-cli": {
-        "label": "Gemini CLI", "bin": "gemini",
-        "argv": [], "prompt_flag": "-p", "plain": True,
-        "model_flag": "-m", "system_flag": None,
-        "models": [("", "Gemini CLI · its default model"), ("gemini-3.8-flash", "Gemini 3.8 Flash"),
-                   ("gemini-3.1-pro-preview", "Gemini 3.1 Pro"), ("gemini-2.5-pro", "Gemini 2.5 Pro"),
-                   ("gemini-2.5-flash", "Gemini 2.5 Flash")],
-        "note": "your Google sign-in — no API key (npm i -g @google/gemini-cli, then run gemini once to sign in)",
+    # Meta's coding agent, built on Muse Spark. `muse exec` runs one prompt to completion and prints its
+    # output; --disable-approval keeps the OS sandbox on while nobody is there to answer a prompt.
+    # Signs in by browser (`muse`, then /login) or reads META_API_KEY (Orbit passes the saved key).
+    "muse-cli": {
+        "label": "Muse Code", "bin": "muse",
+        "argv": ["exec", "--disable-approval"], "plain": True,
+        "model_flag": "--model", "system_flag": None,
+        "models": [("", "Muse Code · its default model"), ("muse-spark-1.3", "Muse Spark 1.3"),
+                   ("muse-spark-1.3-contributor", "Muse Spark 1.3 · Contributor"),
+                   ("muse-spark-1.2", "Muse Spark 1.2")],
+        "note": "Meta's coding agent. Install: curl -fsSL https://dev.meta.ai/install.sh | sh, then run muse once "
+                "to sign in (or save a Meta key in Settings)",
     },
     "qwen-cli": {
         "label": "Qwen Code CLI", "bin": "qwen",
@@ -206,9 +228,6 @@ GOOGLE_CLIS = (
     {"id": "agy-cli", "bin": "agy", "label": "Antigravity CLI", "login": "agy",
      "install": "curl -fsSL https://antigravity.google/cli/install.sh | bash",
      "note": "the coding plan that comes with Google AI Pro / Ultra"},
-    {"id": "gemini-cli", "bin": "gemini", "label": "Gemini CLI", "login": "gemini",
-     "install": "npm install -g @google/gemini-cli",
-     "note": "Google's older terminal agent; the same Google sign-in"},
 )
 
 
@@ -252,6 +271,49 @@ def google_cli_status(fresh=False):
             row["models"] = len(agy_models(max_age=0 if fresh else 3600))
         out.append(row)
     return out
+
+
+MUSE_INSTALL = "curl -fsSL https://dev.meta.ai/install.sh | sh"
+_MUSE = {"at": 0.0, "version": None}
+
+
+def muse_status(fresh=False):
+    """Muse Code on this Mac, for Settings: installed, its version, the commands. Never reads a credential."""
+    import subprocess, time
+    exe = which("muse")
+    if fresh or time.time() - _MUSE["at"] > 600:
+        ver = None
+        if exe:
+            try:
+                r = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=15, env=cli_env(exe),
+                                   stdin=subprocess.DEVNULL)
+                ver = (r.stdout or r.stderr).strip().splitlines()[0][:80] if (r.stdout or r.stderr).strip() else None
+            except Exception:
+                ver = None
+        _MUSE.update(at=time.time(), version=ver)
+    return {"installed": bool(exe), "path": exe, "version": _MUSE["version"] if exe else None,
+            "install": MUSE_INSTALL, "login": "muse", "docs": "https://dev.meta.ai/docs/muse-code"}
+
+
+def muse_test(api_key="", timeout=120):
+    """One tiny headless question, to see that Muse Code can answer: {"ok", "detail"}. Uses `api_key`
+    (as META_API_KEY) when given, else Muse Code's own sign-in."""
+    import subprocess
+    exe = which("muse")
+    if not exe: return {"ok": False, "detail": "not installed"}
+    env = cli_env(exe)
+    if api_key: env["META_API_KEY"] = api_key
+    try:
+        r = subprocess.run([exe, "exec", "--disable-approval", "--max-model-steps", "2", "Reply with the single word OK."],
+                           capture_output=True, text=True, timeout=timeout, env=env, stdin=subprocess.DEVNULL,
+                           cwd=os.path.expanduser("~"))
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "detail": f"no answer in {timeout}s: run muse in a terminal and sign in"}
+    except OSError as e:
+        return {"ok": False, "detail": str(e)}
+    said = (r.stdout or "").strip()
+    if r.returncode == 0 and said: return {"ok": True, "detail": "answering"}
+    return {"ok": False, "detail": (said or r.stderr or "no answer").strip()[-300:]}
 
 
 def parse_agy_models(out):
@@ -383,8 +445,141 @@ class CliQuotaError(RuntimeError):
         self.seconds = seconds
 
 
+def _agy_bases():
+    """Where Antigravity keeps conversations: the app's folder, and the CLI's own (1.4 and later)."""
+    return [os.path.expanduser("~/.gemini/antigravity-cli"), os.path.expanduser("~/.gemini/antigravity")]
+
+
+def agy_conversation_ids():
+    """Antigravity's conversations on this Mac (by id), in either folder."""
+    out = set()
+    for base in _agy_bases():
+        for sub, pat in (("conversations", r"([0-9a-f-]{36})\.db"), ("brain", r"([0-9a-f-]{36})")):
+            try: names = os.listdir(os.path.join(base, sub))
+            except OSError: continue
+            for f in names:
+                m = re.fullmatch(pat, f)
+                if m: out.add(m.group(1))
+    return out
+
+
+def _drop_from_summaries_pb(path, cid):
+    """Antigravity keeps a protobuf copy of its conversation summaries (titles and previews) and rebuilds its
+    index from it, so a conversation removed from the index would come back. Each entry is a length-prefixed
+    message at the top level: the ones that name this conversation are cut out. Anything unexpected in the
+    file and it is left untouched. True when something was removed."""
+    try:
+        with open(path, "rb") as f: data = f.read()
+    except OSError:
+        return False
+    out, i, dropped = bytearray(), 0, False
+    while i < len(data):
+        start = i
+        if data[i] != 0x0A: return False                 # not the shape we know: leave it alone
+        i += 1
+        n, shift = 0, 0
+        while True:
+            if i >= len(data): return False
+            b = data[i]; i += 1
+            n |= (b & 0x7F) << shift; shift += 7
+            if not b & 0x80: break
+        if i + n > len(data): return False
+        if cid.encode() in data[i:i + n]: dropped = True
+        else: out += data[start:i + n]
+        i += n
+    if not dropped: return False
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as f: f.write(bytes(out))
+        os.replace(tmp, path)
+    except OSError:
+        return False
+    return True
+
+
+def opencode_session_ids():
+    """OpenCode's most recent sessions, by id (its list shows the newest hundred)."""
+    import subprocess
+    exe = which("opencode")
+    if not exe: return set()
+    try:
+        r = subprocess.run([exe, "session", "list"], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    except Exception:
+        return set()
+    return set(re.findall(r"\b(ses_[A-Za-z0-9]+)\b", r.stdout or ""))
+
+
+def forget_cli_session(backend, session_id=None, before=None):
+    """Take a temporary chat's session out of the agent's own history: its files, its transcript logs, and
+    the rows and lists that index it. `before` is the set of Antigravity conversations that existed before
+    the run, so a conversation whose id was never reported is still found. Returns the paths removed."""
+    import shutil, sqlite3, subprocess
+    removed = []
+    if backend == "agy-cli":
+        ids = {session_id} if session_id else set()
+        if before is not None: ids |= (agy_conversation_ids() - set(before))
+        for cid in ids:
+            if not re.fullmatch(r"[0-9a-f-]{36}", str(cid or "")): continue
+            for base in _agy_bases():
+                for rel in (f"conversations/{cid}.db", f"conversations/{cid}.db-shm", f"conversations/{cid}.db-wal",
+                            f"annotations/{cid}.pbtxt", f"brain/{cid}"):
+                    pth = os.path.join(base, rel)
+                    try:
+                        if os.path.isdir(pth): shutil.rmtree(pth); removed.append(pth)
+                        elif os.path.exists(pth): os.remove(pth); removed.append(pth)
+                    except OSError:
+                        pass
+                dbp = os.path.join(base, "conversation_summaries.db")      # its title and preview are kept apart, in a search index
+                if os.path.exists(dbp):
+                    try:
+                        con = sqlite3.connect(dbp, timeout=10)
+                        try:
+                            for table in ("conversation_summaries", "conversations_fts"):
+                                try: con.execute(f"DELETE FROM {table} WHERE conversation_id = ?", (cid,))
+                                except sqlite3.Error: pass
+                            con.commit()
+                        finally:
+                            con.close()
+                    except sqlite3.Error:
+                        pass
+                for pb in glob.glob(os.path.join(base, "*_summaries_proto.pb")):
+                    if _drop_from_summaries_pb(pb, cid): removed.append(pb)
+                for rel, drop in (("cache/last_conversations.json", "values"), ("cache/conversation_metadata.json", "conversations")):
+                    jp = os.path.join(base, rel)       # lists of "the last conversation in this folder" and of conversations
+                    try:
+                        with open(jp) as f: data = json.load(f)
+                    except Exception:
+                        continue
+                    changed = False
+                    if drop == "values":
+                        for k in [k for k, v in data.items() if v == cid]: data.pop(k); changed = True
+                    elif isinstance(data.get("conversations"), dict) and cid in data["conversations"]:
+                        data["conversations"].pop(cid); changed = True
+                    if changed:
+                        try:
+                            tmp = jp + ".tmp"
+                            with open(tmp, "w") as f: json.dump(data, f, indent=2)
+                            os.replace(tmp, jp)
+                        except OSError:
+                            pass
+    elif backend == "opencode-cli":
+        ids = {session_id} if session_id else set()
+        if before is not None: ids |= (opencode_session_ids() - set(before))
+        exe = which("opencode")
+        for sid_ in ids:
+            if not exe or not re.fullmatch(r"ses_[A-Za-z0-9]+", str(sid_ or "")): continue
+            try:
+                subprocess.run([exe, "session", "delete", str(sid_)], capture_output=True, timeout=60,
+                               stdin=subprocess.DEVNULL)
+                removed.append("opencode session " + str(sid_))
+            except Exception:
+                pass
+    return removed
+
+
 def cli_stream(backend, model, messages, emit=None, cancel=None, timeout=900,
-               cwd=None, extra_args=None, account_for=None, on_quota=None, on_moved=None):
+               cwd=None, extra_args=None, account_for=None, on_quota=None, on_moved=None, temp=False,
+               effort=None, read_only=False, autonomy=None):
     """Run one turn through a CLI agent and stream what it says.
 
     With several accounts for the agent's provider, `account_for(backend, model, messages,
@@ -393,12 +588,25 @@ def cli_stream(backend, model, messages, emit=None, cancel=None, timeout=900,
     message, seconds)` records it and the turn goes again on the next account."""
     emit = emit or (lambda k, p: None)
     tried = []
+    # a temporary chat's Antigravity conversation is removed however the run ends (a failed or stopped one too)
+    before = (agy_conversation_ids() if backend == "agy-cli" else
+              opencode_session_ids() if backend == "opencode-cli" else None) if temp else None
+    try:
+        return _cli_stream_accounts(backend, model, messages, emit, cancel, timeout, cwd, extra_args,
+                                    account_for, on_quota, on_moved, temp, tried, effort, read_only, autonomy)
+    finally:
+        if before is not None: forget_cli_session(backend, None, before)
+
+
+def _cli_stream_accounts(backend, model, messages, emit, cancel, timeout, cwd, extra_args,
+                         account_for, on_quota, on_moved, temp, tried, effort=None, read_only=False, autonomy=None):
     for _ in range(6):
         pick = account_for(backend, model, messages, tried) if account_for else None
         env_extra, who = pick if pick else ({}, None)
         try:
             out = _cli_stream_once(backend, model, messages, emit=emit, cancel=cancel, timeout=timeout, cwd=cwd,
-                                   extra_args=extra_args, env_extra=env_extra)
+                                   extra_args=extra_args, env_extra=env_extra, temp=temp, effort=effort,
+                                   read_only=read_only, autonomy=autonomy)
             if tried and who and on_moved:
                 try: on_moved(who)
                 except Exception: pass
@@ -415,8 +623,85 @@ def cli_stream(backend, model, messages, emit=None, cancel=None, timeout=900,
     raise RuntimeError("every account for this agent is used up")
 
 
+def _new_since_marker(AG, messages):
+    """What the person said since the agent's session last saw this chat: the newest message,
+    with a plain account of anything said on other models in between."""
+    new = [m for m in AG.since_marker(messages) if m.get("role") in ("user", "assistant", "tool")]
+    last = next((m for m in reversed(new) if m.get("role") == "user"), None) or \
+           next((m for m in reversed(messages) if m.get("role") == "user"), {})
+    said = last.get("content")
+    if isinstance(said, list): said = " ".join(x.get("text", "") for x in said if x.get("type") == "text")
+    said = str(said or "")
+    between = [m for m in new if m is not last]
+    if between:
+        said = "[Meanwhile, in this chat on another model:]\n" + _transcript(between)[1] + "\n\n[Now:]\n" + said
+    return said
+
+
+def _muse_dispatch(exe, system, prompt, resume_mk, AG, model, messages, emit, cancel, timeout, cwd, env_extra, temp,
+                   effort, read_only):
+    """A Muse Code turn over its session protocol (bin/muse_msp.py). A chat that has a Muse session
+    continues it, sending only what is new; if that session is gone the whole conversation goes."""
+    import muse_msp
+    emit = emit or (lambda k, p: None)
+    env = {**cli_env(exe), **(env_extra or {})}
+    if not temp and resume_mk and resume_mk.get("cwd") and os.path.isdir(resume_mk["cwd"]): cwd = resume_mk["cwd"]
+    kw = dict(model=model if model and model != "default" else None, effort=effort, temp=temp, read_only=read_only,
+              env=env, emit=emit, cancel=cancel, timeout=timeout)
+    full = ((system + "\n\n" + prompt) if system else prompt)
+    try:
+        if resume_mk and not temp:
+            try:
+                got = muse_msp.run_turn(exe, _new_since_marker(AG, messages), cwd, resume=resume_mk["id"], **kw)
+            except muse_msp.MuseResumeError:
+                got = muse_msp.run_turn(exe, full, cwd, **kw)
+        else:
+            got = muse_msp.run_turn(exe, full, cwd, **kw)
+    except muse_msp.MuseError as e:
+        raise RuntimeError(str(e)) from None
+    msg = {"role": "assistant", "content": (got["text"] or "").strip()}
+    if got.get("usage"): msg["usage"] = got["usage"]
+    if got.get("reasoning"): msg["reasoning_content"] = got["reasoning"]
+    if not temp and got.get("session") and AG is not None and backend_source_ok(AG):
+        msg["agent"] = {"source": AG.BACKEND_SOURCE["muse-cli"], "id": got["session"], "cwd": cwd or (resume_mk or {}).get("cwd") or ""}
+    return msg
+
+
+def backend_source_ok(AG):
+    return "muse-cli" in getattr(AG, "BACKEND_SOURCE", {})
+
+
+def agy_permission_flags(autonomy, read_only=False):
+    """Antigravity's permission flags for a chat. A headless run (`agy -p`) cannot ask anyone, so
+    whatever needs a yes is refused -- even `ls` on a folder outside its workspace, even with the
+    terminal sandbox, an added directory or Auto mode on. The only thing that lets it act is
+    --dangerously-skip-permissions, so it follows the chat's own autonomy: Plan mode reads only;
+    Auto is Antigravity's Auto mode (its reviewer screens risky commands) without the prompts it
+    cannot show; Full skips the prompts; Ask keeps them, which in a headless run means refusals,
+    reported in the chat."""
+    if read_only: return ["--mode", "plan"]
+    if autonomy == "full": return ["--dangerously-skip-permissions"]
+    if autonomy == "auto": return ["--mode", "auto", "--dangerously-skip-permissions"]
+    return []
+
+
+def agy_denials(ev):
+    """What Antigravity refused on its own, from one stream-json event: a list of short texts."""
+    out = []
+    su = ev.get("step_update") if ev.get("event") == "step_update" else None
+    if isinstance(su, dict) and su.get("state") == "ERROR":
+        info = su.get("tool_info") if isinstance(su.get("tool_info"), dict) else {}
+        err = info.get("error") if isinstance(info.get("error"), dict) else {}
+        if "permission check failed" in str(err.get("message") or ""):
+            params = info.get("parameters") if isinstance(info.get("parameters"), dict) else {}
+            what = next((str(v) for v in params.values() if isinstance(v, (str, int, float))), "") or su.get("tool_name") or "an action"
+            out.append(" ".join(str(what).split())[:140])
+    return out
+
+
 def _cli_stream_once(backend, model, messages, emit=None, cancel=None, timeout=900,
-                     cwd=None, extra_args=None, env_extra=None):
+                     cwd=None, extra_args=None, env_extra=None, temp=False, effort=None, read_only=False,
+                     autonomy=None):
     import signal, subprocess, threading
     emit = emit or (lambda k, p: None)
     b = CLI_BACKENDS.get(backend)
@@ -425,6 +710,8 @@ def _cli_stream_once(backend, model, messages, emit=None, cancel=None, timeout=9
     if not exe: raise RuntimeError(f"{b['bin']} is not installed or not on PATH")
 
     system, prompt = _transcript(messages)
+    if backend == "agy-cli":
+        extra_args = [*agy_permission_flags(autonomy, read_only), *list(extra_args or [])]
     # Codex and OpenCode keep their own sessions: a chat that has one continues it,
     # sending only what is new, instead of replaying the conversation as one prompt
     resume_mk, AG = None, None
@@ -433,6 +720,11 @@ def _cli_stream_once(backend, model, messages, emit=None, cancel=None, timeout=9
         resume_mk = AG.marker_of(messages, backend)
     except Exception:
         resume_mk = None
+    if temp: resume_mk = None            # a temporary chat keeps no session to come back to: it is sent whole each time
+    agy_before = agy_conversation_ids() if (temp and backend == "agy-cli") else None
+    if backend == "muse-cli":
+        return _muse_dispatch(exe, system, prompt, resume_mk, AG, model, messages, emit, cancel, timeout, cwd, env_extra,
+                              temp, effort, read_only)
     if resume_mk and backend in ("codex-cli", "opencode-cli", "agy-cli"):
         new = [m for m in AG.since_marker(messages) if m.get("role") in ("user", "assistant", "tool")]
         last = next((m for m in reversed(new) if m.get("role") == "user"), None) or \
@@ -489,6 +781,7 @@ def _cli_stream_once(backend, model, messages, emit=None, cancel=None, timeout=9
         threading.Thread(target=watch, daemon=True).start()
 
     live, whole, final, think, errs, usage = [], [], None, [], [], None
+    denied = []
     try:
         for raw in proc.stdout:
             if b.get("plain"):                 # a CLI that answers in plain text, not events
@@ -501,6 +794,9 @@ def _cli_stream_once(backend, model, messages, emit=None, cancel=None, timeout=9
             except ValueError:
                 continue                       # progress chatter, not an event
             if not isinstance(ev, dict): continue
+            if backend == "agy-cli":
+                for d_ in agy_denials(ev):
+                    if d_ not in denied: denied.append(d_)
             if ev.get("type") == "error" and isinstance(ev.get("error"), dict):
                 errs.append(ev["error"])       # what OpenCode says when its provider refuses
             if not session_id:
@@ -570,10 +866,31 @@ def _cli_stream_once(backend, model, messages, emit=None, cancel=None, timeout=9
     msg = {"role": "assistant", "content": text}
     if usage: msg["usage"] = usage
     if think: msg["reasoning_content"] = "".join(think)
+    if denied:
+        how = ("Set this chat's autonomy to Auto or Full (Settings → Tools → Permissions, or the chat's own setting) and send it again."
+               if not read_only else "This chat is in Plan mode, which only reads; leave Plan mode to let it act.")
+        note = ("Antigravity was not allowed to run: " + "; ".join(f"`{d}`" for d in denied[:3])
+                + (f" (+{len(denied) - 3} more)" if len(denied) > 3 else "")
+                + ". A headless run cannot ask you, so it refuses whatever needs a yes, and its answer may then be a guess. " + how)
+        emit("notice", {"msg": note, "kind": "permission"})
+        msg["denied"] = denied[:10]
+    if temp:
+        forget_cli_session(backend, session_id, agy_before)
+        return msg
     if AG is not None and backend in AG.BACKEND_SOURCE and (session_id or resume_mk):
         msg["agent"] = {"source": AG.BACKEND_SOURCE[backend], "id": session_id or resume_mk["id"],
                         "cwd": cwd or (resume_mk or {}).get("cwd") or ""}
     return msg
+
+
+def glimmer_models():
+    """Muse Glimmer, if some server on this Mac is serving it: in the picker only while it is there."""
+    try:
+        import glimmer
+        return [{"provider": "glimmer", "model": g["model"], "label": g["label"], "context": g["context"],
+                 "thinking": True, "base": g["base"]} for g in glimmer.models_for_picker()]
+    except Exception:
+        return []
 
 
 def bionic_models():
@@ -671,6 +988,8 @@ def catalogue(root, local_model=None, secrets=None):
              "context": None, "thinking": True})
     for m in bionic_models():
         add(m)
+    for m in glimmer_models():
+        add(m)
     for m in cli_models():
         add(m)
     for m in cfg["models"]:
@@ -698,6 +1017,8 @@ def resolve(root, mid, local_model=None, secrets=None):
     prov = dict(cfg["providers"].get(pick["provider"]) or {})
     if pick["provider"] == "bionic" and not prov.get("base_url"):
         prov["base_url"] = bionic_base()
+    if pick["provider"] == "glimmer" and not prov.get("base_url"):
+        prov["base_url"] = pick.get("base") or ""
     key_name = prov.get("key") or ""
     prov["api_key"] = (secrets or {}).get(key_name) or os.environ.get(key_name) or ""
     return {**pick, "provider_cfg": prov}
@@ -731,6 +1052,8 @@ def fetch_models(provider_cfg, api_key="", timeout=20):
     for m in d.get("data") or []:
         mid = m.get("id")
         if not mid: continue
+        # Meta's list also holds its image, segmentation and speech models: not for a chat
+        if "api.meta.ai" in base and not str(mid).startswith(("muse-wonder", "muse-spark")): continue
         rows.append({"model": mid,
                      "label": m.get("display_name") or mid,
                      "context": m.get("max_input_tokens"),

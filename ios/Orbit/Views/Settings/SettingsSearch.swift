@@ -48,6 +48,7 @@ enum SettingsIndex {
         .init(title: "Connected to", place: "Settings", words: "mac address reachable latency diagnostics check again", target: .here("connected")),
         .init(title: "Appearance", place: "Settings", words: "theme dark light text size answer text code output haptics", target: .here("appearance")),
         .init(title: "Require Face ID", place: "Settings", words: "face id passcode lock privacy lock screen notifications", target: .here("faceid")),
+        .init(title: "Shared projects", place: "Settings", words: "shared project collaborate team people members share chat", target: .here("shared")),
         .init(title: "Bin", place: "Settings", words: "bin trash restore deleted recycle", target: .here("bin")),
         .init(title: "Offline copy", place: "Settings", words: "offline cache clear", target: .here("offline")),
         .init(title: "Unpair this phone", place: "Settings", words: "unpair pairing token forget", target: .here("unpair")),

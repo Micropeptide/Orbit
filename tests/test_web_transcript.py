@@ -1,10 +1,9 @@
 """The web page's Claude Code-style transcript helpers (web/index.html): tool names,
 targets, the one-line result summaries, JSON summaries and todo parsing. The pure
 functions are lifted out of the page and run under Node; skipped without Node."""
-import json, os, re, shutil, subprocess, unittest
+import json, re, shutil, subprocess, unittest
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-PAGE = os.path.join(os.path.dirname(HERE), "web", "index.html")
+import pagejs
 
 NAMES = ["fmtSecs", "toolLabel", "toolName", "shortPath", "toolTarget", "nLines", "plural",
          "resultSummary", "jsonSummary", "parsePlan", "todoMark"]
@@ -12,7 +11,7 @@ CONSTS = ["TOOLNAME", "TOOLVERB", "TOOLFAM", "FAMWORD"]
 
 
 def lift():
-    with open(PAGE, encoding="utf-8") as f: src = f.read()
+    src = pagejs.js()
     out = []
     for c in CONSTS:
         m = re.search(r"^const " + c + r"=\{.*?\};\n", src, re.S | re.M)

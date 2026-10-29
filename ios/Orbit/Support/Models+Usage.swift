@@ -71,7 +71,7 @@ struct OrbitSpend: Decodable, Hashable {
 extension LiveUsage {
     /// "80% 5h · 95% wk · 70% mo left", only when the provider reported a 5-hour window.
     var shortText: String? {
-        guard error == nil, rolling != nil else { return nil }
+        guard error == nil, rolling != nil || monthly != nil else { return nil }
         let parts = [("5h", rolling), ("wk", weekly), ("mo", monthly)].compactMap { n, w in
             w.map { "\($0.left)% \(n)" }
         }

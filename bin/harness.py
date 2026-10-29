@@ -64,6 +64,13 @@ PRESETS = {
         "label": "Local (this Mac)", "base": "", "key": "", "auth": "local", "models": [],
         "docs": "The model MTPLX serves on this Mac.",
     },
+    "glimmer": {
+        "label": "Muse Glimmer · this Mac", "base": "", "key": "", "auth": "gateway", "keyless": True,
+        "docs": "Meta's open-weight Muse Glimmer (30B, Apache 2.0), served on this Mac by Ollama, LM Studio or "
+                "llama.cpp. It shows up here while a server is running it; nothing leaves the Mac. Its models "
+                "speak OpenAI's chat API, so Claude Code reaches them through Orbit's gateway.",
+        "models": [],
+    },
     "bionic": {
         "label": "Bionic", "base": "", "key": "", "auth": "gateway", "keyless": True,
         "docs": "The models Bionic runs on this Mac. They speak OpenAI's API, so the harness "
@@ -142,6 +149,25 @@ PRESETS = {
         "models": [_m(x, "chat", 1048576) for x in ("gemini-4-argon", "gemini-3.8-flash", "gemini-3.6-flash",
                                                      "gemini-3.5-flash-lite", "gemini-3.1-pro-preview",
                                                      "gemini-2.5-pro", "gemini-2.5-flash")],
+    },
+    "meta": {
+        "label": "Meta Model API", "base": "https://api.meta.ai/v1", "key": "MODEL_API_KEY",
+        "auth": "gateway", "small": "muse-spark-1.3", "keys_url": "https://dev.meta.ai/api-keys/",
+        "profile": "meta",
+        # Meta's own Claude Code settings: tool search on, subagents on the cheaper Spark. The bearer
+        # key never enters the Claude process: the gateway adds it, and trims what Meta rejects.
+        "env": {"ENABLE_TOOL_SEARCH": "true", "CLAUDE_CODE_SUBAGENT_MODEL": "muse-spark-1.3"},
+        "docs": "Muse Wonder and Muse Spark through Meta's Model API, which speaks Anthropic's Messages format "
+                "(Claude Code, direct) and OpenAI's Responses format (Codex). Muse Image and SAM 3.1 are tools, "
+                "not chat models: ask for an image or a segmentation in a chat. Muse Code is its own engine.",
+        "models": [_m("muse-wonder-1.0", "messages", 1048576, "Muse Wonder", output=131072, responses_format="responses"),
+                   _m("muse-spark-1.3", "messages", 1048576, "Muse Spark 1.3", output=131072, responses_format="responses"),
+                   _m("muse-spark-1.3-contributor", "messages", 1048576, "Muse Spark 1.3 · Contributor",
+                      output=131072, responses_format="responses"),
+                   _m("muse-spark-1.2", "messages", 1048576, "Muse Spark 1.2", output=131072, responses_format="responses"),
+                   _m("muse-spark-1.2-contributor", "messages", 1048576, "Muse Spark 1.2 · Contributor",
+                      output=131072, responses_format="responses"),
+                   _m("muse-spark-1.1", "messages", 1048576, "Muse Spark 1.1", output=131072, responses_format="responses")],
     },
     "anthropic": {
         "label": "Anthropic", "base": "https://api.anthropic.com", "key": "ANTHROPIC_API_KEY",
@@ -261,10 +287,16 @@ def refresh_models(root, pid, secrets=None, timeout=20):
             url = base + ("/v1/models" if base.endswith("/anthropic") else "/models")
             d = _http_json(url, {"Authorization": "Bearer " + key, "x-api-key": key,
                                  "anthropic-version": "2023-06-01"}, timeout)
-            live = [m.get("id") for m in (d.get("data") or d.get("models") or []) if isinstance(m, dict) and m.get("id")]
+            rows = [m for m in (d.get("data") or d.get("models") or []) if isinstance(m, dict) and m.get("id")]
+            live = [m.get("id") for m in rows]
+            # a server that says how much it holds (vLLM: max_model_len): that is the model's window, not a guess
+            for r in rows:
+                n = r.get("max_model_len") or r.get("context_length") or r.get("context_window")
+                if isinstance(n, int) and n > 0: own[r["id"]] = {"id": r["id"], "context": n}
         except Exception as e:
             note = f"live list unavailable ({type(e).__name__})"
     ids = live if live else list(dev.keys())
+    if pid == "meta" and not ids: ids = [m["id"] for m in PRESETS["meta"]["models"]]
     if pid == "gemini":                  # whichever list it came from: only models that can drive a chat
         ids = [i for i in ids if str(i).startswith("gemini") and not any(w in str(i) for w in GEMINI_NOT_CHAT)]
     if not ids: return 0, note or "no models found"
@@ -273,7 +305,11 @@ def refresh_models(root, pid, secrets=None, timeout=20):
     for mid in ids:
         info = dev.get(mid) or {}
         lim = info.get("limit") or {}
-        if base_p.get("auth") == "api_key":
+        if pid == "meta":
+            # Meta's list also holds Muse Image, SAM and Muse Voice: not chat models
+            if not str(mid).startswith(("muse-wonder", "muse-spark")): continue
+            fmt = "messages"
+        elif base_p.get("auth") == "api_key":
             fmt = "messages"                              # these endpoints are Anthropic-compatible
         elif pid == "gemini":
             fmt = "chat"                                  # OpenAI's chat API, at Google's /openai endpoint
@@ -284,11 +320,14 @@ def refresh_models(root, pid, secrets=None, timeout=20):
                                    else None)
         if fmt is None: continue
         mine = own.get(mid) or {}                            # the provider's own word first
-        out.append({"id": mid, "format": fmt, "label": mine.get("label") or info.get("name") or _label(mid),
+        out.append({"id": mid, "format": fmt, "label": mine.get("label") or (preset.get(mid) or {}).get("label")
+                    or info.get("name") or _label(mid),
+                    **({"responses_format": "responses"} if pid == "meta" else {}),
                     "context": int(mine.get("context") or lim.get("context") or (preset.get(mid) or {}).get("context") or 128000),
                     "output": int(mine.get("output") or lim.get("output") or 0) or None,
                     "reasoning": bool(mine.get("reasoning") or info.get("reasoning")), "free": "free" in mid})
-    out.sort(key=lambda m: (m["free"], m["id"]))
+    order = {m["id"]: i for i, m in enumerate(PRESETS.get(pid, {}).get("models") or [])} if pid == "meta" else {}
+    out.sort(key=lambda m: (m["free"], order.get(m["id"], len(order)), m["id"]))        # Meta: Wonder first, as its docs list them
     cache = fetched(root)
     cache[pid] = {"at": time.time(), "source": ("live+models.dev" if live else "models.dev"), "models": out, "note": note}
     tmp = _fetched_path(root) + ".tmp"
@@ -321,6 +360,29 @@ def save(root, cfg):
         json.dump(keep, fh, indent=1)
     os.replace(tmp, p)
     return keep
+
+
+def sync_server_window(root, pid, model, window, compact_at=0.82):
+    """A custom provider's model really holds `window` tokens (the server said so): make Orbit say the same -- the
+    model's context in the picker and the meter, and the point where Claude Code compacts the chat (a share of it,
+    so a smaller window than before cannot be overrun). -> True when something changed."""
+    cfg = load(root)
+    c = (cfg["custom"] or {}).get(pid)
+    if not c or not (1000 <= int(window or 0) <= 20_000_000): return False
+    window, changed = int(window), False
+    for m in c.get("models") or []:
+        if m.get("id") == model and m.get("context") != window: m["context"] = window; changed = True
+    env = c.setdefault("env", {})
+    want = str(int(window * compact_at))
+    if env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") != want: env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = want; changed = True
+    if (cfg["contexts"] or {}).pop(f"{pid}/{model}", None) is not None: changed = True      # an old override would hide the truth
+    d = learned_windows(root)
+    if d.pop(f"{pid}/{model}", None) is not None:
+        tmp = _learned_path(root) + ".tmp"
+        with open(tmp, "w") as fh: json.dump(d, fh, indent=1)
+        os.replace(tmp, _learned_path(root)); changed = True
+    if changed: save(root, cfg)
+    return changed
 
 
 # ------------------------------------------------------------------ windows that keep up
@@ -398,10 +460,13 @@ def providers(root, local_name=None):
         for m in over.get("extra_models") or []:
             if not any(x["id"] == m.get("id") for x in p["models"]):
                 p["models"].append(_m(m["id"], m.get("format") or "messages", m.get("context") or 128000))
+        mine_ctx = {m.get("id"): int(m["context"]) for m in (p.get("models") or []) if m.get("context")} if p.get("custom") else {}
         got = (fetched_all.get(pid) or {}).get("models")
         if got and pid not in ("local", "claude"):
             p["models"] = [dict(m) for m in got]
             p["fetched_at"] = fetched_all[pid].get("at")
+            for m in p["models"]:            # a server of yours: the size you (or the server) stated, not the fetched default
+                if mine_ctx.get(m["id"]): m["context"] = mine_ctx[m["id"]]
         if pid == "local" and local_name:
             p["models"] = [_m(local_name, "messages", _local_context(root), label=f"{local_name}")]
         if pid == "bionic":
@@ -416,6 +481,16 @@ def providers(root, local_name=None):
                 p["models"] = [_m(m["model"], "chat", m["context"],
                                   label=m["label"] + ("" if m["tools"] else " · no tool use"))
                                for m in b.models()]
+        if pid == "glimmer":
+            # only while a server is serving it, and from wherever that server is
+            try:
+                import glimmer
+                rows = glimmer.served()
+            except Exception:
+                rows = []
+            if not rows: continue
+            p["base"] = rows[0]["base"]
+            p["models"] = [_m(r["id"], "chat", r["context"], label=r["label"].replace(" · ", " · ", 1)) for r in rows]
         aliases = claude_alias_windows(root) if pid == "claude" else {}
         # "opus[1m]" asks Claude Code for the 1M window; when "opus" is a 1M model already it
         # is the same thing twice in the picker
@@ -428,7 +503,9 @@ def providers(root, local_name=None):
                 m["context"], name = aliases[m["id"]]
                 m["label"] = f"{name} (latest)"
             ctx = learned.get(f"{pid}/{m['id']}")         # what the engine said in use
-            if ctx: m["context"] = ctx
+            # ...but not for an endpoint of yours: Claude Code cannot know what a server behind a custom URL holds (it
+            # says 128,000), and the window you or the server stated is the real one
+            if ctx and not p.get("custom"): m["context"] = ctx
             ctx = cfg["contexts"].get(f"{pid}/{m['id']}")  # and yours, above all
             if ctx: m["context"] = int(ctx)
         out[pid] = p
@@ -615,6 +692,7 @@ def resolve(root, mid, secrets=None, local_name=None):
                              "account": keys[0]["id"] if keys else "",
                              "env": dict(p.get("env") or {}), "small": p.get("small") or model,
                              "context": m["context"], "max_output": m.get("output"),
+                             "profile": p.get("profile") or "", "responses_format": m.get("responses_format") or "",
                              "label": p["label"], "proxy": cfg["proxy"],
                              "local": p.get("auth") == "local",
                              "keyless": bool(p.get("keyless")),

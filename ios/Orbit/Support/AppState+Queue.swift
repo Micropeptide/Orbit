@@ -309,7 +309,9 @@ extension AppState {
     /// A chat as the Mac sent it, with any note sent in during this answer that its saved
     /// copy does not have yet put back at the end. A note the Mac has saved is dropped
     /// from the list, so it is never shown twice.
-    func withPendingNotes(_ fresh: [Message], sid: String) -> [Message] {
+    func withPendingNotes(_ loaded: [Message], sid: String) -> [Message] {
+        // the same chat on screen: what has not changed keeps its row (see Message.keepingIDs)
+        let fresh = openChat?.sid == sid ? Message.keepingIDs(loaded, from: messages) : loaded
         guard var notes = pendingNotes[sid], !notes.isEmpty else { return fresh }
         let saved = Set(fresh.suffix(40).filter(\.isUser).map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) })
         notes.removeAll { saved.contains($0.text.trimmingCharacters(in: .whitespacesAndNewlines)) }

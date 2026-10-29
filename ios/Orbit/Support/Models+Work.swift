@@ -1,7 +1,7 @@
 import Foundation
 
 /// Background work and the furniture of agent chats: what is running now
-/// (`/tasks`), cluster jobs, sessions other agents began, "New chat with…"
+/// (`/tasks`), sessions other agents began, "New chat with…"
 /// presets, and the details of a Claude Code or Codex chat.
 
 // ------------------------------------------------------------------ the list
@@ -147,60 +147,6 @@ struct BackgroundTasks: Decodable {
         items = (try? c.decode([BackgroundTask].self, forKey: .items)) ?? []
         now = c.lenientDouble(.now) ?? Date.now.timeIntervalSince1970
     }
-}
-
-// ------------------------------------------------------------------ cluster jobs
-
-/// A job in the cluster's queue, as `qstat` shows it.
-struct ClusterJob: Decodable, Identifiable, Hashable {
-    var id: String
-    var prio: String?
-    var name: String
-    var user: String?
-    var state: String
-    var since: String?
-    var slots: String?
-
-    /// qstat's short states, as words.
-    var stateLabel: String {
-        switch state {
-        case "r": return "running"
-        case "qw": return "queued"
-        case "Eqw": return "error"
-        default: return state
-        }
-    }
-
-    enum CodingKeys: String, CodingKey { case id, prio, name, user, state, since, slots }
-    init(from d: Decoder) throws {
-        let c = try d.container(keyedBy: CodingKeys.self)
-        id = c.lenientString(.id) ?? ""
-        prio = c.lenientString(.prio)
-        name = (try? c.decode(String.self, forKey: .name)) ?? ""
-        user = try? c.decode(String.self, forKey: .user)
-        state = (try? c.decode(String.self, forKey: .state)) ?? ""
-        since = try? c.decode(String.self, forKey: .since)
-        slots = c.lenientString(.slots)
-    }
-}
-
-struct ClusterJobs: Decodable {
-    var jobs: [ClusterJob]
-    var error: String?
-
-    enum CodingKeys: String, CodingKey { case jobs, error }
-    init(from d: Decoder) throws {
-        let c = try d.container(keyedBy: CodingKeys.self)
-        jobs = (try? c.decode([ClusterJob].self, forKey: .jobs)) ?? []
-        error = (try? c.decode(String.self, forKey: .error)).flatMap { $0.isEmpty ? nil : $0 }
-    }
-}
-
-/// How long past jobs with a similar name took.
-struct ClusterEstimate: Decodable {
-    var runs: Int?
-    var median_min: Double?
-    var max_min: Double?
 }
 
 // ------------------------------------------------------------------ New chat with…

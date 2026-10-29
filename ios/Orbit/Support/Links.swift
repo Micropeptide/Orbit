@@ -38,27 +38,46 @@ extension AppState {
         }
     }
 
-    /// Trade the QR's one-time code for this phone's own token, then pair with it.
-    func claimPairing(url: String, alts: [String], code: String, name: String) async {
+    /// Trade the QR's one-time code for this phone's own token, then pair with it. Says on the pairing screen that it is working and, if it fails, why.
+    func claimPairing(url: String, alts: [String], code: String, name: String, aid: String? = nil, asec: String? = nil) async {
         struct Claimed: Decodable { var token: String?; var error: String? }
+        pairingBusy = true; pairingProblem = nil
+        defer { pairingBusy = false }
+        var lastError = ""
         for base in [url] + alts {
             guard let u = URL(string: base + "/api/pair/claim") else { continue }
-            var req = URLRequest(url: u, timeoutInterval: 15)
+            var req = URLRequest(url: u, timeoutInterval: 20)
             req.httpMethod = "POST"
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try? JSONSerialization.data(withJSONObject: ["code": code, "name": UIDevice.current.name])
-            guard let (data, resp) = try? await URLSession.shared.data(for: req) else { continue }   // try the next address
+            // Cloudflare Access wants its service token on the internet address, and only there
+            if let aid, let asec, let host = URL(string: url)?.host, u.host == host, u.scheme == "https" {
+                req.setValue(aid, forHTTPHeaderField: "CF-Access-Client-Id")
+                req.setValue(asec, forHTTPHeaderField: "CF-Access-Client-Secret")
+            }
+            let got: (Data, URLResponse)
+            do { got = try await URLSession.shared.data(for: req) }
+            catch { lastError = "\(u.host ?? base): \((error as NSError).localizedDescription)"; continue }          // try the next address
+            let (data, resp) = got
             let r = try? JSONDecoder().decode(Claimed.self, from: data)
             if let tok = r?.token, !tok.isEmpty {
-                pairing = Pairing(url: url, token: tok, name: name, alts: alts.isEmpty ? nil : alts)
+                pairing = Pairing(url: url, token: tok, name: name, alts: alts.isEmpty ? nil : alts,
+                                  aid: aid, asec: asec, ahost: aid == nil ? nil : URL(string: url)?.host)
                 await refreshEverything()
                 return
             }
             let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            toast(r?.error ?? "Pairing failed (\(status)) — show the QR on the Mac again")
+            let html = (resp as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type")?.contains("text/html") == true
+            let why: String
+            if let e = r?.error { why = e }
+            else if html || status == 401 || status == 403 || resp.url?.host?.contains("cloudflareaccess.com") == true {
+                why = "Cloudflare turned this phone away (\(status)) because the access key in the QR was missing or refused. Update Orbit on this phone to the newest version, then show the QR on the Mac again."
+            } else { why = "The Mac answered \(status) and did not pair this phone. Show the QR on the Mac again." }
+            pairingProblem = why; toast(why)
             return
         }
-        toast("Couldn't reach the Mac to pair — is it on, and is Phone access turned on?")
+        let why = "Couldn't reach the Mac" + (lastError.isEmpty ? "" : " (\(lastError))") + ". Check that this phone has internet, that Orbit is running on the Mac, and that Phone access is on."
+        pairingProblem = why; toast(why)
     }
 
     /// A reply typed on a notification: it joins that chat's queue on the Mac, which

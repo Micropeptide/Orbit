@@ -19,7 +19,7 @@ Quick requests (checking a host, listing a folder) share one SSH connection
 (ControlMaster), so a busy chat does not open dozens of connections -- clusters
 block addresses that do.
 """
-import base64, json, os, random, re, shlex, subprocess, threading, time
+import hashlib, base64, json, os, random, re, shlex, subprocess, threading, time
 
 HOME = os.path.expanduser("~")
 SSH_CONFIG = os.path.join(HOME, ".ssh", "config")
@@ -227,8 +227,9 @@ def popen(host, claude_path, cwd, claude_args, env, forward=None):
     environment line is already written to its input."""
     if not valid_host(host): raise ValueError(f"not a host name: {host}")
     opts = base_opts(shared=False) + ["-T", "-o", "ExitOnForwardFailure=yes"]
-    if forward:
-        opts += ["-R", f"{int(forward[0])}:127.0.0.1:{int(forward[1])}"]
+    if forward:        # one (remote_port, local_port) pair, or a list of them
+        for rp, lp in ([forward] if isinstance(forward[0], int) else forward):
+            opts += ["-R", f"{int(rp)}:127.0.0.1:{int(lp)}"]
     remote = "exec bash -c " + shlex.quote(WRAPPER) + " orbit " + " ".join(shlex.quote(a) for a in claude_args)
     proc = subprocess.Popen(["ssh", *opts, host, remote], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, start_new_session=True)
@@ -241,7 +242,7 @@ def popen(host, claude_path, cwd, claude_args, env, forward=None):
 
 
 # environment a remote Claude Code needs from Orbit's (the rest is the host's own)
-FORWARD_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "DISABLE_", "MCP_TOOL_TIMEOUT", "BASH_DEFAULT_TIMEOUT_MS")
+FORWARD_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "DISABLE_", "MCP_TOOL_TIMEOUT", "BASH_DEFAULT_TIMEOUT_MS", "ENABLE_TOOL_SEARCH")
 
 
 def remote_env(env):
@@ -363,6 +364,58 @@ def install_codex(host, version, cache_root, arch="x86_64", timeout=900):
     rc, out, err = run(host, 'chmod +x "$HOME/.local/bin/codex" && "$HOME/.local/bin/codex" --version && echo "OK=$HOME/.local/bin/codex"', timeout=60)
     ok = next((l[3:] for l in out.splitlines() if l.startswith("OK=")), None)
     return (ok, None) if ok else (None, (err.strip().splitlines() or ["the copied Codex does not run there"])[-1][:300])
+
+
+def session_holders(host, session):
+    """Claude Code processes on the host that have this session open (the desktop app keeps one for
+    each session it has open): [(pid, seconds running)]."""
+    if not valid_host(host) or not re.fullmatch(r"[0-9a-fA-F-]{8,64}", str(session or "")): return []
+    rc, out, err = run(host, 'ps -u "$(id -un)" -o pid=,etimes=,args= | grep -F -e "--resume=%s" -e "--session-id=%s" '
+                             '| grep -v grep | awk \'{print $1, $2}\'' % (session, session), timeout=60)
+    rows = []
+    for line in (out or "").splitlines():
+        a = line.split()
+        if len(a) == 2 and a[0].isdigit() and a[1].isdigit(): rows.append((int(a[0]), int(a[1])))
+    return rows
+
+
+def append_transcript_delta(host, remote_path, local_path, idle_secs=120):
+    """Bring a session's transcript on the host up to this Mac's copy by appending what this Mac
+    has beyond it -- only if the host's file is exactly the start of this Mac's, and nothing is
+    writing to it. Nothing there is ever replaced. Returns (status, bytes_added); status is
+    "added", "same", "differs" (not a prefix: left alone), "busy" or "failed"."""
+    if not valid_host(host): return "failed", 0
+    try: size_here = os.path.getsize(local_path)
+    except OSError: return "failed", 0
+    q = shlex.quote(remote_path)
+    rc, out, err = run(host, f'f={q}\n[ -f "$f" ] || {{ echo MISSING; exit 0; }}\n'
+                             'echo "SIZE=$(stat -c %s "$f")"\necho "AGE=$(( $(date +%s) - $(stat -c %Y "$f") ))"\n'
+                             'echo "SHA=$(sha256sum "$f" | cut -d" " -f1)"\n', timeout=120)
+    if rc != 0 or "MISSING" in out: return "failed", 0
+    info = dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
+    try: size_there, age = int(info["SIZE"]), int(info["AGE"])
+    except (KeyError, ValueError): return "failed", 0
+    if size_there > size_here: return "differs", 0
+    h = hashlib.sha256()
+    with open(local_path, "rb") as fh:
+        left = size_there
+        while left > 0:
+            chunk = fh.read(min(1 << 20, left))
+            if not chunk: break
+            h.update(chunk); left -= len(chunk)
+    if h.hexdigest() != info.get("SHA"): return "differs", 0
+    if size_there == size_here: return "same", 0
+    if age < idle_secs: return "busy", 0
+    with open(local_path, "rb") as fh:
+        fh.seek(size_there); delta = fh.read()
+    if delta and not delta.endswith(b"\n"): return "failed", 0          # a half-written last line: wait
+    script = f'f={q}\n[ "$(stat -c %s "$f")" = "{size_there}" ] || exit 3\nbase64 -d >> "$f" && echo OK\n'
+    argv = ["ssh", *base_opts(True), host, "bash -c " + shlex.quote(script)]
+    try:
+        r = subprocess.run(argv, input=base64.b64encode(delta), capture_output=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        return "failed", 0
+    return ("added", len(delta)) if b"OK" in r.stdout else ("failed", 0)
 
 
 def copy_codex_login(host, auth_path):

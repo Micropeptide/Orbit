@@ -75,6 +75,8 @@ DEFAULTS = {
     "default_effort": "",            # "" = Claude's own; low, medium, high, xhigh, max
     "default_host": "",              # "" = this Mac; else an SSH host new chats run on
     "default_dir": "",               # "" = Orbit's workspace (on another machine: that host's default)
+    "tool_summaries": True,          # Claude Code names each batch of tool calls ("Counted fruit-related lines in recent transcripts"), as its desktop app shows them: a small extra call, only for hosted models
+    "prompt_suggestions": False,     # ask Claude Code to suggest your next message after each answer (a small extra call; this version only sends them when its servers allow)
     "remote_keep_alive_min": 30,     # a chat on another machine keeps Claude Code running this long between messages
     # permission mode for runs nobody is watching (scheduled jobs)
     "unattended_mode": "",
@@ -88,6 +90,7 @@ DEFAULTS = {
     "orbit_rules": False,            # Orbit's safety rules, autonomy mode and folder limit on top
     "orbit_tools": False,            # Orbit's own tools through an MCP bridge
     "chat_tools": True,              # ...and, on their own, the tools for talking to other chats
+    "meta_tools": True,              # Muse Image and SAM 3.1, once a Meta key is saved
     "project_tools": False,          # a trusted project's .orbit/tools through the bridge
     "orbit_tool_names": ["search_chats", "read_chat", "remember", "search_agent_memory",
                          "search_knowledge", "schedule_task", "list_scheduled_tasks",
@@ -194,6 +197,15 @@ def claude_account_for(sid=None, account=None):
     return CA.choose(Q.ROOT, secrets, pinned=pinned)
 
 
+def _cheap_subagents(sid):
+    """With delegation on, Claude Code's own subagents (its Task/Agent tool) run on the provider's small model."""
+    try:
+        import delegate as DELEG
+        return bool(Q.delegation_on(sid) and DELEG.settings(Q.S)["subagents"])
+    except Exception:
+        return False
+
+
 def harness_target(spec=None, sid=None, account=None):
     """Where a Claude Code run for this model sends its requests: base URL, the
     model ids for Claude's tiers, context window, credentials, extra env, and
@@ -208,6 +220,7 @@ def harness_target(spec=None, sid=None, account=None):
         try: secrets = Q.secrets_load() or {}
         except Exception: secrets = {}
         env = CA.env_for(secrets, got["account"])
+        if _cheap_subagents(sid): env["CLAUDE_CODE_SUBAGENT_MODEL"] = "haiku"
         return {"url": None, "model": pc.get("model") or "sonnet", "small": "haiku",
                 "ctx": int(pc.get("context") or 200000), "local": False, "provider": "claude",
                 "auth": {}, "env": env,
@@ -238,6 +251,8 @@ def harness_target(spec=None, sid=None, account=None):
         url = pc.get("base") or ""
         auth = {"ANTHROPIC_API_KEY": pc.get("api_key") or ""}
     env = dict(pc.get("env") or {})
+    if _cheap_subagents(sid) and pc.get("small") and pc.get("small") != pc.get("model"):
+        env.setdefault("CLAUDE_CODE_SUBAGENT_MODEL", pc["small"])
     if pc.get("proxy") and "ANTHROPIC_API_KEY" in auth:
         env.update(HTTPS_PROXY=pc["proxy"], HTTP_PROXY=pc["proxy"])
     return {"url": url, "model": pc.get("model"), "small": pc.get("small") or pc.get("model"),
@@ -327,6 +342,11 @@ def default_remote_dir(host):
     return "~"
 
 
+def tool_search_env(target, kind):
+    """ENABLE_TOOL_SEARCH for a run: on for every model that is not the Claude subscription or the small local model."""
+    return {} if (target.get("subscription") or kind == "local") else {"ENABLE_TOOL_SEARCH": "true"}
+
+
 def remote_target_env(target, env):
     """What a Claude Code run on another machine gets from Orbit: its models come through
     Orbit's gateway on this Mac, reached by an SSH reverse tunnel (the gateway needs
@@ -346,6 +366,7 @@ def remote_target_env(target, env):
     url = f"http://127.0.0.1:{rport}/h/{provider}"
     renv = harness_env(url, model, target.get("ctx") or 128000, extra=dict(target.get("env") or {}), small=small,
                        auth={"ANTHROPIC_AUTH_TOKEN": gateway_token()})
+    if not target.get("local"): renv.setdefault("ENABLE_TOOL_SEARCH", "true")      # see run_turn: the MCP tools wait behind tool search
     return ssh_remote.remote_env(renv), (rport, gateway_port())
 
 
@@ -412,20 +433,22 @@ def erase_session_traces(messages):
     """Remove what Claude Code keeps of this chat's session -- its transcript, file backups
     and session environment -- for a temporary chat, which promises to leave nothing on
     disk. Returns the paths removed."""
-    mk = marker_of(messages) or {}
-    sid = mk.get("session")
-    if not sid or mk.get("host"): return []             # a session on another machine is its own
     removed = []
-    jp = jsonl_path(sid, mk.get("cwd"))
-    targets = [jp] if jp else []
-    targets += [os.path.join(claude_dir(), "file-history", sid), os.path.join(claude_dir(), "session-env", sid)]
-    if jp: targets.append(os.path.splitext(jp)[0])        # its subagents/ and tool-results/ folder
-    for t in targets:
-        try:
-            if t and os.path.isdir(t): shutil.rmtree(t); removed.append(t)
-            elif t and os.path.exists(t): os.remove(t); removed.append(t)
-        except OSError:
-            pass
+    seen = {}
+    for m in messages or []:        # a temporary chat starts a new session each turn: all of them go
+        c_ = m.get("claude") if isinstance(m, dict) else None
+        if isinstance(c_, dict) and c_.get("session") and not c_.get("host"): seen[c_["session"]] = c_.get("cwd")
+    for sid, cwd_ in seen.items():
+        jp = jsonl_path(sid, cwd_)
+        targets = [jp] if jp else []
+        targets += [os.path.join(claude_dir(), "file-history", sid), os.path.join(claude_dir(), "session-env", sid)]
+        if jp: targets.append(os.path.splitext(jp)[0])        # its subagents/ and tool-results/ folder
+        for t in targets:
+            try:
+                if t and os.path.isdir(t): shutil.rmtree(t); removed.append(t)
+                elif t and os.path.exists(t): os.remove(t); removed.append(t)
+            except OSError:
+                pass
     return removed
 
 
@@ -588,9 +611,19 @@ def orbit_is_the_gate(mode, kind, read_only=False):
     return m == "auto" and kind == "local"
 
 
+def _run_effort(prefs, sid):
+    """The effort to ask Claude Code for: a "retry deeper" on this turn, else the one this
+    chat picked, else Orbit's own setting -- but only when that is a step up, because it
+    always holds some value (medium) and must not override Claude's own default."""
+    eff = getattr(Q.TURN_CTX, "effort", None) or (prefs or {}).get("reasoning_effort")
+    if eff: return eff
+    g = Q.chat_setting("reasoning_effort", sid)
+    return g if g in ("high", "xhigh", "max") else None
+
+
 def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None, mode=None,
                settings_path=None, mcp_path=None, append=None, sdk=True, add_dirs=None, model=None,
-               kind="local", remote=False, sid=None, bridge=False, **_):
+               kind="local", remote=False, sid=None, bridge=False, temp=False, **_):
     """The claude command line. The same for the terminal (sdk=False) and for
     Orbit, which only adds the stream transport, the session and a chat's mode.
 
@@ -661,7 +694,7 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
     if settings_path: argv += ["--settings", settings_path]
     if mcp_path:
         argv += ["--mcp-config", mcp_path]
-        if lean_bridge or easy_mode(sid) or ("*" not in (c.get("mcp_servers") or []) and prof != "full"):
+        if not remote and (lean_bridge or easy_mode(sid) or ("*" not in (c.get("mcp_servers") or []) and prof != "full")):
             argv.append("--strict-mcp-config")
     if prof != "lean" and not easy_mode(sid) and not remote:
         # plugins' own MCP servers: a Claude Code started with --print marks them failed
@@ -676,8 +709,11 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
     for d in add_dirs or []:
         argv += ["--add-dir", d]
     if append: argv += ["--append-system-prompt", append]
-    # only an explicit step up ("retry deeper"): the terminal command passes no effort
-    if effort and c.get("effort_passthrough") and effort in ("high", "xhigh", "max"):
+    if temp: argv.append("--no-session-persistence")      # nothing written to ~/.claude: no transcript to find or back up
+    if c.get("prompt_suggestions") and kind != "local" and not temp: argv += ["--prompt-suggestions"]
+    # what the caller asks for: a chat's own choice, a "retry deeper", or Orbit's setting when
+    # that is a step up (the terminal command passes no effort of its own)
+    if effort and c.get("effort_passthrough") and effort in ("low", "medium", "high", "xhigh", "max"):
         argv += ["--effort", effort]
     elif c.get("default_effort") in ("low", "medium", "high", "xhigh", "max"):
         argv += ["--effort", c["default_effort"]]
@@ -688,13 +724,83 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
     return argv
 
 
-def launcher_files(c, tag, skills=None, extra_servers=None, sid=None):
+def delegation_hooks():
+    """Claude Code hook settings that make a lead model delegate (bin/delegation-hook). Cheap: plain Python, no imports of Orbit."""
+    import shlex, delegate as DELEG
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "delegation-hook")
+    state = os.path.join(_work_dir(), "delegation-streak.json")
+    eag = DELEG.settings(Q.S)["eagerness"]
+    py = shlex.quote(sys.executable or "python3")
+    def cmd(*a): return {"type": "command", "command": " ".join([py, shlex.quote(script)] + [shlex.quote(str(x)) for x in a]), "timeout": 10}
+    return {"UserPromptSubmit": [{"hooks": [cmd("prompt", eag, state)]}],
+            "PostToolUse": [{"hooks": [cmd("tool", state, DELEG.STREAK_AT)]}]}
+
+
+# The delegation hook for a chat on another machine: self-contained (that machine has none of Orbit's files), run
+# there with its python3. The text to show and the reminder are baked in; the count of direct tool calls is kept in a file.
+_REMOTE_HOOK = r"""
+import json, os, re, sys
+PROMPT, NOTE, AT = %s, %s, %d
+STATE = os.path.expanduser("~/.orbit-delegation-streak.json")
+def say(ev, text): print(json.dumps({"hookSpecificOutput": {"hookEventName": ev, "additionalContext": text}}))
+try:
+    ev = json.load(sys.stdin)
+    try: st = json.load(open(STATE))
+    except Exception: st = {}
+    sid = ev.get("session_id") or "?"
+    if sys.argv[1] == "prompt":
+        if PROMPT: say("UserPromptSubmit", PROMPT)
+        st[sid] = 0
+    else:
+        if re.search(r"(^|__)delegate$|chat_wait$", str(ev.get("tool_name") or "")): st[sid] = 0
+        else:
+            n = int(st.get(sid, 0)) + 1; st[sid] = n
+            if n >= AT and (n - AT) %% 8 == 0: say("PostToolUse", NOTE.replace("{n}", str(n)))
+    if len(st) > 200: st = dict(list(st.items())[-100:])
+    json.dump(st, open(STATE + ".tmp", "w")); os.replace(STATE + ".tmp", STATE)
+except Exception: pass
+"""
+_REMOTE_CAVEAT = (" The workers run on the user's Mac, not on {host}: they cannot see files there or run commands there, "
+                  "so delegate only what you can hand over whole (text to summarise or check, a question to research) "
+                  "and put everything they need in the task.")
+
+
+def DELEGATION_EAGERNESS():
+    import delegate as DELEG
+    return DELEG.settings(Q.S)["eagerness"]
+
+
+def remote_delegation_files(host, rport, token, eagerness):
+    """--settings and --mcp-config for a chat on another machine, as JSON text (that machine has no Orbit folder).
+    Its Claude reaches Orbit's delegate tool through a reverse SSH tunnel to this Mac's port `rport`."""
+    import shlex, delegate as DELEG
+    here = os.path.dirname(os.path.abspath(__file__))
+    caveat = _REMOTE_CAVEAT.format(host=host)
+    prompt = DELEG.triage(eagerness)
+    script = _REMOTE_HOOK % (json.dumps(prompt + caveat if prompt else ""), json.dumps(DELEG.STREAK_NOTE + caveat), DELEG.STREAK_AT)
+    def cmd(kind): return {"type": "command", "command": "python3 -c " + shlex.quote(script) + " " + kind, "timeout": 10}
+    settings = {"hooks": {"UserPromptSubmit": [{"hooks": [cmd("prompt")]}], "PostToolUse": [{"hooks": [cmd("tool")]}]}}
+    mcp = {"mcpServers": {"orbit": {"type": "stdio", "command": "python3",
+                                    "args": ["-c", open(os.path.join(here, "orbit-mcp")).read()],
+                                    "env": {"ORBIT_MCP_URL": f"http://127.0.0.1:{rport}/api/mcp_bridge",
+                                            "ORBIT_MCP_TOKEN": token}}}}
+    return json.dumps(settings), json.dumps(mcp)
+
+
+def launcher_files(c, tag, skills=None, extra_servers=None, sid=None, temp=False):
     """--settings and --mcp-config files for one run (None where not needed)."""
     settings = {}
+    if temp: settings["disableAllHooks"] = True        # plugin hooks (memory tools, loggers) would record the chat
     # A plugin's hooks expect that plugin's MCP tools to be there. Easy mode takes the
     # servers away, so the hooks go with them rather than firing at tools that are gone.
     if easy_mode(sid) or c.get("hooks") in (False, "off"):
         settings["disableAllHooks"] = True
+    # delegation: hooks that put the triage rule in front of every request and remind the lead after a run of direct tool calls
+    try:
+        if sid and not settings.get("disableAllHooks") and Q.delegation_on(sid):
+            settings.setdefault("hooks", {}).update(delegation_hooks())
+    except Exception:
+        pass
     if skills is not None and c.get("skill_routing") and (c.get("profile") or "standard") != "lean":
         keep = set(skills)
         settings["skillOverrides"] = {it["name"]: "off" for it in skill_index() if it["name"] not in keep}
@@ -819,9 +925,17 @@ def _glob_match(name, patterns):
     return any(fnmatch.fnmatchcase(name, p) for p in patterns or [])
 
 
+def is_screen_action(tool):
+    """mcp__orbit-look__screen_click and the other screen tools that act (screen_look only looks)."""
+    t = str(tool)
+    return t.startswith("mcp__orbit-look__screen_") and t != "mcp__orbit-look__screen_look"
+
+
 def orbit_view(tool, inp):
     """A Claude tool call as the Orbit tool it resembles, for Orbit's risk rules."""
     inp = inp or {}
+    if is_screen_action(tool):
+        return tool.split("__", 2)[-1], inp          # Orbit's own screen_* rule: confirm
     if tool == "Bash":
         return "run_shell", {"command": inp.get("command", "")}
     if tool == "Write":
@@ -906,10 +1020,14 @@ def decide(tool, inp, ctx, req=None):
                        "the user switches plan mode off when they want it carried out.", None, None)
     if tool.startswith("mcp__orbit__"):
         return True, "", inp, None           # the bridge applies Orbit's own checks
-    if tool.startswith("mcp__orbit-look__") and tool.split("__", 2)[-1] not in ("mac_launch", "mac_quit"):
+    if tool.startswith("mcp__orbit-look__") and tool.split("__", 2)[-1] not in ("mac_launch", "mac_quit") \
+            and not is_screen_action(tool):
         # a throwaway browser, the simulator and screenshots of windows: nothing of yours to
-        # protect. Running or quitting an app on this Mac is the exception, and asks.
+        # protect. Running or quitting an app on this Mac is the exception, and asks; so does
+        # driving the screen (clicks, typing, keys) -- looking at it does not.
         return True, "", inp, None
+    if is_screen_action(tool) and ctx["read_only"]:
+        return False, "Plan mode is on, so nothing may be changed. Describe the change instead.", None, None
     if ctx["read_only"] and tool in WRITE_TOOLS:
         return False, "Plan mode is on, so nothing may be changed. Describe the change instead.", None, None
     fn, args = orbit_view(tool, inp)
@@ -1033,6 +1151,41 @@ def _answer_questions(inp, ctx):
     return True, "", {**(inp or {}), "answers": answers}
 
 
+def _answer_elicitation(r, ctx):
+    """An MCP server asks the person for input mid-run (Claude Code's `elicitation` request): a
+    form of a few fields, or a link to finish something in the browser. The answer goes back as
+    {"action": "accept", "content": {...}}; no answer is a decline, never a run left waiting."""
+    ask = ctx.get("ask")
+    server = str(r.get("mcp_server_name") or r.get("server_name") or "An MCP server")
+    msg = str(r.get("message") or "needs your input")
+    if not ask: return {"action": "decline"}
+    url = r.get("url")
+    if url or r.get("mode") == "url":
+        ans = ask(f"{server}: {msg}\n{url or ''}\nOpen the link, finish there, then choose Done.", ["Done", "Cancel"], False)
+        return {"action": "accept"} if ans == "Done" else {"action": "decline"}
+    schema = r.get("requested_schema") or r.get("requestedSchema") or {}
+    props = (schema.get("properties") or {}) if isinstance(schema, dict) else {}
+    content = {}
+    for name, spec in list(props.items())[:8]:
+        spec = spec if isinstance(spec, dict) else {}
+        label = str(spec.get("title") or name)
+        text = f"{server}: {msg}\n{label}" + (f" — {spec['description']}" if spec.get("description") else "")
+        opts = [str(x) for x in spec.get("enum") or []]
+        if not opts and spec.get("type") == "boolean": opts = ["Yes", "No"]
+        ans = ask(text[:600], opts[:8], False)
+        if ans is None or ans == "": return {"action": "decline"}
+        ans = ans[0] if isinstance(ans, list) and ans else ans
+        if spec.get("type") == "boolean": content[name] = str(ans).lower() in ("yes", "true", "y")
+        elif spec.get("type") in ("number", "integer"):
+            try: content[name] = float(ans) if spec["type"] == "number" else int(float(ans))
+            except ValueError: content[name] = ans
+        else: content[name] = str(ans)
+    if not props:
+        ans = ask(f"{server}: {msg}", ["OK", "Cancel"], False)
+        return {"action": "accept", "content": {}} if ans == "OK" else {"action": "decline"}
+    return {"action": "accept", "content": content}
+
+
 # ------------------------------------------------------------------ live control
 
 RUNS = {}            # Orbit chat id -> the Claude Code process answering in it
@@ -1088,6 +1241,9 @@ def _brief_args(inp):
         if v not in (None, ""): out[k] = str(v)[:200]
     return out
 
+REMOTE_HOSTS = {}    # chat id -> the machine its last Claude Code run was on (None: this Mac)
+SETTLE_S = 30        # after a result with messages still unanswered: how long to wait for the next answer to start
+
 INIT = {}            # what the last run reported: commands, agents, models, tools, skills
 
 
@@ -1113,7 +1269,8 @@ def known_tools(add=None):
     return sorted(have)
 CONTROLS = ("set_permission_mode", "set_model", "set_max_thinking_tokens", "get_context_usage",
             "mcp_status", "mcp_toggle", "mcp_reconnect", "mcp_set_servers", "stop_task",
-            "rewind_files", "reload_plugins", "get_settings", "apply_flag_settings", "interrupt")
+            "rewind_files", "reload_plugins", "get_settings", "apply_flag_settings", "interrupt",
+            "background_tasks")
 
 
 def _prefs_path():
@@ -1157,6 +1314,15 @@ def note_context_window(sid, ev, model_hint=None):
     if not wins: return
     w = wins.get(model_hint) if model_hint in wins else max(wins.values())
     if Q is None: return
+    # A model behind a URL of yours: Claude Code does not know its window (it reports 128,000 whatever the server holds),
+    # so what it says is neither kept for the chat nor learned for the model; Orbit uses the size stated for it.
+    if isinstance(model_hint, str) and model_hint.startswith("harness:"):
+        try:
+            if model_hint[len("harness:"):].partition("/")[0] in (Q.HARN.load(Q.ROOT).get("custom") or {}):
+                Q.SESSION_WINDOW.pop(sid, None)
+                if (chat_prefs(sid) or {}).get("context_window"): set_chat_pref(sid, context_window=None)
+                return
+        except Exception: pass
     # and for the model itself, so its window in the picker and in every other chat on
     # it is the one Claude Code really has ("harness:claude/opus" -> "claude/opus")
     if isinstance(model_hint, str) and model_hint.startswith("harness:"):
@@ -1215,6 +1381,51 @@ def control(sid, subtype, timeout=15, **params):
     ev.wait(timeout)
     w = run["waiters"].pop(rid, {})
     return w.get("response") if ev.is_set() else {"error": "no reply from Claude Code"}
+
+
+def can_stop_task(sid):
+    """Claude Code can be told to stop a background task while it answers in this chat, or
+    while it is kept between answers for that background work."""
+    if sid in RUNS: return True
+    live = LIVE.get(sid)
+    return bool(live and live["proc"].poll() is None)
+
+
+def stop_task(sid, tid):
+    """Stop one background task of a chat, as the CLI's /tasks does. {"ok"} or {"error"}."""
+    with _BG_LOCK:
+        tasks = BG_TASKS.get(sid) or {}
+        rec = tasks.get(str(tid)) or next((dict(r) for r in tasks.values() if r.get("tool_id") == tid), None)
+        rec = dict(rec) if rec else None
+    if not rec: return {"error": "no such task"}
+    if rec["status"] not in ("running", "pending"): return {"error": "it has already ended"}
+    r = control(sid, "stop_task", task_id=rec["id"])
+    if r is None:                       # between answers: the kept process takes the request itself
+        live = LIVE.get(sid)
+        if not live or live["proc"].poll() is not None:
+            return {"error": "Claude Code is no longer running there"}
+        try:
+            with live["wlock"]:
+                live["proc"].stdin.write((json.dumps({"type": "control_request",
+                    "request_id": "orbit-stop-task-" + uuid.uuid4().hex[:6],
+                    "request": {"subtype": "stop_task", "task_id": rec["id"]}}) + "\n").encode())
+                live["proc"].stdin.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            return {"error": "Claude Code is no longer running there"}
+    elif r.get("subtype") == "error" or r.get("error"):
+        return {"error": str(r.get("error") or "Claude Code could not stop it")[:200]}
+    bg_task(sid, rec["id"], status="stopped")
+    return {"ok": True}
+
+
+def to_background(sid, tool_id):
+    """A tool that is running in the foreground (a long shell command) goes to the background
+    and the answer carries on -- Ctrl+B in the CLI. {"ok"} or {"error"}."""
+    r = control(sid, "background_tasks", tool_use_id=tool_id)
+    if r is None: return {"error": "nothing is running in that chat"}
+    if r.get("subtype") == "error" or r.get("error"):
+        return {"error": str(r.get("error") or "Claude Code could not do that")[:200]}
+    return {"ok": True}
 
 
 _LEARN = {"lock": threading.Lock()}
@@ -1448,6 +1659,80 @@ def _snapshot(path, pending):
     pending[p] = {"path": p, "snap": snap, "created": not existed}
 
 
+def transcript_chain(path, tip):
+    """The ids of the messages on the line of conversation that ends at `tip` (a set). A resumed
+    session can branch -- the run is stopped, started again from an earlier message -- and Claude
+    Code only knows the messages of the branch it ends on: another branch's id is "not found"."""
+    parents = {}
+    try:
+        with open(path, "rb") as f:
+            for line in f:
+                if b'"parentUuid"' not in line: continue
+                try: d = json.loads(line)
+                except ValueError: continue
+                u = d.get("uuid")
+                if u: parents[u] = d.get("parentUuid")
+    except OSError:
+        return set()
+    chain, cur = set(), tip
+    while cur and cur not in chain:
+        chain.add(cur)
+        cur = parents.get(cur)
+    return chain
+
+
+_HOLDER_WARNED = {}
+
+
+def _holders_in(ps_text, session):
+    """Pids of Claude Code processes the desktop app keeps open for this session (from `ps` output).
+    The app starts each as `claude … --resume=<id>`, from its own folder."""
+    out = []
+    for line in str(ps_text).splitlines():
+        if session not in line or "claude-code/" not in line or "Application Support/Claude" not in line: continue
+        if f"--resume={session}" not in line and f"--session-id={session}" not in line: continue
+        parts = line.split(None, 1)
+        if parts and parts[0].isdigit(): out.append(int(parts[0]))
+    return out
+
+
+def desktop_holders(session):
+    """Is the Claude desktop app holding this session open on this Mac? Its Claude Code keeps the
+    conversation in memory: a turn Orbit adds meanwhile is not in it, and the app's next message
+    continues from before that turn -- leaving Orbit's turn on a branch nothing resumes."""
+    if not session: return []
+    try:
+        out = subprocess.run(["ps", "-ww", "-eo", "pid,command"], capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return []
+    return _holders_in(out, session)
+
+
+_DESKTOP_SSH = {"at": 0.0, "by": {}}
+
+
+def desktop_ssh_session(session):
+    """A session Claude's desktop app ran on a server over SSH, if this one was:
+    {"host", "cwd", "transcript"}. The app keeps a copy of its transcript here, but the session
+    itself -- Claude Code, the files, the cluster -- is on that machine."""
+    if not session: return None
+    now = time.time()
+    if now - _DESKTOP_SSH["at"] > 60:
+        by = {}
+        base = os.path.expanduser("~/Library/Application Support/Claude/claude-code-sessions")
+        for f in glob.glob(os.path.join(base, "*", "*", "local_*.json")):
+            try:
+                with open(f) as fh: d = json.load(fh)
+            except Exception:
+                continue
+            ssh, cli = d.get("sshConfig"), d.get("cliSessionId")
+            if isinstance(ssh, dict) and ssh.get("sshHost") and cli:
+                by[cli] = {"host": str(ssh["sshHost"]), "cwd": d.get("originCwd") or d.get("cwd"),
+                           "transcript": d.get("sshRemoteTranscriptPath")}
+        _DESKTOP_SSH.update(at=now, by=by)
+    return _DESKTOP_SSH["by"].get(session)
+
+
 def last_assistant_uuid(path):
     """The uuid of the last main-thread assistant record in a transcript."""
     try:
@@ -1487,6 +1772,28 @@ def _prior_transcript(messages, limit=24000):
     return text[-limit:]
 
 
+def _missed_turns(messages, limit=20000):
+    """What was said in this chat since Claude's own session last answered, when another model answered in
+    between (Antigravity, Gemini, Codex, Orbit's own agent ...): Claude's session does not contain those turns,
+    so without this it would carry on as if they never happened. "" when there are none."""
+    last_claude = max((i for i, m in enumerate(messages)
+                       if m.get("role") == "assistant" and m.get("claude_uuid")), default=-1)
+    after = [m for m in messages[last_claude + 1:]
+             if m.get("role") in ("user", "assistant") and not m.get("nudge") and not m.get("bang")]
+    if not any(m.get("role") == "assistant" and (m.get("content") or "").strip() for m in after
+               if isinstance(m.get("content"), str)):
+        return ""
+    lines = []
+    for m in after:
+        c = m.get("content")
+        if isinstance(c, list): c = " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+        c = str(c or "").strip()
+        if not c: continue
+        who = "User" if m["role"] == "user" else (re.sub(r"\s*·\s*CLI$", "", str(m.get("model") or "")) or "Assistant")
+        lines.append(f"{who}: {c}")
+    return "\n\n".join(lines)[-limit:]
+
+
 def _system_parts(project):
     """Project rules and the user's standing instructions, as Orbit gives any model."""
     parts = []
@@ -1503,26 +1810,53 @@ def _system_parts(project):
     return parts
 
 
-def _orbit_append(project, c, orbit_tools, chat_instructions=None, kind="local", look=False):
+def _orbit_append(project, c, orbit_tools, chat_instructions=None, kind="local", look=False, delegate=False, remote=None):
     """What Orbit adds to Claude's system prompt: the launcher's note, this chat's
     own instructions (/sysprompt), and Orbit's own context only when that extra is
     turned on."""
     extra = []
+    # A chat begun in Claude's desktop app has SendUserFile in its history; the tool exists only
+    # there, and a call here fails ("No such tool available") however often it is tried
+    extra.append("# Files for the person\n- SendUserFile, and the other tools that exist only in Claude's "
+                 "desktop app, are not available in Orbit: calling them fails. To give the person a file, put "
+                 "its full path in your answer -- Orbit shows paths as links they can open or save.")
     if chat_instructions:
         extra.append("# Instructions for this chat\n" + str(chat_instructions)[:8000])
     if c.get("orbit_context"):
         extra += _system_parts(project)
         extra.append("# Running inside Orbit\n- The user is chatting through Orbit, a local desktop "
                      "window onto this session.")
-    if orbit_tools:
+    if orbit_tools and not remote:
         extra.append("- Orbit's tools are available as mcp__orbit__*. mcp__orbit__chat_create and "
                      "mcp__orbit__chat_send hand work to other chats -- usually on cheaper models -- "
-                     "and return their answers; the person can open and talk to those chats too.")
+                     "and return their answers; the person can open and talk to those chats too. "
+                     "mcp__orbit__claude_usage tells you how much of the person's Claude plan is used (the 5-hour "
+                     "and weekly windows, per account) -- what /usage shows in a terminal, which you cannot read "
+                     "yourself; call it when they ask about usage or allowance.")
+    if orbit_tools and not remote and Q.self_improve_mode() != "off":
+        extra.append("# Improving Orbit\n- Orbit is the app running you. If a limitation or bug in Orbit itself blocks you (not in the project you are "
+                     "working on), propose the fix with mcp__orbit__orbit_improve instead of working around it or editing Orbit's files directly: "
+                     "it is tested in a private copy, reviewed by another model for danger, and applied only if all is well.")
+    if delegate and orbit_tools:
+        import delegate as DELEG
+        extra.append("# Delegation\n- " + DELEG.policy(DELEG.settings(Q.S)["eagerness"])
+                     + (_REMOTE_CAVEAT.format(host=remote) if remote else "") + "\n- The tool is mcp__orbit__delegate.")
+    if orbit_tools and not remote and c.get("meta_tools", True) and Q.meta_key_set():
+        extra.append("- mcp__orbit__meta_image makes or edits images with Meta's Muse Image (it saves a file and returns "
+                     "the path; give that path in your answer). mcp__orbit__meta_segment finds every instance of an "
+                     "object in an image with Meta's SAM 3.1 (boxes, masks and an overlay image).")
     if look:
         extra.append("# Seeing what you build\n- mcp__orbit-look__* lets you look at your work: browser_open then "
                      "browser_screenshot/browser_snapshot for a web page; simulator_boot, simulator_install, "
                      "simulator_launch and simulator_screenshot for an iPhone app; mac_launch and mac_screenshot "
                      "for a Mac app. Check the result on screen before you say it works.")
+        if Q.screen_control_on():
+            extra.append("# Controlling this Mac\n- mcp__orbit-look__screen_* is how you see and drive this Mac's screen: "
+                         "screen_look first (an image exactly the screen's size in points, so a pixel in it is the "
+                         "coordinate), then screen_click / screen_move / screen_drag / screen_type / screen_key / "
+                         "screen_scroll, and screen_look again to check. Each action asks the person first. The desktop "
+                         "app's own computer-use tools (mcp__computer-use__*) do not exist in this chat; these are the "
+                         "ones to use. Do not touch a window the task does not need.")
     return launcher_append(c, extra, kind)
 
 
@@ -1547,6 +1881,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         emit("error", msg); emit("done", None)
         return msg
 
+    temp = bool(sid and q.is_temp(sid))
     spec = q.current_model() or {}
     label = (spec.get("label") or "Claude Code · local Qwen").replace(" · CLI", "")
     if not label.startswith("Claude Code"): label = "Claude Code · " + label
@@ -1614,6 +1949,15 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
 
     mk = dict(marker_of(messages) or {})
     prefs0 = chat_prefs(sid) if sid else {}
+    # A session the desktop app ran on a server over SSH is resumed THERE, in its own folder. Run on
+    # this Mac instead (its folder does not exist here), Claude could only reach the server's files
+    # through ssh and scp -- download, change, upload -- which is the shuffle you saw. Choosing
+    # "This Mac" for the chat (a host of its own) still overrides it.
+    dsk = desktop_ssh_session(mk.get("session")) if mk.get("session") and not mk.get("host") else None
+    moved_to_server = False
+    if dsk and "host" not in prefs0 and dsk.get("cwd"):
+        mk.update(host=dsk["host"], remote_ready=True, cwd=dsk["cwd"])
+        moved_to_server = True
     # a chat that runs on another machine over SSH (its folder is there); a chat keeps
     # the host its Claude session started on
     host = (mk.get("host") if mk.get("session") and mk.get("remote_ready") else None) \
@@ -1623,13 +1967,44 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         import ssh_remote
         info = ssh_remote.probe(host, max_age=1800)
         if not info.get("ok") or not info.get("claude"):
-            msg = (f"Could not start Claude Code on {host}: " + (info.get("error") or "no `claude` found there — "
+            msg = (f"Could not start Claude Code on {host}" + (" (this chat ran there in Claude's desktop app; "
+                   "to carry on here on this Mac instead, choose This Mac in the folder chip)" if dsk else "") + ": "
+                   + (info.get("error") or "no `claude` found there — "
                    "install Claude Code on it (or open a Claude Code SSH session there once), then try again."))
             messages.append({"role": "user", "content": user_content, "t": time.time()})
             ssh_remote._PROBES.pop(host, None)
             emit("error", msg); emit("done", None)
             return msg
         remote = {"host": host, "claude": info["claude"], "home": info.get("home") or "~"}
+        if moved_to_server and dsk.get("transcript"):
+            # This chat has been running on this Mac since the desktop app left it, so this Mac's copy
+            # of the session is ahead of the server's. Add the difference (and only that) to the
+            # server's, so Claude there carries on with the whole conversation.
+            held_there = ssh_remote.session_holders(host, mk["session"])
+            if held_there:
+                emit("notice", {"msg": f"This session is still open in Claude desktop on {host}. Claude desktop keeps its "
+                                       "own copy of the conversation: whatever you write there next continues from before "
+                                       "this turn. Close the session in Claude desktop first, or use one app at a time.",
+                                "kind": "warning"})
+            local_copy = jsonl_path(mk["session"])
+            if local_copy:
+                status, added = ssh_remote.append_transcript_delta(host, dsk["transcript"], local_copy)
+                said = {"added": f"This chat now runs on {host}, where it began; its server copy was brought up to date "
+                                 f"with the {added // 1024} KB it had gained on this Mac.",
+                        "differs": f"This chat now runs on {host}, where it began. Its copy there and this Mac's differ, "
+                                   "so it carries on from the server's own record.",
+                        "busy": f"This chat now runs on {host}, where it began. Something is still writing to its session "
+                                "there (the desktop app?), so it was not brought up to date with this Mac's copy.",
+                        "same": f"This chat now runs on {host}, where it began."}.get(status)
+                if said: emit("notice", {"msg": said})
+    if mk.get("session") and not remote:
+        held = desktop_holders(mk["session"])
+        if held and _HOLDER_WARNED.get(sid) != tuple(held):
+            _HOLDER_WARNED[sid] = tuple(held)
+            emit("notice", {"msg": "This session is still open in Claude desktop. Orbit carries on with it, but "
+                                   "Claude desktop keeps its own copy of the conversation: whatever you write there next "
+                                   "continues from before this turn, and this turn is lost from it. Close the session "
+                                   "in Claude desktop first, or use one app at a time.", "kind": "warning"})
     jp = None if remote else (jsonl_path(mk.get("session"), mk.get("cwd")) if mk else None)
     # on another machine the transcript lives there: a session that started there resumes
     resume = bool(jp) or bool(remote and mk.get("session") and mk.get("host") == host and mk.get("remote_ready"))
@@ -1652,7 +2027,24 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         mine = next((m.get("claude_uuid") for m in reversed(messages)
                      if m.get("role") == "assistant" and m.get("claude_uuid")), None)
         if mine and mine != last_assistant_uuid(jp):
-            resume_at = mine
+            # Claude Code only knows the messages on the branch its transcript ends on. When a run
+            # was stopped or restarted mid-answer, the last step Orbit received can sit on another
+            # branch (or never have been written), and asking to resume at it fails at once --
+            # "No message found with message.uuid" -- on every message after, until the chat was
+            # started over. Resume at the latest step that is on the transcript's own branch.
+            # (a chat edited or regenerated here rewinds to a step that IS on that branch; one that is
+            # not is a stray, and the transcript's own end is where the conversation really stands)
+            if mine in transcript_chain(jp, last_assistant_uuid(jp)):
+                resume_at = mine
+            else:
+                emit("notice", {"msg": "Claude Code's saved session had branched after this chat was "
+                                       "interrupted; carrying on from where its own record ends."})
+    if resume_at and sid in LIVE and bg_running(sid):
+        # Resuming at an earlier message closes the kept Claude Code, and its running agents and
+        # shells with it. When Claude has carried on by itself since (an agent reported back), Orbit's
+        # copy of the chat is simply behind its transcript, which looks just like an edited chat.
+        # Work in flight is worth more than the rewind.
+        resume_at = None
     prefs = chat_prefs(sid) if sid else {}
     if not resume:
         # a new session starts in the folder chosen for this chat, else the
@@ -1664,6 +2056,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         if remote: cwd = prefs.get("cwd") or default_remote_dir(remote["host"])     # a folder on that machine
         prior = _prior_transcript([m for m in messages if m.get("role") != "system"])
         ran = []
+        missed = ""
         mk = {"session": str(uuid.uuid4()), "cwd": cwd, "skills": [], "owner": sid}
         if remote: mk["host"] = remote["host"]
     else:
@@ -1675,6 +2068,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         ran = [m for m in messages[last_seen + 1:] if m.get("role") == "user" and m.get("bang")]
         if ran:
             prior_ran = "\n\n".join(str(m.get("content") or "") for m in ran)[-24000:]
+        missed = _missed_turns(messages)
         if jp and os.path.dirname(jp) != os.path.join(projects_dir(), encode_cwd(cwd)):
             # resumed from wherever the transcript actually is
             cwd = mk.get("cwd") or cwd
@@ -1719,6 +2113,16 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         if c.get("chat_tools", True):
             specs += [x for x in (tools or []) if x.get("function", {}).get("name") in q.CHAT_TOOLS
                       and x not in specs]
+        # Orbit improving itself (bin/selfimprove.py): offered while it is switched on
+        if q.self_improve_mode() != "off":
+            specs += [x for x in (tools or []) if x.get("function", {}).get("name") in q.SELFIMP_TOOLS and x not in specs]
+        # delegation: the lead hands small tasks to cheaper models (bin/delegate.py)
+        if sid and q.delegation_on(sid):
+            specs += [x for x in (tools or []) if x.get("function", {}).get("name") in q.DELEGATE_TOOLS and x not in specs]
+        # Muse Image and SAM 3.1 are offered to any Claude Code chat once a Meta key is saved
+        if c.get("meta_tools", True) and q.meta_key_set():
+            specs += [x for x in (tools or []) if x.get("function", {}).get("name") in q.META_TOOLS
+                      and x not in specs]
         if (c.get("orbit_tools") or c.get("project_tools")) and project:
             try:
                 q.file_tool_specs(project)
@@ -1727,9 +2131,21 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                           and x not in specs]
             except Exception:
                 pass
+    # A chat on another machine gets one Orbit tool, delegate, through a tunnel to this Mac (the rest act on this
+    # Mac's files and windows, which that chat is not about)
+    brport = None
+    if sid: REMOTE_HOSTS[sid] = (remote or {}).get("host")      # delegate asks: is the chat that called it on another machine?
+    if remote and bridge_url() and sid and q.delegation_on(sid) and not temp and not easy_mode(sid):
+        specs = [x for x in (tools or []) if x.get("function", {}).get("name") in q.DELEGATE_TOOLS]
     orbit_tools = bool(specs)
     if orbit_tools:
-        token = secrets.token_hex(16)
+        prev = LIVE.get(sid) if (remote and sid) else None
+        # a kept process was started with its token and port: a new turn has to use the same ones
+        token = (prev or {}).get("token") if (prev or {}).get("rport") else None
+        token = token or secrets.token_hex(16)
+        if remote:
+            import ssh_remote
+            brport = (prev or {}).get("rport") or ssh_remote.pick_port()
         BRIDGE[token] = {"sid": sid, "project": project, "read_only": bool(read_only),
                          "emit": emit, "approve": approve, "cancel": cancel, "specs": specs,
                          "ask": getattr(T, "ask", None), "model": getattr(T, "model", None),
@@ -1742,10 +2158,12 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     # local model (every tool is a definition it reads on every message), nor in easy mode
     look = bool(not remote and q.look_enabled("claude") and (c.get("profile") or "standard") != "lean"
                 and not easy_mode(sid))
-    if look: servers["orbit-look"] = {"type": "stdio", **q.look_server()}
+    if look: servers["orbit-look"] = {"type": "stdio", **q.look_server("claude")}
     # on another machine Claude uses that machine's own setup (settings, skills, MCP)
-    settings_path, mcp_path = (None, None) if remote else launcher_files(c, mk["session"], skills=chosen,
-                                                                          extra_servers=servers, sid=sid)
+    if remote:      # on another machine Claude uses that machine's own setup (settings, skills, MCP) -- and Orbit's delegate tool
+        settings_path, mcp_path = (remote_delegation_files(remote["host"], brport, token, DELEGATION_EAGERNESS()) if brport else (None, None))
+    else:
+        settings_path, mcp_path = launcher_files(c, mk["session"], skills=chosen, extra_servers=servers, sid=sid, temp=temp)
 
     # a chat's own mode, else Orbit's default for new chats, else Claude's own
     mode = prefs.get("permission_mode") or c.get("permission_mode") or None
@@ -1753,17 +2171,30 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         mode = c["unattended_mode"]
     kind = "subscription" if target.get("subscription") else ("local" if target.get("local") else "provider")
     argv = build_argv(c, session_id=mk["session"], resume=resume, read_only=bool(read_only), mode=mode,
-                      model=target.get("cli_model"), kind=kind, remote=bool(remote), sid=sid,
-                      effort=getattr(T, "effort", None) or q.chat_setting("reasoning_effort", sid),
+                      model=target.get("cli_model"), kind=kind, remote=bool(remote), sid=sid, temp=temp,
+                      effort=_run_effort(prefs, sid),
                       settings_path=settings_path, mcp_path=mcp_path, add_dirs=prefs.get("add_dirs"),
-                      append=_orbit_append(project, c, orbit_tools, prefs.get("instructions"), kind, look=look),
+                      append=_orbit_append(project, c, orbit_tools, prefs.get("instructions"), kind, look=look,
+                                           delegate=bool(sid and q.delegation_on(sid)),
+                                           remote=(remote or {}).get("host")),
                       bridge=orbit_tools)
     if fork: argv.append("--fork-session")
     if resume_at: argv += ["--resume-session-at", resume_at]
     env = target_env(target)
+    # Claude Code turns tool search off for any model that is not on Anthropic's own API, and then sends the full
+    # definition of every MCP tool with every request: with a few servers that is 300,000 tokens, more than a 262,144
+    # window holds, so even "hi" failed ("maximum context length ... at least 262145 input tokens"). On, the tools wait
+    # behind one search tool and a model loads the few it needs. The small local model keeps its lean setup.
+    env.update({k: v for k, v in tool_search_env(target, kind).items() if k not in env})
+    if c.get("tool_summaries") and kind != "local":
+        env["CLAUDE_CODE_EMIT_TOOL_USE_SUMMARIES"] = "1"      # a one-line name for each batch of tool calls
 
     stamp = f"[{q.sent_at(now)}] " if c.get("message_time") else ""
     blocks = _content_blocks(user_content, stamp)
+    if resume and missed:
+        blocks.insert(0, {"type": "text", "text": "[Orbit: since your last reply, this chat carried on with other models. "
+                          "What was said meanwhile -- treat it as part of the conversation:]\n" + missed
+                          + "\n[End of what was said meanwhile.]"})
     if resume and ran:
         blocks.insert(0, {"type": "text", "text": "[Since your last reply, the user ran these commands themselves:]\n"
                           + prior_ran + "\n[End of the commands.]"})
@@ -1775,7 +2206,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                        "the Skill tool if it applies: " + "; ".join(
                            f"{s['name']} ({s['description'][:160]})" for s in hint) + "]"})
 
-    _run_log(sid, mk, resume, fork, resume_at, c, cwd, argv)
+    if temp: q.TEMP_ENGINE_IDS.add(mk["session"])           # whatever turns up with this id is not to be backed up
+    else: _run_log(sid, mk, resume, fork, resume_at, c, cwd, argv)
     # A chat on another machine keeps its Claude Code running between messages: a new
     # SSH connection and Claude Code starting on the host took most of every answer's
     # wait. The next message goes straight into the same session while nothing that
@@ -1796,7 +2228,10 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     if keep or local_kept:
         live = LIVE.get(sid)
         if live and (live["sig"] != sig or live["proc"].poll() is not None or fork or resume_at):
-            close_live(sid)
+            close_live(sid, "this message needs a fresh Claude Code (" + (
+                "its settings changed -- account, model, folder or mode" if live["sig"] != sig else
+                "it had already exited" if live["proc"].poll() is not None else
+                "the chat was forked" if fork else "the chat was rewound to an earlier message") + ")")
             live = None
     try:
         if live:
@@ -1817,6 +2252,8 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
         elif remote:
             import ssh_remote
             renv, forward = remote_target_env(target, env)
+            if brport and getattr(Q, "UI_PORT", None):
+                forward = ([forward] if forward else []) + [(brport, Q.UI_PORT)]
             emit("status", {"msg": f"starting Claude Code on {remote['host']}"})
             proc = ssh_remote.popen(remote["host"], remote["claude"], cwd, argv[1:], renv, forward=forward)
         else:
@@ -1925,10 +2362,16 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
 
     stopped = False
     kept = False
+    suggest_until = 0
+    settle_at = 0                      # when a result left messages unanswered: wait this long for their answers
     try:
         while True:
             if not lines:
                 got.wait(0.25); got.clear()
+            if suggest_until and time.time() > suggest_until:
+                suggest_until = 0
+                try: proc.stdin.close()
+                except Exception: pass
             if cancel.is_set() and interrupted_at is None:
                 interrupted_at = time.time()
                 send({"type": "control_request", "request_id": "orbit-stop-" + uuid.uuid4().hex[:6],
@@ -1957,6 +2400,11 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                 if proc.poll() is not None and not lines:
                     got.wait(0.5)
                     if not lines: break
+                elif settle_at and interrupted_at is None and time.time() > settle_at:
+                    # Claude Code folds a message sent mid-answer into the answer running, and then
+                    # sends one result for all of them: nothing more is coming, so count the rest done
+                    settle_at = 0; pending = 1
+                    lines.append(json.dumps({"type": "result", "subtype": "success", "orbit_settled": True}))
                 continue
             raw = lines.popleft()
             if raw is None: break
@@ -1964,6 +2412,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
             except ValueError: continue
             if not isinstance(ev, dict): continue
             t = ev.get("type")
+            if t not in ("result", "rate_limit_event"): settle_at = 0       # the next answer did start
 
             if t == "stream_event":
                 if ev.get("parent_tool_use_id"): continue
@@ -2098,9 +2547,10 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                                    "tokens": sa["ctx"] + sa["out"], "secs": secs, "steps": list(sa["steps"]),
                                    "background": bg}
                             p["subagent"] = sub
-                    if name == "Bash" and inp.get("run_in_background"):
-                        # "Command running in background with ID: bash_1"
-                        m_ = re.search(r"background with ID:\s*(\S+)", text)
+                    if name == "Bash" and (inp.get("run_in_background") or re.search(r"backgrounded by user with ID:", text)):
+                        # "Command running in background with ID: bash_1", or, when you moved a running
+                        # command to the background, "Command was manually backgrounded by user with ID: …"
+                        m_ = re.search(r"(?:background|backgrounded by user) with ID:\s*(\S+)", text)
                         of_ = re.search(r"Output is being written to:\s*(\S+)", text)
                         rec = bg_task(sid, m_.group(1) if m_ else tid, kind="shell",
                                       description=inp.get("description") or str(inp.get("command") or "")[:160],
@@ -2144,11 +2594,40 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                     w["event"].set()
                 continue
 
+            if t == "tool_use_summary":
+                # the one-line name Claude Code gives a batch of tool calls ("Counted fruit-related lines ...")
+                text_ = str(ev.get("summary") or "").strip()
+                ids_ = [x for x in (ev.get("preceding_tool_use_ids") or ev.get("precedingToolUseIds") or []) if x]
+                if text_ and ids_:
+                    for m_ in reversed(messages):
+                        if m_.get("role") == "assistant" and any((tc.get("id") in ids_) for tc in m_.get("tool_calls") or []):
+                            m_.setdefault("tool_summaries", []).append({"ids": ids_, "text": text_[:300]})
+                            break
+                    emit("tool_summary", {"ids": ids_, "text": text_[:300]})
+                continue
+            if t == "tool_progress":
+                # a long tool call reporting how long it has been going (and a helper retrying)
+                emit("tool_progress", {"id": ev.get("tool_use_id"), "name": ev.get("tool_name"),
+                                       "elapsed": ev.get("elapsed_time_seconds"), "heartbeat": bool(ev.get("heartbeat")),
+                                       "retry": ev.get("subagent_retry")})
+                continue
+            if t == "prompt_suggestion":
+                # what Claude Code thinks you will want to say next
+                sg = str(ev.get("suggestion") or "").strip()
+                if sg: emit("prompt_suggestion", {"text": sg[:300]})
+                if suggest_until:
+                    suggest_until = 0
+                    try: proc.stdin.close()
+                    except Exception: pass
+                continue
             if t == "control_request":
                 r = ev.get("request") or {}
                 rid = ev.get("request_id")
                 if r.get("subtype") == "can_use_tool":
                     threading.Thread(target=handle_permission, args=(rid, r), daemon=True).start()
+                elif r.get("subtype") == "elicitation":
+                    # an MCP server is asking the person something: it can wait for minutes
+                    threading.Thread(target=lambda: respond(rid, _answer_elicitation(r, ctx)), daemon=True).start()
                 else:
                     respond(rid, {})
                 continue
@@ -2236,6 +2715,10 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                 # Claude's plan allowance: a refused request says which window and when it resets,
                 # so the chat can carry on by itself then (orbit-ui _LimitWatch)
                 info = ev.get("rate_limit_info") or {}
+                try:        # every answer says how much of the plan is used: keep it, so asking costs nothing
+                    import claude_limits
+                    claude_limits.note(Q.ROOT, (target.get("account") or {}).get("id") or "main", info)
+                except Exception: pass
                 if info.get("status") == "rejected" and info.get("resetsAt"):
                     kind = {"five_hour": "5-hour", "seven_day": "weekly", "seven_day_opus": "weekly Opus",
                             "seven_day_sonnet": "weekly Sonnet"}.get(info.get("rateLimitType"), "usage")
@@ -2254,17 +2737,29 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
 
             if t == "result":
                 pending -= 1
+                try:        # the month's spend per account, as Claude Code prices the session (list prices)
+                    import claude_limits
+                    claude_limits.add_cost(Q.ROOT, (target.get("account") or {}).get("id") or "main",
+                                           ev.get("session_id") or mk.get("session"), ev.get("total_cost_usd"),
+                                           resumed=bool(resume))
+                except Exception: pass
                 note_context_window(sid, ev, model_hint=mk.get("model") if isinstance(mk, dict) else None)
                 if ev.get("is_error") and ev.get("subtype") not in ("success",):
-                    result_err = ev.get("result") or ev.get("subtype")
+                    result_err = ev.get("result") or _RESULT_ERRORS.get(ev.get("subtype")) or ev.get("subtype")
+                elif ev.get("subtype") in _RESULT_ERRORS:
+                    result_err = _RESULT_ERRORS[ev["subtype"]]          # stopped for a reason of its own
                 if isinstance(ev.get("result"), str) and not ev.get("is_error"):
                     final_text = ev["result"]
+                if pending > 0 and not interrupted_at: settle_at = time.time() + SETTLE_S
                 if pending <= 0 or interrupted_at:
                     if inbox and interrupted_at is None:
                         continue               # a note arrived just as it finished
                     if (keep or (not remote and sid and bg_running(sid))) and proc.poll() is None:
                         kept = True            # the answer is done; the process waits for the next message
                         break
+                    if c.get("prompt_suggestions") and not interrupted_at and not result_err and kind != "local":
+                        suggest_until = time.time() + 6        # it sends the suggestion just after the result
+                        continue
                     try: proc.stdin.close()
                     except Exception: pass
                 continue
@@ -2273,7 +2768,7 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
             if kept and proc.poll() is None:
                 LIVE[sid] = {"proc": proc, "sig": sig, "lines": lines, "got": got, "err_tail": err_tail,
                              "wlock": wlock, "host": remote["host"] if remote else None, "used": time.time(),
-                             "token": token}
+                             "token": token, "rport": brport}
                 _live_saved()
             elif proc.poll() is None:
                 try: proc.stdin.close()
@@ -2356,6 +2851,14 @@ def _run_log(sid, mk, resume, fork, resume_at, c, cwd, argv):
         pass
 
 
+_RESULT_ERRORS = {
+    "error_max_turns": "Claude Code stopped because it reached its limit on steps for one answer. Say \"continue\" to carry on.",
+    "error_max_budget_usd": "Claude Code stopped because it reached the spending limit set for this run.",
+    "error_during_execution": "Claude Code stopped because something went wrong while it was working.",
+    "error_max_structured_output_retries": "Claude Code could not produce the answer in the form that was asked for.",
+}
+
+
 def _system_notice(st, ev):
     """A line for the chat from one of Claude Code's other system events."""
     def g(*keys):
@@ -2388,6 +2891,16 @@ def _system_notice(st, ev):
         return g("content", "message", "output")[:2000]
     if st == "stop_hook_summary":
         return g("summary", "message")[:400]
+    if st == "model_refusal_no_fallback":
+        return "the model declined this request" + (f": {g('message', 'reason')}" if g("message", "reason") else "")
+    if st == "memory_saved":
+        return f"saved to memory: {g('path', 'name', 'message')}"[:300]
+    if st == "plugin_install":
+        return f"plugin {g('status', 'message')}: {g('plugin', 'name')}".strip()[:300]
+    if st == "instruction_size_warning":
+        return f"instructions are large: {g('message')}"[:300]
+    if st in ("away_summary", "post_turn_summary"):
+        return g("summary", "message", "content")[:500]
     return ""
 
 
@@ -2410,6 +2923,18 @@ def _live_saved():
         pass
 
 
+def _live_log(sid, event, why, running=0):
+    """One line saying what happened to a chat's kept Claude Code and why. Its background agents
+    live inside that process, so every time it ends is a time they are cut off -- and there was
+    nothing anywhere to say which of Orbit's several reasons it had been."""
+    try:
+        with open(os.path.join(Q.LOGS, "live.log"), "a") as f:
+            f.write(json.dumps({"t": time.strftime("%Y-%m-%d %H:%M:%S"), "chat": sid, "event": event,
+                                "why": why or "unspecified", "background_running": running}) + "\n")
+    except Exception:
+        pass
+
+
 def close_live(sid=None, why=""):
     """End a kept remote session (all of them without a chat id): closing its input ends
     Claude Code there, and the SSH connection with it."""
@@ -2417,6 +2942,14 @@ def close_live(sid=None, why=""):
         ids = [sid] if sid else list(LIVE)
         for k in ids:
             v = LIVE.pop(k, None)
+            if v:
+                with _BG_LOCK:
+                    n = sum(1 for r in (BG_TASKS.get(k) or {}).values() if r["status"] in ("running", "pending"))
+                _live_log(k, "closed", why, n)
+                if n and why not in ("chat deleted",):
+                    try: Q.notify("Background work was stopped",
+                                  f"{n} background task(s) in a chat ended: {why or 'its Claude Code was closed'}")
+                    except Exception: pass
             bg_ended(k)
             if not v: continue
             if v.get("token"): BRIDGE.pop(v["token"], None)
@@ -2440,6 +2973,10 @@ def watch_live():
             seen.add(id(raw))
             try: ev = json.loads(raw)
             except Exception: continue
+            # Claude Code carries on by itself when a background agent or shell reports back: that
+            # turn is writing now, and the process must not be closed under it
+            if ev.get("type") in ("assistant", "stream_event", "user"): v["active_at"] = time.time()
+            elif ev.get("type") == "result": v["active_at"] = 0
             if ev.get("type") == "assistant" and ev.get("parent_tool_use_id"):
                 # a background subagent's step, taken after its answer ended
                 steps = [{"name": b.get("name") or "tool", "args": _brief_args(b.get("input"))}
@@ -2464,6 +3001,11 @@ def watch_live():
                               secs=round(float(u["duration_ms"]) / 1000, 1) if u.get("duration_ms") else None)
                 if st == "task_notification" and rec and rec.get("kind") == "agent" and rec.get("tool_id"):
                     _saved_subagent_done(k, rec)
+                # Its report is what wakes Claude Code up: the next answer begins a moment after this event. Counted as
+                # nothing running and no answer yet, the chat was closed in that moment and the report never read
+                # ("I'll check once the build finishes" -- and then silence).
+                if st in ("task_notification", "task_updated") and (rec or {}).get("status") not in (None, "running", "pending"):
+                    v["active_at"] = time.time()
 
 def bg_output(sid, tid, limit=60000):
     """What a background task has written so far: a shell's output, or a subagent's steps and
@@ -2555,9 +3097,18 @@ def reap_live(max_idle_min=None):
     except Exception: pass
     limit = float(max_idle_min if max_idle_min is not None else (cfg().get("remote_keep_alive_min", 30) or 0)) * 60
     for k, v in list(LIVE.items()):
-        local_done = v.get("host") is None and k not in RUNS and not bg_running(k)
-        if v["proc"].poll() is not None or local_done or (limit and time.time() - v["used"] > limit and k not in RUNS):
-            close_live(k)
+        # A chat waiting on background agents or shells -- or answering their report by itself --
+        # is working, however long ago you last wrote. Closing its Claude Code ended that work and
+        # the chat just went silent ("I'll check once it finishes", and nothing more).
+        working = bg_running(k) or time.time() - v.get("active_at", 0) < 90
+        local_done = v.get("host") is None and k not in RUNS and not working
+        rc = v["proc"].poll()
+        if rc is not None:
+            close_live(k, f"its Claude Code exited by itself (code {rc})")
+        elif local_done:
+            close_live(k, "all its background work was finished")
+        elif limit and time.time() - v["used"] > limit and k not in RUNS and not working:
+            close_live(k, f"idle for more than {int(limit / 60)} minutes")
 
 
 def end_leftover_live():
@@ -2629,6 +3180,36 @@ def harness_model_names():
 def _is_local_model(name, local):
     n = (name or "").lower()
     return bool(n) and (n in local or n.startswith(LOCAL_MODEL_PREFIXES))
+
+
+def _raw_user_text(content):
+    """The text of a user record as stored, tags and all."""
+    if isinstance(content, list):
+        if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content): return ""
+        return " ".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text").strip()
+    return str(content or "").strip()
+
+
+def _task_notification_note(raw):
+    """"<task-notification>…" -- an agent or shell reporting back -- as the line the CLI prints."""
+    if not raw.startswith("<task-notification>"): return ""
+    def tag(name):
+        m = re.search(rf"<{name}>(.*?)</{name}>", raw, re.S)
+        return m.group(1).strip() if m else ""
+    head = tag("summary") or ("background task " + (tag("status") or "ended"))
+    result = tag("result")
+    return head + (" — " + result[:300].replace("\n", " ") if result else "")
+
+
+def _system_record_note(d):
+    """A line for one of the transcript's own system records, or "" for those not worth showing."""
+    sub = d.get("subtype")
+    text = str(d.get("content") or d.get("message") or d.get("error") or "").strip()
+    if sub in ("api_error",): return ("request failed: " + text)[:600] if text else ""
+    if sub in ("informational", "away_summary"): return text[:600]
+    if sub in ("model_refusal_fallback", "model_refusal_no_fallback", "model_fallback"):
+        return ("model fallback: " + text)[:400] if text else "the model declined this request"
+    return ""
 
 
 def _user_text(content):
@@ -2751,6 +3332,7 @@ def convert(path):
     """A Claude transcript as Orbit messages (and its title and cwd)."""
     msgs, cur, cur_id = [], None, None
     names = {}
+    bash_cmd = None
     title, ai_title, cwd, first = None, None, None, None
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -2759,12 +3341,27 @@ def convert(path):
             tp = d.get("type")
             if tp == "custom-title": title = d.get("customTitle") or title
             elif tp in ("ai-title", "summary"): ai_title = d.get("aiTitle") or d.get("summary") or ai_title
+            if tp == "system" and not d.get("isSidechain"):
+                # what the CLI prints between turns: a failed request, a notice, a refusal
+                note = _system_record_note(d)
+                if note:
+                    msgs.append({"role": "user", "content": note, "t": _ts(d.get("timestamp")) or time.time(),
+                                 "nudge": True, "notice": True})
+                    cur, cur_id = None, None
+                continue
             if tp not in ("user", "assistant") or d.get("isSidechain"): continue
             cwd = d.get("cwd") or cwd
             ts = _ts(d.get("timestamp")) or time.time()
             msg = d.get("message") or {}
             if tp == "assistant":
                 synthetic = msg.get("model") == "<synthetic>"
+                if d.get("isApiErrorMessage"):
+                    # "API Error: 529 ..." is Claude Code's own line, not part of the answer before it
+                    txt = " ".join(b.get("text", "") for b in msg.get("content") or [] if isinstance(b, dict))
+                    msgs.append({"role": "user", "content": "request failed: " + txt.strip()[:600],
+                                 "t": ts, "nudge": True, "notice": True})
+                    cur, cur_id = None, None
+                    continue
                 if msg.get("id") != cur_id or cur is None:
                     cur = {"role": "assistant", "content": "", "t": ts,
                            "model": "Claude Code" if synthetic else "Claude Code · " + str(msg.get("model") or "")}
@@ -2792,6 +3389,32 @@ def convert(path):
                     msgs.append({"role": "tool", "tool_call_id": b.get("tool_use_id"),
                                  "name": names.get(b.get("tool_use_id"), "tool"), "t": ts,
                                  "ok": not b.get("is_error"), "content": _tool_text(b.get("content"))[:60000]})
+                cur, cur_id = None, None
+                continue
+            # what the CLI shows as its own lines: an agent reporting back, a `!` command, a slash
+            # command's output -- not as something the person typed
+            raw = _raw_user_text(content)
+            note = _task_notification_note(raw)
+            if note:
+                msgs.append({"role": "user", "content": note, "t": ts, "nudge": True, "notice": True})
+                cur, cur_id = None, None
+                continue
+            if raw.startswith("<bash-input>"):
+                bash_cmd = re.sub(r"</?bash-input>", "", raw).strip()
+                continue
+            if raw.startswith(("<bash-stdout>", "<bash-stderr>")):
+                out = re.sub(r"</?bash-(?:stdout|stderr)>", "", raw).strip()
+                if bash_cmd is not None:
+                    msgs.append({"role": "user", "t": ts, "bang": {"cmd": bash_cmd, "rc": 0, "secs": 0, "host": None,
+                                 "cwd": cwd, "out": out[:6000]},
+                                 "content": f"I ran this myself in {cwd}:\n```bash\n$ {bash_cmd}\n```\nOutput:\n```\n{out or '(no output)'}\n```"})
+                    bash_cmd = None
+                cur, cur_id = None, None
+                continue
+            if raw.startswith("<local-command-stdout>"):
+                out = re.sub(r"</?local-command-stdout>", "", raw).strip()
+                if out:
+                    msgs.append({"role": "user", "content": out[:4000], "t": ts, "nudge": True, "notice": True})
                 cur, cur_id = None, None
                 continue
             if d.get("isMeta"): continue
@@ -3062,9 +3685,103 @@ def resume_command(orbit_msgs, spec=None):
         return (f"ssh -t {mk['host']} " + json.dumps(f"cd {cwd} && {exe} --resume {mk['session']}")
                 + "   # it runs on your Claude login there; other models need Orbit's tunnel")
     pc = (spec or {}).get("provider_cfg") or {}
+    if pc.get("subscription"):
+        # your Claude subscription: plain Claude Code continues the very same session, on its own login
+        return f"cd {json.dumps(cwd)} && claude --resume {mk['session']}"
     if (spec or {}).get("provider") == "harness" and not pc.get("local"):
         return f"cd {json.dumps(cwd)} && claude-harness {json.dumps(spec['id'])} --resume {mk['session']}"
     return f"cd {json.dumps(cwd)} && claude-qwen --resume {mk['session']}"
+
+
+def _first_cwd(path):
+    """The folder a session started in: the first record that names one."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i > 200: break
+                try: c = json.loads(line).get("cwd")
+                except ValueError: continue
+                if c: return c
+    except OSError:
+        pass
+    return None
+
+
+def handoff_text(sid, title, msgs, spec=None):
+    """A note to paste into a Claude desktop chat (or any other Claude session) that has not seen what
+    happened here: where this conversation lives, how to resume it, and what the latest turns were.
+    Returns {"text", "session", "transcript", "cwd", "host", "resume"} -- None when the chat has no
+    Claude session yet."""
+    mk = marker_of(msgs)
+    if not mk: return None
+    session, cwd, host = mk.get("session"), mk.get("cwd") or HOME, mk.get("host")
+    dsk = desktop_ssh_session(session) if session else None
+    if host:
+        transcript = (dsk or {}).get("transcript") or f"~/.claude/projects/{encode_cwd(cwd)}/{session}.jsonl"
+    else:
+        transcript = jsonl_path(session, cwd) or ""
+    resume = resume_command(msgs, spec) or ""
+    # A terminal finds a session in the folder it STARTED in -- Claude may have moved on since (the marker's
+    # folder is where it was last working), so name the first one
+    origin = (dsk or {}).get("cwd") or (_first_cwd(transcript) if transcript and not host else None)
+    if origin and origin != cwd:
+        resume = resume.replace(json.dumps(cwd), json.dumps(origin)).replace(f"cd {cwd} &&", f"cd {origin} &&")
+    def say(m, n=700):
+        c = m.get("content")
+        t = c if isinstance(c, str) else " ".join(x.get("text", "") for x in c or [] if isinstance(x, dict))
+        t = re.sub(r"\s+", " ", str(t or "")).strip()
+        return t if len(t) <= n else t[:n].rstrip() + " …"
+    turns = [m for m in msgs if m.get("role") in ("user", "assistant") and not m.get("nudge") and say(m, 5)]
+    recent = turns[-8:]
+    changed = []
+    for m in msgs[-120:]:
+        for ch in m.get("changes") or []:
+            pth = ch.get("path")
+            if pth and pth not in changed: changed.append(pth)
+    out = ["# Hand-off: carry on a conversation that continued elsewhere", "",
+           "This conversation carried on in **Orbit** (a front end for Claude Code) after you last saw it, so you may be "
+           "missing its latest turns. Everything is in the session's transcript; read it before you carry on.", "",
+           f"- **Chat:** {title or '(untitled)'}",
+           f"- **Claude session id:** `{session}`",
+           f"- **Working folder:** `{cwd}`" + (f" (on `{host}`)" if host else ""),
+           f"- **Transcript (JSON lines, the full history):** `{transcript or 'not found on this Mac'}`" + (f" (on `{host}`)" if host else "")]
+    if resume: out.append(f"- **Resume that very session in a terminal:** `{resume}`")
+    if changed:
+        out += ["", "## Files changed in the latest turns"] + [f"- `{x}`" for x in changed[:25]]
+    out += ["", "## The latest turns (newest last)"]
+    for m in recent:
+        out.append(("**You:** " if m["role"] == "user" else "**Claude:** ") + say(m))
+    out += ["", "## What to do", "",
+            f"1. Read the end of the transcript to catch up: `tail -n 200 {transcript}`" if transcript else
+            "1. Ask me for the transcript if you need more than the turns above.",
+            "2. Check the files listed above, and anything running in the background, before you assume the state of the work.",
+            "3. Then carry on from the last request, and tell me what you found out of date."]
+    held = [] if host else desktop_holders(session)
+    return {"text": "\n".join(out), "session": session, "transcript": transcript, "cwd": cwd, "host": host, "resume": resume,
+            "desktop_holders": held}
+
+
+def release_from_desktop(session, cwd=None):
+    """Let Claude desktop's open copy of a session go: its Claude Code for that session is ended, so the app
+    starts it again from the saved conversation (Orbit's turns included) the next time you write there.
+    Refused while that copy is working (the transcript changed in the last minute). {"ok", "msg"}."""
+    pids = desktop_holders(session)
+    if not pids: return {"ok": True, "msg": "Claude desktop is not holding this session open."}
+    jp = jsonl_path(session, cwd)
+    if jp and time.time() - os.path.getmtime(jp) < 60:
+        return {"ok": False, "msg": "Claude desktop is working in that session right now: wait for it to finish, then try again."}
+    for pid in pids:
+        try: os.kill(pid, signal.SIGTERM)
+        except OSError: pass
+    return {"ok": True, "msg": f"Closed Claude desktop's open copy ({len(pids)} process{'es' if len(pids) != 1 else ''}). "
+                               "It starts it again from the saved conversation the next time you write there."}
+
+
+HANDOFF_PROMPT = ("Write a hand-off note so this work can carry on in a different Claude session -- Claude desktop -- that has not "
+                  "seen the last part of this conversation. Save it as HANDOFF.md in the working folder (replace any earlier one) and "
+                  "show it here in full. Cover: the goal; what is done (with file paths and the commands that matter); decisions and "
+                  "why; what is verified and what is not; open problems; the exact next steps; and where things are (folders, jobs, "
+                  "background agents or tasks still running, the session id). Be concrete and short enough to read in two minutes.")
 
 
 def model_for_session(models):

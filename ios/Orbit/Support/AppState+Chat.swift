@@ -208,6 +208,17 @@ extension AppState {
         } catch { lastError = error.localizedDescription }
     }
 
+    /// Copy the hand-off note for a chat, to paste into Claude desktop.
+    func copyHandoff(for sid: String) async {
+        guard let server else { return }
+        if let text = try? await server.handoffNote(sid) {
+            UIPasteboard.general.string = text
+            toast("Hand-off note copied — paste it into the Claude desktop chat")
+        } else {
+            toast("This chat has no Claude session yet")
+        }
+    }
+
     /// A chat that is never written to disk. Opens it.
     func startTemporaryChat() async {
         guard let server else { return }

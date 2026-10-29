@@ -321,6 +321,7 @@ struct ProviderDetailView: View {
                         } label: {
                             Image(systemName: "ellipsis.circle")
                         }
+                        .accessibilityLabel("Account actions")
                     }
                     Text(a.tokenSet ? "Sign-in token saved"
                          : a.id == "main" ? (p.login == "yes" ? "The Mac's own Claude login" : "Not signed in")
@@ -407,6 +408,7 @@ struct ProviderDetailView: View {
                         } label: {
                             Image(systemName: "ellipsis.circle")
                         }
+                        .accessibilityLabel("Account actions")
                     }
                     Text(a.key + (a.keySet ? " · key set" : " · no key yet"))
                         .font(.caption.monospaced()).foregroundStyle(.secondary)

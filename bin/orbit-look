@@ -1423,7 +1423,25 @@ def input_cmd(backend, action, udid, **a):
                     "--duration", str(a["duration"]), "--udid", udid]
         if action == "type": return [exe, "type", "--udid", udid, "--", a["text"]]
         if action == "button": return [exe, "button", a["name"], "--udid", udid]
+        if action == "tap_element":
+            c = [exe, "tap"]
+            for flag, key in (("--label", "label"), ("--id", "id"), ("--value", "value"), ("--element-type", "element_type")):
+                if a.get(key): c += [flag, str(a[key])]
+            return c + ["--udid", udid]
+        if action == "long_press":
+            return [exe, "touch", "-x", n(a["x"]), "-y", n(a["y"]), "--down", "--up", "--delay", str(a["seconds"]), "--udid", udid]
+        if action == "drag":
+            return [exe, "drag", "--start-x", n(a["x1"]), "--start-y", n(a["y1"]), "--end-x", n(a["x2"]), "--end-y", n(a["y2"]),
+                    "--duration", str(a["duration"]), "--udid", udid]
+        if action == "key": return [exe, "key", str(a["code"]), "--udid", udid]
+        if action == "key_combo": return [exe, "key-combo", "--modifiers", ",".join(str(m) for m in a["modifiers"]), "--key", str(a["code"]), "--udid", udid]
+        if action == "gesture":
+            c = [exe, "gesture", a["preset"]]
+            if a.get("screen"): c += ["--screen-width", str(a["screen"][0]), "--screen-height", str(a["screen"][1])]
+            return c + ["--udid", udid]
     else:
+        if action in ("tap_element", "long_press", "drag", "key", "key_combo", "gesture"):
+            raise ToolError("%s needs AXe: brew install cameroncooke/axe/axe (idb does not have it)." % action.replace("_", " "))
         if action == "tap": return [exe, "ui", "tap", n(a["x"]), n(a["y"]), "--udid", udid]
         if action == "swipe":
             return [exe, "ui", "swipe", n(a["x1"]), n(a["y1"]), n(a["x2"]), n(a["y2"]), "--duration", str(a["duration"]), "--udid", udid]
@@ -1451,12 +1469,19 @@ INTERACTIVE = {"button", "textfield", "securetextfield", "searchfield", "switch"
                "textview", "stepper", "picker", "segmentedcontrol", "toggle", "menuitem", "checkbox", "image", "statictext", "tabbar"}
 
 
-def flatten_ui(raw, limit=150):
-    """AXe/idb accessibility JSON -> (numbered lines, (screen width, height) in points)."""
+def flatten_ui(raw, limit=200):
+    """AXe/idb accessibility JSON -> (numbered lines, (screen width, height) in points). Only what is on the screen: a long
+    list (a chat of hundreds of messages) reports every row it has, most far above or below, and the first 150 were all
+    off-screen ones, so the composer and the buttons you can actually tap never made the list."""
     try: data = json.loads(raw)
     except ValueError: return ([l for l in raw.splitlines() if l.strip()][:limit], None)
     roots = data if isinstance(data, list) else [data]
-    lines, screen = [], [None]
+    lines, screen, off = [], [None], [0]
+
+    def visible(fr):
+        if not screen[0]: return True
+        w, h = screen[0]
+        return fr[0] < w and fr[0] + fr[2] > 0 and fr[1] < h and fr[1] + fr[3] > 0
 
     def walk(n):
         if not isinstance(n, dict): return
@@ -1466,7 +1491,9 @@ def flatten_ui(raw, limit=150):
         ident = n.get("AXUniqueId") or n.get("identifier") or ""
         fr = frame_of(n)
         if fr and typ.lower() in ("application", "window") and screen[0] is None: screen[0] = (round(fr[2]), round(fr[3]))
-        if (label or val or ident or typ.lower() in INTERACTIVE) and typ.lower() not in ("application", "window") and fr and len(lines) < limit:
+        if (label or val or ident or typ.lower() in INTERACTIVE) and typ.lower() not in ("application", "window") and fr and not visible(fr):
+            off[0] += 1
+        elif (label or val or ident or typ.lower() in INTERACTIVE) and typ.lower() not in ("application", "window") and fr and len(lines) < limit:
             bits = ["[%d] %s" % (len(lines), typ or "element")]
             if label: bits.append('"%s"' % str(label).replace("\n", " ")[:80])
             if val not in (None, "", label): bits.append("value=%r" % str(val)[:60])
@@ -1477,6 +1504,7 @@ def flatten_ui(raw, limit=150):
         for c in n.get("children") or []: walk(c)
 
     for r in roots: walk(r)
+    if off[0]: lines.append("(%d more elements are off-screen: scroll to reach them)" % off[0])
     return lines, screen[0]
 
 
@@ -1523,6 +1551,69 @@ def simulator_button(name, device=None):
     b = BUTTONS.get(name.strip().lower())
     if not b: raise ToolError("Unknown button %r. Use home, lock, side-button, siri or apple-pay." % name)
     return sim_input("button", device, "Pressed %s." % b, name=b)
+
+
+KEYCODES = {"return": 40, "enter": 40, "escape": 41, "esc": 41, "delete": 42, "backspace": 42, "tab": 43, "space": 44,
+            "right": 79, "left": 80, "down": 81, "up": 82, "home": 74, "end": 77, "pageup": 75, "pagedown": 78}
+KEYCODES.update({c: 4 + i for i, c in enumerate("abcdefghijklmnopqrstuvwxyz")})
+KEYCODES.update({c: 30 + i for i, c in enumerate("123456789")}); KEYCODES["0"] = 39
+MODIFIERS = {"ctrl": 224, "control": 224, "shift": 225, "alt": 226, "option": 226, "cmd": 227, "command": 227}
+GESTURES = ("scroll-up", "scroll-down", "scroll-left", "scroll-right", "swipe-from-left-edge", "swipe-from-right-edge",
+            "swipe-from-top-edge", "swipe-from-bottom-edge")
+
+
+@tool("simulator_tap_element", "Tap a control by its accessibility label, id or value instead of coordinates (find them with simulator_ui). More robust than simulator_tap: no scaling, it follows the element. Needs AXe. Returns the new screen.",
+      {"label": P("string", "The element's accessibility label, e.g. the button's text."),
+       "id": P("string", "Its accessibilityIdentifier."), "value": P("string", "Its current value."),
+       "element_type": P("string", "Narrow the match: Button, TextField, Switch, Cell..."),
+       "device": P("string", "Device name or UDID; default = the booted simulator.")}, timeout=90)
+def simulator_tap_element(label=None, id=None, value=None, element_type=None, device=None):
+    if not (label or id or value): raise ToolError("Give a label, an id or a value to find the element by (simulator_ui lists them).")
+    return sim_input("tap_element", device, "Tapped %s." % (label or id or value), label=label, id=id, value=value, element_type=element_type)
+
+
+@tool("simulator_long_press", "Press and hold at device-point coordinates (context menus, drag handles, delete mode). Needs AXe. Returns the new screen.",
+      {"x": P("number", "X in device points."), "y": P("number", "Y in device points."),
+       "seconds": P("number", "How long to hold (default 1.0)."), "device": P("string", "Device name or UDID; default = the booted simulator.")},
+      ["x", "y"], timeout=90)
+def simulator_long_press(x, y, seconds=1.0, device=None):
+    return sim_input("long_press", device, "Held %s,%s for %ss." % (fmt_num(x), fmt_num(y), fmt_num(seconds)), x=x, y=y, seconds=seconds)
+
+
+@tool("simulator_drag", "Drag from one point to another with explicit touch moves (reorder a list, move a slider, pull a sheet). Slower and more exact than a swipe. Needs AXe. Returns the new screen.",
+      {"x1": P("number", "Start x in device points."), "y1": P("number", "Start y."), "x2": P("number", "End x."), "y2": P("number", "End y."),
+       "duration": P("number", "Seconds (default 0.6)."), "device": P("string", "Device name or UDID; default = the booted simulator.")},
+      ["x1", "y1", "x2", "y2"], timeout=90)
+def simulator_drag(x1, y1, x2, y2, duration=0.6, device=None):
+    return sim_input("drag", device, "Dragged %s,%s to %s,%s." % (fmt_num(x1), fmt_num(y1), fmt_num(x2), fmt_num(y2)),
+                     x1=x1, y1=y1, x2=x2, y2=y2, duration=duration)
+
+
+@tool("simulator_key", "Press a key on the hardware keyboard: return, delete, tab, space, escape, the arrows, a letter or digit; add modifiers (cmd, shift, ctrl, alt) for shortcuts such as cmd+a. Needs AXe. Returns the new screen.",
+      {"key": P("string", "return, delete, tab, space, escape, up, down, left, right, or one letter/digit."),
+       "modifiers": P("array", "Held while the key is pressed: cmd, shift, ctrl, alt.", items={"type": "string"}),
+       "device": P("string", "Device name or UDID; default = the booted simulator.")}, ["key"], timeout=90)
+def simulator_key(key, modifiers=None, device=None):
+    code = KEYCODES.get(str(key).strip().lower())
+    if code is None: raise ToolError("Unknown key %r. Use return, delete, tab, space, escape, up, down, left, right, or one letter or digit." % key)
+    mods = []
+    for m in modifiers or []:
+        if str(m).strip().lower() not in MODIFIERS: raise ToolError("Unknown modifier %r. Use cmd, shift, ctrl or alt." % m)
+        mods.append(MODIFIERS[str(m).strip().lower()])
+    if mods: return sim_input("key_combo", device, "Pressed %s+%s." % ("+".join(str(m) for m in modifiers), key), modifiers=mods, code=code)
+    return sim_input("key", device, "Pressed %s." % key, code=code)
+
+
+@tool("simulator_gesture", "A common gesture without coordinates: scroll-up/down/left/right, or swipe-from-left-edge (back), -right-edge, -top-edge (notifications), -bottom-edge (home or the app switcher). Needs AXe. Returns the new screen.",
+      {"preset": P("string", "One of: " + ", ".join(GESTURES) + "."),
+       "device": P("string", "Device name or UDID; default = the booted simulator.")}, ["preset"], timeout=90)
+def simulator_gesture(preset, device=None):
+    preset = str(preset).strip().lower()
+    if preset not in GESTURES: raise ToolError("Unknown gesture %r. Use one of: %s." % (preset, ", ".join(GESTURES)))
+    backend, d = input_backend(), booted_device(device)
+    rc, out, err = run_cmd(describe_cmd(backend, d["udid"]), timeout=30)       # the gesture needs the screen's size in points
+    screen = flatten_ui(out)[1] if rc == 0 else None
+    return sim_input("gesture", device, "Did %s." % preset, preset=preset, screen=screen)
 
 
 @tool("simulator_ui", "The simulator's accessibility tree as text: numbered elements with type, label, id and frame in device points. Needs AXe or idb.",
@@ -1723,6 +1814,157 @@ def send(msg):
             sys.stdout.flush()
         except (BrokenPipeError, OSError, ValueError):
             shutdown(0)
+
+
+# --------------------------------------------------------------------- screen control (group "screen")
+# The whole main display, seen and driven the way the desktop app's computer-use does it. Off unless
+# Orbit's "Screen control" setting is on (the server then lists the group); every action but
+# screen_look asks the person first (see claude_engine.decide).
+
+CLICLICK_PATHS = ("/opt/homebrew/bin/cliclick", "/usr/local/bin/cliclick")
+
+
+def cliclick_path():
+    for p in CLICLICK_PATHS:
+        if os.path.exists(p): return p
+    p = shutil.which("cliclick")
+    if p: return p
+    raise ToolError("cliclick is not installed (brew install cliclick); screen control needs it.")
+
+
+def cliclick(*cmds):
+    rc, out, err = run_cmd([cliclick_path(), *cmds], timeout=20)
+    if rc != 0:
+        msg = tail(err or out, 300)
+        if not msg or "not allowed" in msg.lower() or "accessib" in msg.lower():
+            raise ToolError("macOS refused the action. Allow Accessibility for the app that started this server (Orbit, or "
+                            "Terminal) in System Settings > Privacy & Security > Accessibility, then restart that app.")
+        raise ToolError(msg)
+    return out.strip()
+
+
+def screen_points():
+    """(width, height) of the main display in points -- the unit the click tools use."""
+    rc, out, _ = run_cmd(["osascript", "-l", "JavaScript", "-e",
+                          "ObjC.import('AppKit'); var f=$.NSScreen.mainScreen.frame.size; f.width+','+f.height"], timeout=10)
+    try:
+        w, h = [int(float(v)) for v in out.strip().split(",")]
+        if w > 0 and h > 0: return w, h
+    except ValueError:
+        pass
+    return None
+
+
+def screen_xy(x, y):
+    size = screen_points()
+    x, y = int(round(float(x))), int(round(float(y)))
+    if size and not (0 <= x < size[0] and 0 <= y < size[1]):
+        raise ToolError("(%d,%d) is off the screen, which is %dx%d points (0,0 is the top-left). Take a screen_look "
+                        "and read the coordinates from it." % (x, y, size[0], size[1]))
+    return x, y
+
+
+@tool("screen_look",
+      "Screenshot the whole main display of this Mac. The image is exactly the screen's size in points, so a pixel in it is the "
+      "coordinate screen_click and the other screen_* tools take. Look before you click, and again after.",
+      timeout=60)
+def screen_look():
+    path = new_shot_path("screen")
+    rc, out, err = run_cmd(["screencapture", "-x", "-m", "-t", "png", path], timeout=30)
+    if rc != 0 or not os.path.isfile(path) or os.path.getsize(path) < 100:
+        raise ToolError("screencapture failed (%s). The app that started this server (Orbit or Terminal) needs Screen Recording "
+                        "permission: System Settings > Privacy & Security > Screen Recording, enable it, then restart that app."
+                        % (tail(err or out, 200) or "exit %s" % rc))
+    size = screen_points()
+    if size and png_size(path) != size and shutil.which("sips"):
+        run_cmd(["sips", "-z", str(size[1]), str(size[0]), path], timeout=30)      # a retina capture -> point size
+    path, pw, ph = finish_shot(path)
+    note = ""
+    if size and (pw, ph) != size:
+        note = " The image is scaled: multiply its pixel coordinates by %.3f to get screen points." % (size[0] / float(pw))
+    return [text_part("Main display %s points. Screenshot saved: %s (%dx%d px).%s"
+                      % ("%dx%d" % size if size else "(size unknown)", path, pw, ph, note)), image_part(path)]
+
+
+@tool("screen_click",
+      "Click at screen coordinates (points, 0,0 = top-left of the main display). Take a screen_look afterwards to see what happened.",
+      {"x": P("integer", "Horizontal position."), "y": P("integer", "Vertical position."),
+       "button": P("string", "left (default) or right."), "clicks": P("integer", "1 (default) or 2 for a double click.")},
+      ["x", "y"], timeout=30)
+def screen_click(x, y, button="left", clicks=1):
+    x, y = screen_xy(x, y)
+    cmd = {("left", 1): "c", ("left", 2): "dc", ("right", 1): "rc"}.get((str(button).lower(), int(clicks)))
+    if not cmd: raise ToolError("button is left or right; clicks is 1 or 2 (a right double click does not exist).")
+    cliclick("%s:%d,%d" % (cmd, x, y))
+    return "Clicked %s%s at %d,%d." % (button, " twice" if int(clicks) == 2 else "", x, y)
+
+
+@tool("screen_move", "Move the mouse to screen coordinates without clicking (hover, to open a menu or tooltip).",
+      {"x": P("integer", "Horizontal position."), "y": P("integer", "Vertical position.")}, ["x", "y"], timeout=30)
+def screen_move(x, y):
+    x, y = screen_xy(x, y)
+    cliclick("m:%d,%d" % (x, y))
+    return "Moved the pointer to %d,%d." % (x, y)
+
+
+@tool("screen_drag", "Press at one point, drag to another and release: select text, move a window, drag a file.",
+      {"x1": P("integer", "Start x."), "y1": P("integer", "Start y."), "x2": P("integer", "End x."), "y2": P("integer", "End y.")},
+      ["x1", "y1", "x2", "y2"], timeout=30)
+def screen_drag(x1, y1, x2, y2):
+    x1, y1 = screen_xy(x1, y1)
+    x2, y2 = screen_xy(x2, y2)
+    cliclick("dd:%d,%d" % (x1, y1), "dm:%d,%d" % (x2, y2), "du:%d,%d" % (x2, y2))
+    return "Dragged %d,%d to %d,%d." % (x1, y1, x2, y2)
+
+
+@tool("screen_type", "Type text into whatever has keyboard focus (click the field first).",
+      {"text": P("string", "The text to type.")}, ["text"], timeout=60)
+def screen_type(text):
+    if not text: raise ToolError("Nothing to type.")
+    cliclick("t:" + text)
+    return "Typed %d characters." % len(text)
+
+
+SCREEN_KEYS = {"enter": "enter", "return": "return", "escape": "esc", "esc": "esc", "tab": "tab", "space": "space",
+               "delete": "delete", "backspace": "delete", "up": "arrow-up", "down": "arrow-down", "left": "arrow-left",
+               "right": "arrow-right", "pageup": "page-up", "pagedown": "page-down", "home": "home", "end": "end"}
+SCREEN_MODS = {"cmd": "cmd", "command": "cmd", "ctrl": "ctrl", "control": "ctrl", "alt": "alt", "option": "alt",
+               "shift": "shift", "fn": "fn"}
+
+
+@tool("screen_key", "Press a key or a chord: return, escape, tab, space, delete, arrows, or e.g. cmd+a, cmd+shift+4, ctrl+c.",
+      {"key": P("string", "The key or chord, joined with +.")}, ["key"], timeout=30)
+def screen_key(key):
+    parts = [p.strip().lower() for p in str(key).split("+") if p.strip()]
+    if not parts: raise ToolError("No key given.")
+    *mods, main = parts
+    bad = [m for m in mods if m not in SCREEN_MODS]
+    if bad: raise ToolError("Unknown modifier %s; use cmd, ctrl, alt, shift or fn." % ", ".join(bad))
+    mods = [SCREEN_MODS[m] for m in mods]
+    main = SCREEN_KEYS.get(main, main)
+    cmds = (["kd:" + ",".join(mods)] if mods else []) + [("t:" + main) if len(main) == 1 else ("kp:" + main)] \
+        + (["ku:" + ",".join(mods)] if mods else [])
+    cliclick(*cmds)
+    return "Pressed %s." % key
+
+
+SCROLL_JS = ("ObjC.import('ApplicationServices');"
+             "var e=$.CGEventCreateScrollWheelEvent(null,0,1,%d);$.CGEventPost(0,e);'ok'")
+
+
+@tool("screen_scroll", "Scroll with the mouse wheel at a point (moves the pointer there first). Positive amount scrolls down.",
+      {"amount": P("integer", "Wheel lines; positive = down, negative = up (default 5)."),
+       "x": P("integer", "Horizontal position of the pane to scroll."), "y": P("integer", "Vertical position of the pane.")},
+      timeout=30)
+def screen_scroll(amount=5, x=None, y=None):
+    if (x is None) != (y is None): raise ToolError("Give both x and y, or neither.")
+    if x is not None:
+        x, y = screen_xy(x, y)
+        cliclick("m:%d,%d" % (x, y))
+    n = max(-50, min(50, int(amount)))
+    rc, out, err = run_cmd(["osascript", "-l", "JavaScript", "-e", SCROLL_JS % -n], timeout=15)
+    if rc != 0: raise ToolError("Scrolling failed: %s" % tail(err or out, 200))
+    return "Scrolled %s by %d." % ("down" if n >= 0 else "up", abs(n))
 
 
 def enabled_tools():

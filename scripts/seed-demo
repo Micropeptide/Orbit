@@ -1,0 +1,58 @@
+#!/bin/bash
+# Seed the sandbox with invented demo data: a scripted mock model + demo chats.
+#   scripts/seed-demo
+# Starts the sandbox (if not running), starts a scripted mock model server, points the
+# sandbox's model list at it, and writes invented demo chats: a 1,700-message chat, tool
+# calls with diffs, a plot, a failed answer, a goal + a scheduled message, projects and a
+# crew run. Everything is invented -- no real names, paths or text. Safe to re-run: it
+# reuses a mock server already up on the port and does not duplicate the demo chats.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+DATA="${ORBIT_SANDBOX_DATA:-$HOME/Rdirectory/Crew/orbit-sandbox}"
+PY="${ORBIT_SANDBOX_PYTHON:-$HOME/Rdirectory/Qwen/venv/bin/python}"
+SANDBOX="$HERE/sandbox"
+PORT="${ORBIT_MOCK_PORT:-8992}"
+
+# 1. the sandbox must be up (it carries the data folder the demo chats go into)
+"$SANDBOX" status | grep -q "running" || "$SANDBOX" start || exit 1
+
+# 2. a default script for the mock model: a plausible three-step answer (think, read, answer)
+SCRIPT="$DATA/demo-model-script.json"
+[ -f "$SCRIPT" ] || cat > "$SCRIPT" <<'JSON'
+[
+  [{"thinking": "Let me check the project layout before I answer."}, {"text": "I will look at the project first."}],
+  [{"tool_use": {"name": "Read", "input": {"file_path": "README.md"}}}],
+  [{"text": "The project is healthy. The loader reads from the workspace folder and the tests are the source of truth."}]
+]
+JSON
+
+# 3. (re)start the mock model server. Restarting (rather than reusing a server that
+#    is already up) resets its script counter, so a freshly seeded sandbox answers new
+#    messages from the top of the script instead of "(script exhausted)". os.setsid()
+#    puts it in its own session so it outlives this script (a bare `nohup ... &` dies
+#    with the process group; macOS has no setsid(1), so the session is created in Python).
+kill "$(cat "$DATA/mock-model.pid" 2>/dev/null)" 2>/dev/null
+for _ in $(seq 1 20); do   # wait for the old server to release the port
+  "$PY" - "$PORT" <<'PY' || break
+import sys, urllib.request
+try: urllib.request.urlopen("http://127.0.0.1:%s/" % sys.argv[1], timeout=1); sys.exit(0)
+except Exception: sys.exit(1)
+PY
+  sleep 0.2
+done
+( "$PY" -c 'import os, sys
+os.setsid()
+os.execv(sys.argv[1], [sys.argv[1]] + sys.argv[2:])' \
+    "$PY" "$HERE/../tests/mock_anthropic.py" "$PORT" "$SCRIPT" "$DATA/logs/mock-model.log" \
+    > /dev/null 2>&1 &
+  echo $! > "$DATA/mock-model.pid" )
+for _ in $(seq 1 20); do   # wait for the new server to answer
+  "$PY" - "$PORT" <<'PY' && break
+import sys, urllib.request
+try: urllib.request.urlopen("http://127.0.0.1:%s/" % sys.argv[1], timeout=2); sys.exit(0)
+except Exception: sys.exit(1)
+PY
+  sleep 0.5
+done
+
+# 4. register the model + write the demo chats
+"$PY" "$HERE/seed_demo.py" "$DATA" "$PORT"

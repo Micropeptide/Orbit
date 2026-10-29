@@ -1,7 +1,6 @@
 import Foundation
 
-/// Background work and agent chats: the chat list in pages, `/tasks`, cluster
-/// jobs, "New chat with…" presets, and a Claude Code or Codex chat's details.
+/// Background work and agent chats: the chat list in pages, `/tasks`, "New chat with…" presets, and a Claude Code or Codex chat's details.
 /// Every call mirrors what the Mac's web page sends.
 extension OrbitServer {
 
@@ -58,27 +57,6 @@ extension OrbitServer {
                                           body: ["kind": t.kind.rawValue, "id": t.rawID])
         }
         if let e = workError(data) { throw Failure.server(400, e) }
-    }
-
-    // ------------------------------------------------------------ cluster jobs
-    //
-    // Each of these opens an SSH connection to the cluster, which limits how
-    // often it may be reached: call them only when someone asks.
-
-    func clusterJobs() async throws -> ClusterJobs {
-        try workJSON(ClusterJobs.self, try await settingsCall("/api/h2/jobs", method: "POST", body: [:], timeout: 90))
-    }
-
-    func clusterLog(id: String, lines: Int = 80) async throws -> String {
-        struct R: Decodable { var log: String? }
-        let data = try await settingsCall("/api/h2/log", method: "POST", body: ["id": id, "lines": lines], timeout: 90)
-        return (try? JSONDecoder().decode(R.self, from: data))?.log ?? ""
-    }
-
-    /// Past runs of jobs whose name starts like this one's.
-    func clusterEstimate(name: String) async throws -> ClusterEstimate {
-        try workJSON(ClusterEstimate.self,
-                     try await settingsCall("/api/h2/estimate", method: "POST", body: ["name": name], timeout: 30))
     }
 
     // ------------------------------------------------------------ New chat with…
