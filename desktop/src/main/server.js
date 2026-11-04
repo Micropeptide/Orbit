@@ -7,6 +7,7 @@ const path = require('path');
 const { spawn, execFile } = require('child_process');
 const { app, dialog } = require('electron');
 const { prefs, orbitPort } = require('./prefs');
+const installer = require('./installer');
 
 const PROBE_TIMEOUT_MS = 1500;
 const START_TIMEOUT_MS = 25000;
@@ -109,16 +110,75 @@ function kickstart(label) {
 }
 
 let spawnedByUs = false;
-function spawnServer(root) {
-  const child = spawn(path.join(root, 'bin', 'orbit-ui'), ['--no-open'], {
-    cwd: root,
+let failure = null;          // why the last start failed, for the boot page
+function spawnProcess(cmd, args, cwd, extraEnv) {
+  const child = spawn(cmd, args, {
+    cwd,
     detached: true,
     stdio: 'ignore',
-    env: { ...process.env, ORBIT_UI_PORT: String(orbitPort()) },
+    env: { ...process.env, ...extraEnv, ORBIT_UI_PORT: String(orbitPort()) },
   });
   child.on('error', (err) => console.error('[orbit] could not start orbit-ui:', err.message));
   child.unref(); // background service: it outlives the app on purpose
   spawnedByUs = true;
+}
+function spawnServer(root) {
+  spawnProcess(path.join(root, 'bin', 'orbit-ui'), ['--no-open'], root, {});
+}
+
+/** The server inside this app, run from its own Python environment with its data in Application Support. */
+function spawnManaged(bundle) {
+  const c = installer.serverCommand({ bundle });
+  spawnProcess(c.cmd, c.args, c.cwd, c.env);
+  const root = installer.managedRoot();
+  const st = installer.readState(root);
+  if (st) installer.writeState(root, { ...st, served: installer.bundleVersion(bundle) });
+}
+
+/** Tell the person why there is no server and what to do, when this Mac has no Python. */
+async function explainNoPython(parentWindow) {
+  const r = await dialog.showMessageBox(parentWindow || undefined, {
+    type: 'info',
+    buttons: ['Open python.org', 'Cancel'],
+    defaultId: 0,
+    message: 'Orbit needs Python 3.9 or newer',
+    detail: 'Orbit’s server is written in Python and this Mac has none yet. Install Python from python.org '
+      + '(or run `brew install python`), then open Orbit again — it sets itself up from there.',
+  });
+  if (r.response === 0) require('electron').shell.openExternal('https://www.python.org/downloads/macos/');
+}
+
+/** First launch of a downloaded Orbit.app (no Orbit folder anywhere): set up the bundled server and start it. */
+async function startManaged(bundle, onStatus, parentWindow) {
+  const root = installer.managedRoot();
+  if (installer.needsSetup(root, bundle)) {
+    try {
+      await installer.setup({ root, bundle, onStatus });
+    } catch (err) {
+      console.error('[orbit] setup failed:', err.message);
+      if (err.needsPython) await explainNoPython(parentWindow);
+      failure = err.message + (err.log ? ` (details: ${err.log})` : '');
+      return false;
+    }
+  }
+  if (await probe()) return true;
+  onStatus('Launching the Orbit server…');
+  spawnManaged(bundle);
+  return waitUntilUp(START_TIMEOUT_MS);
+}
+
+/** After an app update the managed server may still be the old one: ask it to quit so the new one starts. */
+async function retireOutdatedManagedServer() {
+  const bundle = installer.bundleDir();
+  if (!bundle) return;
+  const st = installer.readState(installer.managedRoot());
+  if (!st || !st.ok || !st.served || st.served === installer.bundleVersion(bundle)) return;
+  try { await postJSON('/api/restart_ui', {}); } catch { return; }
+  const end = Date.now() + 20000;
+  while (Date.now() < end) {
+    if (!(await probe())) return;
+    await new Promise((r) => setTimeout(r, 700));
+  }
 }
 
 async function waitUntilUp(timeoutMs) {
@@ -138,6 +198,8 @@ let inflight = null;
 function ensureServer(onStatus = () => {}, parentWindow = null) {
   if (!inflight) {
     inflight = (async () => {
+      failure = null;
+      await retireOutdatedManagedServer();
       if (await probe()) return true;
       onStatus('Starting Orbit…');
       if (await probe()) return true; // re-probe right before acting: never start a duplicate
@@ -150,6 +212,8 @@ function ensureServer(onStatus = () => {}, parentWindow = null) {
 
       let root = findOrbitRoot();
       if (!root) {
+        const bundle = installer.bundleDir();
+        if (bundle) return startManaged(bundle, onStatus, parentWindow); // a downloaded app: it carries its own server
         onStatus('Where is Orbit installed?');
         root = await chooseOrbitRoot(parentWindow);
         if (!root) return false;
@@ -166,4 +230,5 @@ function ensureServer(onStatus = () => {}, parentWindow = null) {
 module.exports = {
   baseURL, getJSON, postJSON, probe, ensureServer, chooseOrbitRoot, findOrbitRoot,
   wasSpawnedByUs: () => spawnedByUs,
+  lastFailure: () => failure,
 };

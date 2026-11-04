@@ -620,7 +620,7 @@ async function openSettings(tab){
       const r=el('<div style="border:1px solid var(--line);border-radius:8px;padding:6px 9px;margin:5px 0"></div>');
       r.appendChild(el('<div></div>')).innerHTML='<b></b> <span class=note></span>';
       r.querySelector('b').textContent=p.title;r.querySelector('.note').textContent='— '+(chip[p.status]||p.status);
-      const sub=el('<div class=note></div>');sub.textContent=(p.why||'')+' · '+(p.files||[]).join(', ')+(p.proposer?' · by '+p.proposer.replace(/^(harness|codex|claude-cli|agy-cli|muse-cli):/,''):'');r.appendChild(sub);
+      const sub=el('<div class=note></div>');sub.textContent=(p.why||'')+' · '+(p.files||[]).join(', ')+(p.proposer?' · by '+p.proposer.replace(/^(harness|codex|claude-cli|agy-cli|muse-cli|grok-cli):/,''):'');r.appendChild(sub);
       const acts=el('<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px"></div>');
       const b=(t,fn,tip)=>{const x=el('<button class=ghost></button>');x.textContent=t;if(tip)x.title=tip;x.onclick=async()=>{x.disabled=true;try{await fn()}finally{x.disabled=false}drawSI()};acts.appendChild(x)};
       b('Details',async()=>{const v=await siApi({op:'diff',id:p.id});if(!v)return;
@@ -1066,7 +1066,16 @@ async function openSettings(tab){
     <label>Deny</label><textarea class=ta id=cc_deny style="min-height:40px"></textarea>
     <label>Extra folders</label><textarea class=ta id=cc_dirs style="min-height:40px" placeholder="additionalDirectories, one per line"></textarea>
     <label>Hooks</label><div class=sw><input type=checkbox id=cc_hooks><span class=note>run the hooks in your Claude settings (disableAllHooks off)</span></div>
+    <label>Output style</label><div class=sw><select id=cc_style><option value="">Claude's default</option><option>Explanatory</option><option>Learning</option></select><span class=note>how Claude words its answers (outputStyle); a style of your own in ~/.claude/output-styles is kept if you have one</span></div>
+    <label>Always think</label><div class=sw><input type=checkbox id=cc_think><span class=note>extended thinking on every answer (alwaysThinkingEnabled)</span></div>
+    <label>Remember things</label><div class=sw><input type=checkbox id=cc_mem><span class=note>Claude's automatic memory (autoMemoryEnabled)</span></div>
+    <label>Git instructions</label><div class=sw><input type=checkbox id=cc_git><span class=note>give Claude the commit and PR instructions (includeGitInstructions)</span></div>
+    <label>Keep chats for</label><div class=sw><input type=number id=cc_keep min=1 max=3650 style="width:90px"> days <span class=note>Claude's own session files (cleanupPeriodDays); empty = its default</span></div>
     </div><button class=primary id=cc_save>Save to Claude's settings</button> <span class=note id=cc_note></span>
+    <details style="margin-top:8px"><summary style="cursor:pointer">Every setting (settings.json), for anything not listed above</summary>
+     <div class=note style="margin:6px 0">This is Claude's own file, ~/.claude/settings.json. Saving replaces it with what is here (the old one is kept in Orbit's backups). It must be valid JSON.</div>
+     <textarea class=ta id=cc_raw style="min-height:220px;font-family:var(--mono);font-size:var(--fs-code-sm)" spellcheck=false></textarea>
+     <div class=srvact><button class=ghost id=cc_rawsave>Save the whole file</button><span class=note id=cc_rawnote></span></div></details>
 
     <div class=sec>Skills <small>— ~/.claude/skills</small></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px"><input type=text id=sk_find placeholder="filter" style="max-width:200px">
@@ -1133,11 +1142,21 @@ async function openSettings(tab){
    $('#cc_mode').value=perm.defaultMode&&perm.defaultMode!=='default'?perm.defaultMode:'';
    $('#cc_allow').value=lines(perm.allow);$('#cc_ask').value=lines(perm.ask);$('#cc_deny').value=lines(perm.deny);
    $('#cc_dirs').value=lines(perm.additionalDirectories);$('#cc_hooks').checked=!us.disableAllHooks;
+   $('#cc_style').value=['Explanatory','Learning'].includes(us.outputStyle)?us.outputStyle:'';
+   $('#cc_think').checked=!!us.alwaysThinkingEnabled;$('#cc_mem').checked=us.autoMemoryEnabled!==false;$('#cc_git').checked=us.includeGitInstructions!==false;
+   $('#cc_keep').value=us.cleanupPeriodDays||'';$('#cc_raw').value=JSON.stringify(us,null,2);
    $('#cc_save').onclick=async()=>{
     const r=await apiPost('/api/claude/claude_settings',{patch:{permissions:{defaultMode:$('#cc_mode').value||null,
       allow:unlines($('#cc_allow').value),ask:unlines($('#cc_ask').value),deny:unlines($('#cc_deny').value),
-      additionalDirectories:unlines($('#cc_dirs').value)},disableAllHooks:$('#cc_hooks').checked?null:true}},'Claude settings');
+      additionalDirectories:unlines($('#cc_dirs').value)},disableAllHooks:$('#cc_hooks').checked?null:true,
+      ...($('#cc_style').value||!['Explanatory','Learning'].includes(us.outputStyle)?($('#cc_style').value?{outputStyle:$('#cc_style').value}:{}):{outputStyle:null}),
+      alwaysThinkingEnabled:$('#cc_think').checked?true:null,autoMemoryEnabled:$('#cc_mem').checked?null:false,includeGitInstructions:$('#cc_git').checked?null:false,
+      cleanupPeriodDays:+$('#cc_keep').value>0?Math.round(+$('#cc_keep').value):null}},'Claude settings');
     if(r)$('#cc_note').textContent='saved to Claude — applies to its next session'};
+   $('#cc_rawsave').onclick=async()=>{let j;try{j=JSON.parse($('#cc_raw').value)}catch(e){$('#cc_rawnote').textContent='not valid JSON: '+e.message;return}
+    if(!j||typeof j!=='object'||Array.isArray(j)){$('#cc_rawnote').textContent='it must be a JSON object';return}
+    if(!confirm('Replace ~/.claude/settings.json with this? The old file is kept in Orbit’s backups.'))return;
+    const r=await apiPost('/api/claude/claude_settings',{patch:j,replace:true},'Claude settings');if(r)$('#cc_rawnote').textContent='saved'};
    // skills
    let SK=cc.skills||[];
    const drawSkills=()=>{const f=$('#sk_find').value.toLowerCase(),box=$('#sk_list');box.innerHTML='';
@@ -1392,8 +1411,8 @@ function crewEdit(r){
  },{sub:'the builder and the reviewer use the new text from now on'})}
 // --- the cluster page: bin/cluster.py
 async function openCluster(){
- let alive=true,timer=null,data=null,busy=false;
- const api=async(op,extra)=>{const r=await fetch('/api/cluster',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({op,...(extra||{})})});
+ let alive=true,timer=null,data=null,busy=false,cid=PREF.get('cluster','hpc'),clusters=[];
+ const api=async(op,extra)=>{const r=await fetch('/api/cluster',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({op,cluster:cid,...(extra||{})})});
   const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('error '+r.status));return j};
  const dur=t=>{if(t==null)return '—';t=Math.max(0,Math.round(t));const d=Math.floor(t/86400),h=Math.floor(t%86400/3600),m=Math.floor(t%3600/60);return d?`${d} d ${h} h`:h?`${h} h ${m} min`:m?`${m} min`:`${t} s`};
  const ago=t=>{const d=Date.now()/1000-t;return d<20?'just now':d<90?Math.round(d)+' s ago':d<5400?Math.round(d/60)+' min ago':Math.round(d/3600)+' h ago'};
@@ -1401,7 +1420,7 @@ async function openCluster(){
  const bar=(pct,note)=>{const l=pct>=95?'bad':pct>=85?'warn':'';return `<div class="clbar ${l}"><i style="width:${Math.min(100,pct||0)}%"></i></div><div class=note>${note}</div>`};
  const pill=st=>`<span class="clpill ${esc(st)}">${esc(String(st).toLowerCase().replace(/_/g,' '))}</span>`;
  const m=openSheet('Cluster',body=>{body.style.padding='12px 18px 18px';
-  body.innerHTML=`<div class=sheetnote id=cl_head>Looking at the cluster…</div><div id=cl_res></div><div id=cl_main></div>`},{sub:'jobs · queue · disk · GPUs · errors'});
+  body.innerHTML=`<div id=cl_tabs></div><div class=sheetnote id=cl_head>Looking at the cluster…</div><div id=cl_res></div><div id=cl_main></div>`},{sub:'jobs · queue · disk · GPUs · errors'});
  const body=m.querySelector('.pvbody');
  const res=txt=>{const r=body.querySelector('#cl_res');r.innerHTML='';if(!txt)return;const d=el('<div class=clres></div>');d.textContent=txt;
   const x=el('<div style="text-align:right"><button class=ghost>close</button></div>');x.querySelector('button').onclick=()=>r.innerHTML='';r.appendChild(d);r.appendChild(x);r.scrollIntoView({block:'nearest'})};
@@ -1462,7 +1481,7 @@ async function openCluster(){
    <div><b>${d.median_wait!=null?dur(d.median_wait):'—'}</b><small>typical wait before starting</small></div></div>`
    +(d.daily.length?`<div style="display:flex;align-items:flex-end;gap:3px;height:56px;margin:8px 0">${d.daily.map(x=>`<div title="${esc(x.day)}: ${x.jobs} jobs, ${x.gpu_hours} GPU-h, ${x.cpu_hours} CPU-h" style="flex:1;min-width:4px;background:var(--acc);border-radius:2px 2px 0 0;height:${Math.max(4,Math.round(52*((x.gpu_hours||x.cpu_hours/50))/mx))}px;opacity:.75"></div>`).join('')}</div><div class=note>one bar a day: GPU-hours (CPU-hours when no GPU was used)</div>`:'')
    +(d.by_name.length?`<table class=cltbl><tr><th>Job name</th><th>Runs</th><th>Finished / failed</th><th>Usually waits</th><th>Usually runs</th><th>GPU-hours</th></tr>`+d.by_name.map(r=>`<tr><td><b>${esc(r.name)}</b></td><td>${r.jobs}</td><td>${r.ok} / ${r.failed}</td><td>${r.median_wait!=null?dur(r.median_wait):'—'}</td><td>${dur(r.median_run)}</td><td>${r.gpu_hours}</td></tr>`).join('')+'</table>':'<div class=note>Nothing ran in that time.</div>')};
- const draw=()=>{if(!alive||!data)return;const sn=data.snapshot,cfg=data.config||{},n=cfg.notify||{};
+ const draw=()=>{if(!alive||!data)return;const sn=data.snapshot,cfg=data.config||{},n=cfg.notify||{},plain=data.profile==='slurm';
   const head=body.querySelector('#cl_head');
   head.innerHTML=sn?`<b>${esc(cfg.host)}</b> · ${esc((sn.host||{}).node||'')} · looked ${ago(data.at)}${data.error?` · <span class=srverr>${esc(data.error)}</span>`:''}
    <button class=ghost id=cl_re style="margin-left:10px">Refresh</button> <label style="margin-left:8px"><input type=checkbox id=cl_auto ${body._auto!==false?'checked':''}> refresh every 30 s while this is open</label>`
@@ -1480,26 +1499,26 @@ async function openCluster(){
   h+=`<div class=sec style="margin-top:0">Needs a look${away.length?` <small><a href="#" id=cl_showaway>${away.length} put away ${body._away?'▾':'▸'}</a></small>`:''}</div>`+(probs.length?probs.map(p=>prow(p,false)).join(''):'<div class=note>Nothing: no disk filling up, nothing failing, nothing stuck.</div>');
   if(away.length&&body._away)h+=away.map(p=>prow(p,true)).join('');
   // jobs
-  h+=`<div class=sec>Your jobs <small>— ${jobs.length?jobs.filter(j=>j.state==='RUNNING').length+' running, '+jobs.filter(j=>j.state==='PENDING').length+' waiting':'none in the queue'}</small></div>`;
+  h+=`<div class=sec>Your jobs <small>— ${plain&&cfg.job_prefix?'named '+esc(cfg.job_prefix)+'… · ':''}${jobs.length?jobs.filter(j=>j.state==='RUNNING').length+' running, '+jobs.filter(j=>j.state==='PENDING').length+' waiting':'none in the queue'}</small></div>`;
   if(jobs.length)h+=`<table class=cltbl><tr><th>Job</th><th>State</th><th>Where / why</th><th>Time</th><th>Asked for</th><th></th></tr>`+jobs.map(j=>`<tr data-id="${esc(j.id)}">
-    <td><b>${esc(j.name)}</b><br><small class=note>${esc(j.id)}${ms.has(j.name)?' · a model server (see Cluster models)':''}</small></td><td>${pill(j.state)}</td>
+    <td><b>${esc(j.name)}</b><br><small class=note>${esc(j.id)}${j.via?' · '+esc(j.via):''}${ms.has(j.name)?' · a model server (see Cluster models)':''}</small></td><td>${pill(j.state)}</td>
     <td>${j.state==='RUNNING'?esc(j.node||''):esc(j.reason||'queued')}${j.state==='PENDING'&&j.start_est?`<br><small class=note>expected start ${esc(j.start_est.replace('T',' '))}</small>`:''}</td>
     <td>${j.state==='RUNNING'?dur(j.elapsed)+' of '+dur(j.limit)+`<br><small class=note>${dur(j.left)} left</small>`:'waiting'}</td>
     <td>${j.gpus?j.gpus+' GPU · ':''}${j.cpus||'?'} CPU · ${esc(j.mem||'')}</td>
     <td class=acts>${j.state==='PENDING'?'<button class=ghost data-a=why>Why waiting</button>':'<button class=ghost data-a=out>Output</button>'}<button class=ghost data-a=ask title="Open a chat about this job">Ask Orbit</button><button class=ghost data-a=cancel>Cancel</button></td></tr>`).join('')+'</table>';
   // recent
   const rec=(sn.recent||[]).slice(0,12);
-  h+=`<div class=sec>Last three days</div>`+(rec.length?`<table class=cltbl><tr><th>Job</th><th>Result</th><th>Ran for</th><th>Exit</th><th>Started</th><th></th></tr>`+rec.map(r=>`<tr data-id="${esc(r.id)}"><td><b>${esc(r.name)}</b><br><small class=note>${esc(r.id)}${r.node?' · '+esc(r.node):''}</small></td>
+  h+=`<div class=sec>Last three days</div>`+(rec.length?`<table class=cltbl><tr><th>Job</th><th>Result</th><th>Ran for</th><th>Exit</th><th>Started</th><th></th></tr>`+rec.map(r=>`<tr data-id="${esc(r.id)}"><td><b>${esc(r.name)}</b><br><small class=note>${esc(r.id)}${r.via?' · '+esc(r.via):''}${r.node?' · '+esc(r.node):''}</small></td>
     <td>${pill(r.state)}</td><td>${dur(r.elapsed)}</td><td>${esc(r.exit)}</td><td>${esc((r.start||'').replace('T',' ').slice(5,16))}</td>
     <td class=acts>${['FAILED','OUT_OF_MEMORY','NODE_FAIL','TIMEOUT'].includes(r.state)?'<button class=ghost data-a=diag>What went wrong</button><button class=ghost data-a=ask>Ask Orbit</button>':''}<button class=ghost data-a=eff>Efficiency</button></td></tr>`).join('')+'</table>':'<div class=note>No jobs in the last three days.</div>');
   // how you have used it: asked for, not automatic
   h+=`<div class=sec>Usage history <small>— from the scheduler's records; shows the last reading, read again on schedule or when you press Refresh</small></div><div class=srvact>${[1,7,30].map(d=>`<button class=ghost data-h=${d}>${d===1?'Last day':'Last '+d+' days'}</button>`).join('')}<button class=ghost id=cl_hre style="padding:1px 8px;font-size:var(--fs-xs)">Refresh</button><span class=note id=cl_hnote></span></div><div id=cl_hist></div>`;
   // storage
-  h+=`<div class=sec>Disk <small>— quota numbers read ${sn.slow_at?ago(sn.slow_at):'never'}; folder breakdowns show when they were measured</small> <button class=ghost id=cl_rdisk style="padding:1px 8px;font-size:var(--fs-xs)">Read the numbers again</button></div>`;
+  h+=`<div class=sec>Disk <small>— ${plain?'read '+(sn.slow_at?ago(sn.slow_at):'never'):'quota numbers read '+(sn.slow_at?ago(sn.slow_at):'never')+'; folder breakdowns show when they were measured'}</small> <button class=ghost id=cl_rdisk style="padding:1px 8px;font-size:var(--fs-xs)">Read the numbers again</button></div>`;
   h+=`<div class=stat style="grid-template-columns:repeat(auto-fill,minmax(230px,1fr))">`;
   (sn.storage||[]).forEach(q=>{const w=q.label==='Home'?'home':q.label==='Scratch'?'scratch':'';
    h+=`<div><b>${esc(q.label)}</b>${q.pct!=null?bar(q.pct,`${gbs(q.used_kb)} of ${gbs(q.quota_kb||q.limit_kb)} · ${q.pct}%${q.files_pct!=null?' · files '+q.files_pct+'%':''}`):`<div class=note>${gbs(q.used_kb)} used, no quota</div>`}${w?`<button class=ghost data-du=${w} style="padding:2px 8px;font-size:var(--fs-xs)">Largest folders ▸</button>`:''}${(data.growth&&data.growth[q.label]!=null)?`<div class=note>${data.growth[q.label]>=0?'+':'−'}${gbs(Math.abs(data.growth[q.label]))} in a week</div>`:''}</div>`});
-  (sn.shared||[]).forEach(d=>{h+=`<div><b>Lab project disk</b>${bar(d.pct,`${esc(d.used)} of ${esc(d.size)} · ${d.pct}% · ${esc(d.avail)} free<br>${esc(d.mount)}`)}${cfg.project_dir?'<button class=ghost data-du=lab style="padding:2px 8px;font-size:var(--fs-xs)">Who uses it ▸</button> <button class=ghost data-du=mine style="padding:2px 8px;font-size:var(--fs-xs)">My folder ▸</button>':''}</div>`});
+  (sn.shared||[]).forEach(d=>{h+=`<div><b>${esc(d.label||'Lab project disk')}</b>${bar(d.pct,`${esc(d.used)} of ${esc(d.size)} · ${d.pct}% · ${esc(d.avail)} free<br>${esc(d.mount)}`)}${cfg.project_dir&&!plain?'<button class=ghost data-du=lab style="padding:2px 8px;font-size:var(--fs-xs)">Who uses it ▸</button> <button class=ghost data-du=mine style="padding:2px 8px;font-size:var(--fs-xs)">My folder ▸</button>':''}</div>`});
   h+=`</div><div id=cl_du></div>`;
   // gpus
   const g=sn.gpus||{};
@@ -1510,7 +1529,9 @@ async function openCluster(){
    <input id=cl_mod placeholder="GPU model (optional)" style="width:150px"><button class=ghost id=cl_fit>Check</button><span class=note id=cl_fitres></span></div>`;
   // account and queue
   const a=sn.account||{},pt=a.partition||{};
-  h+=`<div class=sec>Your limits and the queue</div><div class=stat>
+  if(plain){const pt0=((sn.partitions||[])[0])||{};h+=`<div class=sec>The queue</div><div class=stat><div><b>${pt0.cpus_idle!=null?pt0.cpus_idle.toLocaleString():'—'}</b><small>idle CPUs on ${esc(pt0.partition||'the partition')} (of ${pt0.cpus_total?pt0.cpus_total.toLocaleString():'?'})</small></div>
+   <div><b>${pt0.max_time?esc(pt0.max_time):'—'}</b><small>longest job allowed</small></div></div>`}
+  else h+=`<div class=sec>Your limits and the queue</div><div class=stat>
    <div><b>${esc(a.account||'—')}</b><small>account</small></div><div><b>${a.fairshare!=null?a.fairshare.toFixed(2):'—'}</b><small>fair-share (higher starts sooner)</small></div>
    <div><b>${lim.running_jobs!=null?jobs.filter(j=>j.state==='RUNNING').length+' / '+lim.running_jobs:'—'}</b><small>running jobs, of what you may</small></div>
    <div><b>${lim.gpus!=null?gpusInUse+' / '+lim.gpus:'—'}</b><small>GPUs in use, of what you may</small></div>
@@ -1518,7 +1539,8 @@ async function openCluster(){
    <div><b>${pt.max_time?esc(pt.max_time):'—'}</b><small>longest job allowed</small></div></div>`;
   // login node
   const hs=sn.host||{};
-  h+=`<div class=sec>Login node <small>— ${esc(hs.node||'')}</small></div>${bar(hs.processes&&hs.process_limit?Math.round(100*hs.processes/hs.process_limit):0,`${hs.processes??'?'} of your processes of ${hs.process_limit??'?'} allowed here${hs.load?' · load '+esc(hs.load):''}. A login node with too many cannot start a new shell: stop what you do not need.`)}
+  if(plain)h+=`<div class=sec>Login node <small>— ${esc(hs.node||'')}${hs.load?' · load '+esc(hs.load):''}</small></div><div class=note>This node only takes jobs in: never run anything heavy on it. Other people use this account, so only jobs named ${esc(cfg.job_prefix||'')}… are shown and can be cancelled from here.</div>`;
+  else h+=`<div class=sec>Login node <small>— ${esc(hs.node||'')}</small></div>${bar(hs.processes&&hs.process_limit?Math.round(100*hs.processes/hs.process_limit):0,`${hs.processes??'?'} of your processes of ${hs.process_limit??'?'} allowed here${hs.load?' · load '+esc(hs.load):''}. A login node with too many cannot start a new shell: stop what you do not need.`)}
    <div class=srvact><button class=ghost data-a=procs>Show my processes</button></div><div id=cl_procs></div>`;
   // events
   const ev=data.events||[];
@@ -1537,6 +1559,7 @@ async function openCluster(){
    <label>Project folder</label><input id=cl_proj value="${esc(cfg.project_dir||'')}" placeholder="/path/to/project/yourlab" style="max-width:300px"></div>
    <div class=srvact><button class=primary id=cl_save>Save</button><span class=note id=cl_savemsg></span></div>`;
   main.innerHTML=h;
+  if(plain){const x=main.querySelector('#cl_rfm');if(x&&x.closest('label'))x.closest('label').style.display='none'}
   // actions
   main.querySelectorAll('[data-a]').forEach(b=>b.onclick=async()=>{
    const row=b.closest('[data-id]'),id=b.dataset.id||(row&&row.dataset.id),a_=b.dataset.a;
@@ -1566,10 +1589,126 @@ async function openCluster(){
   const rfh=main.querySelector('#cl_rfh'),rfat=main.querySelector('#cl_rfat');const syncAt=()=>{rfat.style.display=+rfh.value>=24?'':'none'};rfh.onchange=syncAt;syncAt();
   main.querySelector('#cl_save').onclick=()=>doing('Saving',async()=>{const notify={};main.querySelectorAll('[data-n]').forEach(c=>notify[c.dataset.n]=c.checked);
    data=await api('config',{refresh:{on:main.querySelector('#cl_rf').checked,every_h:+main.querySelector('#cl_rfh').value,at:main.querySelector('#cl_rft').value,remeasure:main.querySelector('#cl_rfm').checked},watch:main.querySelector('#cl_watch').checked,explain:main.querySelector('#cl_expl').checked,project_dir:main.querySelector('#cl_proj').value,notify});main.querySelector('#cl_savemsg').textContent='saved';await load(true)})};
- const load=async force=>{if(busy&&!force)return;try{data=await api('look',{force:!!force});try{data.growth=(await api('growth')).growth}catch(_){}draw()}catch(e){body.querySelector('#cl_head').textContent='Could not read the cluster: '+e.message}};
- try{data=await api('look',{cached:true});if(data.snapshot){data.growth={};draw()}}catch(_){}
- await load(true);
+ const load=async force=>{if(busy&&!force)return;const mine=cid;try{const d=await api('look',{force:!!force});if(mine!==cid)return;data=d;try{data.growth=(await api('growth')).growth}catch(_){}draw()}catch(e){if(mine===cid)body.querySelector('#cl_head').textContent='Could not read the cluster: '+e.message}};
+ // two or more clusters: a tab for each, and the page shows the one picked
+ const drawTabs=()=>{const box=body.querySelector('#cl_tabs');if(!box)return;box.innerHTML='';box.className='cltabs';
+  (clusters.length>1?clusters:[]).forEach(c=>{const b=el(`<button class="${c.id===cid?'on':''}">${esc(c.label)}</button>`);
+   b.onclick=()=>{if(c.id===cid)return;cid=c.id;PREF.set('cluster',cid);data=null;hist=null;clearTimeout(duTimer);du=null;busy=false;
+    body.querySelector('#cl_main').innerHTML='';body.querySelector('#cl_res').innerHTML='';body.querySelector('#cl_head').textContent='Looking at '+c.label+'…';drawTabs();start()};box.appendChild(b)})
+  const nb=el('<button style="margin-left:auto" title="Copy results, scripts and logs from the clusters to the lab NAS">Back up to the NAS…</button>');nb.onclick=()=>openNasBackup();box.appendChild(nb)};
+ const start=async()=>{const mine=cid;try{const d=await api('look',{cached:true});if(mine===cid&&d.snapshot){data=d;data.growth={};draw()}}catch(_){}
+  if(mine===cid)await load(true)};
+ try{clusters=(await api('clusters')).clusters||[];if(!clusters.some(c=>c.id===cid))cid=(clusters[0]||{}).id||'hpc'}catch(_){}
+ drawTabs();
+ await start();
  timer=setInterval(()=>{if(!document.body.contains(body)){alive=false;clearInterval(timer);return}if(body._auto!==false&&!busy)load(false)},30000)}
+// --- backing cluster folders up to the lab NAS: bin/nas_backup.py
+async function openNasBackup(){
+ let alive=true,timer=null,st=null,pending=null;            // pending: a host key waiting to be trusted
+ const api=async(op,extra)=>{const r=await fetch('/api/nasbackup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({op,...(extra||{})})});
+  const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||('error '+r.status));return j};
+ const ago=t=>{const d=Date.now()/1000-t;return d<20?'just now':d<90?Math.round(d)+' s ago':d<5400?Math.round(d/60)+' min ago':d<172800?Math.round(d/3600)+' h ago':Math.round(d/86400)+' days ago'};
+ const m=openSheet('Backups and transfers',body=>{body.style.padding='12px 18px 18px';body.innerHTML='<div class=note>Reading…</div>'},
+  {sub:'back up HPC and Cassini to the NAS once a week, and copy between clusters · copy only: nothing is ever deleted'});
+ const body=m.querySelector('.pvbody');
+ const say=t=>{const e=body.querySelector('#nb_msg');if(e)e.textContent=t||''};
+ const run=async(label,fn)=>{say(label+'…');try{await fn();say('')}catch(e){say('Error: '+e.message)}};
+ const draw=()=>{if(!alive||!st)return;const c=st.config,d=c.dest,lat=st.latest||{};
+  const cl=id=>((st.clusters||[]).find(x=>x.id===id)||{}).label||id;
+  const stc=r=>!r?'<span class=note>never</span>':`<span class="clpill ${r.state==='done'?'COMPLETED':r.state==='failed'?'FAILED':'RUNNING'}">${esc((r.dry&&r.state==='done'?'checked':r.state))}</span>`;
+  body.innerHTML=`<div id=nb_msg class=sheetnote style="min-height:1.2em"></div>
+  <div class=sec style="margin-top:0">The NAS</div>
+  <div class=grid>
+   <label>Name</label><input id=nb_label value="${esc(d.label)}" style="max-width:200px">
+   <label>How it copies</label><div class=sw style="flex-wrap:wrap;gap:10px"><label style="font-weight:normal"><input type=radio name=nb_mode value=ssh ${d.mode!=='mac'?'checked':''}> the clusters copy straight to it (ssh/rsync)</label>
+    <label style="font-weight:normal"><input type=radio name=nb_mode value=mac ${d.mode==='mac'?'checked':''}> this Mac copies into the NAS folder mounted in Finder</label></div>
+   <label class=nbmac>Mounted folder</label><div class="sw nbmac" style="flex-wrap:wrap;gap:8px"><input id=nb_mount value="${esc(d.mount||'')}" style="max-width:360px" placeholder="/Volumes/backup/you"><button class=ghost id=nb_openfinder>Connect in Finder</button><span class=note>Finder > Go > Connect to Server > smb://labnas.mcdb.ucla.edu, tick “remember in Keychain”. The Mac must be awake, on the VPN, with it mounted at the scheduled time.</span></div>
+   <label class=nbssh>Address</label><div class="sw nbssh" style="gap:8px"><input id=nb_host value="${esc(d.host)}" style="max-width:200px" placeholder="164.67.78.105"> port <input id=nb_port type=number value="${d.port}" style="width:80px"><span class=note>ssh (rsync) address: the cluster copies to it directly</span></div>
+   <label class=nbssh>User</label><input class=nbssh id=nb_user value="${esc(d.user)}" style="max-width:200px" placeholder="the name the NAS knows you as">
+   <label class=nbssh>Folder on the NAS</label><input class=nbssh id=nb_path value="${esc(d.path)}" style="max-width:360px" placeholder="/backup/you">
+   <label class=nbssh>Trust</label><div class="sw nbssh" style="flex-wrap:wrap;gap:8px">${d.host_key?'<span class=note>✓ its fingerprint was confirmed</span> ':'<span class=note>not confirmed yet</span> '}<button class=ghost id=nb_scan>${d.host_key?'Check it again':'Look at its fingerprint'}</button><span id=nb_fp></span></div>
+   <label class=nbssh>Your login</label><div class="sw nbssh" style="flex-wrap:wrap;gap:8px"><button class=ghost id=nb_login>Open the login file</button><span id=nb_loginmsg class=note>a text file you fill in with your NAS user and password; only Orbit on this Mac reads it</span></div>
+   <label class=nbssh>Clusters</label><div class="sw nbssh" style="flex-wrap:wrap;gap:8px">${(st.clusters||[]).map(x=>`<button class=primary data-auth="${esc(x.id)}">Authorize ${esc(x.label)}</button><button class=ghost data-key="${esc(x.id)}" title="Make the key and show its public half, to add by hand">Show key</button>`).join(' ')}<span class=note>Authorize puts the cluster's own key on the NAS using your login file once, and checks the cluster can log in with it. The password is not kept anywhere else.</span></div>
+  </div><div id=nb_keybox></div>
+  <div class=sec>Copy between clusters</div>
+  ${(c.routes||[]).length?(c.routes).map(r=>`<div class=srvcard style="margin:6px 0" data-route="${esc(r.id)}"><div class=srvhead><b>${esc(r.label)}</b><span class=note>${esc(r.user)}@${esc(r.host)}:${r.port} · ${esc(r.path||'')}</span>
+    <span class=note style="margin-left:auto">${r.host_key?'✓ trusted':'not trusted yet'}</span></div>
+    <div class=srvact style="flex-wrap:wrap;gap:6px"><button class=ghost data-ra=scan>${r.host_key?'Check fingerprint again':'Look at its fingerprint'}</button><button class=ghost data-ra=key>Make the key on ${esc(((st.clusters||[]).find(x=>x.id===r.from)||{}).label||r.from)}</button>
+     <button class=ghost data-ra=push>Send…</button><button class=ghost data-ra=pull>Fetch…</button><button class=ghost data-ra=rm>Remove</button><span class=rfp></span></div>
+    <div class=rkey></div></div>`).join(''):'<div class=note>No routes yet. The usual one is HPC → Cassini through the restricted transfer key.</div>'}
+  <div class=srvact style="margin-top:6px"><button class=ghost id=nb_h2cas title="HPC to Cassini through the gate that only allows rsync into micropeptide/inbox">Add HPC ↔ Cassini</button><span class=note>Send copies your files to the far end's inbox; Fetch brings files from its micropeptide folder here. Both run as batch jobs on the cluster they start from and never delete.</span></div>
+  ${(()=>{const rs=(c.runs||[]).filter(r=>r.route).slice(-4).reverse();return rs.length?`<table class=cltbl><tr><th>Copy</th><th>State</th><th>Copied</th></tr>`+rs.map(r=>`<tr><td><code>${esc(r.path)}</code><br><small class=note>${ago(r.started)}${r.dry?' · dry run':''}</small></td><td>${stc(r)}${r.error?`<br><small class=srverr>${esc(r.error)}</small>`:''}</td><td>${r.files!=null?r.files.toLocaleString()+' files<br><small class=note>'+esc(r.bytes||'')+'</small>':'—'}</td></tr>`).join('')+'</table>':''})()}
+  <div class=sec>Folders to back up</div>
+  ${(c.sources||[]).length?`<table class=cltbl><tr><th>Folder</th><th>Last</th><th>Copied</th><th></th></tr>`+c.sources.map(s=>{const r=lat[s.id];return `<tr data-src="${esc(s.id)}">
+    <td><b>${esc(cl(s.cluster))}</b> <code>${esc(s.path)}</code><br><small class=note>goes to ${esc(d.path||'…')}/${esc(s.cluster)}/${esc(s.label)}</small></td>
+    <td>${stc(r)}${r?`<br><small class=note>${ago(r.started)}${r.dry?' · dry run':''}</small>`:''}${r&&r.error?`<br><small class=srverr>${esc(r.error)}</small>`:''}</td>
+    <td>${r&&r.files!=null?`${r.files.toLocaleString()} files<br><small class=note>${esc(r.bytes||'')}</small>`:'—'}</td>
+    <td class=acts><button class=ghost data-a=dry title="List what would be copied, without copying">Check</button><button class=ghost data-a=go>Back up now</button><button class=ghost data-a=rm>Remove</button></td></tr>`}).join('')+'</table>'
+   :'<div class=note>None yet. Add the folders whose results you cannot afford to lose.</div>'}
+  <div class=srvact style="margin-top:8px;flex-wrap:wrap;gap:6px"><select id=nb_cl>${(st.clusters||[]).map(x=>`<option value="${esc(x.id)}">${esc(x.label)}</option>`).join('')}</select>
+   <input id=nb_sp placeholder="/path/on/the/cluster" style="min-width:260px"><input id=nb_sl placeholder="label (optional)" style="width:130px"><button class=ghost id=nb_add>Add folder</button>
+   <button class=primary id=nb_all>Back up all now</button></div>
+  <div class=sec>Schedule and what is kept</div>
+  <div class=grid>
+   <label>Automatically</label><div class=sw style="flex-wrap:wrap;gap:8px"><input type=checkbox id=nb_on ${c.enabled?'checked':''}> every
+     <select id=nb_every>${[[12,'12 hours'],[24,'day'],[48,'2 days'],[168,'week']].map(([v,t])=>`<option value=${v} ${+c.every_h===v?'selected':''}>${t}</option>`).join('')}</select>
+     <span id=nb_atw>at <input id=nb_at type=time value="${esc(c.at)}"></span>
+     <span class=note>${c.enabled&&st.next?'next: '+new Date(st.next*1000).toLocaleString([], {weekday:'short',hour:'2-digit',minute:'2-digit'}):'off'}</span></div>
+   <label>Old versions</label><div class=sw><input type=checkbox id=nb_ver ${c.versions?'checked':''}><span class=note>a file that changed keeps its earlier copy in a dated folder on the NAS (_versions) instead of being overwritten</span></div>
+   <label>Largest file</label><div class=sw><input id=nb_max type=number min=0 value="${c.max_file_gb}" style="width:80px"> GB <span class=note>0 = any size; bigger files are skipped</span></div>
+   <label>Left out</label><textarea id=nb_ex rows=5 style="width:100%;max-width:420px">${esc((c.exclude||[]).join('\n'))}</textarea>
+   <div></div><div class=note>One pattern per line. By default alignments, reads, temporary and work folders are left out: results, scripts and logs are kept.</div>
+  </div>
+  <div class=srvact><button class=primary id=nb_save>Save</button><button class=ghost id=nb_reset>Reset “left out”</button></div>`;
+  const val=id=>body.querySelector(id).value;
+  const syncAt=()=>{body.querySelector('#nb_atw').style.display=+val('#nb_every')>=24?'':'none'};body.querySelector('#nb_every').onchange=syncAt;syncAt();
+  const mode=()=>(body.querySelector('input[name=nb_mode]:checked')||{}).value||'ssh';
+  const syncMode=()=>{const mac=mode()==='mac';body.querySelectorAll('.nbmac').forEach(x=>x.style.display=mac?'':'none');body.querySelectorAll('.nbssh').forEach(x=>x.style.display=mac?'none':'')};
+  body.querySelectorAll('input[name=nb_mode]').forEach(r=>r.onchange=syncMode);syncMode();
+  body.querySelector('#nb_openfinder').onclick=()=>{window.open('smb://labnas.mcdb.ucla.edu','_blank')};
+  const form=()=>({enabled:body.querySelector('#nb_on').checked,every_h:+val('#nb_every'),at:val('#nb_at')||'02:30',versions:body.querySelector('#nb_ver').checked,max_file_gb:+val('#nb_max')||0,
+   exclude:val('#nb_ex').split('\n').map(x=>x.trim()).filter(Boolean),dest:{label:val('#nb_label'),host:val('#nb_host').trim(),port:+val('#nb_port')||22,user:val('#nb_user').trim(),path:val('#nb_path').trim(),mode:mode(),mount:val('#nb_mount').trim()}});
+  const save=async extra=>{st=await api('config',{...form(),...(extra||{})})};
+  body.querySelector('#nb_save').onclick=()=>run('Saving',async()=>{await save();draw();say('saved')});
+  body.querySelector('#nb_reset').onclick=()=>{body.querySelector('#nb_ex').value=(st.default_exclude||[]).join('\n')};
+  body.querySelector('#nb_scan').onclick=()=>run('Asking the NAS for its fingerprint',async()=>{await save();const r=await api('scan');pending=r;
+    const box=body.querySelector('#nb_fp');box.innerHTML=`<code>${esc(r.fingerprint)}</code> <button class=ghost id=nb_trust>It matches: trust it</button>`;
+    box.querySelector('#nb_trust').onclick=()=>run('Trusting',async()=>{await save({dest:{...form().dest,host_key:r.line}});draw();say('trusted — the cluster will only copy to a NAS with this fingerprint')})});
+  body.querySelector('#nb_h2cas').onclick=()=>run('Adding the route',async()=>{await save();
+   const mine=(c.routes||[]).filter(r=>r.id!=='hpc-cassini');
+   st=await api('config',{routes:[...mine,{id:'hpc-cassini',label:'HPC → Cassini',from:'hpc',host:'cassini2.mbi.ucla.edu',port:22,user:'yuxing',path:'/share/gscratch/yuxing_backup/micropeptide/inbox',host_key:''}]});draw()});
+  body.querySelectorAll('[data-route] [data-ra]').forEach(b=>b.onclick=()=>{const card=b.closest('[data-route]'),id=card.dataset.route,a=b.dataset.ra,r=(c.routes||[]).find(x=>x.id===id);
+   if(a==='rm'){if(!confirm('Remove this route? Files already copied stay where they are.'))return;return run('Removing',async()=>{st=await api('config',{routes:(c.routes||[]).filter(x=>x.id!==id)});draw()})}
+   if(a==='scan')return run('Asking '+r.host+' for its fingerprint',async()=>{const f=await api('route_scan',{route:id});const box=card.querySelector('.rfp');
+     box.innerHTML=`<code>${esc(f.fingerprint)}</code> <button class=ghost>It matches: trust it</button>`;
+     box.querySelector('button').onclick=()=>run('Trusting',async()=>{st=await api('config',{routes:(c.routes||[]).map(x=>x.id===id?{...x,host_key:f.line}:x)});draw();say('trusted')})});
+   if(a==='key')return run('Making the key on '+r.from,async()=>{const k=await api('route_key',{route:id});const box=card.querySelector('.rkey');
+     box.innerHTML=`<div class=clres style="margin:6px 0"><b>Public key</b> (the private half stays on the cluster)<br><code style="word-break:break-all">${esc(k.public_key)}</code><div class=note>This goes on the far end as one restricted line in authorized_keys. For Cassini, the Cassini chat does that with its transfer gate.</div><button class=ghost>Copy</button></div>`;
+     box.querySelector('button').onclick=()=>{copy(k.public_key);toast('copied')}});
+   const send=a==='push',def=send?['/path/to/project/user/','/share/gscratch/yuxing_backup/micropeptide/inbox/']:['/share/gscratch/yuxing_backup/micropeptide/','/path/to/project/user/'];
+   const src=prompt((send?'Folder on '+r.from+' to send':'Folder on the far end to fetch (inside its micropeptide folder)'),def[0]);if(!src)return;
+   const dst=prompt((send?'Where it goes on the far end (inside its inbox)':'Where it goes on '+r.from),def[1]);if(!dst)return;
+   const dry=confirm('First only list what would be copied (a dry run)?\nOK = dry run, Cancel = copy for real');
+   return run(dry?'Submitting the dry run':'Submitting the copy',async()=>{await save();st=await api('transfer',{route:id,direction:a,src,dst,dry});draw();say('submitted: it runs as a batch job on '+r.from)})});
+  body.querySelector('#nb_login').onclick=()=>run('Opening the login file',async()=>{const r=await api('login_file');
+   const msg=body.querySelector('#nb_loginmsg');msg.innerHTML='';msg.append(r.user_set&&r.password_set?'✓ filled in: ':'not filled in yet — edit ',el('<code style="word-break:break-all"></code>'));msg.querySelector('code').textContent=r.path;
+   try{await fetch('/api/open_path',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:r.path})})}catch(_){}});
+  body.querySelectorAll('[data-auth]').forEach(b=>b.onclick=()=>run('Authorizing '+b.dataset.auth+' on the NAS',async()=>{await save();const r=await api('authorize',{cluster:b.dataset.auth});say('✓ '+r.message)}));
+  body.querySelectorAll('[data-key]').forEach(b=>b.onclick=()=>run('Making the key on '+b.dataset.key,async()=>{const r=await api('setup_key',{cluster:b.dataset.key});
+    const box=body.querySelector('#nb_keybox');box.innerHTML=`<div class=clres style="margin:8px 0"><b>Public key for ${esc(b.dataset.key)}</b> (the private half never leaves the cluster)<br><code style="word-break:break-all">${esc(r.public_key)}</code>
+     <div class=note>Add this line to the NAS user's <code>~/.ssh/authorized_keys</code> (or paste it in the NAS's user settings). It is only used to copy into the backup folder.</div><button class=ghost id=nb_cp>Copy</button></div>`;
+    box.querySelector('#nb_cp').onclick=()=>{copy(r.public_key);toast('copied')}}));
+  body.querySelector('#nb_add').onclick=()=>run('Adding',async()=>{await save();const p=val('#nb_sp').trim();if(!p)throw new Error('type the folder on the cluster');
+    st=await api('config',{sources:[...c.sources,{cluster:val('#nb_cl'),path:p,label:val('#nb_sl').trim()}]});draw()});
+  body.querySelector('#nb_all').onclick=()=>run('Submitting the copy jobs',async()=>{await save();st=await api('run',{});draw();say('submitted: they run as batch jobs on the clusters')});
+  body.querySelectorAll('[data-src] [data-a]').forEach(b=>b.onclick=()=>{const id=b.closest('[data-src]').dataset.src,a=b.dataset.a;
+   if(a==='rm'){if(!confirm('Stop backing this folder up? What is already on the NAS stays.'))return;return run('Removing',async()=>{st=await api('config',{sources:c.sources.filter(x=>x.id!==id)});draw()})}
+   return run(a==='dry'?'Checking what would be copied':'Submitting the copy job',async()=>{await save();st=await api('run',{source:id,dry:a==='dry'});draw();say('submitted')})})};
+ try{st=await api('status');draw()}catch(e){body.innerHTML='<div class=srverr></div>';body.firstChild.textContent=e.message}
+ timer=setInterval(async()=>{if(!document.body.contains(body)){alive=false;clearInterval(timer);return}
+  if(!(st&&(st.config.runs||[]).some(r=>r.state==='submitted'||r.state==='running')))return;
+  const a=document.activeElement;if(a&&body.contains(a)&&/INPUT|TEXTAREA|SELECT/.test(a.tagName))return;      // not while you are typing
+  try{st=await api('refresh');draw()}catch(_){}},15000)}
 async function openCrew(){
  const m=openSheet('Crew',(body)=>{
   body.style.padding='12px 18px 16px';
@@ -1579,7 +1718,7 @@ async function openCrew(){
     <div class=grid style="margin-top:8px">
      <label>Name</label><input id=cw_title placeholder="e.g. BlotScribe, rebuilt">
      <label>What to build</label><textarea id=cw_brief rows=5 placeholder="Describe the app: who it is for, what it must do, the stack if you care. The builder starts from this."></textarea>
-     <label>Folder</label><input id=cw_folder placeholder="(optional) default: ~/Rdirectory/Crew/<name>">
+     <label>Folder</label><input id=cw_folder placeholder="(optional) default: ~/Crew/<name>">
      <label>Reference</label><input id=cw_ref placeholder="(optional) an existing project to read for ideas — nothing is copied from it">
      <label>Judged on</label><textarea id=cw_crit rows=3 placeholder="(optional) the criteria the reviewer scores against — e.g. the hackathon's judging rubric"></textarea>
      <label>Builders</label><div id=cw_b></div>
@@ -1611,7 +1750,7 @@ async function openCrew(){
     const lims=[lim.hours?lim.hours+' h':'',lim.max_rounds?lim.max_rounds+' rounds':'',lim.max_tokens?(lim.max_tokens/1e6).toFixed(1)+'M tokens':''].filter(Boolean).join(', ');
     card.innerHTML=`<div class=usename></div><div class=note id=cs></div><div id=cr style="margin:4px 0"></div><div id=cb class=note></div><div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px" id=ca></div>`;
     card.querySelector('.usename').textContent=r.title+' — '+st;
-    const who=(l)=>(l||[]).map(x=>x.existing?'“'+ttl0(x.sid)+'”':(x.model||'').replace(/^(harness|codex|claude-cli|agy-cli|muse-cli):/,'')).join(' + ');
+    const who=(l)=>(l||[]).map(x=>x.existing?'“'+ttl0(x.sid)+'”':(x.model||'').replace(/^(harness|codex|claude-cli|agy-cli|muse-cli|grok-cli):/,'')).join(' + ');
     const ttl0=sid=>{const x=(typeof SESSIONS!=='undefined'?SESSIONS:[]).find(s=>s.id===sid);return x?(x.title||sid).slice(0,26):sid};
     card.querySelector('#cs').textContent=`${who(r.builders)||'?'} builds · ${(r.reviewers||[]).length?who(r.reviewers)+' reviews':'the builder reviews itself'} · round ${r.round} · best ${r.best==null?'—':r.best+' (round '+r.best_round+')'} · last ${last.score==null?'—':last.score} · ${(r.tokens||0).toLocaleString()} tokens · started ${crewAgo(r.started)}${lims?' · stops after '+lims:' · no limit'}`;
     const ac=r.activity;
@@ -2704,58 +2843,152 @@ const PCOLORS=['#6b5bd6','#2d7d4f','#a8721c','#c0392b','#2b7a9b','#8e44ad'];
 async function loadProjects(){
  if(loadProjects._local)loadProjects._local=false;      // just reordered here: draw what we have
  else PROJECTS=await (await fetch('/api/projects')).json();
- const pc=$('#projct');if(pc)pc.textContent=Object.keys(PROJECTS).length||'';
- const wrap=$('#projwrap');wrap.innerHTML='';
- const counts={};SESSIONS.forEach(s=>{if(s.project)counts[s.project]=(counts[s.project]||0)+1});
- const all=el(`<div class="projrow${projFilter===null?' on':''}">
-   <span class=sw style="background:var(--dim)"></span><span class=nm>All chats</span>
-   <span class=ct>${SESSIONS.length}</span></div>`);
- all.onclick=()=>{projFilter=null;loadProjects();renderSessions()};
- wrap.appendChild(all);
- Object.entries(PROJECTS).sort((a,b)=>(a[1].order||0)-(b[1].order||0)).forEach(([pid,pr])=>{
-  const r=el(`<div class="projrow${projFilter===pid?' on':''}">
-    <span class=sw style="background:${pr.color||PCOLORS[0]}"></span>
-    <span class=nm></span>${pr.source==='claude'?'<span class=pclaude title="a group from the Claude app\'s sidebar — its Claude Code chats are filed here by themselves">✻</span>':''}<span class=ct>${counts[pid]||0}</span>
-    <span class=a title="project menu">⋮</span></div>`);
-  r.querySelector('.nm').textContent=pr.name;
-  r.onclick=e=>{if(e.target.classList.contains('a'))return;
-   projFilter=projFilter===pid?null:pid;loadProjects();renderSessions()};
-  r.querySelector('.a').onclick=e=>{e.stopPropagation();editProject(pid)};
-  r.oncontextmenu=e=>{e.preventDefault();ctxMenu(e,[
-   {icon:'＋',label:'New chat in this project',run:()=>{projFilter=pid;loadProjects();renderSessions();newChat()}},
-   {icon:'\u270E',label:'Edit project',run:()=>editProject(pid)},
-   {icon:'\u{1F50D}',label:'Show only this',run:()=>{projFilter=pid;loadProjects();renderSessions()}},
-   '-',
-   {icon:'\u{1F5D1}',label:'Delete project',danger:true,run:async()=>{
-     if(!confirm('Delete project? Chats are kept.'))return;
-     await fetch('/api/projects/delete',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({id:pid})});projFilter=null;loadSessions()}}])};
-  // drag a project to put it where you want it; drag a chat onto it to move the chat
-  r.draggable=true;
-  r.ondragstart=e=>{e.dataTransfer.setData('pid',pid);e.dataTransfer.effectAllowed='move';
-   r.classList.add('dragging')};
-  r.ondragend=()=>{r.classList.remove('dragging');
-   wrap.querySelectorAll('.projrow.over').forEach(x=>x.classList.remove('over'));dropLineOff()};
-  // "over", not "drop": .drop is the full-screen file overlay, and a row wearing that
-  // class became one -- a page-sized orange sheet that swallowed the drop it was
-  // supposed to receive, so the project never moved.
-  // A project being dragged is being reordered, so it gets the line; a chat being
-  // dragged is going INTO this project, so the row is outlined. The dashed outline
-  // used to mean both, which is why it read as neither.
-  r.ondragover=e=>{e.preventDefault();e.dataTransfer.dropEffect='move';
-   const kind=[...(e.dataTransfer.types||[])];
-   if(kind.includes('pid')){r.classList.remove('over');dropLine(r,aboveHalf(r,e.clientY))}
-   else{dropLineOff();r.classList.add('over')}};
-  r.ondragleave=()=>{r.classList.remove('over')};
-  r.ondrop=async e=>{e.preventDefault();e.stopPropagation();r.classList.remove('over');dropLineOff();
-   const moved=e.dataTransfer.getData('pid');
-   // where the line was drawn: the lower half of a row means after it (last place too)
-   if(moved&&moved!==pid){await reorderProject(moved,pid,!aboveHalf(r,e.clientY));return}
-   const sid=e.dataTransfer.getData('sid'); if(!sid)return;
-   await fetch('/api/session/assign',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({id:sid,project:pid})});
-   toast('moved to '+pr.name);loadSessions()};
-  wrap.appendChild(r)})}
+ syncPick();
+ if(POP&&POP._redraw)POP._redraw()}
+// The line above the chat list: which project's chats you are looking at, and how many.
+function syncPick(){
+ const lbl=$('#chatslbl'),dot=$('#pickdot');if(!lbl)return;
+ const pj=projFilter&&PROJECTS[projFilter];
+ if(projFilter&&!pj&&Object.keys(PROJECTS).length)projFilter=null;     // that project was deleted
+ lbl.textContent=pj?pj.name:filterMode==='attention'?'Needs attention':filterMode==='pinned'?'Pinned':filterMode==='archived'?'Archived':filterMode==='all'?'Everything':'All chats';
+ dot.style.background=pj?(pj.color||PCOLORS[0]):'transparent';
+ dot.classList.toggle('none',!pj);
+ $('#projpick').classList.toggle('on',!!pj);
+ $('#viewbtn').classList.toggle('on',filterMode!=='active'||GROUP_BY!=='date')}
+
+/* ---------------- popovers hung under a sidebar button ---------------- */
+let POP=null;
+function closePop(){if(POP){POP.remove();POP=null;document.removeEventListener('mousedown',popOut,true)}}
+function popOut(e){if(POP&&!POP.contains(e.target)&&!(POP._for&&POP._for.contains(e.target)))closePop()}
+function popAt(anchor,node,opts){
+ const again=POP&&POP._for===anchor&&!(opts&&opts.drop);
+ closePop();if(again)return false;
+ POP=node;node._for=anchor;node._drop=!!(opts&&opts.drop);
+ node.classList.add('sidepop');document.body.appendChild(node);
+ const r=anchor.getBoundingClientRect(),side=$('#side').getBoundingClientRect();
+ const w=Math.max(node.offsetWidth,Math.min(300,side.width-16));
+ node.style.width=w+'px';
+ node.style.left=Math.max(8,Math.min(side.left+8,innerWidth-w-8))+'px';
+ node.style.top=(r.bottom+6)+'px';
+ node.style.maxHeight=Math.max(240,innerHeight-r.bottom-22)+'px';
+ document.addEventListener('mousedown',popOut,true);
+ return true}
+addEventListener('keydown',e=>{if(e.key==='Escape'&&POP){e.stopPropagation();closePop()}},true);
+
+// what a right-click on a project offers, wherever the project is drawn
+function projMenu(e,pid){
+ const pr=PROJECTS[pid];if(!pr)return;
+ ctxMenu(e,[
+  {icon:'＋',label:'New chat in this project',run:()=>{closePop();projFilter=pid;syncPick();renderSessions(true);newChat()}},
+  {icon:'✎',label:'Edit project',run:()=>{closePop();editProject(pid)}},
+  {icon:'\u{1F50D}',label:'Show only this',run:()=>{closePop();projFilter=pid;syncPick();renderSessions(true)}},
+  '-',
+  {icon:'\u{1F5D1}',label:'Delete project',danger:true,run:async()=>{
+    if(!confirm('Delete project? Chats are kept.'))return;
+    await fetch('/api/projects/delete',{method:'POST',headers:{'Content-Type':'application/json'},
+     body:JSON.stringify({id:pid})});projFilter=null;loadSessions()}}])}
+// a chat dropped on a project goes into it
+function projDropChat(r,pid,onDone){
+ r.ondragover=e=>{e.preventDefault();e.dataTransfer.dropEffect='move';
+  if([...(e.dataTransfer.types||[])].includes('pid'))return;
+  r.classList.add('over')};
+ r.ondragleave=()=>r.classList.remove('over');
+ r.ondrop=async e=>{e.preventDefault();e.stopPropagation();r.classList.remove('over');
+  const csid=e.dataTransfer.getData('sid');if(!csid)return false;
+  await fetch('/api/session/assign',{method:'POST',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({id:csid,project:pid})});
+  toast('moved to '+(PROJECTS[pid]||{}).name);if(onDone)onDone();loadSessions();return true}}
+// the heading of a project in the grouped list: + starts a chat in it, ⋯ opens its menu, a chat can be dropped on it
+function projHeadWire(h,pid){
+ h.querySelector('.gadd').onclick=e=>{e.stopPropagation();projFilter=pid;syncPick();renderSessions(true);newChat()};
+ h.querySelector('.gmore').onclick=e=>{e.stopPropagation();const r=e.target.getBoundingClientRect();projMenu({clientX:r.left,clientY:r.bottom},pid)};
+ h.oncontextmenu=e=>{e.preventDefault();projMenu(e,pid)};
+ projDropChat(h,pid)}
+
+// One project in the picker. Drag it to put it where you want it; drag a chat onto it to move the chat.
+function projPopRow(pid,pr,n,wrap){
+ const r=el(`<div class="projrow${projFilter===pid?' on':''}">
+   <span class=sw style="background:${esc(pr.color||PCOLORS[0])}"></span>
+   <span class=nm></span>${pr.source==='claude'?'<span class=pclaude title="a group from the Claude app\'s sidebar — its Claude Code chats are filed here by themselves">✻</span>':''}<span class=ct>${n||''}</span>
+   <span class=a title="Edit project">✎</span></div>`);
+ r.querySelector('.nm').textContent=pr.name;
+ r.onclick=e=>{if(e.target.classList.contains('a'))return;
+  projFilter=projFilter===pid?null:pid;closePop();syncPick();renderSessions(true)};
+ r.querySelector('.a').onclick=e=>{e.stopPropagation();closePop();editProject(pid)};
+ r.oncontextmenu=e=>{e.preventDefault();projMenu(e,pid)};
+ r.draggable=true;
+ r.ondragstart=e=>{e.dataTransfer.setData('pid',pid);e.dataTransfer.effectAllowed='move';r.classList.add('dragging')};
+ r.ondragend=()=>{r.classList.remove('dragging');
+  wrap.querySelectorAll('.projrow.over').forEach(x=>x.classList.remove('over'));dropLineOff()};
+ // A project being dragged is being reordered, so it gets the line; a chat being dragged
+ // is going INTO this project, so the row is outlined.
+ r.ondragover=e=>{e.preventDefault();e.dataTransfer.dropEffect='move';
+  if([...(e.dataTransfer.types||[])].includes('pid')){r.classList.remove('over');dropLine(r,aboveHalf(r,e.clientY))}
+  else{dropLineOff();r.classList.add('over')}};
+ r.ondragleave=()=>{r.classList.remove('over')};
+ r.ondrop=async e=>{e.preventDefault();e.stopPropagation();r.classList.remove('over');dropLineOff();
+  const moved=e.dataTransfer.getData('pid');
+  if(moved&&moved!==pid){await reorderProject(moved,pid,!aboveHalf(r,e.clientY));return}
+  const csid=e.dataTransfer.getData('sid'); if(!csid)return;
+  await fetch('/api/session/assign',{method:'POST',headers:{'Content-Type':'application/json'},
+   body:JSON.stringify({id:csid,project:pid})});
+  closePop();toast('moved to '+pr.name);loadSessions()};
+ return r}
+function openProjPop(anchor,opts){
+ const pop=el(`<div class="pop projpop"><div class=poph><input class=popq placeholder="Find a project" autocomplete=off spellcheck=false></div>
+  <div class=popl></div><div class=popf><button class=popadd>＋ New project</button></div></div>`);
+ const list=pop.querySelector('.popl'),q=pop.querySelector('.popq');
+ const draw=()=>{
+  const counts={};SESSIONS.forEach(s=>{if(s.project&&!s.archived&&s.n)counts[s.project]=(counts[s.project]||0)+1});
+  const total=SESSIONS.filter(s=>!s.archived&&s.n).length, term=q.value.trim().toLowerCase();
+  list.innerHTML='';
+  if(!term){
+   const all=el(`<div class="projrow${projFilter===null?' on':''}"><span class="sw none"></span><span class=nm>All chats</span><span class=ct>${total||''}</span></div>`);
+   all.onclick=()=>{projFilter=null;closePop();syncPick();renderSessions(true)};
+   list.appendChild(all)}
+  let n=0;
+  Object.entries(PROJECTS).sort((a,b)=>(a[1].order||0)-(b[1].order||0)).forEach(([pid,pr])=>{
+   if(term&&!String(pr.name||'').toLowerCase().includes(term))return;
+   n++;list.appendChild(projPopRow(pid,pr,counts[pid],list))});
+  if(term&&!n)list.appendChild(el('<div class=note style="padding:8px 10px">No project by that name.</div>'))};
+ pop._redraw=draw;draw();
+ q.oninput=draw;
+ q.onkeydown=e=>{if(e.key==='Enter'){const f=list.querySelector('.projrow:not(.on)')||list.querySelector('.projrow');if(f)f.click()}};
+ pop.querySelector('.popadd').onclick=()=>{closePop();editProject(null)};
+ if(!popAt(anchor,pop,opts))return;
+ if(opts&&opts.drop){pop.querySelector('.poph').style.display='none';pop.querySelector('.popf').style.display='none'}
+ else q.focus()}
+
+// Which chats, and how they are grouped.
+function openViewPop(anchor){
+ const pop=el('<div class="pop viewpop"></div>');
+ const draw=()=>{
+  pop.innerHTML='';
+  const sec=(label,opts,cur,set)=>{
+   pop.appendChild(el(`<div class=pops>${label}</div>`));
+   opts.forEach(([v,l])=>{
+    const r=el(`<div class="popit${cur()===v?' on':''}"><span class=tick>${cur()===v?'✓':''}</span><span>${esc(l)}</span></div>`);
+    r.onclick=()=>{set(v);syncPick();renderSessions(true);draw()};pop.appendChild(r)})};
+  sec('Show',[['active','Active chats'],['pinned','Pinned'],['attention','Needs attention'],['archived','Archived'],['all','Everything']],
+   ()=>filterMode,v=>{filterMode=v;$('#filtersel').value=v});
+  pop.appendChild(el('<div class=popsep></div>'));
+  sec('Group by',[['date','Date'],['project','Project']],()=>GROUP_BY,v=>{GROUP_BY=v;$('#groupsel').value=v;PREF.set('groupby',v)})};
+ draw();popAt(anchor,pop)}
+
+// the title filter is a row of its own that appears when asked for, so a list that is not being filtered gets the room
+function openFilter(){
+ const row=$('#filterrow');row.style.display='';
+ $('#search').focus();$('#search').select()}
+function closeFilter(clear){
+ const s=$('#search');if(clear)s.value='';
+ if(!s.value.trim())$('#filterrow').style.display='none';
+ renderSessions(true)}
+$('#findbtn').onclick=()=>{$('#filterrow').style.display==='none'?openFilter():closeFilter(true)};
+$('#filterx').onclick=()=>closeFilter(true);
+$('#search').onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();closeFilter(true);e.target.blur()}};
+$('#search').onblur=()=>{if(!$('#search').value.trim())closeFilter(false)};
+$('#projpick').onclick=e=>{e.stopPropagation();openProjPop($('#projpick'))};
+$('#viewbtn').onclick=e=>{e.stopPropagation();openViewPop($('#viewbtn'))};
 // Put a project where it was dropped, and keep every project's place by saving the new order.
 async function reorderProject(moved,target,after){
  const ids=Object.entries(PROJECTS).sort((a,b)=>(a[1].order||0)-(b[1].order||0)).map(([id])=>id);
@@ -2817,7 +3050,6 @@ function editProject(pid){
   await fetch('/api/projects/delete',{method:'POST',headers:{'Content-Type':'application/json'},
    body:JSON.stringify({id:pid})});closeModal();projFilter=null;loadSessions()};
 }
-$('#addproj').onclick=()=>editProject(null);
 
 /* ---------------- about ---------------- */
 async function showAbout(){
@@ -2968,6 +3200,7 @@ function startStatus(){
  n.style.display='';drawStatus();
  if(!statusTimer)statusTimer=setInterval(drawStatus,140)}
 function stopStatus(forSid){
+ actAllDone(forSid||STATUS_SID);
  if(forSid&&STATUS_SID&&forSid!==STATUS_SID)return;     // another chat's answer owns the line now
  STATUS_SID=null;
  document.body.classList.remove('statuson');
@@ -3000,6 +3233,55 @@ function drawStatus(){
  const x=n.querySelector('.sint');if(!x._wired){x._wired=true;x.onclick=()=>stopRun()}}
 // one place that stops the running answer, for the Stop button, Esc and the status line
 function stopRun(){const b=$('#stopgen');if(b&&b.style.display!=='none')b.click()}
+
+/* ---------------- latest actions ----------------
+   What a chat is doing, or did last, as a short list above the composer: each step it took with a clock
+   on the one in progress, and a plain "waiting for you" when it has asked something. Kept per chat, so
+   switching away and back, or looking at a chat that has gone quiet, still says where it stands. */
+const ACT={},ACT_OPEN={};
+function actList(s){return ACT[s]||(ACT[s]=[])}
+function actStart(s,id,label){if(!s)return;const l=actList(s);l.push({id:id||('x'+Date.now()+l.length),label:String(label||'working').slice(0,160),t0:Date.now(),state:'run'});
+ if(l.length>40)l.splice(0,l.length-40);drawActivity()}
+function actEnd(s,id,ok){const a=actList(s).find(x=>x.id===id);if(a&&a.state==='run'){a.t1=Date.now();a.state=ok===false?'err':'ok'}drawActivity()}
+function actWait(s,label){if(!s)return;const l=actList(s);if(l.some(a=>a.state==='wait'))return;
+ l.push({id:'w'+Date.now(),label:String(label||'waiting for your answer').slice(0,160),t0:Date.now(),state:'wait'});drawActivity()}
+function actClear(s){const l=ACT[s];if(!l||!l.some(a=>a.state==='wait'))return;l.forEach(a=>{if(a.state==='wait'){a.state='ok';a.t1=Date.now()}});drawActivity()}
+function actAllDone(s){const l=ACT[s];if(!l)return;let ch=false;
+ l.forEach(a=>{if(a.state==='run'){a.state='ok';a.t1=Date.now();ch=true}
+  else if(a.state==='wait'){a.state='err';a.t1=Date.now();a.label+=' — not answered';ch=true}});      // the run ended with it still open
+ if(ch)drawActivity()}
+// a chat opened from its saved copy: the last few things it did
+function actFromSaved(s,msgs){
+ if(ACT[s]&&ACT[s].length)return;
+ const out=[];
+ (msgs||[]).slice(-40).forEach(m=>{(m.tools||[]).forEach(t=>{
+  if(!t||!t.name)return;const d=toolName(t.name);
+  out.push({id:t.id||'s'+out.length,label:((TOOLVERB[d]||d)+' '+toolTarget(t.name,t.args||{})).trim().slice(0,160),
+   t0:(m.t||0)*1000,t1:(m.t||0)*1000+(t.secs||0)*1000,state:t.ok===false?'err':'ok',saved:true})})});
+ if(out.length)ACT[s]=out.slice(-12);
+ drawActivity()}
+function drawActivity(){
+ const n=$('#activity');if(!n)return;
+ const l=ACT[sid]||[];
+ if(!l.length){n.style.display='none';n.innerHTML='';return}
+ const running=l.find(a=>a.state==='run'),waiting=l.find(a=>a.state==='wait');
+ const live=RUNNING.has(sid)||!!running||!!waiting;
+ const last=l[l.length-1];
+ // a chat that has been quiet for a day is not news
+ if(!live&&Date.now()-(last.t1||last.t0)>864e5){n.style.display='none';return}
+ n.style.display='';
+ const open=ACT_OPEN[sid]!=null?ACT_OPEN[sid]:live;
+ const head=waiting?'Waiting for you':running||RUNNING.has(sid)?'Working':'Idle · last activity '+agoShort((last.t1||last.t0)/1000)+' ago';
+ const icon=a=>a.state==='run'?'<span class=spin></span>':a.state==='wait'?'<span class="aic wait">?</span>':a.state==='err'?'<span class="aic err">✕</span>':'<span class="aic ok">✓</span>';
+ const el_=a=>a.state==='run'||a.state==='wait'?fmtSecs((Date.now()-a.t0)/1000):(a.t1&&a.t1>a.t0&&!a.saved?fmtSecs((a.t1-a.t0)/1000):(a.saved&&a.t1>a.t0?fmtSecs((a.t1-a.t0)/1000):''));
+ n.innerHTML=`<details${open?' open':''}><summary><b class="ah ${waiting?'wait':running?'run':''}"></b><span class=asub></span></summary><div class=arows></div></details>`;
+ n.querySelector('.ah').textContent=head;
+ n.querySelector('.asub').textContent=(waiting||running||last).label;
+ const rows=n.querySelector('.arows');
+ l.slice(-6).forEach(a=>{const r=el(`<div class="arow ${a.state}"><span class=aico>${icon(a)}</span><span class=alab></span><span class=aclk></span></div>`);
+  r.querySelector('.alab').textContent=a.label;r.querySelector('.aclk').textContent=el_(a);rows.appendChild(r)});
+ n.querySelector('details').ontoggle=e=>{ACT_OPEN[sid]=e.target.open}}
+setInterval(()=>{const l=ACT[sid];if(l&&l.some(a=>a.state==='run'||a.state==='wait')&&!document.hidden)drawActivity()},1000);
 
 /* ---------------- tool rows, answer stats ---------------- */
 let toolTick=null;
@@ -3278,7 +3560,8 @@ function subagentDone(row,sub){
  const t=row.querySelector('.tsum');if(t)t.textContent=resultSummary('Agent',{subagent:sub,output:'.'});
  const tt=row.querySelector('.tt');if(tt&&sub.secs)tt.textContent=fmtSecs(+sub.secs);
  row.appendChild(subStepsBox(sub))}
-function subStepLine(s){const t=toolTarget(s.name,s.args||{});return toolName(s.name)+(t?' '+t:'')}
+function subStepLine(s){if(s.name==='Says'||s.name==='Thinks')return (s.name==='Says'?'“':'… ')+String((s.args||{}).text||'')+(s.name==='Says'?'”':'');
+ const t=toolTarget(s.name,s.args||{});return toolName(s.name)+(t?' '+t:'')}
 function subagentLive(row,p){
  if(!row)return;
  row._steps=row._steps||[];row._steps.push({name:p.name,args:p.args});drawSub(row,p)}
@@ -3651,7 +3934,7 @@ async function showTasks(){
      let ok;
      if(it.kind==='answer')ok=await apiPost('/api/cancel',{sid:it.sid},'stopping');
      else if(it.kind==='queued')ok=await apiPost('/api/queue',{sid:it.sid,op:'remove',id:it.id},'removing');
-     else ok=await apiPost('/api/tasks/stop',{kind:it.kind,id:it.id,sid:it.sid},'stopping');
+     else{ok=await apiPost('/api/tasks/stop',{kind:it.kind,id:it.id,sid:it.sid},'stopping');if(ok&&ok.note)toast(ok.note)}
      if(ok){x.disabled=true;x.textContent=it.kind==='queued'?'removed':'stopped';refreshRunning()}};
     acts.appendChild(x)}
    body.appendChild(r)})})}
@@ -4015,7 +4298,8 @@ function drawHero(fromData){
  // What this chat could be asked, for the case the recent-chats list does not cover:
  // the first one. They fill the box and stop there — nothing is sent for you.
  const SUGG={
-  'Claude Code':['Explain what this repository does and how it is laid out',
+  'Claude Code':['/init — write a CLAUDE.md for this project','/review','/security-review',
+                 'Explain what this repository does and how it is laid out',
                  'Find the bug behind this failing test and fix it',
                  'Review my uncommitted changes',
                  'Add tests for the file I changed last'],
@@ -4029,25 +4313,42 @@ function drawHero(fromData){
  const sg=el('<div class=sugg></div>');
  (SUGG[engine]||SUGG.Orbit).forEach(t=>{
   const b=el('<button class=suggp></button>');b.textContent=t;
-  b.onclick=()=>{q.value=t;q.focus();fitQ();q.dispatchEvent(new Event('input'))};
+  b.onclick=()=>{q.value=t.startsWith('/')?t.split(' — ')[0]:t;q.focus();fitQ();q.dispatchEvent(new Event('input'))};
   sg.appendChild(b)});
  h.appendChild(sg);
  const d=HOME;
  const tasks=(d&&d.tasks)||[];
  // ---- things that want you now
  const alerts=el('<div class=heroalerts></div>');
- const alert=(icon,text,side,fn,bad)=>{const a=el(`<div class="halert${bad?' bad':''}"><span class=hai></span><span class=hat></span><span class=hago></span></div>`);
-  a.querySelector('.hai').textContent=icon;a.querySelector('.hat').textContent=text;a.querySelector('.hago').textContent=side||'';a.onclick=fn;alerts.appendChild(a)};
+ // each notice can be dismissed; it stays gone until its text changes (a new failure, a new limit)
+ const gone=(()=>{try{return new Set(JSON.parse(PREF.get('home_dismissed','[]')))}catch(e){return new Set()}})();
+ const saveGone=()=>PREF.set('home_dismissed',JSON.stringify([...gone].slice(-300)));
+ const alert=(icon,text,side,fn,bad,key)=>{key=key||text;if(gone.has(key))return;
+  const a=el(`<div class="halert${bad?' bad':''}"><span class=hai></span><span class=hat></span><span class=hago></span><button class=hax title="Dismiss" aria-label="Dismiss">×</button></div>`);
+  a.querySelector('.hax').onclick=e=>{e.stopPropagation();gone.add(key);saveGone();a.remove();
+   if(!alerts.querySelector('.halert'))alerts.remove();else drawClear()};
+  a.querySelector('.hai').textContent=icon;a.querySelector('.hat').textContent=text;a.querySelector('.hago').textContent=side||'';a.onclick=fn;a._k=key;alerts.appendChild(a)};
  const waiting=tasks.filter(t=>t.kind==='answer'&&t.status==='waiting for you');
- waiting.forEach(t=>alert('⏸',`“${t.title}” is waiting for your answer`,'open →',()=>openChatFromHome(t.sid)));
+ waiting.forEach(t=>alert('⏸',`“${t.title}” is waiting for your answer`,'open →',()=>openChatFromHome(t.sid),false,'wait|'+t.sid+'|'+(t.since||'')));
  ((d&&d.problems)||[]).forEach(pb=>alert('⚠',pb.name+': '+pb.detail,pb.fix?'fix →':'',()=>showHealth(),true));
- ((d&&d.failed)||[]).forEach(f=>alert('✕',`Scheduled task “${f.title}” failed${f.result?': '+f.result:''}`,f.at?relTime(f.at):'',()=>f.sid?openChatFromHome(f.sid):showPane('tasks'),true));
+ {// the same failure repeated (a usage limit hitting every scheduled task) is one notice with a count
+  const by=new Map();
+  ((d&&d.failed)||[]).forEach(f=>{const k=String(f.result||'').replace(/\d+/g,'#').slice(0,120);(by.get(k)||by.set(k,[]).get(k)).push(f)});
+  by.forEach(fs=>{
+   if(fs.length===1){const f=fs[0];
+    alert('✕',`Scheduled task “${f.title}” failed${f.result?': '+f.result:''}`,f.at?relTime(f.at):'',()=>f.sid?openChatFromHome(f.sid):showPane('tasks'),true,'failed|'+f.title+'|'+(f.at||''));return}
+   const newest=fs.reduce((a,b)=>(b.at||0)>(a.at||0)?b:a);
+   alert('✕',`${fs.length} scheduled tasks failed${newest.result?': '+newest.result:''}`,newest.at?relTime(newest.at):'',()=>showPane('tasks'),true,
+    'failed*|'+fs.map(f=>f.title+'|'+(f.at||'')).join(';'))})}
  ((d&&d.allowances)||[]).forEach(a=>{
   const lim=(a.windows||[]).find(w=>w.limited)||(a.exhausted&&{name:'',resets:a.exhausted.until*1000});
   const low=!lim&&(a.windows||[]).find(w=>w.left<=15);
   if(lim)alert('⛔',`${a.label}${a.account?' ('+a.account+')':''}: limit reached`+(lim.resets?' — back '+inTime((typeof lim.resets==='number'?lim.resets:Date.parse(lim.resets))/1000):''),'',()=>{},true);
   else if(low)alert('◔',`${a.label}${a.account?' ('+a.account+')':''}: only ${low.left}% of the ${low.name} allowance left`,low.resets?'resets '+inTime(Date.parse(low.resets)/1000):'',()=>{})});
- if(alerts.children.length)h.appendChild(alerts);
+ const drawClear=()=>{let c=alerts.querySelector('.haclear');const n=alerts.querySelectorAll('.halert').length;
+  if(n<2){if(c)c.remove();return}
+  if(!c){c=el('<button class=haclear>Dismiss all</button>');c.onclick=()=>{alerts.querySelectorAll('.halert').forEach(x=>{x._k&&gone.add(x._k)});saveGone();alerts.remove()};alerts.appendChild(c)}};
+ if(alerts.querySelector('.halert')){drawClear();h.appendChild(alerts)}
  const grid=el('<div class=herogrid></div>');
  const skel=c=>{for(let i=0;i<3;i++){const x=el('<div class=hskel></div>');x.style.width=(90-i*18)+'%';c.appendChild(x)}};
  // ---- running now
@@ -4188,7 +4489,7 @@ function currentMode(){
 function drawModeHint(){
  const h=$('#modehint');if(!h)return;
  const m=currentMode(),txt=MODE_GLYPH[m]||'';
- h.textContent=txt?txt+' (shift+tab to cycle)':'';
+ h.textContent=txt;h.title=txt?'shift+tab cycles the permission mode':'';
  h.className=txt?'mode-'+m:''}
 async function cycleMode(){
  const sel=$('#cqbar select');
@@ -4458,7 +4759,8 @@ setInterval(()=>{if(document.hidden||!sid)return;const l=LINKS[sid];
  if(RUNNING.has(sid)||(l&&(l.talking_to||l.links.some(x=>x.state)))||(GOALS[sid]&&GOALS[sid].status==='active'))loadLinks(sid)},4000);
 function dockSection(d,key,title,digest,fill){
  const openKey='_sec_'+key;
- if(d[openKey]===undefined)d[openKey]=(key==='plan');
+ // on a wide screen the dock sits in the side panel, where there is room: the work list is open by default
+ if(d[openKey]===undefined)d[openKey]=(key==='plan')||(key==='work'&&matchMedia('(min-width:1640px)').matches);
  const h=el('<div class=pdsec></div>');
  h.appendChild(el(`<b>${title}</b>`));
  const dg=document.createElement('span');dg.className='pddig';dg.textContent=digest;h.appendChild(dg);
@@ -4534,6 +4836,7 @@ function drawPlanDockInner(){
      if(t.item.can_stop){const x=el('<button class=ghost style="margin-left:8px;padding:0 7px">stop</button>');
       x.onclick=async e=>{e.stopPropagation();x.disabled=true;
        const ok=await apiPost('/api/tasks/stop',{kind:'background',id:t.item.id,sid:t.item.sid},'stopping');
+       if(ok&&ok.note)toast(ok.note);
        x.textContent=ok?'stopped':'stop';if(ok)setTimeout(pollBg,600);else x.disabled=false};
       r.appendChild(x)}}
     body.appendChild(r)});
@@ -4761,6 +5064,7 @@ function drawEasyBtn(){
  b.onclick=()=>setEasy(!on)}
 
 $('#more').onclick=e=>{e.stopPropagation();
+ if(ctxEl&&ctxEl.dataset.owner==='more'){closeCtx();return}     // a second click closes it
  const r=$('#more').getBoundingClientRect();
  ctxMenu({clientX:r.left-90,clientY:r.bottom+4},[
   {icon:'⤓',label:'Export markdown',run:()=>location.href='/api/export?id='+encodeURIComponent(sid||'')},
@@ -4784,7 +5088,7 @@ $('#more').onclick=e=>{e.stopPropagation();
   {icon:'▦',label:'Usage by model…',run:()=>showStats(7)},
   {icon:'↧',label:'Jump to a message…',run:openJump},
   {icon:'✓',label:'Health check',run:showHealth},
- ])};
+ ]);ctxEl.dataset.owner='more'};
 async function chatPromptDlg(){
  // THIS chat's, not whichever chat the Mac happens to have open: on a phone, or in a
  // second window, the dialog pre-filled another chat's prompt and then saved it onto
@@ -4978,7 +5282,7 @@ addEventListener('keydown',e=>{
  if((e.metaKey||e.ctrlKey)&&e.shiftKey&&keyIs(e,'k')){e.preventDefault();newChatWith();return}
  if((e.metaKey||e.ctrlKey)&&keyIs(e,'k')){e.preventDefault();newChat();return}
  if((e.metaKey||e.ctrlKey)&&keyIs(e,'f')){e.preventDefault();
-  if(e.shiftKey||!sid||!wrap.children.length)$('#search').focus(); else openFind()}
+  if(e.shiftKey||!sid||!wrap.children.length)openFilter(); else openFind()}
  if((e.metaKey||e.ctrlKey)&&keyIs(e,'j')){e.preventDefault();showPane('files')}
  if((e.metaKey||e.ctrlKey)&&keyIs(e,'p')){e.preventDefault();openPal()}
  const dialog=!!$('#modalhost').innerHTML;
@@ -5013,8 +5317,8 @@ async function pruneTabs(){
  const unknown=TABS.filter(id=>id!==sid&&!SESSIONS.some(s=>s.id===id)&&!RUNNING.has(id));
  for(const id of unknown){
   // a chat the list does not show may simply be older than the page of it loaded
-  try{const r=await fetch('/api/session/'+encodeURIComponent(id));const d=await r.json();
-   if(!r.ok||d.error||!(d.messages||[]).some(m=>m.role==='user'))TABS=TABS.filter(x=>x!==id);
+  try{const r=await fetch('/api/session/'+encodeURIComponent(id)+'?tail=1');const d=await r.json();
+   if(!r.ok||d.error||!(typeof d.users==='number'?d.users>0:(d.messages||[]).some(m=>m.role==='user')))TABS=TABS.filter(x=>x!==id);
    else if(d.title)TAB_TITLES[id]=d.title}catch(e){}}
  saveTabs();drawTabs()}
 function tabSaved(id){return !FRESH_TABS.has(id)||SESSIONS.some(s=>s.id===id)||RUNNING.has(id)}
@@ -5037,10 +5341,15 @@ function drawTabs(){
  if(DESK){const title=sid?tabTitle(sid):'';const key=sid+'\n'+title;
   if(key!==DESK_SENT&&DESK.setActiveChat){DESK_SENT=key;try{DESK.setActiveChat(sid||null,title)}catch(e){}}}
  if(!show){bar.innerHTML='';return}
+ // chats another chat started (delegated work) crowd the strip: the quiet ones fold into one chip
+ const isHelper=id=>{const s=SESSIONS.find(x=>x.id===id);return !!(s&&s.parent)||/^↳/.test(tabTitle(id)||'')};
+ const quiet=id=>isHelper(id)&&id!==sid&&!RUNNING.has(id)&&!WAITING.has(id)&&!UNSEEN[id];
+ const folded=TABS.filter(quiet);
  const sig=JSON.stringify([TABS,sid,TABS.map(id=>[tabTitle(id),RUNNING.has(id),WAITING.has(id),!!UNSEEN[id]])]);
  if(bar.dataset.sig===sig)return;bar.dataset.sig=sig;
  bar.innerHTML='';
  TABS.forEach((id,i)=>{
+  if(quiet(id)&&folded.length>1)return;
   const st=WAITING.has(id)?'wait':RUNNING.has(id)?'run':UNSEEN[id]?'new':'';
   const b=el(`<button class="tab${id===sid?' on':''}" draggable=true><span class="td ${st}"></span><span class=tt></span><span class=tx title="close tab (⌘W)"><svg viewBox="0 0 10 10" width="9" height="9" aria-hidden="true"><path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg></span></button>`);
   b.querySelector('.tt').textContent=tabTitle(id);
@@ -5054,6 +5363,11 @@ function drawTabs(){
   b.ondrop=e=>{const from=e.dataTransfer.getData('text/orbit-tab');if(!from||from===id)return;e.preventDefault();
    TABS=TABS.filter(x=>x!==from);TABS.splice(TABS.indexOf(id)+(e.offsetX>b.offsetWidth/2?1:0),0,from);saveTabs();drawTabs()};
   bar.appendChild(b)});
+ if(folded.length>1){const f=el(`<button class=tabfold title="Chats other chats started, folded away while they are quiet">↳ ${folded.length}</button>`);
+  f.onclick=e=>{e.stopPropagation();const r=f.getBoundingClientRect();
+   ctxMenu({clientX:r.left,clientY:r.bottom+4},[...folded.map(id=>({icon:'↳',label:tabTitle(id).replace(/^↳\s*/,'')||id,run:()=>{showPane('log');openSession(id)}})),'-',
+    {icon:'✕',label:'Close these tabs',run:()=>{folded.forEach(id=>{const i=TABS.indexOf(id);if(i>=0)TABS.splice(i,1)});saveTabs();drawTabs()}}])};
+  bar.appendChild(f)}
  const add=el(`<button class=tabnew title="new chat (${DESK?'⌘N':'⌘K'})">+</button>`);add.onclick=()=>newChat();bar.appendChild(add);
  const on=bar.querySelector('.tab.on');if(on)on.scrollIntoView({block:'nearest',inline:'nearest'})}
 async function closeTab(id){
@@ -5550,7 +5864,7 @@ if(DESK&&DESK.onCommand)DESK.onCommand((name,arg)=>{
   case 'new-chat-with':newChatWith();break;
   case 'close-tab':if(dialog)closeModal();else if(document.querySelector('.palette'))closePal();else closeTab(sid);break;
   case 'reopen-tab':reopenTab();break;
-  case 'find':if(!sid||!wrap.children.length)$('#search').focus();else openFind();break;
+  case 'find':if(!sid||!wrap.children.length)openFilter();else openFind();break;
   case 'palette':openPal();break;
   case 'jump':openJump();break;
   case 'guide':openGuide();break;
@@ -5858,30 +6172,42 @@ async function checkCode(){
    const b=el('<div class="staleBar reloadBar"><span>Orbit\'s page was updated — reload to get the new version.</span></div>');
    const btn=el('<button>Reload</button>');btn.onclick=()=>location.reload();b.appendChild(btn);
    document.body.appendChild(b)}
-  const bar=document.querySelector('.staleBar:not(.reloadBar)');   // not the page-reload bar
-  if(c.stale&&!bar){
-   const b=el(`<div class=staleBar><span>Code changed on disk (${c.files.join(', ')}) — `
-     +`the running interface is out of date.</span></div>`);
-   const btn=el('<button>Restart interface</button>');
-   btn.onclick=async()=>{
-    btn.disabled=true;btn.textContent='restarting…';
-    const rr=await fetch('/api/restart_ui',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})
-      .then(r=>r.json()).catch(()=>({}));
-    if(rr.deferred){btn.textContent=rr.msg||'restarting when answers finish';toast(rr.msg||'waiting for running answers');return}
-    // wait for it to actually come back instead of reloading into a dead server
-    const t0=Date.now();
-    const poll=async()=>{
-     try{const r=await fetch('/api/code',{cache:'no-store'});
-      if(r.ok){location.reload();return}}catch(e){}
-     const secs=Math.round((Date.now()-t0)/1000);
-     btn.textContent=`restarting… ${secs}s`;
-     if(secs>60){btn.textContent='still down — check logs';btn.disabled=false;return}
+  let bar=document.querySelector('.staleBar:not(.reloadBar)');   // not the page-reload bar
+  const busy=(c.blockers||[]);
+  if(c.stale||c.restart_waiting){
+   if(!bar){
+    bar=el('<div class=staleBar><span class=sbmsg></span></div>');
+    const btn=el('<button class=sbgo></button>');
+    btn.onclick=async()=>{
+     btn.disabled=true;
+     const rr=await fetch('/api/restart_ui',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>r.json()).catch(()=>({}));
+     if(rr.deferred){toast(rr.msg||'waiting for running answers');btn.disabled=false;checkCode();return}
+     // wait for it to actually come back instead of reloading into a dead server
+     const t0=Date.now();btn.textContent='restarting…';
+     const poll=async()=>{
+      try{const r=await fetch('/api/code',{cache:'no-store'});
+       if(r.ok){location.reload();return}}catch(e){}
+      const secs=Math.round((Date.now()-t0)/1000);
+      btn.textContent=`restarting… ${secs}s`;
+      if(secs>60){btn.textContent='still down — check logs';btn.disabled=false;return}
+      setTimeout(poll,700)};
      setTimeout(poll,700)};
-    setTimeout(poll,700)};
-   b.appendChild(btn);document.body.appendChild(b)}
-  else if(!c.stale&&bar)bar.remove();
+    const cancel=el('<button class="sbcancel" style="display:none">Cancel</button>');
+    cancel.onclick=async()=>{await fetch('/api/restart_ui',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cancel:true})});
+     toast('restart cancelled');setTimeout(checkCode,800)};
+    bar.append(btn,cancel);document.body.appendChild(bar)}
+   const btn=bar.querySelector('.sbgo'),cancel=bar.querySelector('.sbcancel'),msg=bar.querySelector('.sbmsg');
+   const who=busy.length?busy.slice(0,3).join(', ')+(busy.length>3?' and '+(busy.length-3)+' more':''):'';
+   if(c.restart_waiting){
+    msg.textContent='Restarting as soon as '+(who||'everything')+' finish'+(busy.length===1?'es':'')+' — new chats and Crew runs wait until then.';
+    btn.style.display='none';cancel.style.display='';
+   }else{
+    msg.textContent=`Code changed on disk (${(c.files||[]).join(', ')}) — the running interface is out of date.`+(busy.length?` ${who} ${busy.length===1?'is':'are'} still working.`:'');
+    btn.style.display='';btn.disabled=false;cancel.style.display='none';
+    btn.textContent=busy.length?'Restart when idle':'Restart interface'}}
+  else if(bar)bar.remove();
  }catch(e){}}
-checkCode(); setInterval(checkCode,15000);
+checkCode(); setInterval(checkCode,6000);
 loadSessions();refreshStatus();loadModels();setInterval(refreshStatus,20000);q.focus();
 // Adopt the server's current chat. Without this the browser started with sid=null
 // and the server quietly kept using whatever chat it was on -- including a

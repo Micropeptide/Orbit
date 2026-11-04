@@ -13,7 +13,7 @@ import json, os, re, shlex, threading, time
 
 MIN_GAP_S = 8                  # a look this soon after another returns what it has
 WATCH_BUSY_S, WATCH_IDLE_S = 90, 600
-BACKOFF_S = (120, 300, 600, 900)
+BACKOFF_S = (120, 300, 600, 1800)       # a cluster that cannot be reached is tried again, at most half an hour apart, for as long as it takes
 KEEP_EVENTS = 60
 SECTIONS = ("host", "squeue", "sacct", "quota", "df", "gpus", "whoami", "sinfo")
 
@@ -149,6 +149,32 @@ def parse_gpus(text):
     return {"models": models, "nodes": nodes, "free": int(m[1]) if m else None, "total": int(m[2]) if m else None}
 
 
+def parse_gpus_plain(text, avoid=()):
+    """A plain Slurm cluster, from `sinfo -N` (a node, its gres, state, CPUs, memory) and `squeue -t R` (the GPUs running jobs hold):
+    the same shape as parse_gpus. Nodes that are to be avoided are left out altogether: they are never somewhere to run."""
+    sect, nodes, used = None, [], {}
+    for line in (text or "").splitlines():
+        if line.startswith("#"): sect = line[1:].strip(); continue
+        f = line.split("|")
+        if sect == "nodes" and len(f) >= 6:
+            m = re.search(r"gpu(?::([\w.-]+))?:(\d+)", f[1])
+            if not m or f[0] in avoid: continue
+            cpu = re.fullmatch(r"(\d+)/(\d+)/(\d+)/(\d+)", f[6]) if len(f) > 6 else None
+            mem = _int(f[5])
+            nodes.append({"node": f[0], "model": m[1] or "GPU", "total": int(m[2]), "state": f[2].rstrip("*~#$@"),
+                          "idle_cpus": f"{cpu[2]}/{cpu[4]}" if cpu else None, "free_mem": f"{round(mem / 1024)}G" if mem is not None else None, "partitions": ""})
+        elif sect == "used" and len(f) >= 2 and re.fullmatch(r"[\w.-]+", f[0]):
+            used[f[0]] = used.get(f[0], 0) + gres_gpus(f[1])
+    for n in nodes:
+        up = not re.match(r"(down|drain|drng|fail|maint|inval|unk|futu|powe)", n["state"])
+        n["free"] = max(n["total"] - used.get(n["node"], 0), 0) if up else 0
+    models = {}
+    for n in nodes:
+        m = models.setdefault(n["model"], {"model": n["model"], "vram": None, "nodes": 0, "gpus": 0, "free": 0})
+        m["nodes"] += 1; m["gpus"] += n["total"]; m["free"] += n["free"]
+    return {"models": list(models.values()), "nodes": nodes, "free": sum(n["free"] for n in nodes) if nodes else None, "total": sum(n["total"] for n in nodes) if nodes else None}
+
+
 def _int(v):
     try: return int(str(v).strip())
     except ValueError: return None
@@ -211,7 +237,7 @@ def dismissed(problem, record):
     return set(problem.get("ids") or ()) == set(record.get("ids") or ())
 
 
-def snapshot_from(text, project_dir="", ignore=(), now=None):
+def snapshot_from(text, project_dir="", ignore=(), now=None, profile="h2", avoid=()):
     """The whole look -> what the page shows."""
     s = split_sections(text)
     jobs = parse_squeue(s.get("squeue"))
@@ -226,8 +252,10 @@ def snapshot_from(text, project_dir="", ignore=(), now=None):
     homes = [x for x in storage if x["label"] == "Home"]
     storage = ([homes[0]] if homes else []) + [x for x in storage if x["label"] != "Home"]       # the same home is listed once per server
     shared = [d for d in df if project_dir and d["mount"] == project_dir]
+    if profile == "slurm":           # no quotas here: the disks the account sits on, each by its own mount
+        shared = [dict(d, label=d["mount"]) for d in df]
     return {"host": parse_host(s.get("host")), "jobs": jobs, "recent": parse_sacct(s.get("sacct")), "storage": storage, "shared": shared,
-            "gpus": parse_gpus(s.get("gpus")), "account": parse_whoami(s.get("whoami")), "partitions": parse_sinfo(s.get("sinfo")),
+            "gpus": parse_gpus_plain(s.get("gpus"), avoid) if profile == "slurm" else parse_gpus(s.get("gpus")), "account": parse_whoami(s.get("whoami")), "partitions": parse_sinfo(s.get("sinfo")),
             "problems": problems_of(jobs, parse_sacct(s.get("sacct")), storage, shared, parse_whoami(s.get("whoami")), ignore, now)}
 
 
@@ -235,7 +263,8 @@ def problems_of(jobs, recent, storage, shared, account, ignore=(), now=None):
     """What deserves a look, in plain words, worst first."""
     out = []
     for d in shared:
-        if d["pct"] >= 90: out.append({"key": "disk:lab", "value": d["pct"], "level": "bad" if d["pct"] >= 95 else "warn", "text": f"The lab's project disk is {d['pct']}% full: {d['avail']} left of {d['size']}."})
+        if d["pct"] >= 90: out.append({"key": "disk:" + (d.get("label") or "lab"), "value": d["pct"], "level": "bad" if d["pct"] >= 95 else "warn",
+                                       "text": (f"{d['label']} is {d['pct']}% full: {d['avail']} left of {d['size']}." if d.get("label") else f"The lab's project disk is {d['pct']}% full: {d['avail']} left of {d['size']}.")})
     for q in storage:
         if q.get("pct") is not None and q["pct"] >= 85: out.append({"key": "quota:" + q["label"], "value": q["pct"], "level": "bad" if q["pct"] >= 95 else "warn", "text": f"{q['label']} is {q['pct']}% of its quota."})
         if q.get("files_pct") is not None and q["files_pct"] >= 85: out.append({"key": "files:" + q["label"], "value": q["files_pct"], "level": "warn", "text": f"{q['label']} has used {q['files_pct']}% of its file-count quota."})
@@ -381,8 +410,9 @@ def disk_level(pct):
 HIST_FIELDS = "JobID,JobName%30,Partition,State,Elapsed,ExitCode,Submit,Start,End,AllocTRES%80,AllocCPUS"
 
 
-def history_command(days):
-    return f"sacct -S now-{int(days)}days -u $USER -X -n -P -o {HIST_FIELDS} 2>&1 | tail -n 3000"
+def history_command(days, prefix="", dirs=()):
+    f = HIST_FIELDS + (",WorkDir%120" if dirs else "")
+    return f"sacct -S now-{int(days)}days -u $USER -X -n -P -o {f} 2>&1" + mine_only(prefix, dirs) + " | tail -n 3000"
 
 
 def _t(x):
@@ -524,10 +554,31 @@ def rank_people(rows):
 SLOW_SECTIONS = ("quota", "df", "whoami")      # read from the disks and the account database: slow on a busy login node, and slow to change
 
 
-def look_command(project_dir="", slow=True):
+def mine_only(prefix, dirs=()):
+    """A pipe that keeps only the jobs whose name starts with the prefix (job name is the second `|` field), or that run from one of these
+    folders (the last field: what an app that names jobs by itself, such as Claude Science, leaves behind). On an account other people share,
+    the queue holds their jobs too: only these are this person's."""
+    dirs = [d.rstrip("/") + "/" for d in dirs or () if d]
+    if not prefix and not dirs: return ""
+    cond = ["index($2,p)==1"] if prefix else []
+    cond += [f"index($NF,d{i})==1" for i in range(len(dirs))]
+    return (" | awk -F'|' -v p=" + shlex.quote(prefix or "") + "".join(f" -v d{i}={shlex.quote(d)}" for i, d in enumerate(dirs))
+            + " 'NF<2 || " + " || ".join(cond) + "'")
+
+
+def look_command(project_dir="", slow=True, profile="h2", prefix="", partitions="", dirs=()):
     """One ssh command that prints every section the page needs. The slow ones (quotas, disk sizes, limits) only when asked for, and every
     command has its own time limit so one stuck disk cannot take the whole answer with it."""
     df = "timeout 25 df -hPT $HOME" + (" " + shlex.quote(project_dir) if project_dir else "") + " 2>&1"
+    if profile == "slurm":
+        mine, parts = mine_only(prefix, dirs), (" -p " + shlex.quote(partitions) if partitions else "")
+        fast = ('echo @@host; echo "$(hostname -s)|$(ps -u $USER --no-headers | wc -l)|$(ulimit -u)|$(uptime | sed \'s/.*load average: //\')"; '
+                'echo @@squeue; timeout 20 squeue -u $USER -h -o "%i|%j|%T|%P|%N|%M|%l|%C|%m|%b|%R|%V|%S|%Z" 2>&1' + mine + '; '
+                'echo @@sacct; timeout 20 sacct -S now-3days -u $USER -X -n -P -o JobID,JobName%30,Partition,State,Elapsed,ExitCode,Start,End,AllocTRES%80,NodeList,WorkDir%120 2>&1' + mine + ' | tail -n 60; '
+                'echo @@gpus; echo "#nodes"; timeout 20 sinfo -N -h' + parts + ' -o "%N|%G|%T|%c|%m|%e|%C" 2>&1 | grep -i gpu; '
+                'echo "#used"; timeout 20 squeue -h -t R' + parts + ' -o "%N|%b" 2>&1 | grep -i gpu; '
+                'echo @@sinfo; timeout 15 sinfo -h' + parts + ' -o "%P|%a|%l|%C" 2>&1 | head -12')
+        return fast if not slow else fast + '; echo @@df; ' + df
     fast = ('echo @@host; echo "$(hostname -s)|$(ps -u $USER --no-headers | wc -l)|$(ulimit -u)|$(uptime | sed \'s/.*load average: //\')"; '
             'echo @@squeue; timeout 20 squeue -u $USER -h -o "%i|%j|%T|%P|%N|%M|%l|%C|%m|%b|%R|%V|%S" 2>&1; '
             'echo @@sacct; timeout 20 sacct -S now-3days -u $USER -X -n -P -o JobID,JobName%30,Partition,State,Elapsed,ExitCode,Start,End,AllocTRES%80,NodeList 2>&1 | tail -n 60; '
@@ -582,11 +633,36 @@ class Cluster:
         self.next_scan = 0.0
         self.events = self._load_events()
 
+    @property
+    def plain(self): return self.cfg.get("profile") == "slurm"
+
+    def _ssh(self, cmd, timeout=30):
+        """Run a command on the cluster's login node. A plain Slurm login may use another shell than bash (Cassini's is tcsh): bash runs it."""
+        return self.w.ssh(self.cfg["host"], "bash -c " + shlex.quote(cmd) if self.plain else cmd, timeout)
+
+    def _mine(self): return mine_only(self.cfg.get("job_prefix", ""), self.cfg.get("job_dirs") or ())
+
+    def _queue_command(self):
+        if not self.plain: return QUEUE_COMMAND + self._mine()
+        return QUEUE_COMMAND.replace('%S"', '%S|%Z"', 1) + self._mine()      # plain Slurm: and each job's folder, to tell mine by
+
+    def _tag_via(self, snap):
+        """Say which app a job came from where its name tells (Claude Science's jobs are all named MP_cs)."""
+        via = self.cfg.get("via") or {}
+        for j in (snap.get("jobs") or []) + (snap.get("recent") or []):
+            for name, label in via.items():
+                if j.get("name") == name or (name.endswith("*") and str(j.get("name")).startswith(name[:-1])): j["via"] = label; break
+        return snap
+
     # --- config and events
     def _load(self):
         try: d = json.load(open(self.path))
         except (OSError, ValueError): d = {}
         d.setdefault("host", "hpc"); d.setdefault("project_dir", ""); d.setdefault("watch", True)
+        # a cluster that is not HPC: "slurm" is a plain Slurm login (no `h2` helper, no quotas); job_prefix keeps to the jobs that are mine
+        # on an account other people share; avoid_nodes are never offered as somewhere to run
+        d.setdefault("profile", "h2"); d.setdefault("label", "HPC"); d.setdefault("job_prefix", ""); d.setdefault("partitions", ""); d.setdefault("avoid_nodes", [])
+        d.setdefault("job_dirs", []); d.setdefault("via", {})       # also mine: jobs that run from these folders; and which app a job name comes from ({"MP_cs": "Claude Science"})
         d.setdefault("notify", {})
         for k, v in {"started": False, "finished": True, "failed": True, "errors": True, "disk": True, "pending": True, "digest": True}.items(): d["notify"].setdefault(k, v)
         d["refresh"] = {**REFRESH_DEFAULT, **(d.get("refresh") if isinstance(d.get("refresh"), dict) else {})}      # when the slow readings are read again by themselves
@@ -640,7 +716,7 @@ class Cluster:
             if cached and self.snap: return self.public()          # the page opening: what was last read, at once
             if not force and self.snap and self.now() - self.snap_at < MIN_GAP_S and not slow: return self.public()
             need_slow = slow or not self.slow_text
-        code, out = self.w.ssh(self.cfg["host"], look_command(self.cfg.get("project_dir", ""), slow=need_slow), 75)
+        code, out = self._ssh(look_command(self.cfg.get("project_dir", ""), slow=need_slow, profile=self.cfg["profile"], prefix=self.cfg["job_prefix"], partitions=self.cfg["partitions"], dirs=self.cfg["job_dirs"]), 75)
         with self.lock:
             if code or "@@squeue" not in out:
                 self.error = (out or "no answer")[:200]; self.fails += 1
@@ -651,7 +727,7 @@ class Cluster:
                 if need_slow and any(k in sec for k in SLOW_SECTIONS):
                     self.slow_text = {k: sec[k] for k in SLOW_SECTIONS if k in sec}; self.slow_at = self.now(); self._save_cache()
                 text = out if need_slow else out + "".join(f"\n@@{k}\n{v}" for k, v in self.slow_text.items())
-                self.snap = snapshot_from(text, self.cfg.get("project_dir", ""), self.own_jobs(), self.now()); self.snap_at = self.now()
+                self.snap = snapshot_from(text, self.cfg.get("project_dir", ""), self.own_jobs(), self.now(), self.cfg["profile"], set(self.cfg["avoid_nodes"])); self._tag_via(self.snap); self.snap_at = self.now()
                 self.snap["slow_at"] = self.slow_at
                 self._see_jobs(self.snap["jobs"], full=True)
                 if need_slow: self._see_disks(self.snap)
@@ -705,12 +781,12 @@ class Cluster:
             if snap:
                 rec = self.cfg.get("dismissed", {})
                 snap = dict(snap, problems=[dict(p, dismissed=dismissed(p, rec.get(p.get("key")))) for p in snap.get("problems", [])])
-            return {"snapshot": snap, "at": self.snap_at, "error": self.error, "config": self.cfg, "events": list(reversed(self.events[-30:])),
+            return {"snapshot": snap, "label": self.cfg.get("label"), "profile": self.cfg.get("profile"), "at": self.snap_at, "error": self.error, "config": self.cfg, "events": list(reversed(self.events[-30:])),
                     "model_server_jobs": sorted(self.own_jobs()), "now": self.now(), "next_refresh": self.refresh_at(), "history": self.hist_cache}
 
     # --- the watch: the queue only, and what changed
     def watch_once(self):
-        jobs_code, out = self.w.ssh(self.cfg["host"], QUEUE_COMMAND, 40)
+        jobs_code, out = self._ssh(self._queue_command(), 40)
         if jobs_code:
             with self.lock:
                 self.fails += 1; self.next_look = self.now() + BACKOFF_S[min(self.fails, len(BACKOFF_S)) - 1]; self.error = (out or "")[:200]
@@ -743,7 +819,7 @@ class Cluster:
         if gone: self._how_ended(gone, names)
 
     def _how_ended(self, ids, names):
-        code, out = self.w.ssh(self.cfg["host"], ended_command(ids), 40)
+        code, out = self._ssh(ended_command(ids), 40)
         rows = {r["id"]: r for r in parse_sacct(out)} if not code else {}
         for i in ids:
             r = rows.get(i)
@@ -765,7 +841,7 @@ class Cluster:
     def _triage(self, jid, state, exit_code):
         """Why a job went wrong: the cluster's own `h2 diagnose`, what the output says, and (if switched on) a model's plain explanation."""
         try:
-            code, diag = self.w.ssh(self.cfg["host"], "h2 diagnose " + shlex.quote(jid) + " 2>&1 | head -70", 60)
+            code, diag = self._ssh(self._explain_command("diagnose", jid), 60)
         except Exception:
             code, diag = 1, ""
         diag = diag if not code else ""
@@ -832,7 +908,7 @@ class Cluster:
             ok = abs(q["used_kb"] - mk["used_kb"]) < SAME_KB and abs((q.get("files") or 0) - (mk.get("files") or 0)) < SAME_FILES
             return ok, "the quota has not moved" if ok else "the quota moved"
         if q: return False, "no earlier quota to compare"
-        code, out = self.w.ssh(self.cfg["host"], f"timeout 25 find {shlex.quote(st['path'])} -maxdepth 4 -newermt @{int(st['measured_at'])} -print -quit 2>/dev/null | head -n 1; true", 40)
+        code, out = self._ssh(f"timeout 25 find {shlex.quote(st['path'])} -maxdepth 4 -newermt @{int(st['measured_at'])} -print -quit 2>/dev/null | head -n 1; true", 40)
         if code: return False, "could not check"
         return (not out.strip()), ("nothing modified since" if not out.strip() else "something was modified")
 
@@ -876,7 +952,7 @@ class Cluster:
 
     def _own(self, name):
         """A job Orbit started for itself (a model server, a disk measurement): its news is not announced here."""
-        return str(name).startswith(DU_JOB) or name in self.own_jobs()
+        return str(name).startswith((DU_JOB, "orbit-nasbackup", "MP_nasbackup")) or name in self.own_jobs()        # Orbit's own batch jobs (disk measuring, the NAS backup)
 
     def known_list(self):
         with self.lock: return [dict(v, id=k) for k, v in self.known.items()]
@@ -890,7 +966,7 @@ class Cluster:
         levels = {}
         for q in snap.get("storage", []):
             if q.get("pct") is not None: levels[q["label"]] = q["pct"]
-        for d in snap.get("shared", []): levels["Project disk"] = d["pct"]
+        for d in snap.get("shared", []): levels[d.get("label") or "Project disk"] = d["pct"]
         for name, pct in levels.items():
             new, old = disk_level(pct), self.disk_state.get(name, "ok")
             if new != "ok" and (old == "ok" or (old == "warn" and new == "bad")):
@@ -925,7 +1001,7 @@ class Cluster:
         """Read the end of every running job's output and say what looks wrong, once per kind per job."""
         with self.lock: ids = [i for i, j in self.known.items() if j["state"] == "RUNNING" and not self._own(j["name"])]
         if not ids: return
-        code, out = self.w.ssh(self.cfg["host"], outputs_command(ids), 60)
+        code, out = self._ssh(outputs_command(ids), 60)
         if code: return
         chunks = re.split(r"^@@out (\S+)\s*$", out, flags=re.M)
         for jid, text in zip(chunks[1::2], chunks[2::2]):
@@ -941,16 +1017,18 @@ class Cluster:
 
     def processes(self):
         """Your processes on the login node (the number that decides whether it can start a shell), oldest first."""
-        code, out = self.w.ssh(self.cfg["host"], PS_COMMAND, 30)
+        if self.plain: return []            # the login node of an account other people share: its processes are not mine to list or stop
+        code, out = self._ssh(PS_COMMAND, 30)
         if code: raise RuntimeError(out[:200] or "the cluster did not answer")
         return parse_ps(out)
 
     def stop_process(self, pid):
+        if self.plain: raise ValueError("processes are not listed on this cluster: the login is shared")
         pid = int(pid)
         mine = {p["pid"]: p for p in self.processes()}
         if pid not in mine: raise ValueError("that is not one of your processes on the login node")
         if mine[pid]["system"]: raise ValueError("that process keeps your login working: leave it")
-        code, out = self.w.ssh(self.cfg["host"], f"kill {pid} 2>&1", 30)
+        code, out = self._ssh(f"kill {pid} 2>&1", 30)
         if code: raise RuntimeError(out[:200] or "kill failed")
         self._add_event("process", f"You stopped process {pid} ({mine[pid]['cmd'][:60]})", None)
         return True
@@ -960,7 +1038,7 @@ class Cluster:
         days = max(1, min(90, int(days or 7)))
         with self.lock: cached = self.hist_cache.get(str(days))
         if cached and not refresh: return dict(cached, cached=True)
-        code, out = self.w.ssh(self.cfg["host"], history_command(days), 90)
+        code, out = self._ssh(history_command(days, self.cfg.get("job_prefix", ""), self.cfg.get("job_dirs") or ()), 90)
         if code: raise RuntimeError(out[:200] or "the cluster did not answer")
         res = dict(summarize_history(out), days=days, read_at=self.now())
         with self.lock: self.hist_cache[str(days)] = res; self._save_cache()
@@ -990,6 +1068,7 @@ class Cluster:
         if text: self.notify("Cluster this morning", text)
 
     def du_roots(self):
+        if self.plain: return {}
         pd = self.cfg.get("project_dir") or ""
         return {"home": "$HOME", "scratch": "$SCRATCH", **({"mine": shlex.quote(pd) + "/$USER", "lab": shlex.quote(pd)} if pd else {})}
 
@@ -1002,21 +1081,22 @@ class Cluster:
 
     def du_start(self, which):
         """Measure what is directly inside a place, as a small batch job (never on the login node). -> {job, path}"""
+        if self.plain: raise ValueError("folder sizes are not measured on this cluster: it would submit a job on a shared account")
         target = self._du_target(which)
         guard = ('P=$(readlink -f -- ' + target + ' 2>/dev/null) || exit 4; case "$P" in "$HOME"|"$HOME"/*|"$SCRATCH"|"$SCRATCH"/*'
                  + ("|" + shlex.quote(self.cfg["project_dir"]) + "|" + shlex.quote(self.cfg["project_dir"]) + "/*" if self.cfg.get("project_dir") else "")
                  + ') ;; *) echo "not inside your home, scratch or the lab folder"; exit 3;; esac; ')
-        code, path = self.w.ssh(self.cfg["host"], guard + 'echo "$P"', 30)
+        code, path = self._ssh(guard + 'echo "$P"', 30)
         path = path.strip().splitlines()[-1] if path.strip() else ""
         if code or not path.startswith("/"): raise ValueError(path or "that folder cannot be measured")
         key = du_key(path)
-        code, run = self.w.ssh(self.cfg["host"], f'squeue -u $USER -h -n {DU_JOB}{key} -o "%i"', 30)
+        code, run = self._ssh(f'squeue -u $USER -h -n {DU_JOB}{key} -o "%i"', 30)
         if not code and run.strip(): return {"job": run.split()[0], "path": path, "already": True}
         import base64
         b64 = base64.b64encode(du_script(key, path, 2 if which == "lab" else 4, files=(which != "lab")).encode()).decode()
         cmd = (f'mkdir -p {DU_DIR} && printf %s {b64} | base64 -d > {DU_DIR}/{key}.sh && '
                f'sbatch --parsable -J {DU_JOB}{key} -t 12:00:00 -c 4 --mem=2G -o /dev/null {DU_DIR}/{key}.sh')
-        code, out = self.w.ssh(self.cfg["host"], cmd, 40)
+        code, out = self._ssh(cmd, 40)
         jid = out.strip().split(";")[0].strip()
         if code or not jid.isdigit(): raise RuntimeError("the cluster refused the measuring job: " + out[:200])
         with self.lock:
@@ -1029,6 +1109,7 @@ class Cluster:
         """What a measurement has so far: rows, how far along, when it was measured, and (for the lab folder) who uses it.
         The last reading is kept here, with the time it was read: it is returned as it is unless `refresh` is asked for (or there is none),
         because reading the cluster for it can take many seconds on a busy login node."""
+        if self.plain: raise ValueError("folder sizes are not measured on this cluster")
         target = self._du_target(which)
         ck = str(which)
         with self.lock: cached = self.du_cache.get(ck)
@@ -1037,7 +1118,7 @@ class Cluster:
         cmd = ('P=$(timeout 20 readlink -f -- ' + target + ' 2>/dev/null) || exit 4; echo "@@path"; echo "$P"; K=$(printf %s "$P" | sha1sum | cut -c1-10); '
                f'O={DU_DIR}; echo "@@state"; for f in start done total; do printf "%s=" $f; cat $O/$K.$f 2>/dev/null || echo; done; '
                f'echo "@@job"; timeout 20 squeue -u $USER -h -n {DU_JOB}$K -o "%i|%T" 2>&1; echo "@@tsv"; cat $O/$K.tsv 2>/dev/null; echo "@@tmp"; cat $O/$K.tmp 2>/dev/null; echo "@@files"; cat $O/$K.files 2>/dev/null; echo "@@ext"; cat $O/$K.ext 2>/dev/null; echo "@@sum"; cat $O/$K.sum 2>/dev/null; true')
-        code, out = self.w.ssh(self.cfg["host"], cmd, 60)
+        code, out = self._ssh(cmd, 60)
         if code: raise RuntimeError(out[:200] or "the cluster did not answer")
         sec = split_sections(out)
         path = (sec.get("path") or "").strip()
@@ -1059,7 +1140,7 @@ class Cluster:
     def efficiency(self, jid):
         jid = str(jid)
         if not re.fullmatch(r"\d+(_\d+)?", jid): raise ValueError("not a job id")
-        code, out = self.w.ssh(self.cfg["host"], efficiency_command(jid), 40)
+        code, out = self._ssh(efficiency_command(jid), 40)
         if code: raise RuntimeError(out[:200] or "the cluster did not answer")
         return efficiency_of(out)
 
@@ -1074,7 +1155,7 @@ class Cluster:
         jid = str(jid)
         ev = next((e for e in reversed(self.events) if e.get("job") == jid and e.get("detail")), None)
         job = next((j for j in ((self.snap or {}).get("jobs") or []) + ((self.snap or {}).get("recent") or []) if j["id"] == jid), None)
-        parts = [f"Help me with Slurm job {jid} on HPC."]
+        parts = [f"Help me with Slurm job {jid} on {self.cfg.get('label') or 'HPC'}."]
         if job: parts.append("Record: " + json.dumps({k: v for k, v in job.items() if v not in (None, "")}))
         if ev: parts.append("What Orbit saw: " + ev["text"] + ("\nLikely cause: " + ev["cause"]["title"] + ". " + ev["cause"].get("fix", "") if ev.get("cause") else "") + "\n\nDiagnosis and the end of its output:\n" + ev["detail"])
         else:
@@ -1085,25 +1166,39 @@ class Cluster:
 
     # --- things you do
     def _own_job_ids(self):
-        code, out = self.w.ssh(self.cfg["host"], 'squeue -u $USER -h -o "%i"', 30)
-        return set(out.split()) if not code else set()
+        if not self.cfg.get("job_prefix") and not self.cfg.get("job_dirs"):
+            code, out = self._ssh('squeue -u $USER -h -o "%i"', 30)
+            return set(out.split()) if not code else set()
+        code, out = self._ssh('squeue -u $USER -h -o "%i|%j|%Z" 2>&1' + self._mine(), 30)      # on a shared account: only the jobs with my prefix
+        return {l.split("|")[0] for l in out.splitlines() if "|" in l} if not code else set()
 
     def cancel(self, jid):
         jid = str(jid)
         if not re.fullmatch(r"\d+(_\d+)?", jid): raise ValueError("not a job id")
-        if jid.split("_")[0] not in {i.split("_")[0] for i in self._own_job_ids()}: raise ValueError("that is not one of your jobs in the queue")
-        code, out = self.w.ssh(self.cfg["host"], "scancel " + shlex.quote(jid), 30)
+        if jid.split("_")[0] not in {i.split("_")[0] for i in self._own_job_ids()}:
+            raise ValueError("that is not one of your jobs in the queue" + (f" (only jobs named {self.cfg['job_prefix']}… are yours on this cluster)" if self.cfg.get("job_prefix") else ""))
+        code, out = self._ssh("scancel " + shlex.quote(jid), 30)
         if code: raise RuntimeError(out[:200] or "scancel failed")
         self._add_event("cancelled", f"You cancelled job {jid}", jid)
         return self.look(force=True)
+
+    def _explain_command(self, kind, jid):
+        """What to ask the cluster about a job. HPC has `h2` for it; a plain Slurm login gets the scheduler's own record and accounting."""
+        j = shlex.quote(jid)
+        if not self.plain: return {"why": "h2 why-pending ", "diagnose": "h2 diagnose ", "job": "h2 job "}[kind] + j + " 2>&1 | head " + ("-70" if kind == "diagnose" else "-80")
+        rec = f'echo "## Job {jid}"; scontrol show job {j} 2>&1 | tr " " "\\n" | grep -E "^(JobName|JobState|Reason|ExitCode|RunTime|TimeLimit|NodeList|ReqNodeList|NumCPUs|MinMemoryNode|TresPerNode|SubmitTime|StartTime|EndTime|Partition|StdOut|StdErr)=" ; '
+        acct = f'echo; echo "## Accounting"; sacct -j {j} -P -o JobID,State,ExitCode,Elapsed,Timelimit,ReqMem,MaxRSS,AllocCPUS,NodeList 2>&1 | head -20; '
+        tail = ('p=$(scontrol show job -o ' + j + ' 2>/dev/null | tr " " "\\n" | grep "^StdErr=" | head -1 | cut -d= -f2); '
+                '[ -n "$p" ] && [ -f "$p" ] && { echo; echo "## End of $p"; tail -n 30 "$p"; }; true')
+        if kind == "why": return f'echo "## Why it waits"; squeue -j {j} -h -o "state %T, reason %r, estimated start %S, partition %P, node list %N" 2>&1; ' + rec + ' true'
+        return rec + acct + tail
 
     def explain(self, jid, kind):
         """`h2 why-pending` for a job waiting, `h2 diagnose` for one that went wrong: the cluster's own explanation."""
         jid = str(jid)
         if not re.fullmatch(r"\d+(_\d+)?", jid): raise ValueError("not a job id")
-        cmd = {"why": "h2 why-pending ", "diagnose": "h2 diagnose ", "job": "h2 job "}.get(kind)
-        if not cmd: raise ValueError("unknown question")
-        code, out = self.w.ssh(self.cfg["host"], cmd + shlex.quote(jid) + " 2>&1 | head -80", 60)
+        if kind not in ("why", "diagnose", "job"): raise ValueError("unknown question")
+        code, out = self._ssh(self._explain_command(kind, jid), 60)
         if code: raise RuntimeError(out[:200] or "the cluster did not answer")
         return out
 
@@ -1114,14 +1209,15 @@ class Cluster:
         n = max(10, min(400, int(lines)))
         cmd = ('p=$(scontrol show job -o ' + shlex.quote(jid) + ' 2>/dev/null | tr " " "\\n" | grep "^StdOut=" | head -1 | cut -d= -f2); '
                '[ -n "$p" ] && [ -f "$p" ] && { echo "== $p"; tail -n ' + str(n) + ' "$p"; } || echo "(no output file: the job is no longer in the scheduler\'s memory, or it writes nowhere)"')
-        code, out = self.w.ssh(self.cfg["host"], cmd, 40)
+        code, out = self._ssh(cmd, 40)
         if code: raise RuntimeError(out[:200] or "the cluster did not answer")
         return out
 
     def summary_text(self):
         """The picture as plain text, for a chat about it."""
         s = (self.snap or {})
-        lines = ["HPC right now (read %ds ago):" % int(self.now() - self.snap_at) if self.snap else "HPC (no look yet):"]
+        lab = self.cfg.get("label") or "HPC"
+        lines = [lab + " right now (read %ds ago):" % int(self.now() - self.snap_at) if self.snap else lab + " (no look yet):"]
         for j in s.get("jobs", []): lines.append(f"- job {j['id']} {j['name']}: {j['state']}{(' on ' + j['node']) if j['node'] else ''}{(' (' + j['reason'] + ')') if j['reason'] else ''}, {j['gpus']} GPU, {j['cpus']} CPU")
         if not s.get("jobs"): lines.append("- no jobs in the queue")
         for q in s.get("storage", []): lines.append(f"- {q['label']}: {q['pct']}% of its quota" if q.get("pct") is not None else f"- {q['label']}: {q['filesystem']}")

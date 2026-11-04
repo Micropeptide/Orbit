@@ -34,7 +34,7 @@ LOG_KEEP = 60
 
 
 PROVIDER_LABELS = {"claude": "Claude (your plan)", "codex": "Codex (your ChatGPT)", "antigravity": "Antigravity (your Google)",
-                   "muse-code": "Muse Code", "meta": "Meta Model API", "opencode-go": "OpenCode Go", "opencode-zen": "OpenCode Zen",
+                   "muse-code": "Muse Code", "grok": "Grok (xAI)", "meta": "Meta Model API", "opencode-go": "OpenCode Go", "opencode-zen": "OpenCode Zen",
                    "local": "This Mac (local model)", "deepseek": "DeepSeek", "gemini": "Gemini API", "anthropic": "Anthropic API"}
 
 
@@ -45,7 +45,7 @@ def provider_of(mid):
     if head in ("harness", "harness-direct", "codex"):
         p = rest.split("/", 1)[0]
         return "codex" if head == "codex" and p == "chatgpt" else p
-    return {"claude-cli": "claude", "codex-cli": "codex", "agy-cli": "antigravity", "muse-cli": "muse-code",
+    return {"claude-cli": "claude", "codex-cli": "codex", "agy-cli": "antigravity", "muse-cli": "muse-code", "grok-cli": "grok",
             "claude-qwen-cli": "local", "opencode-cli": "opencode-go"}.get(head, head)
 
 

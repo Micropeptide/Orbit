@@ -13,57 +13,74 @@
 <script defer src="/vendor/katex/dist/contrib/auto-render.min.js"></script>
 <script defer src="/vendor/mermaid/dist/mermaid.min.js"></script>
 <link rel="manifest" href="/manifest.json">
-<meta name="theme-color" content="#2c5bf0"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#f7f8fb"><meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
 
+<svg width=0 height=0 style="position:absolute" aria-hidden=true focusable=false><defs>
+ <symbol id=i-plus viewBox="0 0 16 16"><path d="M8 3.2v9.6M3.2 8h9.6"/></symbol>
+ <symbol id=i-chev viewBox="0 0 16 16"><path d="M4.5 6.5 8 10l3.5-3.5"/></symbol>
+ <symbol id=i-search viewBox="0 0 16 16"><circle cx=7 cy=7 r=4.3 /><path d="m10.3 10.3 3.2 3.2"/></symbol>
+ <symbol id=i-crew viewBox="0 0 16 16"><path d="M2.8 7.2a5.2 5.2 0 0 1 9.2-2.4L13.2 6M13.2 3v3h-3M13.2 8.8a5.2 5.2 0 0 1-9.2 2.4L2.8 10M2.8 13v-3h3"/></symbol>
+ <symbol id=i-cluster viewBox="0 0 16 16"><rect x=2.5 y=3 width=11 height=4 rx=1.2 /><rect x=2.5 y=9 width=11 height=4 rx=1.2 /><path d="M5 5h.01M5 11h.01"/></symbol>
+ <symbol id=i-chat viewBox="0 0 16 16"><path d="M3 4.6A1.6 1.6 0 0 1 4.6 3h6.8A1.6 1.6 0 0 1 13 4.6v4.8a1.6 1.6 0 0 1-1.6 1.6H7.2L4 13.3V11a1.6 1.6 0 0 1-1-1.5z"/></symbol>
+ <symbol id=i-files viewBox="0 0 16 16"><path d="M2.5 5.2a1 1 0 0 1 1-1h2.9l1.3 1.5h4.8a1 1 0 0 1 1 1v5.1a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1z"/></symbol>
+ <symbol id=i-lib viewBox="0 0 16 16"><path d="M2.8 3.4h3.6A1.6 1.6 0 0 1 8 5v8.4a1.4 1.4 0 0 0-1.4-1.2H2.8zM13.2 3.4H9.6A1.6 1.6 0 0 0 8 5v8.4a1.4 1.4 0 0 1 1.4-1.2h3.8z"/></symbol>
+ <symbol id=i-clock viewBox="0 0 16 16"><circle cx=8 cy=8 r=5.4 /><path d="M8 5v3.2l2.1 1.2"/></symbol>
+ <symbol id=i-trash viewBox="0 0 16 16"><path d="M3 4.6h10M6.4 4.6V3.2h3.2v1.4M4.4 4.6l.6 8.2h6l.6-8.2M7 7v3.6M9 7v3.6"/></symbol>
+ <symbol id=i-sliders viewBox="0 0 16 16"><path d="M2.8 5h5.6M11.6 5h1.6M2.8 11h1.6M7.6 11h5.6"/><circle cx=10 cy=5 r=1.6 /><circle cx=6 cy=11 r=1.6 /></symbol>
+ <symbol id=i-gear viewBox="0 0 16 16"><circle cx=8 cy=8 r=2.2 /><path d="M8 2.4v1.7M8 11.9v1.7M2.4 8h1.7M11.9 8h1.7M4 4l1.2 1.2M10.8 10.8 12 12M4 12l1.2-1.2M10.8 5.2 12 4"/></symbol>
+ <symbol id=i-dots viewBox="0 0 16 16"><path d="M3.8 8h.01M8 8h.01M12.2 8h.01" stroke-width=2.4 /></symbol>
+ <symbol id=i-power viewBox="0 0 16 16"><path d="M8 2.6v5M4.7 4.6a5 5 0 1 0 6.6 0"/></symbol>
+ <symbol id=i-panel viewBox="0 0 16 16"><rect x=2.5 y=3.2 width=11 height=9.6 rx=1.8 /><path d="M6.4 3.2v9.6"/></symbol>
+ <symbol id=i-pin viewBox="0 0 16 16"><path d="M9.6 2.8 13.2 6.4l-1.5.4-2.2 2.2.2 2.1-1 1L5.3 9.1 2.8 11.6M6.4 6.4l-.5-.4 1-1 2.1.2"/></symbol>
+</defs></svg>
 <aside id=side>
   <div class=brand><img class=mark src="/icons/orbit-64.png?v=2" alt="" width=20 height=20>
    <span class=wordmark>Orbit</span><span class="dot" id=dot title="model server"></span>
    <small id=badge>local</small>
-   <button class=iconbtn2 id=srvmenu title="Local model server: start, stop, restart">⏻</button>
-   <button class=iconbtn2 id=sidehide title="Narrow the sidebar to icons, then hide it (☰ cycles it back)">«</button></div>
+   <button class=iconbtn2 id=srvmenu title="Local model server: start, stop, restart"><svg class=si><use href="#i-power"/></svg></button>
+   <button class=iconbtn2 id=sidehide title="Narrow the sidebar to icons, then hide it (☰ cycles it back)"><svg class=si><use href="#i-panel"/></svg></button></div>
   <div class=srvbar id=srvbar style="display:none">
     <button id=srv_start>Start</button><button id=srv_stop>Stop</button><button id=srv_restart>Restart</button>
   </div>
   <div class=sidetop>
-   <button class=newbtn id=newchat>+ New chat</button>
-   <button class=newbtn id=newwith title="New chat with a model, folder and permission mode — or a saved preset">▾</button>
+   <button class=newbtn id=newchat title="Start a new chat (⌘K)"><svg class=si><use href="#i-plus"/></svg><span class=lbl>New chat</span></button>
+   <button class=newbtn id=newwith title="New chat with a model, folder and permission mode — or a saved preset (⇧⌘K)"><svg class=si><use href="#i-chev"/></svg></button>
   </div>
-  <button class=searchbtn id=searchbtn title="Search chats, messages, files and commands"><span>⌕ Search</span><kbd>⌘P</kbd></button>
-  <button class=searchbtn id=crewbtn title="A builder and a reviewer chat that keep improving a project, round after round, until you stop them"><span>⟳ Crew — build · review · improve</span></button>
-  <button class=searchbtn id=clusterbtn title="Your jobs, the queue, the disk, the GPUs and what went wrong on the cluster"><span>▦ Cluster — jobs · disk · GPUs</span></button>
+  <div class=sidenav>
+   <button class=navrow id=searchbtn title="Search chats, messages, files and commands"><svg class=si><use href="#i-search"/></svg><span class=lbl>Search</span><kbd>⌘P</kbd></button>
+   <button class=navrow id=crewbtn title="A builder and a reviewer chat that keep improving a project, round after round, until you stop them"><svg class=si><use href="#i-crew"/></svg><span class=lbl>Crew</span></button>
+   <button class=navrow id=clusterbtn title="Your jobs, the queue, the disk, the GPUs and what went wrong on the cluster"><svg class=si><use href="#i-cluster"/></svg><span class=lbl>Cluster</span></button>
+  </div>
   <div class=navtabs>
-    <button id=nav_chats class=on>Chats</button>
-    <button id=nav_files>Files</button>
-    <button id=nav_lib>Library</button>
-    <button id=nav_tasks title="messages scheduled in any chat, and tasks that run on their own">Scheduled</button>
-    <button id=nav_trash>Trash</button>
+    <button id=nav_chats class=on title="Chats"><svg class=si><use href="#i-chat"/></svg><span>Chats</span></button>
+    <button id=nav_files title="Files your chats made"><svg class=si><use href="#i-files"/></svg><span>Files</span></button>
+    <button id=nav_lib title="Library: prompts, skills and knowledge"><svg class=si><use href="#i-lib"/></svg><span>Library</span></button>
+    <button id=nav_tasks title="messages scheduled in any chat, and tasks that run on their own"><svg class=si><use href="#i-clock"/></svg><span>Scheduled</span></button>
+    <button id=nav_trash title="Bin"><svg class=si><use href="#i-trash"/></svg><span>Trash</span></button>
   </div>
+  <div class=listhead id=listhead>
+   <button class=pickbtn id=projpick title="Show one project's chats, or all of them"><span class=gsw id=pickdot></span><span class=nm id=chatslbl>All chats</span><span class=ct id=chatct></span><svg class=si><use href="#i-chev"/></svg></button>
+   <button class=lhbtn id=findbtn title="Filter by title (⌘F)"><svg class=si><use href="#i-search"/></svg></button>
+   <button class=lhbtn id=viewbtn title="Which chats to show, and how to group them"><svg class=si><use href="#i-sliders"/></svg></button>
+  </div>
+  <div class=filterrow id=filterrow style="display:none"><input class=search id=search placeholder="Filter by title" autocomplete=off spellcheck=false>
+   <button class=lhbtn id=filterx title="Clear the filter">✕</button></div>
+  <select id=filtersel style="display:none"><option value=active>Active</option><option value=pinned>Pinned</option><option value=archived>Archived</option>
+     <option value=all>All</option><option value=attention>Needs attention</option></select>
+  <select id=groupsel style="display:none"><option value=date>By date</option><option value=project>By project</option></select>
   <div class=sidescroll id=sidescroll>
    <div id=sidestatus></div>
-   <div class=sechead data-sec=projects><span class=caret>▾</span><span class=lbl>Projects</span>
-    <span class=ct id=projct></span><button class=secbtn id=addproj title="New project">+</button></div>
-   <div class=secbody data-sec=projects><div id=projwrap></div></div>
-   <div class=sechead data-sec=chats><span class=caret>▾</span><span class=lbl id=chatslbl>Chats</span>
-    <span class=ct id=chatct></span>
-    <select class=filtersel id=filtersel title="Which chats">
-     <option value=active>Active</option><option value=pinned>Pinned</option><option value=archived>Archived</option>
-     <option value=all>All</option><option value=attention>Needs attention</option></select>
-    <select class=filtersel id=groupsel title="How the chats are grouped">
-     <option value=date>By date</option><option value=project>By project</option></select></div>
-   <div class=secbody data-sec=chats>
-    <input class=search id=search placeholder="Filter by title  (⌘F)">
-    <div class=tagrow id=tagrow></div>
-    <div class=slist id=slist></div>
-   </div>
+   <div class=tagrow id=tagrow></div>
+   <div class=slist id=slist></div>
    <div id=extsecs></div>
    <div id=sharedsecs></div>
   </div>
   <div class=foot>
-    <a id=opensettings title="Settings (⌘,)">⚙ Settings</a>
-    <a id=footmore title="Memory, prompts, doctor, shortcuts, help">⋯ More</a>
+    <a id=opensettings title="Settings (⌘,)"><svg class=si><use href="#i-gear"/></svg><span>Settings</span></a>
+    <a id=footmore title="Memory, prompts, doctor, shortcuts, help"><svg class=si><use href="#i-dots"/></svg><span>More</span></a>
     <span id=fmodel></span>
     <span style="display:none"><a id=openmem></a><a id=openprompts></a><a id=opendoctor></a><a id=openkeys></a><a id=openabout></a></span>
   </div>
@@ -94,10 +111,14 @@
   <div id=trash class=fileview style="display:none;overflow-y:auto"></div>
   <div id=shared style="display:none;padding:0;overflow:hidden;flex:1 1 auto;min-height:0;position:relative"></div>
   <div class=composer><div class=cwrap>
+    <div id=rail class=rail>
+    <div class=activity id=activity style="display:none"></div>
     <div class=statusline id=statusline style="display:none"></div>
     <div class=goalbar id=goalbar style="display:none"></div>
     <div class=plandock id=plandock style="display:none"></div>
     <div class=queuebox id=queuebox style="display:none"></div>
+    <div class=railtasks id=railtasks style="display:none"></div>
+    </div>
     <div class=chips id=chips></div>
     <div class=enginebar id=enginebar>
     <button id=engchip class=engchip title="Engine, model, account and effort for this chat"><span class=engname></span><span class=engmodel></span><span class=engextra></span><span class=engcaret>▾</span></button>
@@ -113,9 +134,11 @@
     </div>
     <button id=hmode style="display:none"></button><button id=cmode style="display:none"></button>
     <button id=opbadge class=opbadge style="display:none" title="cheaper hours for this model — click for details"></button>
+    <span id=modehint></span>
     <span class=ebsp></span>
     <span class=ctx id=ctxbox style="display:none">
       <span class=bar><i id=ctxbar></i></span><span id=ctxtxt></span></span>
+    <button class=qhelp id=qhelp title="keyboard shortcuts (?)" aria-label="keyboard shortcuts">?</button>
     </div>
     <div class=row>
       <button class=iconbtn id=attach title="Attach file or image">+</button>
@@ -124,7 +147,7 @@
       <button class=sendbtn id=send>Send</button>
       <button class=stopbtn id=stopgen style="display:none">Stop</button>
     </div>
-    <div class=hint><span id=modehint></span><span id=keyhint>Enter send · Shift+Enter newline</span><span id=tools></span><span class=qhelp id=qhelp title="keyboard shortcuts">? for shortcuts</span></div>
+    <div class=hint><span id=keyhint>Enter send · Shift+Enter newline</span><span id=tools></span></div>
   </div></div>
   <div class=termdock id=termdock style="display:none"><div class=termgrip id=termgrip title="drag to resize"></div>
     <div class=termbar id=termbar></div><div class=termbody id=termbody></div></div>
@@ -136,5 +159,6 @@
 <script src="/app2.js"></script>
 <script src="/app3.js"></script>
 <script src="/app4.js"></script>
+<script src="/app5.js"></script>
 </body>
 </html>

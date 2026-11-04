@@ -1,7 +1,7 @@
 # The sandbox copy of Orbit
 
 `mac/` is a copy of the live Orbit's code (no data). Run it with `scripts/sandbox start` and it is a complete Orbit on
-`http://127.0.0.1:8990` with its own empty data folder (`~/Rdirectory/Crew/orbit-sandbox`), so you can change anything, click through
+`http://127.0.0.1:8990` with its own empty data folder (`~/Crew/orbit-sandbox`), so you can change anything, click through
 it, break it and reset it (`scripts/sandbox reset`) without touching the person's real chats, settings, keys or running models.
 
 What is cut off (all of it by environment, plus three small guards in the code under `ORBIT_SANDBOX=1`):
@@ -9,7 +9,7 @@ What is cut off (all of it by environment, plus three small guards in the code u
 | | live Orbit | sandbox |
 |---|---|---|
 | port | 8899 (and 8443 through Tailscale) | 8990, loopback only; remote access is forced off: no Tailscale, no LAN, no Bonjour |
-| data (`ORBIT_HOME`) | `~/Rdirectory/Qwen` | `~/Rdirectory/Crew/orbit-sandbox` |
+| data (`ORBIT_HOME`) | `~/Rdirectory/Qwen` | `~/Crew/orbit-sandbox` |
 | `HOME` | the person's | `…/orbit-sandbox/home`: so it cannot see their Claude Code, Codex or OpenCode chats, keys, ssh config, iCloud |
 | harness gateway | 8897 | 8997 |
 | the local model server | 8011 | `ORBIT_MODEL_PORT=8991`: nothing listens there until you start a mock |

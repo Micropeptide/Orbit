@@ -5,7 +5,7 @@ Imported by `orbit` (CLI) and `orbit-ui` (web). Every piece of state lives in on
 folder — the one this file sits in — so the whole install is movable and
 inspectable. Set ORBIT_HOME to keep data somewhere other than the code.
 """
-import atexit, fnmatch, hashlib, json, os, subprocess, sys, threading, time, urllib.request, urllib.error, warnings
+import atexit, collections, fnmatch, hashlib, json, os, subprocess, sys, threading, time, urllib.request, urllib.error, warnings
 warnings.filterwarnings("ignore")
 
 _HERE     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -668,7 +668,8 @@ class MCP:
                                else "no command to start")
         env = dict(os.environ); env.update(self.cfg.get("env") or {})
         # what the server says as it fails is the only clue to why: kept, not discarded
-        self.errlog = os.path.join(LOGS, f"mcp-{"".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in self.name)[:60]}.log")
+        safe_name = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in self.name)[:60]    # (not inside the f-string: Python before 3.12 cannot nest its quotes)
+        self.errlog = os.path.join(LOGS, f"mcp-{safe_name}.log")
         err = open(self.errlog, "w")
         try:
             self.p = subprocess.Popen([self.cfg["command"], *self.cfg.get("args", [])],
@@ -1860,6 +1861,10 @@ def _cli_account_for(backend, model, messages, tried=()):
         # Muse Code signs in with Meta's browser flow, or reads META_API_KEY: the saved key goes in for this run
         k = MAPI.api_key(secrets_load())
         return ({"META_API_KEY": k}, None) if k else None
+    if backend == "grok-cli":
+        # Grok signs in with xAI's browser flow, or reads XAI_API_KEY: a key saved in Orbit goes in for this run
+        k = secrets_load().get("XAI_API_KEY")
+        return ({"XAI_API_KEY": k}, None) if k else None
     if backend != "opencode-cli": return None
     cfg = {}
     if look_enabled("opencode"):         # its eyes: a local MCP server, in OpenCode's own config format
@@ -3103,6 +3108,40 @@ def session_path(sid): return os.path.join(SESSIONS, f"{sid}.json")
 _SESS_CACHE = {"key": None, "val": []}
 
 _SESS_ROWS = {}       # file name -> ((mtime, size), row): only changed chat files are read again
+_SESS_INDEX = {"loaded": False, "saved_at": 0.0}
+
+
+def _sess_index_path():
+    return os.path.join(ROOT, "cache", "sessions-index.json")
+
+
+def _sess_index_load():
+    """The chat list as it was when Orbit last ran, so a restart reads only the chats that changed since. Without it every
+    start parsed every chat file (hundreds of megabytes), and on a busy Mac the sidebar stayed empty for minutes."""
+    if _SESS_INDEX["loaded"]: return
+    _SESS_INDEX["loaded"] = True
+    try:
+        d = json.load(open(_sess_index_path()))
+        if d.get("v") != 1: return
+        for f, ent in (d.get("rows") or {}).items():
+            k = ent.get("k")
+            if isinstance(k, list) and len(k) == 2 and isinstance(ent.get("row"), dict):
+                _SESS_ROWS.setdefault(f, ((k[0], k[1]), ent["row"]))
+    except Exception:
+        pass
+
+
+def _sess_index_save(force=False):
+    if not force and time.time() - _SESS_INDEX["saved_at"] < 20: return
+    _SESS_INDEX["saved_at"] = time.time()
+    try:
+        os.makedirs(os.path.dirname(_sess_index_path()), exist_ok=True)
+        tmp = _sess_index_path() + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump({"v": 1, "rows": {f: {"k": list(h[0]), "row": h[1]} for f, h in _SESS_ROWS.items()}}, fh)
+        os.replace(tmp, _sess_index_path())
+    except Exception:
+        pass
 
 def _activity(meta, msgs, name, path):
     """When a chat was last used, for ordering: the last message you sent. Saves made
@@ -3159,6 +3198,7 @@ def session_list():
     return out
 
 def _session_rows():
+    _sess_index_load()
     # Key on the files themselves — a directory's mtime does NOT change when a
     # file inside it is modified, so pin/archive/tag edits were served stale.
     try:
@@ -3175,9 +3215,11 @@ def _session_rows():
     if key and _SESS_CACHE["key"] == key:
         return list(_SESS_CACHE["val"])
     out = []
+    parsed = 0
     for f, k in stats.items():
         hit = _SESS_ROWS.get(f)
-        if not hit or hit[0] != k:
+        if not hit or tuple(hit[0]) != tuple(k):
+            parsed += 1
             p = os.path.join(SESSIONS, f)
             try: d = json.load(open(p))
             except Exception: continue
@@ -3196,8 +3238,10 @@ def _session_rows():
                    "n": len([m for m in (msgs or []) if isinstance(m, dict) and m.get("role") in ("user", "assistant")])}
             hit = (k, row)
             _SESS_ROWS[f] = hit
+            if parsed % 50 == 0: _sess_index_save()          # progress is kept, so a restart mid-build does not start over
         out.append(dict(hit[1]))
     for f in [f for f in _SESS_ROWS if f not in stats]: _SESS_ROWS.pop(f, None)
+    if parsed: _sess_index_save(force=True)          # the finished list is always kept; only the progress checkpoints are spaced out
     out.sort(key=lambda x: (not x["pinned"],
                             (x.get("order") if x.get("order") is not None else 1e12) if x["pinned"] else 0,
                             -(x["mtime"] or 0)))
@@ -3278,10 +3322,48 @@ def _repair_session(path):
         except ValueError: continue
     return None
 
-def session_load(sid):
+_META = collections.OrderedDict()     # sid -> (file stamp, everything saved with the chat except its messages)
+_META_LOCK = threading.Lock()
+
+
+def _stamp(path):
+    try:
+        s = os.stat(path); return (s.st_mtime_ns, s.st_size)
+    except OSError:
+        return None
+
+
+def _meta_put(sid, stamp, d):
+    if stamp is None or not isinstance(d, dict): return
+    meta = {k: v for k, v in d.items() if k != "messages"}
+    with _META_LOCK:
+        _META[sid] = (stamp, meta); _META.move_to_end(sid)
+        while len(_META) > 64: _META.popitem(last=False)
+
+
+def chat_fields(sid):
+    """What a chat file holds besides its messages (project, model, queue, goal, parent...), read-only. A 40 MB chat was
+    parsed in full each time one of these small fields was wanted, four times to open it; now once per change of the file."""
     path = session_path(sid)
+    stamp = _stamp(path)
+    if stamp is None: return {}
+    with _META_LOCK:
+        hit = _META.get(sid)
+        if hit and hit[0] == stamp: return hit[1]
     try:
         d = json.load(open(path))
+    except (ValueError, OSError):
+        return {}
+    _meta_put(sid, stamp, d)
+    return {k: v for k, v in d.items() if k != "messages"} if isinstance(d, dict) else {}
+
+
+def session_load(sid):
+    path = session_path(sid)
+    stamp = _stamp(path)
+    try:
+        d = json.load(open(path))
+        _meta_put(sid, stamp, d)
     except (ValueError, OSError):
         msgs = _repair_session(path)
         if msgs is None: raise
@@ -5638,9 +5720,6 @@ def context_state(messages=None, sid=None, model=None):
     except Exception: pass
     mx = reported or (spec or {}).get("context") or S["server"].get("context_window") or 1
     if messages is not None:
-        # tool schemas ride along on every request; leaving them out made the
-        # meter read 1% when the real prompt was already 12%
-        est = estimate_tokens(messages) + tool_schema_tokens()
         exact = SESSION_TOKENS.get(sid) if sid else None
         if not exact:
             saved = saved_measurement(messages)
@@ -5649,8 +5728,11 @@ def context_state(messages=None, sid=None, model=None):
                 if saved[1] and not reported: reported = mx = saved[1]
         # a measurement is this chat's own, from a real request, and is cleared when the
         # chat is compacted: it wins over an estimate of Orbit's copy of the transcript,
-        # which for Claude Code and Codex is not what their model sees at all
-        used, kind = (exact, "measured") if exact else (est, "estimated")
+        # which for Claude Code and Codex is not what their model sees at all. The estimate walks every message, so it is
+        # only made when there is nothing measured (opening a 20,000-message chat paid for it every time).
+        # (tool schemas ride along on every request; leaving them out made the meter read 1% when the real prompt was
+        # already 12%)
+        used, kind = (exact, "measured") if exact else (estimate_tokens(messages) + tool_schema_tokens(), "estimated")
     else:
         st = server_status()
         used, kind = st.get("context_used") or 0, "server"
@@ -6607,7 +6689,7 @@ def backup_now(reason="manual"):
     def _filter(ti):
         n = ti.name
         if "__pycache__" in n or n.endswith(".pyc") or "/.history/" in n: return None
-        if not keep_secrets and (n.endswith("secrets.json") or n.endswith(".remote_token")):
+        if not keep_secrets and (n.endswith("secrets.json") or n.endswith(".remote_token") or n.endswith("nas_login.txt")):
             return None
         return ti
     with tarfile.open(tmp, "w:gz") as tar:
@@ -7717,7 +7799,7 @@ def _shell_write_targets(cmd):
 SENSITIVE_READ = ("~/.ssh/id_", "~/.ssh/identity", "~/.aws/credentials", "~/.netrc",
                   "~/.config/gh/hosts.yml", "~/.docker/config.json", "~/.kube/config",
                   "~/Library/Keychains/", "~/.gnupg/")
-_SENSITIVE_READ_NAMES = {"remote-token", "secrets.json", ".env", ".npmrc", ".pypirc",
+_SENSITIVE_READ_NAMES = {"remote-token", "secrets.json", "nas_login.txt", ".env", ".npmrc", ".pypirc",
                          "credentials.json", "token.json"}
 _NETWORK_TOOLS = {"fetch_url", "http_json", "web_search", "download_file", "WebFetch", "WebSearch"}
 

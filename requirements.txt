@@ -11,3 +11,6 @@ numpy>=1.26             # numerics for that same tool
 pandas>=2.0             # tables for that same tool
 anthropic>=1.0          # the Claude API path (unused unless you add a key)
 qrcode>=7.4            # the pairing QR shown in Settings -> Phone
+cryptography>=42.0     # signs and checks shared-project invitations and accounts (imported when Orbit starts)
+PyJWT>=2.8             # phone pairing and shared-project tokens
+openpyxl>=3.1          # reads and writes .xlsx files in chats

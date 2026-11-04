@@ -22,7 +22,7 @@ PORT = int(os.environ.get("ORBIT_UI_PORT") or os.environ.get("QQ_UI_PORT") or 88
 import remote as REMOTE
 import term as TERM
 import worktree as WT
-import collections, re, shutil, subprocess
+import collections, copy, re, shutil, subprocess
 
 def remote_mode():
     return (q.S.get("remote_access") or {}).get("mode", "off")
@@ -607,10 +607,10 @@ class H(http.server.BaseHTTPRequestHandler):
     # What a device limited to chats may not do: settings, keys, permissions, pairing,
     # the servers and everything that installs or changes Orbit itself.
     ADMIN_PREFIXES = ("/api/settings", "/api/secrets", "/api/remote", "/api/devices", "/api/permissions",
-                      "/api/mcp/save", "/api/restart_ui", "/api/server/", "/api/model/provider",
+                      "/api/mcp/save", "/api/grok", "/api/restart_ui", "/api/server/", "/api/model/provider",
                       "/api/model/account", "/api/claude/settings", "/api/claude/skills", "/api/claude/plugins",
                       "/api/codex/settings", "/api/plugins", "/api/skills/", "/api/agents/", "/api/instructions",
-                      "/api/backup", "/api/self", "/api/update", "/api/quiet", "/api/bionic", "/api/term", "/api/crew", "/api/selfimprove", "/api/servers", "/api/cluster", "/api/collabhost", "/api/account",
+                      "/api/backup", "/api/self", "/api/update", "/api/quiet", "/api/bionic", "/api/term", "/api/crew", "/api/selfimprove", "/api/servers", "/api/cluster", "/api/nasbackup", "/api/ccfeatures", "/api/collabhost", "/api/account",
                       "/shared/")             # a shared project is opened as its owner (Orbit adds the owner's sign-in), so a chats-only phone must not reach it
     READ_OK = ("/api/settings", "/api/permissions")      # reading these is fine; changing them is not
 
@@ -991,6 +991,10 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._send(200, jdump(_delegation_view()))
         if p.split("?")[0] == "/api/meta/status":
             return self._send(200, jdump(_meta_status("fresh=1" in self.path)))
+        if p.split("?")[0] == "/api/grok/status":
+            return self._send(200, jdump({**q.MODELS.grok_status("fresh=1" in self.path),
+                                          "key_set": bool(q.secrets_load().get("XAI_API_KEY")),
+                                          "keys_url": "https://console.x.ai/team/default/api-keys"}))
         if p.split("?")[0] == "/api/google/cli":
             return self._send(200, jdump({"clis": q.MODELS.google_cli_status(fresh="fresh=1" in self.path)}))
         if p == "/api/look/status":
@@ -1106,7 +1110,15 @@ class H(http.server.BaseHTTPRequestHandler):
                                 if _chat_host(mk, q.CE.chat_prefs(sid)) else (q.CE.cfg().get("default_dir") or None)),
                 "claude_default_mode": ((q.CE.read_claude_settings().get("permissions") or {}).get("defaultMode"))}))
         if p == "/api/code":
-            return self._send(200, jdump(code_is_stale()))
+            out = dict(code_is_stale())
+            out["restart_waiting"] = _RESTART_WAITING.is_set()
+            if out["restart_waiting"] or out.get("stale"):
+                names = []
+                for sid_ in restart_blockers():
+                    st_ = STATES.get(sid_)
+                    names.append((getattr(st_, "title", None) or sid_)[:40])
+                out["blockers"] = names
+            return self._send(200, jdump(out))
         if p == "/api/remote/hosts":
             import ssh_remote
             saved = q.S.get("remote_hosts") or {}
@@ -1403,6 +1415,26 @@ class H(http.server.BaseHTTPRequestHandler):
                 running = False
             return self._send(200, jdump({"ok": True, "sid": sid, "title": title,
                                           "messages": render(msgs), "running": running}))
+        if p.startswith("/api/session_range/"):
+            # the older part of a long chat, drawn as you scroll up: entries [from, to) of what /api/session counts
+            sid = p.rsplit("/", 1)[-1]
+            qs_ = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            lo, hi = _qint(qs_, "from"), _qint(qs_, "to")
+            if not sid or lo is None or hi is None or lo < 0 or hi <= lo:
+                return self._send(400, jdump({"error": "which part?"}))
+            st = STATES.get(sid)
+            if st is not None:
+                msgs, running = list(st.msgs), st.lock.locked()
+                frm = st.live.get("from") if running else None
+                if isinstance(frm, int) and 0 < frm <= len(msgs): msgs = msgs[:frm]
+            else:
+                try: msgs, _t = q.session_load(sid)
+                except Exception: return self._send(404, jdump({"error": "no such chat"}))
+                running = False
+            rendered = _render_cached(sid, msgs, running)
+            hi = min(hi, lo + _WINDOW_MAX, len(rendered))
+            return self._send(200, jdump({"ok": True, "sid": sid, "from": lo, "to": hi, "total": len(rendered),
+                                          "messages": rendered[lo:hi]}))
         if p.startswith("/api/session/"):
             sid = p.rsplit("/", 1)[-1]
             if not sid:
@@ -1423,7 +1455,7 @@ class H(http.server.BaseHTTPRequestHandler):
                     msgs, title = q.session_load(sid)
                     stt.sid, stt.msgs, stt.title = sid, msgs, title
                     try:
-                        raw = json.load(open(q.session_path(sid)))
+                        raw = copy.deepcopy(q.chat_fields(sid))     # session_load just read the file: not read again
                         stt.project = (q.chat_project(sid, raw.get("project"), bool(raw.get("project_set")))
                                        if isinstance(raw, dict) else None)
                         if isinstance(raw, dict) and raw.get("plan") and sid not in q.PLANS:
@@ -1446,7 +1478,24 @@ class H(http.server.BaseHTTPRequestHandler):
                 shown = msgs
                 if live and isinstance(live.get("from"), int) and 0 < live["from"] <= len(msgs):
                     shown = msgs[:live["from"]]
+                # A long chat is sent in pieces: ?tail=60 is its newest 60 entries (what the page draws first), ?since= pulls the
+                # start back to where you left off, and /api/session_range/ brings older ones as you scroll up. Without ?tail
+                # the whole chat is sent, as the phone app and the Mac app still ask for it.
+                qs_ = _up.parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+                rendered = _render_cached(sid, shown, running)
+                total = len(rendered)
+                tail = _qint(qs_, "tail") or 0
+                base = 0
+                if tail > 0 and total > tail:
+                    base = total - tail
+                    since = _qint(qs_, "since")
+                    if since is not None: base = max(total - _WINDOW_MAX, min(base, max(0, since)))
+                users_before = sum(1 for e in rendered[:base] if e.get("role") == "user")
+                users = users_before + sum(1 for e in rendered[base:] if e.get("role") == "user")
+                last_user = next((e.get("text") or "" for e in reversed(rendered) if e.get("role") == "user"), "")
                 return self._send(200, jdump({"ok": True, "sid": sid, "title": title,
+                                              "base": base, "total": total, "users_before": users_before,
+                                              "users": users, "last_user": last_user,
                                               "plan_mode": bool(getattr(stt, "plan_mode", False)),
                                               "agent": getattr(stt, "agent", None) or "",
                                               "goal": getattr(stt, "goal", None),
@@ -1455,7 +1504,7 @@ class H(http.server.BaseHTTPRequestHandler):
                                               "parent": (getattr(stt, "flags", {}) or {}).get("parent") or _disk_key(sid, "parent"),
                                               "links": CHATS.links_view(stt),
                                               "talking_to": CHATS.talking_to(sid),
-                                              "messages": render(shown), "n": len(msgs),
+                                              "messages": rendered[base:], "n": len(msgs),
                                               "context": q.context_state(msgs, sid),
                                               "running": running, "live": live,
                                               # what this chat remembers for itself, and
@@ -1966,6 +2015,8 @@ class H(http.server.BaseHTTPRequestHandler):
             over["accounts"] = accts
             q.HARN.save(q.ROOT, cfg)
             return self._send(200, jdump({"ok": True, "accounts": accts, "id": aid}))
+        if p == "/api/grok/test":
+            return self._send(200, jdump(q.MODELS.grok_test(q.secrets_load().get("XAI_API_KEY") or "")))
         if p == "/api/meta/test":
             what = d.get("what") or "key"
             if what == "muse":
@@ -2043,7 +2094,7 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._send(200 if not r.get("error") else 400, jdump(r))
         if p == "/api/claude/claude_settings":
             return self._send(200, jdump({"ok": True, "settings": q.CE.write_claude_settings(
-                d.get("patch") or {}, d.get("scope") or "user", d.get("cwd"))}))
+                d.get("patch") or {}, d.get("scope") or "user", d.get("cwd"), replace=bool(d.get("replace")))}))
         if p == "/api/claude/skills":
             op = d.get("op")
             if op == "toggle": r = q.CE.skill_set_enabled(d.get("name", ""), bool(d.get("on")))
@@ -2822,6 +2873,12 @@ class H(http.server.BaseHTTPRequestHandler):
             st = S if want == S.sid else STATES.get(want)
             if st is None: return self._send(404, jdump({"error": "that chat is not answering"}))
             st.cancel.set()
+            # A Stop is not a crash. The chat file says "answering" until the answer has wound down, and an Orbit restart in
+            # that time used to treat the chat as cut off and pick it up again ("continue") -- against what you had just asked.
+            if getattr(st, "running", False):
+                st.running = False
+                try: save_session(st)
+                except Exception: pass
             if st.goal and st.goal.get("status") == "active":      # Stop pauses a goal, never ends it
                 q.goal_settle(st.goal, "paused", "you stopped it — resume to carry on")
                 save_session(st)
@@ -2845,6 +2902,10 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._send(*_servers_route(d))
         if p == "/api/cluster":
             return self._send(*_cluster_route(d))
+        if p == "/api/nasbackup":
+            return self._send(*_nasbackup_route(d))
+        if p == "/api/ccfeatures":
+            return self._send(*_ccfeatures_route(d))
         if p == "/api/update":
             return self._send(*_update_route(d))
         if p == "/api/collabhost":
@@ -2905,6 +2966,9 @@ class H(http.server.BaseHTTPRequestHandler):
             r_ = q.CE.release_from_desktop(mk_["session"], mk_.get("cwd"))
             return self._send(200 if r_.get("ok") else 409, jdump(r_))
         if p == "/api/restart_ui":
+            if d.get("cancel"):
+                _RESTART_CANCEL.set()
+                return self._send(200, jdump({"ok": True, "msg": "restart cancelled"}))
             # launchd has KeepAlive, so exiting brings us straight back on new code.
             # Never mid-answer: a restart used to cut a running answer off, so it
             # now waits for every running chat to finish (force=true to override)
@@ -3165,7 +3229,7 @@ def _busy_count():
     return len([s_ for s_ in running_sids() if s_ not in WAITING_ON])
 
 def _disk_key(sid_, key):
-    try: return json.load(open(q.session_path(sid_))).get(key)
+    try: return copy.deepcopy(q.chat_fields(sid_).get(key))      # small fields: not a re-parse of a 40 MB chat each time
     except Exception: return None
 
 def _last_answer(st):
@@ -4184,20 +4248,26 @@ class _ScienceBackend:
         try: q.session_meta(sid, archived=True, archived_at=time.time())
         except Exception: pass
 
-    def cluster_events(self, minutes):
-        cut = time.time() - minutes * 60
-        return [e for e in CLUSTER.events if e.get("t", 0) >= cut and e.get("kind") in ("failed", "finished", "errors", "error")]
+    def _cluster_of(self, cluster):
+        c = CLUSTERS.get(cluster or "hpc")
+        if c is None: raise SBR.BridgeError("no cluster called %r (Orbit watches: %s)" % (cluster, ", ".join(CLUSTERS)))
+        return c
 
-    def cluster_view(self, match, refresh):
-        snap = CLUSTER.snap
+    def cluster_events(self, minutes, cluster=None):
+        cut = time.time() - minutes * 60
+        return [e for e in self._cluster_of(cluster).events if e.get("t", 0) >= cut and e.get("kind") in ("failed", "finished", "errors", "error")]
+
+    def cluster_view(self, match, refresh, cluster=None):
+        cl = self._cluster_of(cluster)
+        snap = cl.snap
         if refresh or not snap:
-            if not snap or time.time() - CLUSTER.snap_at > 60: CLUSTER.look(force=True)
-            snap = CLUSTER.snap
-        if not snap: raise SBR.BridgeError("the cluster could not be reached: " + (CLUSTER.error or "no answer"))
+            if not snap or time.time() - cl.snap_at > 60: cl.look(force=True)
+            snap = cl.snap
+        if not snap: raise SBR.BridgeError("the cluster could not be reached: " + (cl.error or "no answer"))
         return {"running": snap.get("jobs") or [], "recent": snap.get("recent") or []}
 
-    def cluster_output(self, jid, lines):
-        try: return CLUSTER.output(jid, lines)
+    def cluster_output(self, jid, lines, cluster=None):
+        try: return self._cluster_of(cluster).output(jid, lines)
         except (ValueError, RuntimeError) as e: raise SBR.BridgeError(str(e))
 
     def notify(self, title, text):
@@ -4563,9 +4633,33 @@ if not os.path.exists(CLUSTER.path):                 # first time: the host and 
     except Exception: pass
 
 
+# Other clusters to watch beside HPC (a plain Slurm login, such as one on a shared account): config/clusters.json,
+#   {"<id>": {"label": "...", "host": "<ssh alias>", "profile": "slurm", "job_prefix": "MP_", "partitions": "...", "project_dir": "...", "avoid_nodes": [...]}}
+# Each has its own folder (config/clusters/<id>/) for its settings, last reading, events and history, and its own watcher.
+CLUSTERS = {"hpc": CLUSTER}
+try:
+    for _cid, _cc in (json.load(open(os.path.join(q.ROOT, "config", "clusters.json"))) or {}).items():
+        if not re.fullmatch(r"[a-z][a-z0-9_-]{0,23}", str(_cid)) or _cid == "hpc" or not isinstance(_cc, dict): continue
+        _cdir = os.path.join(q.ROOT, "config", "clusters", _cid)
+        os.makedirs(_cdir, exist_ok=True)
+        _cn = (lambda lab: (lambda title, text: _cluster_notify(f"{lab}: {title}", text)))(_cc.get("label") or _cid.title())
+        _cl = CLU.Cluster(os.path.join(_cdir, "cluster.json"), CLUSTER.w, notify=_cn, own_jobs=lambda: set(), explain_with=_cluster_explain)
+        for _k, _v in _cc.items():                 # what is written in clusters.json is the starting point; settings changed on the page are kept
+            if _k in ("host", "profile", "label", "job_prefix", "partitions", "project_dir", "avoid_nodes", "job_dirs", "via") and (_k not in _cl.cfg or not os.path.exists(_cl.path)):
+                _cl.cfg[_k] = _v
+        if not os.path.exists(_cl.path): _cl._save()
+        CLUSTERS[_cid] = _cl
+except (OSError, ValueError) as _e:
+    if not isinstance(_e, FileNotFoundError): print(f"  ! clusters.json is not usable: {_e}", flush=True)
+
+
 def _cluster_route(d):
-    """/api/cluster {op: look|config|cancel|explain|output|measure|efficiency|where|processes|stop_process|ask, ...} -> (status, body)"""
+    """/api/cluster {op: look|config|cancel|explain|output|measure|efficiency|where|processes|stop_process|ask, cluster: id, ...} -> (status, body)"""
     op = d.get("op") or "look"
+    if op == "clusters":
+        return 200, jdump({"clusters": [{"id": k, "label": c.cfg.get("label") or k, "profile": c.cfg.get("profile"), "host": c.cfg.get("host")} for k, c in CLUSTERS.items()]})
+    CLUSTER = CLUSTERS.get(str(d.get("cluster") or "hpc"))          # this call's cluster
+    if CLUSTER is None: return 400, jdump({"error": "no such cluster"})
     try:
         if op == "look": return 200, jdump(CLUSTER.look(force=bool(d.get("force")), slow=bool(d.get("slow")), cached=bool(d.get("cached"))))
         if op == "dismiss": return 200, jdump(CLUSTER.dismiss(str(d.get("key") or "")))
@@ -4585,6 +4679,106 @@ def _cluster_route(d):
         if op == "ask": return 200, jdump({"text": CLUSTER.ask_text(d.get("id"))})
         if op == "growth": return 200, jdump({"growth": CLUSTER.growth()})
         if op == "history": return 200, jdump(CLUSTER.history(d.get("days") or 7, refresh=bool(d.get("refresh"))))
+        return 400, jdump({"error": f"unknown op {op!r}"})
+    except (ValueError, TypeError) as e:
+        return 400, jdump({"error": str(e)})
+    except RuntimeError as e:
+        return 502, jdump({"error": str(e)})
+
+
+import nas_backup as NASB
+import claude_features as CCF
+import claude_ctl as CCTL
+
+
+def _ccfeatures_route(d):
+    """Claude Code's own subagents and hooks, and the options Orbit passes on. {op: ...} -> (status, body)."""
+    op = d.get("op")
+    cwd = d.get("cwd") or None
+    if op == "agents":
+        return 200, jdump({"agents": CCF.list_agents(cwd), "templates": CCF.TEMPLATES, "models": list(CCF.MODELS),
+                           "colors": [c for c in CCF.COLORS if c]})
+    if op == "agent_save":
+        r = CCF.save_agent(d.get("scope") or "user", cwd, d.get("name"), d.get("description"), d.get("prompt"),
+                           d.get("model") or "inherit", d.get("tools") or "", d.get("color") or "")
+        return (400 if r.get("error") else 200), jdump(r)
+    if op == "agent_delete":
+        r = CCF.delete_agent(d.get("scope") or "user", cwd, d.get("name"))
+        return (400 if r.get("error") else 200), jdump(r)
+    if op == "hooks":
+        return 200, jdump({"hooks": CCF.hooks(cwd)})
+    if op == "statusline":
+        if not q.CE.cfg().get("show_statusline", True): return 200, jdump({"text": ""})
+        return 200, jdump({"text": CCF.statusline(cwd, d.get("session") or "", d.get("model") or "", d.get("model_name") or "",
+                                                  d.get("cost"))})
+    if op == "notify_get":
+        return 200, jdump({"minutes": _notify_secs() / 60})
+    if op == "notify_set":
+        try: m = max(0.0, min(1440.0, float(d.get("minutes"))))
+        except (TypeError, ValueError): return 400, jdump({"error": "give a number of minutes (0 turns it off)"})
+        with LOCK:
+            cur = q.load_settings(); cur["notify_long_min"] = m; q.save_settings(cur); q.reload_settings()
+        return 200, jdump({"ok": True, "minutes": m})
+    if op == "keybindings":
+        return 200, jdump(CCF.read_keybindings())
+    if op == "keybindings_save":
+        r = CCF.write_keybindings(d.get("text"))
+        return (400 if r.get("error") else 200), jdump(r)
+    if op in ("mcp_list", "mcp_auth", "mcp_auth_state", "mcp_auth_callback", "mcp_clear", "reload_plugins"):
+        exe = q.CE.which_claude()
+        if not exe: return 400, jdump({"error": "Claude Code is not installed"})
+        env = q.CE.target_env({"url": None, "model": "sonnet", "ctx": 200000})
+        srv = str(d.get("server") or "")
+        work = cwd or q.CE._work_dir()
+        if op == "reload_plugins":
+            # a chat's answer reloads in place; otherwise its kept Claude Code is closed so the next message starts fresh
+            sid_ = d.get("sid") or ""
+            r = q.CE.control(sid_, "reload_plugins") if sid_ in q.CE.RUNS else None
+            if r is None:
+                if sid_ in q.CE.LIVE: q.CE.close_live(sid_, "plugins and skills were reloaded")
+                r = {"ok": True, "note": "the next message starts with your current plugins and skills"}
+            return (400 if (r or {}).get("error") else 200), jdump(r)
+        if op == "mcp_list": r = CCTL.mcp_servers(exe, env, work)
+        elif op == "mcp_auth": r = CCTL.auth_start(exe, env, work, srv)
+        elif op == "mcp_auth_state": r = CCTL.auth_state(srv)
+        elif op == "mcp_auth_callback": r = CCTL.auth_callback(exe, env, work, srv, str(d.get("url") or ""))
+        else: r = CCTL.auth_clear(exe, env, work, srv)
+        return (400 if (r or {}).get("error") else 200), jdump(r)
+    if op.startswith("bg_"):
+        exe = q.CE.which_claude()
+        if not exe: return 400, jdump({"error": "Claude Code is not installed"})
+        env = q.CE.target_env({"url": None, "model": "sonnet", "ctx": 200000})      # your own Claude login, as in a terminal
+        sid_ = d.get("id")
+        if op == "bg_list": r = CCF.bg_list(exe, env, cwd, bool(d.get("all")))
+        elif op == "bg_start": r = CCF.bg_start(exe, d.get("prompt"), cwd, env, d.get("model") or "", d.get("mode") or "", d.get("resume") or "")
+        elif op == "bg_logs": r = CCF.bg_logs(exe, sid_, env)
+        elif op == "bg_stop": r = CCF.bg_stop(exe, sid_, env)
+        elif op == "bg_rm": r = CCF.bg_remove(exe, sid_, env)
+        elif op == "bg_respawn": r = CCF.bg_respawn(exe, sid_, env)
+        else: return 400, jdump({"error": "unknown op"})
+        return (400 if r.get("error") else 200), jdump(r)
+    return 400, jdump({"error": "unknown op"})
+NAS_BACKUP = NASB.NasBackup(os.path.join(q.ROOT, "config", "nas_backup.json"), CLUSTERS, notify=_cluster_notify)
+
+
+def _nasbackup_route(d):
+    """/api/nasbackup {op: status|config|scan|setup_key|run|refresh, ...} -> (status, body): backing cluster folders up to the lab NAS"""
+    op = d.get("op") or "status"
+    try:
+        if op == "status": return 200, jdump(NAS_BACKUP.status())
+        if op == "config": NAS_BACKUP.update(d); return 200, jdump(NAS_BACKUP.status())
+        if op == "scan": return 200, jdump(NAS_BACKUP.scan_host())
+        if op == "setup_key": return 200, jdump(NAS_BACKUP.setup_key(str(d.get("cluster") or "")))
+        if op == "login_file": return 200, jdump(NAS_BACKUP.login_file())
+        if op == "route_scan": return 200, jdump(NAS_BACKUP.route_scan(str(d.get("route") or "")))
+        if op == "route_key": return 200, jdump(NAS_BACKUP.route_key(str(d.get("route") or "")))
+        if op == "transfer":
+            return 200, jdump({"started": NAS_BACKUP.transfer(str(d.get("route") or ""), str(d.get("direction") or "push"), d.get("src"), d.get("dst"), dry=bool(d.get("dry"))), **NAS_BACKUP.status()})
+        if op == "authorize": return 200, jdump(NAS_BACKUP.authorize(str(d.get("cluster") or "")))
+        if op == "run":
+            r = NAS_BACKUP.run(only=d.get("source") or None, dry=bool(d.get("dry")), reason="manual")
+            return 200, jdump({"started": r, **NAS_BACKUP.status()})
+        if op == "refresh": return 200, jdump(NAS_BACKUP.refresh())
         return 400, jdump({"error": f"unknown op {op!r}"})
     except (ValueError, TypeError) as e:
         return 400, jdump({"error": str(e)})
@@ -4659,7 +4853,7 @@ def _crew_route(d):
                 if x.get("effort") and x["effort"] not in ("low", "medium", "high", "xhigh", "max"):
                     return 400, jdump({"error": f"the {who}'s effort must be low, medium, high, xhigh or max"})
         if not builders: return 400, jdump({"error": "pick at least one builder: a model, or a chat of yours"})
-        folder = str(d.get("folder") or "").strip() or os.path.join(os.path.expanduser("~/Rdirectory/Crew"), CREW.slug(title or brief))
+        folder = str(d.get("folder") or "").strip() or os.path.join(os.path.expanduser("~/Crew"), CREW.slug(title or brief))
         run = CREW.new_run(title or brief[:50], brief, folder, builders, reviewers or [], reference=d.get("reference") or "",
                            criteria=d.get("criteria") or "", hours=d.get("hours") or 0, max_rounds=d.get("max_rounds") or 0,
                            max_tokens=d.get("max_tokens") or 0)
@@ -4784,19 +4978,63 @@ def _model_loading(model):
     return MODEL_SERVERS.loading_for(m.group(1)) if m else None
 
 
+def _notify_after(title, text, sid, mac):
+    """A Mac notification (only when no window is following the work) and a phone push, when one is set up."""
+    try:
+        if mac: q.notify(title, text)
+        q.push_notify(title, text, sid=sid)
+    except Exception: pass
+
+
+def _notify_secs():
+    try: return max(0.0, float(q.S.get("notify_long_min", 5))) * 60
+    except (TypeError, ValueError): return 300.0
+
+
+def _notify_long(st, secs, sink, failed):
+    """A long answer is over: tell you, wherever you are. Short ones are not worth a tap on the shoulder."""
+    thr = _notify_secs()
+    if not thr or secs < thr or st.cancel.is_set() or st.temp: return
+    last = next((m for m in reversed(st.msgs) if m.get("role") == "assistant" and isinstance(m.get("content"), str) and m["content"].strip()), None)
+    text = " ".join(((last or {}).get("content") or "").split())[:160]
+    name = (st.title or "a chat")[:50]
+    _notify_after("Answer failed" if failed else "Answer ready", f"{name}: {text}" if text else name, st.sid, sink)
+
+
+def _bg_done(sid, rec):
+    thr = _notify_secs()
+    if not thr or (rec.get("ended") or 0) - (rec.get("since") or 0) < thr: return
+    st = STATES.get(sid)
+    ok = str(rec.get("status") or "").startswith(("completed", "done", "ended"))
+    _notify_after("Background task finished" if ok else "Background task stopped",
+                  f"{((st and st.title) or 'a chat')[:40]}: {(rec.get('description') or rec.get('command') or 'a task')[:100]}", sid, False)
+
+
+def adopt_selfdriven(sid):
+    """Claude Code answered on its own (a background task reported back): run that as an ordinary answer, so the chat
+    shows as answering, the answer streams to any window and is saved with the chat."""
+    st = get_state(sid, create=False)
+    if st is None or not st.lock.acquire(blocking=False): return False
+    try: start_turn(st, q.CE.ADOPT)
+    except Exception:
+        st.lock.release(); raise
+    return True
+
 def start_turn(st, text, atts=None, effort=None, Q=None, origin=None, chain=None):
     """Run one message in a chat on its own thread. The chat's lock must already be
     held (it is released when the answer ends). Events go to Q (a browser's stream)
     and always to the chat's live buffer, so any window can follow it; a message the
     queue starts has no stream, and its events go only to the live buffer."""
     Q = Q if Q is not None else _Sink()
+    adopt = text == q.CE.ADOPT      # an answer Claude Code began by itself: there is no message of yours in it
     st.busy_since = time.time()
     st.cancel.clear()
     st.goal_offer = None          # you moved on: an open offer to keep going is withdrawn
     st.live = {"thinking": "", "content": "", "tools": [],
                "status": "", "done": False, "seq": 0,
-               "user": str(text or "").split("\n\n" + q.ORBIT_SAYS)[0][:4000]}
-    try: text = q.expand_prompt(text)       # '/name words' runs a saved prompt
+               "user": "" if adopt else str(text or "").split("\n\n" + q.ORBIT_SAYS)[0][:4000]}
+    try:
+        if not adopt: text = q.expand_prompt(text)       # '/name words' runs a saved prompt
     except Exception: pass
     atts = atts or []
 
@@ -4819,15 +5057,15 @@ def start_turn(st, text, atts=None, effort=None, Q=None, origin=None, chain=None
                     notes.append(f"[attached file: {a['name']} — read it with read_file at {path}]")
             body = text + (("\n" + "\n".join(notes)) if notes else "")
             content = ([{"type":"text","text":body}] + parts) if parts else body
-            first = st.title is None
+            first = st.title is None and not adopt
             if True:
                 if first:
                     st.title = " ".join(str(text).split())[:60] or "(untitled)"
                 # write immediately: a running chat must be visible in the sidebar
-                st.msgs.append({"role": "user", "content": content})
+                if not adopt: st.msgs.append({"role": "user", "content": content})
                 st.running = True
                 save_session(st)
-                st.msgs.pop()
+                if not adopt: st.msgs.pop()
                 def _approve(fn, a, reason, info=None):
                     # info: a prompt raised by Claude Code (claude_engine) -- its
                     # "always allow" becomes a Claude permission rule, not Orbit's
@@ -5014,13 +5252,14 @@ def start_turn(st, text, atts=None, effort=None, Q=None, origin=None, chain=None
                 if not failed[0]: st.clear_pickups = True
                 st.answered_at = time.time()
                 save_session(st)
+                _notify_long(st, time.time() - _t0, isinstance(Q, _Sink), failed[0])
                 if not st.temp:
                     job = limits.check(st, n0, cancelled=st.cancel.is_set())
                     if job:
                         failed[0] = "limit"
                         # in the live buffer too: a window that rejoins sees why it paused
                         _emit("notice", {"msg": _limit_note(job), "kind": "limit"})
-                if not failed[0] and not st.cancel.is_set() and not _due_items(st) and not origin:
+                if not adopt and not failed[0] and not st.cancel.is_set() and not _due_items(st) and not origin:
                     try: _maybe_offer_goal(st, text, _emit,
                                            watching=not getattr(Q, "deaf", False) and not isinstance(Q, _Sink))
                     except Exception as e: print(f"  ! goal offer: {type(e).__name__}: {e}", flush=True)
@@ -5859,6 +6098,40 @@ def _msg_text(m):
         return " ".join(x.get("text", "") for x in c if x.get("type") == "text")
     return str(c or "")
 
+_RENDER_CACHE = collections.OrderedDict()   # sid -> (file stamp, when, rendered): the last couple of long chats, for reading back
+_RENDER_LOCK = threading.Lock()
+_WINDOW_MAX = 500                            # the most entries one request returns when the page asks for a window
+
+
+def _qint(qs, key):
+    try: return int((qs.get(key) or [""])[0])
+    except (ValueError, TypeError): return None
+
+
+def _render_cached(sid, msgs, running):
+    """render() of a saved chat, kept for a few minutes: opening one and then scrolling up through it asks for the same
+    22,000-message chat over and over. Never kept for a chat that is answering, which changes under it."""
+    try:
+        s = os.stat(q.session_path(sid)); stamp = (s.st_mtime_ns, s.st_size, len(msgs))
+    except OSError:
+        stamp = None
+    now = time.time()
+    if stamp and not running:
+        with _RENDER_LOCK:
+            hit = _RENDER_CACHE.get(sid)
+            if hit and hit[0] == stamp and now - hit[1] < 300:
+                _RENDER_CACHE.move_to_end(sid)
+                return hit[2]
+    out = render(msgs)
+    with _RENDER_LOCK:
+        if stamp and not running:
+            _RENDER_CACHE[sid] = (stamp, now, out); _RENDER_CACHE.move_to_end(sid)
+            while len(_RENDER_CACHE) > 2: _RENDER_CACHE.popitem(last=False)
+        else:
+            _RENDER_CACHE.pop(sid, None)
+    return out
+
+
 def render(msgs):
     """Chat messages as the page draws them. Each model step is its own entry --
     what it said, then the tools that step called, with their results -- the
@@ -5891,7 +6164,8 @@ def render(msgs):
             except (ValueError, KeyError, TypeError): pass
         if m.get("role") not in ("user", "assistant"): continue
         if m.get("notice"):                # a line Claude Code printed itself: an agent reporting back, command output
-            out.append({"role": "notice", "text": str(m.get("content") or ""), "t": m.get("t"), "plots": [], "tools": []})
+            out.append({"role": "notice", "text": str(m.get("content") or ""), "t": m.get("t"), "plots": [], "tools": [],
+                        **({"fallback": m["fallback"]} if m.get("fallback") else {})})
             continue
         if m.get("nudge"): continue        # Orbit's own "carry on" notes, not the user's words
         c = m.get("content")
@@ -6287,13 +6561,18 @@ def _bow_out(grace=6.0):
     time.sleep(1); os._exit(0)
 
 
+_RESTART_CANCEL = threading.Event()
+
 def _restart_when_idle():
     """Restart once no chat is answering (checked every few seconds)."""
     if _RESTART_WAITING.is_set(): return
-    _RESTART_WAITING.set()
+    _RESTART_WAITING.set(); _RESTART_CANCEL.clear()
     CREW_HOLD.set()
     def wait():
         while restart_blockers() or JOBS_INFLIGHT:
+            if _RESTART_CANCEL.is_set():            # you changed your mind: carry on as before
+                _RESTART_WAITING.clear(); CREW_HOLD.clear(); _RESTART_CANCEL.clear()
+                return
             time.sleep(3)
         _bow_out()
     threading.Thread(target=wait, daemon=True).start()
@@ -6336,8 +6615,11 @@ if __name__ == "__main__":
         print(f"  ! could not check for chats cut off mid-answer: {e}")
     threading.Thread(target=scheduler_loop, daemon=True).start()
     threading.Thread(target=MODEL_SERVERS.loop, daemon=True).start()
-    threading.Thread(target=CLUSTER.loop, daemon=True).start()
+    for _c in CLUSTERS.values(): threading.Thread(target=_c.loop, daemon=True).start()
+    threading.Thread(target=NAS_BACKUP.loop, daemon=True).start()
     q.UI_PORT = PORT
+    q.CE.ON_SELFDRIVE = adopt_selfdriven
+    q.CE.ON_BG_DONE = _bg_done
     _start_gateway()
     # remote Claude Code sessions: any a previous run left open end now; idle ones close
     try: q.CE.end_leftover_live()
@@ -6348,6 +6630,13 @@ if __name__ == "__main__":
             try: q.CE.reap_live()
             except Exception: pass
     threading.Thread(target=_reap_remote, daemon=True).start()
+    def _prewarm():
+        # the chat list, and the tool list the context meter needs, are ready before the first page asks: opening the first
+        # chat after a restart used to wait for the tools to load (16 s on a busy Mac)
+        for warm in (q.session_list, q.tool_schema_tokens):
+            try: warm()
+            except Exception: pass
+    threading.Thread(target=_prewarm, daemon=True).start()
     # model lists for harness providers -- names, and each model's window -- kept no more
     # than a day old for as long as Orbit runs (it used to look only when it started, so a
     # server up for a week had week-old windows); models.dev also gives the Claude

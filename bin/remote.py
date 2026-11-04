@@ -641,6 +641,21 @@ def device_name_from_agent(ua):
 
 _BONJOUR = {"proc": None}
 
+def _kill_stale_advertisements():
+    """Announcements an earlier Orbit left running: a restart used to leave its dns-sd behind, and a hundred of them had
+    piled up over ten days, each announcing the same service. Only ours (this exact service type) is touched."""
+    try:
+        subprocess.run(["/usr/bin/pkill", "-f", "dns-sd -R Orbit on .* _orbit._tcp local"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+    except Exception:
+        pass
+
+
+# dns-sd must not outlive the server that started it: this shell ends it within seconds of the server going away, however it went
+_WATCHDOG = ('/usr/bin/dns-sd -R "$2" _orbit._tcp local "$3" path=/ >/dev/null 2>&1 & p=$!; '
+             'while kill -0 "$1" 2>/dev/null; do sleep 4; done; kill "$p" 2>/dev/null')
+
+
 def advertise(port, name=None):
     """Announce _orbit._tcp so the app finds this Mac on the same network.
 
@@ -649,11 +664,11 @@ def advertise(port, name=None):
     """
     stop_advertising()
     if not os.path.exists("/usr/bin/dns-sd"): return False
+    _kill_stale_advertisements()
     label = name or mac_name()
     try:
         _BONJOUR["proc"] = subprocess.Popen(
-            ["/usr/bin/dns-sd", "-R", f"Orbit on {label}", "_orbit._tcp", "local",
-             str(port), "path=/"],
+            ["/bin/sh", "-c", _WATCHDOG, "orbit-bonjour", str(os.getpid()), f"Orbit on {label}", str(port)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL, start_new_session=True)
         return True
@@ -666,4 +681,5 @@ def stop_advertising():
     if p and p.poll() is None:
         try: p.terminate()
         except Exception: pass
+        _kill_stale_advertisements()           # the dns-sd it started is a child of that shell
     _BONJOUR["proc"] = None

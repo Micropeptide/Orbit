@@ -26,6 +26,8 @@ SOURCES = {
     "agy": {"prefix": "ag-", "label": "Antigravity", "backend": "agy-cli", "orbit_only": True},
     # Muse Code: a chat started in Orbit continues its own Muse session (muse serve, session/resume)
     "muse": {"prefix": "mu-", "label": "Muse Code", "backend": "muse-cli", "orbit_only": True},
+    # Grok CLI: a chat started in Orbit loads its own Grok session (grok agent stdio, session/load)
+    "grok": {"prefix": "gk-", "label": "Grok", "backend": "grok-cli", "orbit_only": True},
 }
 BACKEND_SOURCE = {v["backend"]: k for k, v in SOURCES.items()}
 

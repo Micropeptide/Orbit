@@ -125,6 +125,16 @@ asking; starting or quitting an app on your Mac asks. [More](#seeing-what-it-bui
 <td width="50%"><img src="docs/screenshots/gemini.png" alt="Gemini in Models & keys: the models Google lists for the key, with their token limits"></td>
 </tr></table>
 
+### Grok CLI
+
+xAI's Grok Build agent (`grok`) runs a chat the way Antigravity and Muse Code do: its own tools, in
+the chat's folder, on your Grok sign-in or an xAI API key. Settings → Models & keys → *xAI · Grok CLI*
+types the install command for you to read and run, runs `grok login`, tests it with one word, and
+holds an optional xAI key. The **Grok** pill in the model popover then offers the models `grok models`
+lists. A chat keeps its own Grok session, so each message continues it. Grok decides what to ask by your
+own settings, so Orbit sets the limit with Grok's OS sandbox, by the chat's autonomy: Plan mode and
+Ask read only, Auto writes inside the chat's folder, Full has no sandbox.
+
 ### A real Mac app, and an iPhone app
 
 - **Orbit for Mac** has:
@@ -1017,7 +1027,15 @@ It starts Orbit's server when it is not running — through its launchd agent if
 [latest desktop release](https://github.com/Micropeptide/Orbit/releases?q=desktop&expanded=true),
 open it and drag Orbit to Applications. It is not notarized, so the first time right-click
 it → **Open** (or run `xattr -dr com.apple.quarantine /Applications/Orbit.app`). Apple
-Silicon Macs; Orbit itself (the server) must be installed as described in [Install](#install).
+Silicon Macs. **Nothing else needs installing first:** the app carries Orbit's server. The first
+time you open it, it sets up its own Python environment (a few minutes, needs the internet, shown
+in the window as it goes) in `~/Library/Application Support/Orbit`, which is also where your chats,
+settings and memory live, apart from the app, so updating or deleting Orbit.app never touches them.
+It needs Python 3.9 or newer on the Mac (Homebrew's, python.org's, or Apple's Command Line Tools);
+if there is none it tells you where to get it. Python 3.10 or newer is better: reading Word, PDF and
+Excel files in chats (the `markitdown` package) and the Claude API path (`anthropic`) need it, and Orbit
+simply goes without them on 3.9. `brew install python@3.12` is the easy way. If you already run Orbit from a folder (see
+[Install](#install)), the app uses that one instead.
 
 **Updates:** Settings → General → *Orbit for Mac*, or Orbit → Updates in the menu bar:
 install automatically (when no chat is answering and you are away, or when you quit), tell

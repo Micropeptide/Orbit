@@ -62,7 +62,7 @@ async function loadOrbit(win) {
   if (up) {
     for (const w of windows) if (!w.isDestroyed() && links.isLocalAppPage(w.webContents.getURL())) w.loadURL(server.baseURL() + '/');
   } else {
-    sendBootStatus(win, 'Orbit didn’t answer. Check that it is installed, then try again.', true);
+    sendBootStatus(win, server.lastFailure() || 'Orbit didn’t answer. Check that it is installed, then try again.', true);
   }
 }
 

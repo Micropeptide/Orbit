@@ -51,14 +51,22 @@ class TestStopAndBackground(unittest.TestCase):
         self.assertEqual(CE.stop_task(SID, "toolu_1"), {"ok": True})
 
     def test_a_refusal_comes_back_and_the_task_stays_as_it_was(self):
-        self.answering({"subtype": "error", "request_id": "x", "error": "already finished"})
-        self.assertIn("already finished", CE.stop_task(SID, "b123")["error"])
+        self.answering({"subtype": "error", "request_id": "x", "error": "the sandbox refused to signal it"})
+        self.assertIn("sandbox refused", CE.stop_task(SID, "b123")["error"])
         self.assertEqual(CE.bg_tasks(SID)[0]["status"], "running")
+
+    def test_a_task_claude_says_already_finished_is_cleared_not_refused(self):
+        self.answering({"subtype": "error", "request_id": "x", "error": "already finished"})
+        r = CE.stop_task(SID, "b123")
+        self.assertTrue(r.get("ok") and r.get("cleared"), r)
+        self.assertEqual(CE.bg_tasks(SID)[0]["status"], "stopped")
 
     def test_nothing_to_stop(self):
         self.assertFalse(CE.can_stop_task(SID))
-        self.assertIn("error", CE.stop_task(SID, "b123"))                 # no process to ask
+        r = CE.stop_task(SID, "b123")                                      # no process to ask: nothing is running it, so it is cleared
+        self.assertTrue(r.get("ok") and r.get("cleared"), r)
         self.assertIn("error", CE.stop_task(SID, "nope"))
+        CE.BG_TASKS[SID]["b123"].update(status="running", ended=None)
         CE.bg_task(SID, "b123", status="completed")
         self.answering({"subtype": "success", "response": {}})
         self.assertEqual(CE.stop_task(SID, "b123"), {"error": "it has already ended"})
@@ -498,3 +506,50 @@ class TestTurnsByOtherModels(unittest.TestCase):
         msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello", "claude_uuid": "u1"}]
         self.assertEqual(CE._missed_turns(msgs), "")
         self.assertEqual(CE._missed_turns([]), "")
+
+
+class TestATaskWhoseClaudeCodeIsGone(unittest.TestCase):
+    """The Stop button was refused (409) for a task still listed as running although its Claude Code had gone, and such a task held up
+    every restart. It is now written off, and stopping it clears it."""
+    SID = "gone-test-chat"
+
+    def setUp(self):
+        for d in (CE.BG_TASKS, CE.LIVE, CE.RUNS): d.pop(self.SID, None)
+        self.addCleanup(lambda: [d.pop(self.SID, None) for d in (CE.BG_TASKS, CE.LIVE, CE.RUNS)])
+
+    def _task(self, age=0):
+        CE.bg_task(self.SID, "w1", kind="shell", description="watch the unpacking", status="running")
+        CE.BG_TASKS[self.SID]["w1"]["seen"] = time.time() - age
+        CE.BG_TASKS[self.SID]["w1"]["since"] = time.time() - age
+
+    def test_stopping_it_clears_it_instead_of_refusing(self):
+        self._task()
+        r = CE.stop_task(self.SID, "w1")
+        self.assertTrue(r.get("ok"), r); self.assertTrue(r.get("cleared"))
+        self.assertFalse(CE.bg_running(self.SID))
+        self.assertEqual(CE.bg_tasks(self.SID)[0]["status"], "stopped")
+
+    def test_a_task_nobody_has_heard_of_for_a_while_is_written_off_and_stops_blocking(self):
+        self._task(age=CE.STALE_TASK_S + 5)
+        self.assertFalse(CE.bg_running(self.SID), "no Claude Code, nothing heard for a while: not running")
+        self.assertEqual(CE.bg_tasks(self.SID)[0]["status"], "stopped")
+
+    def test_a_fresh_task_is_left_alone_for_a_moment(self):
+        self._task(age=1)
+        self.assertTrue(CE.bg_running(self.SID))
+
+    def test_a_task_in_a_live_claude_code_is_never_written_off(self):
+        import collections
+        class Alive:
+            def poll(self): return None
+        CE.LIVE[self.SID] = {"proc": Alive(), "sig": "x", "lines": collections.deque(), "got": [], "err_tail": [], "wlock": None,
+                             "host": None, "used": time.time(), "token": None}
+        self._task(age=CE.STALE_TASK_S + 500)
+        self.assertTrue(CE.bg_running(self.SID))
+
+    def test_claude_saying_it_no_longer_knows_the_task_clears_it_too(self):
+        self._task()
+        saved = CE.control; CE.control = lambda sid, sub, **kw: {"subtype": "error", "error": "no such task: w1"}
+        self.addCleanup(setattr, CE, "control", saved)
+        r = CE.stop_task(self.SID, "w1")
+        self.assertTrue(r.get("ok") and r.get("cleared"), r)

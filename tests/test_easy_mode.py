@@ -83,12 +83,12 @@ class TestClaudeCode(unittest.TestCase):
         q.S["easy_mode"] = False
         sp, mp = CE.launcher_files(c, "t-off")
         self.assertIsNone(mp)                      # all of yours, no file needed
-        self.assertIsNone(sp)                      # hooks as your Claude has them
+        self.assertNotIn("disableAllHooks", json.load(open(sp)))          # hooks as your Claude has them (the file only asks for thinking summaries)
 
         q.S["easy_mode"] = True
         sp, mp = CE.launcher_files(c, "t-on")
         self.assertEqual(json.load(open(mp))["mcpServers"], {})
-        self.assertEqual(json.load(open(sp)), {"disableAllHooks": True})
+        self.assertEqual(json.load(open(sp)), {"showThinkingSummaries": True, "disableAllHooks": True})
         argv = CE.build_argv(c, settings_path=sp, mcp_path=mp, kind="local")
         self.assertIn("--strict-mcp-config", argv)
         self.assertNotIn("--plugin-dir", argv)

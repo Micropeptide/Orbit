@@ -39,7 +39,7 @@ Right-click a row (or use its ⋯) to rename, pin, tag, archive, move to a proje
 
 **Search:** ⌘P searches chats, messages, files and commands at once. ⌘F finds within the chat you are reading. ⌘G jumps to any message you sent.
 
-**Projects** group related chats. A project can carry its own instructions and folder, which apply to every chat in it. Drag a chat onto a project to file it.
+**Projects** group related chats. A project can carry its own instructions and folder, which apply to every chat in it. The heading above the chat list names what you are looking at: click it to pick a project (it has a search box, so twenty projects stay easy to find), or to go back to all chats. The slider button next to it chooses which chats to show (active, pinned, needs attention, archived) and whether to group them by date or by project; with projects as the groups, a project's heading has a + to start a chat in it and a ⋯ menu. The magnifier filters the list by title (⌘F). Drag a chat toward a project and the project list opens under the heading so you can drop it on one.
 
 **Chats from other agents.** Sessions you began in Claude Code (the CLI or Claude's desktop app), Codex or OpenCode appear in their own sections at the bottom of the chat list, on the Mac and on the phone: *From Claude Code*, *From Codex*, *From OpenCode*, each showing how long ago its newest chat moved. A section opens by itself while something in it is active, and refreshes every few seconds. Open one to read it and carry on in that agent's own session. If you ran out of tokens there, pick another account (or model) in Orbit and keep going in the same chat.
 
@@ -108,6 +108,15 @@ Any agent that builds something can look at it: Claude Code, Codex and OpenCode 
 - **With an API key:** Settings → Models & keys → *Gemini · Google AI*, with a key from Google AI Studio. Orbit lists the models your key can use with each one's real input and output limits, and keeps the list current. Claude Code (through Orbit's gateway), Codex and Orbit's own agent can all use them, for example `gemini-3.8-flash`.
 - **With your Google sign-in** (the coding plan in Google AI Pro / Ultra): Settings → Models & keys → **Sign in with Google**. **Install in the terminal** opens Orbit's terminal with the Antigravity CLI's install command typed for you to read and run; **Sign in in the terminal** then runs `agy`, which asks you to sign in with your Google account in the browser. **Check again** and it appears in the model picker as a chat, with the models it reports for your account (on a Google plan that can include Gemini 3.8 Flash, Claude 4.6 and GPT-OSS). The chat keeps Antigravity's own conversation going, so it remembers what was said; the tools it uses show as lines in its thinking, and what it spent is counted. The Gemini CLI works the same way. A subscription is not an API key, so these run as their own agents rather than inside Claude Code.
 
+## Grok CLI
+
+xAI's Grok Build agent (`grok`) runs a chat the way Antigravity and Muse Code do: its own tools, in the chat's folder, on your Grok sign-in (SuperGrok / X Premium Plus) or an xAI API key.
+
+- **Set up:** Settings → Models & keys → *xAI · Grok CLI*. **Install in the terminal** types the install command for you to read and run; **Sign in in the terminal** runs `grok login`; **Test** asks it one word. To use an xAI API key instead, paste it in the same card and press **Save key**.
+- **Use it:** pick the **Grok** pill in the model popover. The models are whatever `grok models` lists for your account.
+- **It keeps its own session.** Each message continues the same Grok session, so it remembers what it did; if you switch to another model and back, Orbit tells it what was said meanwhile. A temporary chat's Grok session is deleted afterwards.
+- **Permissions follow the chat's autonomy, enforced by the OS.** Over its headless protocol Grok decides what to ask by your own settings, so Orbit sets the limit with Grok's kernel sandbox instead. In *Ask* and in Plan mode Grok can read everything and write only to temp folders (a write, even through the shell, is blocked and Grok tells you). *Auto* lets it write inside the chat's folder. *Full* removes the sandbox and the prompts.
+
 ## Files, Library and Scheduled
 
 - **Files** (⌘J): everything Orbit made or you attached, with the chat it came from. Click a file for a preview; Reveal opens it in Finder.
@@ -170,6 +179,17 @@ On the Mac, Settings → Phone → **Show a pairing link**, and open the link (o
 - A **temporary chat** (the *temp* button or ⋯ menu) is never written to disk.
 - Terminals are only for you at the Mac unless you allow paired devices in Settings → Phone.
 
+## More of Claude Code
+
+These work in a Claude Code chat; each is a slash command, and the Claude panel (click "Claude Code" by the folder) has a button for each.
+
+- **`/subagents`**: define the helpers Claude can hand work to, each on the model you choose: a small one for searching, a strong one for review. They are ordinary files in `~/.claude/agents`.
+- **`/background`**, **`/bg <task>`**: sessions Claude Code runs on its own, with no window. Read what they did, stop, restart or remove them. They carry on if Orbit is closed.
+- **`/mcp-servers`**: which MCP servers are connected, signing in to those that need it, and reloading plugins and skills.
+- **`/hooks`**: the hooks your settings run. **`/claude-options`**: a spending limit per run, a thinking budget, the sandbox, what subagents say, when Claude compacts, and the status line.
+- **`/keys`**: your own shortcuts for common actions, and Claude Code's keybindings file. **`/cloud`**: cloud sessions, a pull request's session and remote control, typed into the terminal.
+- A **plan** Claude wants approved appears as a card you can read, with "accept edits", "ask before each edit" and "keep planning". The chat's **cost so far** shows beside the folder.
+
 ## Keyboard shortcuts
 
 | Keys | What they do |
@@ -200,3 +220,10 @@ On the Mac, Settings → Phone → **Show a pairing link**, and open the link (o
 ---
 
 Orbit is made by **Runtian Wu** — [runtianwu.com](https://runtianwu.com) · [github.com/Micropeptide](https://github.com/Micropeptide). MIT licensed.
+
+## Backing cluster files up to the lab NAS
+
+Cluster page → **Back up to the NAS…**. Orbit does not carry the data: for each folder you add (on HPC or Cassini) it writes a small rsync script on that cluster and submits it as a batch job, so the copy runs on a compute node and goes straight from the cluster to the NAS. It **only adds**: nothing on the NAS is ever deleted, and a file that changed keeps its earlier copy in a dated `_versions` folder. Alignments, reads, temporary and work folders are left out by default (the list is yours to edit); results, scripts and logs are kept. **Check** lists what would be copied without copying; **Back up now** copies; the schedule runs it by itself (default 02:30 every day) and tells you how each folder went.
+
+One-time setup, each a button: the NAS address, user and folder; **Look at its fingerprint** (compare it with the NAS's own, then trust it: the cluster will only copy to a NAS with that fingerprint); **Set up the key on <cluster>** (it makes a key on the cluster and shows its public half, which you add to the NAS user's authorized keys once). On Cassini the jobs are named `MP_nasbackup_…`, use only your lab's partition, stay off the GPU nodes and write only inside your own folder.
+

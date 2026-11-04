@@ -396,6 +396,80 @@ class TestClaudeEngine(unittest.TestCase):
         self.assertNotIn("test-ce", CE.LIVE)
         self.assertNotIn(CE.bg_tasks("test-ce")[0]["status"], ("running", "pending"))
 
+    def test_an_answer_claude_starts_by_itself_is_handed_to_the_server(self):
+        """A background task reports back and Claude Code answers unasked: that must become an ordinary
+        answer (shown, saved, chat marked answering), not sit unread until the next message."""
+        import collections, json as _j
+        called = []
+        saved = CE.ON_SELFDRIVE; CE.ON_SELFDRIVE = called.append
+        self.addCleanup(setattr, CE, "ON_SELFDRIVE", saved)
+        class P:  # a kept process that is still running
+            def poll(self): return None
+        lines = collections.deque([_j.dumps({"type": "assistant", "parent_tool_use_id": "t1", "message": {"content": []}}).encode(),
+                                   _j.dumps({"type": "assistant", "message": {"content": []}}).encode(),
+                                   _j.dumps({"type": "assistant", "message": {"content": []}}).encode()])
+        CE.LIVE["adopt-test"] = {"proc": P(), "lines": lines, "host": None, "used": time.time()}
+        self.addCleanup(CE.LIVE.pop, "adopt-test", None)
+        CE.watch_live()
+        self.assertEqual(called, ["adopt-test"], "a background subagent's step is not an answer; the chat's own text is, once")
+
+    def test_following_an_answer_with_nothing_running_ends_at_once(self):
+        out, ev = self.run_turn([{"role": "system", "content": "s"}], CE.ADOPT)
+        self.assertEqual(out, "")
+        self.assertEqual(ev[-1][0], "done")
+
+    def test_approving_a_plan_can_switch_to_accepting_edits(self):
+        """The plan card's first choice: carry it out and accept file edits -- Claude Code's own setMode update."""
+        seen = {}
+        def approve(fn, args, reason, info=None):
+            seen.update(fn=fn, plan=args.get("plan"))
+            return {"allow": True, "always": True, "pattern": "mode:acceptEdits"}
+        ctx = {"cfg": dict(CE.DEFAULTS), "read_only": False, "emit": lambda *a: None, "approve": approve, "roots": [], "sid": None}
+        ok, note, upd, perms = CE.decide("ExitPlanMode", {"plan": "1. do it"}, ctx, {})
+        self.assertTrue(ok)
+        self.assertEqual(seen["plan"], "1. do it")
+        self.assertEqual(perms[0]["type"], "setMode"); self.assertEqual(perms[0]["mode"], "acceptEdits")
+
+    def test_the_chats_cost_so_far_is_kept_from_claude_codes_own_figure(self):
+        self.serve([[{"text": "hello"}]])
+        self.run_turn([{"role": "system", "content": "s"}], "hi")
+        cost = CE.chat_prefs("test-ce").get("cost_usd")
+        if cost is None: self.skipTest("this Claude Code reported no cost")
+        self.assertGreaterEqual(cost, 0)
+        self.addCleanup(CE.set_chat_pref, "test-ce", cost_usd=None)
+
+    def test_thinking_budget_and_sandbox_are_passed_on_only_when_set(self):
+        import json as _j
+        env = {}; CE._subagent_model(env)
+        self.assertNotIn("MAX_THINKING_TOKENS", env)
+        saved = dict(CE.cfg()); self.addCleanup(lambda: None)
+        orig = CE.cfg
+        CE.cfg = lambda: {**CE.DEFAULTS, "max_thinking_tokens": 8000, "sandbox": True}
+        self.addCleanup(setattr, CE, "cfg", orig)
+        env = {}; CE._subagent_model(env)
+        self.assertEqual(env["MAX_THINKING_TOKENS"], "8000")
+        sp, mp = CE.launcher_files({**CE.DEFAULTS, "sandbox": True}, "t-sb")
+        self.addCleanup(lambda: [os.remove(f) for f in (sp, mp) if f and os.path.exists(f)])
+        self.assertTrue(_j.load(open(sp))["sandbox"]["enabled"])
+
+    def test_the_conversation_is_cached_for_the_hour_asked_for(self):
+        """The request Claude Code sends carries the cache lifetime: asking for an hour gives 1h, and 5m gives the short one."""
+        def ttls():
+            return {b.get("ttl") for r in self.requests() for blk in (r.get("system") or []) + [
+                    c for m in r.get("messages", []) if isinstance(m.get("content"), list) for c in m["content"]]
+                    for b in [blk.get("cache_control") or {}] if isinstance(blk, dict) and b}
+        orig = CE.cfg
+        self.addCleanup(setattr, CE, "cfg", orig)
+        CE.cfg = lambda: {**orig(), "prompt_cache_ttl": "1h"}
+        self.serve([[{"text": "one"}]])
+        self.run_turn([{"role": "system", "content": "s"}], "hi")
+        self.assertIn("1h", ttls(), self.requests()[:1])
+        # and the other way round, so the check cannot pass by accident
+        CE.cfg = lambda: {**orig(), "prompt_cache_ttl": "5m"}
+        self.serve([[{"text": "two"}]])
+        self.run_turn([{"role": "system", "content": "s2"}], "hi again")
+        self.assertNotIn("1h", ttls(), "5m asked for, 1h sent")
+
     def test_stop_mid_answer(self):
         self.serve([[{"text": "Starting a long job"}, {"sleep": 30}, {"text": " never"}]])
         cancel = threading.Event()
@@ -519,7 +593,7 @@ class TestClaudeEngine(unittest.TestCase):
         st = json.load(open(sp))
         self.assertEqual(st["skillOverrides"].get("docx"), "off")
         self.assertNotIn("pubmed-database", st["skillOverrides"])
-        self.assertEqual(CE.launcher_files(dict(CE.DEFAULTS), "t", skills=["x"])[0], None)   # off: Claude lists all
+        self.assertNotIn("skillOverrides", json.load(open(CE.launcher_files(dict(CE.DEFAULTS), "t", skills=["x"])[0])))   # off: Claude lists all
 
     def test_your_claude_setup_is_changed_in_claude(self):
         src = os.path.join(self.tmp, "repo")
@@ -971,6 +1045,57 @@ class _DeadProc:
     def poll(self): return 0
     def wait(self, timeout=None): return 0
 
+
+
+class TestClaudeCodeFallback(unittest.TestCase):
+    """Claude Code changes model by itself when its safeguards flag a session: Orbit says so, plainly, and names the model that answers."""
+    EV = {"type": "system", "subtype": "model_refusal_fallback", "trigger": "refusal", "direction": "retry", "scope": "session",
+          "originalModel": "claude-opus-5-5", "fallbackModel": "claude-opus-4-8", "apiRefusalCategory": "cyber",
+          "content": "Opus 5.5's safeguards flagged this session. ... Details: `[cyber]`"}
+
+    def test_model_ids_read_as_names(self):
+        for mid, name in (("claude-opus-4-8", "Claude Opus 4.8"), ("claude-sonnet-5", "Claude Sonnet 5"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+                          ("claude-haiku-4-5-20251001", "Claude Haiku 4.5"), ("some-other-model", "some-other-model"), (None, "")):
+            self.assertEqual(CE.pretty_model(mid), name)
+
+    def test_the_fallback_is_read_from_the_event_and_said_in_one_line(self):
+        f = CE.fallback_info("model_refusal_fallback", self.EV)
+        self.assertEqual((f["from_label"], f["to_label"], f["category"], f["scope"]), ("Claude Opus 5.5", "Claude Opus 4.8", "cyber", "session"))
+        text = CE.fallback_text(f)
+        self.assertIn("Opus 5.5", text); self.assertIn("Opus 4.8", text); self.assertIn("cyber", text); self.assertIn("rest of this session", text)
+        self.assertNotIn("Claude Opus", text)                     # short names in the line
+
+    def test_an_event_that_names_no_model_is_left_to_the_generic_notice(self):
+        self.assertIsNone(CE.fallback_info("model_refusal_no_fallback", {"subtype": "model_refusal_no_fallback", "message": "declined"}))
+
+    def test_every_run_asks_for_thinking_summaries_unless_switched_off(self):
+        import json as _j
+        sp, _ = CE.launcher_files({"profile": "standard"}, "ttest")
+        self.assertTrue(_j.load(open(sp)).get("showThinkingSummaries"))
+        sp2, _ = CE.launcher_files({"profile": "standard", "thinking_summaries": False}, "ttest2")
+        self.assertFalse(sp2 and _j.load(open(sp2)).get("showThinkingSummaries"))
+
+    def test_orbit_leaves_claude_codes_own_shell_timeout_alone(self):
+        env = CE.harness_env("http://127.0.0.1:1", "m", 100000)
+        self.assertNotIn("BASH_DEFAULT_TIMEOUT_MS", env)
+        sub = CE.harness_env(None, "sonnet", 200000)
+        self.assertNotIn("BASH_DEFAULT_TIMEOUT_MS", sub)
+
+    def test_claude_settings_can_be_merged_or_replaced_whole(self):
+        import tempfile, json as _j
+        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, True)
+        saved = (os.environ.get("ORBIT_CLAUDE_CONFIG_DIR"), CE._work_dir)
+        os.environ["ORBIT_CLAUDE_CONFIG_DIR"] = d; CE._work_dir = lambda: d
+        try:
+            _j.dump({"a": 1, "permissions": {"allow": ["x"]}}, open(os.path.join(d, "settings.json"), "w"))
+            self.assertEqual(CE.write_claude_settings({"b": 2, "permissions": {"deny": ["y"]}}), {"a": 1, "permissions": {"allow": ["x"], "deny": ["y"]}, "b": 2})
+            self.assertEqual(CE.write_claude_settings({"a": None}), {"permissions": {"allow": ["x"], "deny": ["y"]}, "b": 2})
+            self.assertEqual(CE.write_claude_settings({"only": True}, replace=True), {"only": True})
+            self.assertTrue(os.listdir(os.path.join(d, "backups")))                                  # the old file was kept
+        finally:
+            if saved[0] is None: os.environ.pop("ORBIT_CLAUDE_CONFIG_DIR", None)
+            else: os.environ["ORBIT_CLAUDE_CONFIG_DIR"] = saved[0]
+            CE._work_dir = saved[1]
 
 
 if __name__ == "__main__":

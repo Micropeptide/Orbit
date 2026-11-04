@@ -471,6 +471,71 @@ class TestReadAgainByItself(unittest.TestCase):
         self.assertFalse(a["cached"]); self.assertTrue(b["cached"]); self.assertIn("read_at", b); self.assertIn("7", self.c.public()["history"])
 
 
+class TestAPlainSlurmCluster(unittest.TestCase):
+    """A second cluster on an account other people share: no `h2`, a login shell that is not bash, and only the jobs with my prefix."""
+    GPUS = ("#nodes\ncompute-6-11|gpu:3080ti:2|idle|32|1031941|900000|32/0/0/32\ncompute-6-19|gpu:l40s:4|drained*|48|515652|500000|0/0/48/48\n"
+            "compute-6-21|gpu:3090ti:1|idle|32|193145|97000|0/32/0/32\ncompute-6-22|gpu:3090ti:1|mixed|32|257660|168000|8/24/0/32\n#used\ncompute-6-22|gres:gpu:1\n")
+
+    def make(self, w=None):
+        tmp = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, tmp, True)
+        self.w = w or FakeWorld()
+        c = C.Cluster(os.path.join(tmp, "cluster.json"), self.w)
+        c.cfg.update(host="cassini", profile="slurm", label="Cassini", job_prefix="MP_", partitions="lab", avoid_nodes=["compute-6-11"])
+        return c
+
+    def test_gpus_are_read_from_sinfo_and_squeue_and_avoided_nodes_are_left_out(self):
+        g = C.parse_gpus_plain(self.GPUS, {"compute-6-11"})
+        self.assertEqual([n["node"] for n in g["nodes"]], ["compute-6-19", "compute-6-21", "compute-6-22"])
+        free = {n["node"]: n["free"] for n in g["nodes"]}
+        self.assertEqual(free, {"compute-6-19": 0, "compute-6-21": 1, "compute-6-22": 0})      # drained: none; one in use on the mixed one
+        self.assertEqual((g["free"], g["total"]), (1, 6))
+        self.assertEqual(C.fits(g["nodes"], 1)[0]["node"], "compute-6-21")
+
+    def test_only_jobs_with_my_prefix_survive_the_filter(self):
+        import subprocess
+        cmd = 'printf "1|MP_a|R\\n2|other|R\\n3|SAMPLE|R\\nerror text\\n"' + C.mine_only("MP_")
+        out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True).stdout.split("\n")
+        self.assertIn("1|MP_a|R", out); self.assertNotIn("2|other|R", out); self.assertNotIn("3|SAMPLE|R", out); self.assertIn("error text", out)
+        self.assertEqual(C.mine_only(""), "")
+
+    def test_the_look_is_plain_slurm_filtered_and_run_by_bash(self):
+        c = self.make(); self.w.look = "@@squeue\n"
+        c.look(force=True, slow=True)
+        sent = self.w.calls[-1]
+        self.assertTrue(sent.startswith("bash -c "))                    # the login shell there is tcsh
+        self.assertNotIn("h2 ", sent); self.assertNotIn("quota", sent)
+        self.assertIn("index($2,p)==1", sent); self.assertIn("-p lab", sent)
+
+    def test_cancel_only_my_prefixed_jobs_and_nothing_is_measured_or_listed(self):
+        class W(FakeWorld):
+            def ssh(s, host, cmd, timeout=30):
+                s.calls.append(cmd)
+                if "%i|%j" in cmd: return 0, "7002|MP_train|RUNNING"
+                return 0, ""
+        c = self.make(W())
+        with self.assertRaises(ValueError): c.cancel("999")
+        c.cancel("7002"); self.assertTrue(any("scancel" in x for x in self.w.calls))
+        with self.assertRaises(ValueError): c.du_start("home")
+        self.assertEqual(c.processes(), [])
+        with self.assertRaises(ValueError): c.stop_process(5)
+
+    def test_jobs_run_from_my_folder_are_mine_whatever_they_are_called_and_the_app_is_named(self):
+        import subprocess
+        d = "/share/gscratch/yuxing_backup/micropeptide"
+        cmd = ('printf "1|MP_cs|R|' + d + '/jobs/a\\n2|renamed|R|' + d + '/jobs/b\\n3|theirs|R|/share/gscratch/yuxing_backup/other\\n'
+               '4|alsotheirs|R|' + d + 'x/c\\n"' + C.mine_only("MP_", [d]))
+        out = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True).stdout
+        self.assertIn("1|MP_cs", out); self.assertIn("2|renamed", out); self.assertNotIn("3|theirs", out); self.assertNotIn("4|alsotheirs", out)
+        c = self.make(); c.cfg["via"] = {"MP_cs": "Claude Science"}
+        snap = c._tag_via({"jobs": [{"name": "MP_cs"}, {"name": "x"}], "recent": [{"name": "MP_cs"}]})
+        self.assertEqual([j.get("via") for j in snap["jobs"] + snap["recent"]], ["Claude Science", None, "Claude Science"])
+
+    def test_explaining_a_job_uses_the_schedulers_own_record(self):
+        c = self.make(); self.w.look = ""
+        c.explain("7002", "why")
+        self.assertIn("scontrol show job", self.w.calls[-1]); self.assertNotIn("h2 ", self.w.calls[-1])
+
+
 class TestSimulated(unittest.TestCase):
     def test_the_sandbox_cluster_gives_a_complete_picture_and_runs_nothing(self):
         tmp = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, tmp, True)

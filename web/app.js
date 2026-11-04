@@ -18,6 +18,17 @@ let PASTES={}, pasteN=0, PLANS={}, histPos=-1, draftT=null;
 
 const CMDS=[
  {c:'/new',d:'start a fresh chat'},
+ {c:'/notify',d:'/notify <minutes>: tell me (Mac and phone) when an answer or background task that took longer than this finishes; 0 turns it off'},
+ {c:'/width',d:'text width: normal, wide or full — each use steps to the next'},
+ {c:'/side',d:'show or hide the side panel on wide screens (what this chat is doing, queued messages, your other chats)'},
+ {c:'/keys',d:'your own shortcuts, and Claude Code\'s keybindings.json'},
+ {c:'/cloud',d:'continue a cloud session, resume a pull request\'s session, or start remote control (in the terminal)'},
+ {c:'/mcp-servers',d:'MCP servers: which are connected, sign in to those that need it, reload plugins and skills'},
+ {c:'/background',d:'sessions Claude Code runs on its own, with no window: start, read, stop'},
+ {c:'/bg',d:'/bg <task>: hand a task to Claude Code to do in the background, in this chat\'s folder'},
+ {c:'/subagents',d:'the subagents Claude can hand work to, each on a model you choose (cheap or strong)'},
+ {c:'/hooks',d:'the hooks Claude Code runs, from your settings'},
+ {c:'/claude-options',d:'subagent model, spending limit, subagent text and when Claude compacts'},
  {c:'/rename',d:'rename this chat: /rename <title>'},
  {c:'/handoff',d:'a note to carry this chat on in Claude desktop, or another Claude session'},
  {c:'/crew',d:'a builder and a reviewer that keep improving a project until you stop them'},
@@ -942,6 +953,19 @@ function bottom(force){            // only auto-scroll if the user is already at
  if(force)stickToBottom=true}
 function sysline(t){const n=el(`<div class=sysline>${esc(t)}</div>`);
  wrap.appendChild(n);bottom();return n}
+// Claude Code changed model by itself (its safeguards flagged the session, so a lower model answers): a card that says so, with the way back
+function fallbackCard(f,text,live){
+ const b=el('<div class="injwarn limitnote fbcard"><span class=fbt></span> <span class=fbact></span></div>');
+ b.querySelector('.fbt').textContent='\u21e3 '+text;
+ const act=b.querySelector('.fbact');
+ const short=s=>String(s||'').replace(/^Claude /,'');
+ if(live){const r=el(`<button class=ghost style="margin-left:6px">Retry on ${esc(short(f.from_label))}</button>`);
+  r.title='Send your last message again, from before it was answered, and see whether '+short(f.from_label)+' takes it this time';
+  r.onclick=()=>{const us=[...wrap.querySelectorAll('.msg.u')],last=us[us.length-1];
+   const btn=last&&[...last.querySelectorAll('.acts button')].find(x=>x.textContent==='retry');if(btn)btn.click()};
+  act.appendChild(r)}
+ if(f.more){const a=el('<a target=_blank rel=noopener style="margin-left:8px;font-size:var(--fs-xs)">why</a>');a.href=f.more;act.appendChild(a)}
+ return b}
 // POST that tells you when it did not work. Several actions used to fail in
 // silence: the list simply redrew unchanged and you were left guessing.
 async function apiPost(path, body, what){
@@ -1232,13 +1256,20 @@ function rowState(s){
 function chatRow(s,box){
  const st=rowState(s);
  const src=extSource(s);
- const d=el(`<div class="sitem${s.id===sid?' on':''}${st.cls?' st-'+st.cls:''}${s.external?' external':''}" title="${esc(s.title||'')}">
-   <span class=stc title="${esc(st.tip)}">${st.icon}</span><span class=t></span>${
+ // the second line says where a chat lives and what sets it apart from its namesakes;
+ // it is left off when there is nothing to say, so a plain row stays one line
+ const pj=s.project&&PROJECTS[s.project];
+ const sub=[];
+ if(pj&&GROUP_BY!=='project'&&!projFilter)
+  sub.push(`<span class=sproj><span class=gsw style="background:${esc(pj.color||PCOLORS[0])}"></span><span class=pn>${esc(pj.name||'Project')}</span></span>`);
+ if((TITLE_N[String(s.title||'').trim().toLowerCase()]||0)>1)
+  sub.push(`<span class=dupmark title="Other chats have this same name. This one has ${s.n||0} messages and was last active ${esc(new Date((s.mtime||0)*1000).toLocaleString())}.">${(s.n||0)>=1000?((s.n/1000).toFixed(1)+'k msgs'):((s.n||0)+(s.n===1?' msg':' msgs'))}</span>`);
+ if(s.host)sub.push(`<span class=hostmark title="runs on ${esc(s.host)} over SSH">${esc(s.host)}</span>`);
+ const d=el(`<div class="sitem${s.id===sid?' on':''}${st.cls?' st-'+st.cls:''}${s.external?' external':''}${sub.length?' two':''}" title="${esc(s.title||'')}">
+   <span class=stc title="${esc(st.tip)}">${st.icon}</span><span class=tw><span class=t></span>${sub.length?`<span class=sub>${sub.join('')}</span>`:''}</span>${
    s.goal&&s.goal!=='complete'?`<span class=goalmark title="goal: ${esc(s.goal)}">◎</span>`:''}${
    s.parent?`<span class=goalmark title="started by “${esc(s.parent.title||'')}”">↳</span>`:''}${
-   s.pinned?'<span class=pinmark title="pinned">★</span>':''}${
-   (TITLE_N[String(s.title||'').trim().toLowerCase()]||0)>1?`<span class=dupmark title="Other chats have this same name. This one has ${s.n||0} messages and was last active ${esc(new Date((s.mtime||0)*1000).toLocaleString())}.">${(s.n||0)>=1000?((s.n/1000).toFixed(1)+'k'):(s.n||0)} msgs</span>`:''}${
-   s.host?`<span class=hostmark title="runs on ${esc(s.host)} over SSH">${esc(s.host)}</span>`:''}<span class=ago title="${esc(new Date((s.mtime||0)*1000).toLocaleString())} · ${s.n||0} messages">${agoShort(s.mtime)}</span><button class=more title="Actions">⋯</button></div>`);
+   s.pinned?'<span class=pinmark title="pinned">★</span>':''}<span class=ago title="${esc(new Date((s.mtime||0)*1000).toLocaleString())} · ${s.n||0} messages">${agoShort(s.mtime)}</span><button class=more title="Actions">⋯</button></div>`);
  d.querySelector('.t').textContent=s.title||'(untitled)';
  // answering: how long it has been at it, counting up
  if(RUNNING.has(s.id)&&RUN_SINCE[s.id]){const ag=d.querySelector('.ago');ag.classList.add('elapsed');
@@ -1249,10 +1280,11 @@ function chatRow(s,box){
    chatMenu({clientX:r.left,clientY:r.bottom},s);return}
   showPane('log');openSession(s.id)};
  d.oncontextmenu=e=>{e.preventDefault();chatMenu(e,s)};
- // drag a chat onto a project to move it there
+ // drag a chat onto a project to move it there: the project list opens to be dropped on
  if(!s.external){d.draggable=true;
-  d.ondragstart=e=>{e.dataTransfer.setData('sid',s.id);d.classList.add('dragging')};
-  d.ondragend=()=>d.classList.remove('dragging')}
+  d.ondragstart=e=>{e.dataTransfer.setData('sid',s.id);d.classList.add('dragging');
+   setTimeout(()=>{if(typeof openProjPop==='function'&&d.classList.contains('dragging'))openProjPop($('#projpick'),{drop:true})},0)};
+  d.ondragend=()=>{d.classList.remove('dragging');if(typeof closePop==='function'&&POP&&POP._drop)closePop()}}
  box.appendChild(d);return d}
 const EXT_SOURCES=[
  {key:'claude',label:'From Claude Code',tip:"Sessions from the Claude CLI and Claude's desktop app — open one to continue it here, in the same Claude session"},
@@ -1287,12 +1319,14 @@ function groupedRows(list,box,prefix,term){
    lastGroup=g;
    const recent=byProj||['Pinned','Today','Yesterday','Previous 7 days','Previous 30 days'].includes(g);
    const open=term?true:PREF.get(prefix+g,recent?'1':'0')==='1';
+   const pid=byProj&&s.project&&PROJECTS[s.project]?s.project:null;
    const h=el(`<div class="daygroup${open?'':' closed'}"><span class=caret>▾</span>${
-     byProj&&s.project&&PROJECTS[s.project]?`<span class=gsw style="background:${esc(PROJECTS[s.project].color||PCOLORS[0])}"></span>`:''
-    } ${esc(g)} <span class=gct></span></div>`);
+     pid?`<span class=gsw style="background:${esc(PROJECTS[pid].color||PCOLORS[0])}"></span>`:''
+    }<span class=gn>${esc(g)}</span><span class=gct></span>${pid?'<button class=gadd title="New chat in this project">+</button><button class=gmore title="Project menu">⋯</button>':''}</div>`);
+   if(pid&&typeof projHeadWire==='function')projHeadWire(h,pid);
    groupBody=el(`<div class=grpbody${open?'':' style="display:none"'}></div>`);
    const gb=groupBody;
-   h.onclick=()=>{const now=gb.style.display==='none';gb.style.display=now?'':'none';
+   h.onclick=e=>{if(e.target.closest('.gadd,.gmore'))return;const now=gb.style.display==='none';gb.style.display=now?'':'none';
     h.classList.toggle('closed',!now);PREF.set(prefix+g,now?'1':'0')};
    box.appendChild(h);box.appendChild(groupBody)}
   chatRow(s,groupBody);
@@ -1339,11 +1373,15 @@ function renderSessions(force){
    &&(!term||(s.title||'').toLowerCase().includes(term)));
  const list=all_.filter(s=>!extSource(s)||(!s.external&&RUNNING.has(s.id)));
  const inList=new Set(list.map(s=>s.id));
- $('#chatct').textContent=list.length||'';
- $('#chatslbl').textContent=projFilter&&PROJECTS[projFilter]?PROJECTS[projFilter].name:(filterMode==='attention'?'Needs attention':'Chats');
- if(!list.length)box.innerHTML=`<div class=note style="padding:10px 8px;font-size:12.5px">${
+ $('#chatct').textContent=all_.length||'';
+ if(typeof syncPick==='function')syncPick();
+ if(!list.length&&all_.length)box.innerHTML='';       // what there is lives in the sections below
+ else if(!list.length)box.innerHTML=`<div class=note style="padding:10px 8px;font-size:12.5px">${
    term?'No titles match — ⌘P searches inside chats too.':filterMode==='archived'?'No archived chats.':
-   filterMode==='attention'?'Nothing is answering or waiting for you.':'No chats here yet.'}</div>`;
+   filterMode==='attention'?'Nothing is answering or waiting for you.':
+   filterMode==='pinned'?'Nothing is pinned. Use ⋯ on a chat to pin it.':
+   projFilter&&PROJECTS[projFilter]?'No chats in this project yet. <a class=lnk id=emptynew>Start one</a>':'No chats here yet.'}</div>`;
+ const en=$('#emptynew');if(en)en.onclick=()=>newChat();
  else groupedRows(list,box,'grp_',term);
  // conversations that began outside Orbit: each agent in its own section, folded until opened
  const ext=$('#extsecs');ext.innerHTML='';
@@ -1581,11 +1619,15 @@ function attachLive(theSid, initial){
 let OPEN_GEN=0;
 async function openSession(id){
  const gen=++OPEN_GEN;
+ document.querySelectorAll('#log .earlier').forEach(x=>x.remove());
  stopLive();
  findClose();                                  // its hits belong to the chat leaving
  if(tempMode){tempMode=false;$('#tempbtn').style.borderColor='';$('#tempbtn').style.color='';
   $('#burnbtn').style.display='none'}          // a saved chat is never temporary
- const d=await (await fetch('/api/session/'+id)).json();
+ // Only the newest messages are asked for (a long chat is tens of megabytes, almost all of it tool output nobody sees at
+ // first), or the part you left off at; older ones come in pieces as you scroll up.
+ const left0=POS[id], since=(left0&&!left0.b&&Number.isInteger(left0.mi))?Math.max(0,left0.mi-20):null;
+ const d=await (await fetch('/api/session/'+id+'?tail=60'+(since!=null?'&since='+since:''))).json();
  if(gen!==OPEN_GEN)return;                     // you opened something else while it loaded
  if(d.error)return sysline('could not open: '+d.error);
  if(sid&&sid!==d.sid){clearTimeout(draftT);saveDraft(sid)}
@@ -1596,6 +1638,7 @@ async function openSession(id){
  WATCH_SID=d.sid;WATCH_N=(typeof d.n==='number')?d.n:null;   // what this page now shows
  if(UNSEEN[d.sid]){delete UNSEEN[d.sid];syncUnseen()}
  markSeenOnMac(d.sid);
+ actFromSaved(d.sid,d.messages);drawActivity();
  if(d.parent&&d.parent.sid){const pl=el('<div class="sysline parentline">started by <a class=chatlink href="#"></a> — messages marked “from” it are its work for you; you can talk here too</div>');
   pl.querySelector('a').dataset.chat=d.parent.sid;pl.querySelector('a').textContent=d.parent.title||'another chat';
   wrap.insertBefore(pl,wrap.firstChild)}
@@ -1615,38 +1658,59 @@ async function openSession(id){
  if(d.running)setTimeout(()=>{
   // The message this answer is for may not be in the saved chat yet: a queued one has just left the queue, and the
   // engine writes it into the chat a moment later. Without this it vanished from the list until the answer ended.
-  const lu=((d.live||{}).user||'').trim(), lastSaved=((d.messages.filter(m=>m.role==='user'&&!m.note).pop()||{}).text||'').trim();
+  const lu=((d.live||{}).user||'').trim(), lastSaved=(typeof d.last_user==='string'?d.last_user:((d.messages.filter(m=>m.role==='user'&&!m.note).pop()||{}).text||'')).trim();
   if(lu&&sid===d.sid&&lu!==lastSaved&&!(lastSaved&&lastSaved.startsWith(lu.slice(0,200))))userNode({text:lu,t:(d.live||{}).since||Date.now()/1000});
   attachLive(d.sid,d.live||{})},60);
  else if(STATUS_SID===d.sid&&!SENDING.has(d.sid))stopStatus(d.sid);     // it finished while you were away
  // user-message index in the saved chat, for fork (earlier ones may not be drawn)
- let ui=0;const uix=d.messages.map(m=>m.role==='user'?ui++:-1);
+ // What is here: arr holds entries lo.. of the chat (the server sent the newest ones; earlier ones are added in front)
+ const total=typeof d.total==='number'?d.total:d.messages.length;
+ let arr=d.messages, lo=d.base||0, ubase=d.users_before||0, uix=[];
+ const reidx=()=>{let u=ubase;uix=arr.map(m=>m.role==='user'?u++:-1)};reidx();
  const drawMsg=(m,i,merge)=>{let n;
-  if(m.role==='notice')n=sysline(m.text||'');
+  if(m.role==='notice'){if(m.fallback){n=fallbackCard(m.fallback,m.text||'',false);wrap.appendChild(n)}else n=sysline(m.text||'')}
   else if(m.role!=='user')n=savedAssistant(m,merge).m;
-  else{n=userNode(m);n.dataset.ui=uix[i]}
+  else{n=userNode(m);n.dataset.ui=uix[i-lo]}
   if(n&&n.dataset)n.dataset.mi=i;return n};
  // The newest messages are drawn first and older ones are added as you scroll up, without moving what you are reading
  // (like Claude's desktop app): no "load earlier" button, and no jump to the top.
  const CAP=60, CHUNK=50;
  // ...but when you left this chat part-way up, the window starts just above where you were
- const left=POS[d.sid], target=(left&&!left.b&&Number.isInteger(left.mi)&&left.mi<d.messages.length&&d.messages.length-left.mi<=400)?left:null;
- let older=Math.max(0,d.messages.length-CAP), loadingOlder=false;
- if(target)older=Math.min(older,Math.max(0,target.mi-20));
- const loadEarlier=()=>{
+ const left=POS[d.sid], target=(left&&!left.b&&Number.isInteger(left.mi)&&left.mi<total&&total-left.mi<=400)?left:null;
+ let older=Math.max(lo,Math.max(0,total-CAP)), loadingOlder=false;
+ if(target)older=Math.max(lo,Math.min(older,Math.max(0,target.mi-20)));
+ const loadEarlier=async(count)=>{
   if(!older||loadingOlder||gen!==OPEN_GEN)return;
   loadingOlder=true;
-  const from=Math.max(0,older-CHUNK), prevH=log.scrollHeight, prevTop=log.scrollTop;
+  const from=Math.max(0,older-(count||CHUNK));
+  if(from<lo){                                          // not here yet: ask for the part just before what we have
+   const b=log.querySelector('.earlier');if(b)b.textContent='loading earlier messages…';
+   let r=null;
+   try{r=await (await fetch('/api/session_range/'+encodeURIComponent(d.sid)+'?from='+from+'&to='+lo)).json()}catch(e){}
+   if(gen!==OPEN_GEN)return;
+   if(!r||r.error||!Array.isArray(r.messages)||r.messages.length!==lo-from){loadingOlder=false;drawEarlier();return}
+   ubase-=r.messages.filter(m=>m.role==='user').length;
+   arr=r.messages.concat(arr);lo=from;reidx()}
+  const prevH=log.scrollHeight, prevTop=log.scrollTop;
   const first=wrap.querySelector('.parentline')?wrap.querySelector('.parentline').nextSibling:wrap.firstChild;
-  for(let i=from;i<older;i++){const n=drawMsg(d.messages[i],i);wrap.insertBefore(n,first&&first.parentNode===wrap?first:wrap.firstChild)}
+  for(let i=from;i<older;i++){const n=drawMsg(arr[i-lo],i);wrap.insertBefore(n,first&&first.parentNode===wrap?first:wrap.firstChild)}
   older=from;
   wrap.querySelectorAll('.msg.a').forEach(markCont);
   log.scrollTop=prevTop+(log.scrollHeight-prevH);        // keep the same message under your eyes
-  loadingOlder=false};
+  loadingOlder=false;drawEarlier()};
+ // Said out loud: only the newest messages are drawn at first, and the rest used to appear silently as you scrolled
+ // up -- which read as the older ones being lost.
+ const drawEarlier=()=>{
+  let b=log.querySelector('.earlier');
+  if(!older||gen!==OPEN_GEN){if(b)b.remove();return}
+  if(!b){b=el('<button class=earlier></button>');wrap.before(b);
+   b.onclick=()=>loadEarlier(CHUNK*4)}
+  b.textContent='↑ '+older+' earlier message'+(older===1?'':'s')+' — show'};
  if(log._older)log.removeEventListener('scroll',log._older);
  log._older=()=>{if(log.scrollTop<400)loadEarlier()};
  if(older)log.addEventListener('scroll',log._older,{passive:true});
- d.messages.forEach((m,i)=>{if(i>=older)drawMsg(m,i,i>older)});
+ arr.forEach((m,k)=>{const i=lo+k;if(i>=older)drawMsg(m,i,i>older)});
+ drawEarlier();
  if(PREF.get('foldtools','1')==='1')foldTurns();
  chatChanged(d.prefs);                        // easy mode, the branch, the find bar
  {const sel=$('#agentsel');if(sel&&[...sel.options].some(o=>o.value===(d.agent||'')))sel.value=d.agent||''}
@@ -1658,7 +1722,13 @@ async function openSession(id){
  // thought you were following the end, so after reading back in another chat it opened at the very top.
  {const nd=target&&wrap.querySelector('[data-mi="'+target.mi+'"]');
   if(nd){stickToBottom=false;log.scrollTop=nd.getBoundingClientRect().top-log.getBoundingClientRect().top+log.scrollTop-(target.off||0)}
-  else bottom(true);
+  else{
+   // A chat you have not read here yet (or a long answer you left at its end): open at the start of the newest answer
+   // when it is longer than the screen, so you read it from its first line, not from its last paragraph.
+   const last=!d.running&&[...wrap.querySelectorAll('.msg.a')].pop();
+   if(last&&last.offsetHeight>log.clientHeight*0.9&&wrap.lastElementChild===last&&!(POS[d.sid]&&POS[d.sid].b)){
+    stickToBottom=false;log.scrollTop=last.getBoundingClientRect().top-log.getBoundingClientRect().top+log.scrollTop-12}
+   else bottom(true)}
   setTimeout(()=>{if(gen===OPEN_GEN)POS_READY=true},400)}
  refreshStatus();loadModels().then(drawClaudeBar);
  if(typeof sideOpen==='function'&&matchMedia('(max-width:820px)').matches)sideOpen(false)}
@@ -1809,6 +1879,17 @@ async function runCmd(cmd,rest){
   q.value=rest;setTimeout(()=>go({goal:true}),0);return true}
  if(cmd==='/terminal'){toggleTerm(true);return true}
  if(cmd==='/worktree'){openWorktree();return true}
+ if(cmd==='/notify'){setNotifyLong(rest);return true}
+ if(cmd==='/width'){cycleWidth();return true}
+ if(cmd==='/side'){toggleSide();return true}
+ if(cmd==='/keys'){openKeys();return true}
+ if(cmd==='/cloud'){openCloud();return true}
+ if(cmd==='/mcp-servers'){openMcp();return true}
+ if(cmd==='/background'){openBackground();return true}
+ if(cmd==='/bg'){if(!rest){openBackground();return true}startBackground(rest);return true}
+ if(cmd==='/subagents'){openSubagents();return true}
+ if(cmd==='/hooks'){openHooks();return true}
+ if(cmd==='/claude-options'){openClaudeOptions();return true}
  if(cmd==='/verbose'){setVerbose(!VERBOSE);return true}
  if(cmd==='/todos'){togglePlanDock();return true}
  if(cmd==='/usage'){if(MODELS.harness_mode)showClaudeUsage();else showStats(7);return true}
@@ -1849,7 +1930,7 @@ async function runCmd(cmd,rest){
   const val=(w===''||w==='on')?true:w==='off'?false:(w==='auto'||w==='default')?null:undefined;
   if(val===undefined){toast('usage: /stay on|off|auto');return true}
   await setStay(val);return true}
- if(cmd==='/resume'){showPane('log');const sb=$('#search')||$('#sq');if(sb)sb.focus();toast('open any chat in the list to carry on with it — Claude Code sessions from the terminal are listed too');return true}
+ if(cmd==='/resume'){showPane('log');if(typeof openFilter==='function')openFilter();else{const sb=$('#search')||$('#sq');if(sb)sb.focus()}toast('open any chat in the list to carry on with it — Claude Code sessions from the terminal are listed too');return true}
  if(cmd==='/hooks'||cmd==='/config'||cmd==='/mcp'||cmd==='/release-notes'||cmd==='/ide'){claudePanel();return true}
  if(cmd==='/effort'){const w=(rest||'').trim().toLowerCase();
   if(!w){openEnginePop(true);const e=$('#heffort');if(e)e.focus();return true}
@@ -1903,6 +1984,9 @@ let switching=null;                        // a chat switch still in flight
 async function newChat(){
  if(sid){clearTimeout(draftT);saveDraft(sid)}      // keep what you were typing with its chat
  const typed=q.value;
+ // Leaving a chat cancels what it was still doing to the page: an open that is mid-load, and the
+ // "older messages as you scroll up" hook, which otherwise paints the old chat's history into the new one.
+ ++OPEN_GEN;document.querySelectorAll('#log .earlier').forEach(x=>x.remove());if(log._older){log.removeEventListener('scroll',log._older);log._older=null}
  switching=(async()=>{
   // a failed request used to do nothing at all -- the old chat just stayed put
   // in the project the sidebar is showing, or none from "All chats"
@@ -2034,6 +2118,8 @@ q.addEventListener('keydown',e=>{
 // An approval prompt — from this tab's own stream, or found waiting in a chat
 // opened from another window, so it can be answered from wherever you are.
 function approvalBox(p){
+ // a plan Claude wants approved is read as a plan, not as a tool call (app5.js)
+ if(p.claude&&p.name==='ExitPlanMode'&&p.args&&p.args.plan&&window.planCard)return window.planCard(p);
  // Claude Code's permission prompt: what it wants to do, "Do you want to proceed?",
  // and numbered choices you can pick with 1/2/3, the arrows and Enter, or Esc for "no".
  const box=el('<div class="approve ccask" tabindex=0 title="click here, then 1 / 2 / 3, arrows and Enter, or Esc"></div>');
@@ -2221,7 +2307,7 @@ async function drawClaudeBar(){
  let b=$('#cqbar');
  if(!(isClaudeChat()||isCodexChat())||!sid){if(b)b.style.display='none';return}
  if(!b){b=el(`<span id=cqbar><select title="Claude Code permission mode for this chat — changes a running answer too">${
-   Object.entries(CQ_MODES).map(([k,v])=>`<option value=${k}>${v}</option>`).join('')}</select><span class=cqdir title="the folder this chat's Claude session works in"></span><span class=cqi title="Claude Code session">Claude Code</span></span>`);
+   Object.entries(CQ_MODES).map(([k,v])=>`<option value=${k}>${v}</option>`).join('')}</select><span class=cqdir title="the folder this chat's Claude session works in"></span><span class=cqcost style="display:none"></span><span class=cqi title="Claude Code session">Claude Code</span></span>`);
   (($('#planmode'))||$('#title')).after(b);
   b.querySelector('select').onchange=async e=>{
    if(e.target.value==='bypassPermissions'&&!confirm('Bypass: Claude Code runs every tool — shell commands, edits, deletions — without asking. Use it only in a folder you can afford to lose. Switch?')){
@@ -2235,6 +2321,11 @@ async function drawClaudeBar(){
  try{CQ_INFO=await (await fetch('/api/claude/info?sid='+encodeURIComponent(sid))).json();CQ_INFO.sid_for=sid}catch(e){return}
  b.querySelector('select').value=(CQ_INFO.prefs||{}).permission_mode||(CQ_INFO.settings||{}).permission_mode||CQ_INFO.claude_default_mode||'default';
  drawModeHint();
+ try{drawStatusLine(CQ_INFO)}catch(e){}
+ try{drawCacheChip(CQ_INFO)}catch(e){}
+ {const cc=b.querySelector('.cqcost'),usd=(CQ_INFO.prefs||{}).cost_usd,cap=+((CQ_INFO.settings||{}).max_budget_usd)||0;
+  if(cc){cc.style.display=usd!=null?'':'none';cc.textContent=usd!=null?'$'+(+usd).toFixed(usd<1?3:2)+(cap?' of $'+cap:''):'';
+   cc.title='What this chat has cost so far, at Claude\'s list prices — on a plan you pay nothing extra for it.'+(cap?' A run stops at $'+cap+' (Settings → Claude options).':'')}}
  const dir=CQ_INFO.cwd||CQ_INFO.cwd_pref||CQ_INFO.cwd_default;const chip=b.querySelector('.cqdir');
  const rh=CQ_INFO.host;
  chip.textContent=(rh?'🖥 '+rh+':':'📁 ')+(dir?dir.replace(/^\/Users\/[^/]+/,'~'):(rh?'~':'workspace'));
@@ -2269,6 +2360,7 @@ function fmtCtx(n){n=+n||0;return n>=1e6?(Math.round(n/1e5)/10+'M'):n>=1000?Math
 function providerOf(id){id=id||'';if(id.startsWith('claude-qwen-cli'))return 'local';
  if(id.startsWith('agy-cli:'))return 'agy';
  if(id.startsWith('muse-cli:'))return 'muse';
+ if(id.startsWith('grok-cli:'))return 'grok';
  const m=id.match(/^(?:harness|codex):([^/]+)\//);return m?m[1]:''}
 const codexMode=()=>!!MODELS.codex_mode&&!MODELS.harness_mode;
 // What runs on this Mac first, then your models on a server (custom providers), then the hosted ones: the order of the list.
@@ -2302,7 +2394,8 @@ var ENGINES=[
  {id:'claude',label:'Claude Code',mode:'claude',tip:'Claude Code runs the chat — on your Claude plan or any provider'},
  {id:'codex',label:'Codex',mode:'codex',tip:"Codex runs the chat — on your ChatGPT account or any provider"},
  {id:'agy',label:'Antigravity',cli:'agy-cli:',tip:"Google's Antigravity CLI, on your Antigravity sign-in"},
- {id:'muse',label:'Muse Code',cli:'muse-cli:',tip:"Meta's Muse Code agent, on your Meta sign-in or API key"}];
+ {id:'muse',label:'Muse Code',cli:'muse-cli:',tip:"Meta's Muse Code agent, on your Meta sign-in or API key"},
+ {id:'grok',label:'Grok',cli:'grok-cli:',tip:"xAI's Grok CLI agent, on your Grok sign-in or xAI API key"}];
 function engineOfModel(id){id=id||'';
  const c=ENGINES.find(e=>e.cli&&id.startsWith(e.cli));if(c)return c.id;
  if(id.startsWith('codex:'))return 'codex';
@@ -2359,7 +2452,8 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')openEnginePop(false)
 // Antigravity and Gemini CLI are not Claude Code or Codex providers: their models are the Mac's own signed-in
 // CLIs. They sit in the same picker, so any chat can move to them from either mode.
 const CLI_PROVIDERS=[{id:'agy',prefix:'agy-cli:',label:'Antigravity (CLI)',group:'Antigravity'},
- {id:'muse',prefix:'muse-cli:',label:'Muse Code (CLI)',group:'Muse Code'}];
+ {id:'muse',prefix:'muse-cli:',label:'Muse Code (CLI)',group:'Muse Code'},
+ {id:'grok',prefix:'grok-cli:',label:'Grok (CLI)',group:'Grok'}];
 async function fillHarnessModels(pid,cur,refresh){
  const ms=$('#hmodel');
  const cli=CLI_PROVIDERS.find(c=>c.id===pid);
@@ -2677,6 +2771,39 @@ async function renderHarnessModels(box){
   if(!run.length&&!Object.keys(have).length)host.appendChild(el(`<div class=note style="margin:2px 0 2px 138px">No runtime found. Easiest: install Ollama (<code>brew install ollama</code>), then <code>ollama run muse-glimmer</code>.</div>`));
  };
  drawM(false);
+ // Grok CLI (xAI's coding agent) as an engine: installed? signed in? a key?
+ const grokBox=el(`<div class=memrow style="display:block;margin:6px 0;padding:8px 10px;border:1px solid var(--line);border-radius:9px">
+   <b>xAI · Grok CLI</b> <span class=note>— xAI’s Grok Build coding agent, as an engine pill in the model popover; a chat keeps its own Grok session</span>
+   <div id=gcard style="margin-top:4px">checking…</div>
+   <div class=note>Sign in once with <code>grok login</code> (SuperGrok / X Premium Plus), or save an xAI API key below.</div></div>`);
+ box.appendChild(grokBox);
+ const drawGrok=async fresh=>{
+  let d;try{d=await (await fetch('/api/grok/status'+(fresh?'?fresh=1':''))).json()}catch(e){return}
+  const host=grokBox.querySelector('#gcard');host.innerHTML='';
+  const r=el(`<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:5px 0">
+    <b style="min-width:130px">Grok CLI</b><span class=note style="flex:1;min-width:180px"></span></div>`);
+  r.querySelector('.note').innerHTML=!d.installed?'not installed — xAI’s coding agent for the terminal'
+   :`✓ installed${d.version?' · '+esc(d.version):''}${d.models?' · '+d.models+' model'+(d.models===1?'':'s'):''}${d.key_set?' · xAI key saved':''}`;
+  const add=(t,fn,tip)=>{const b=el('<button class=ghost></button>');b.textContent=t;if(tip)b.title=tip;
+   b.onclick=async()=>{b.disabled=true;const was=b.textContent;b.textContent='…';try{await fn()}finally{b.disabled=false;b.textContent=was}};r.appendChild(b)};
+  if(!d.installed)add('Install in the terminal',()=>terminalDo(d.install,false),'types the install command; you press Enter');
+  else{add('Sign in in the terminal',()=>terminalDo('grok login',true),'opens a terminal and runs: grok login');
+   add('Test',async()=>{const t=await apiPost('/api/grok/test',{},'testing');
+    toast(t&&t.ok?'Grok: answering':'Grok: '+((t&&t.detail)||'no answer'),t&&t.ok?undefined:7000);await drawGrok(true);delete HPROV_CACHE.models;loadModels()},'a one-word question')}
+  host.appendChild(r);
+  const kr=el(`<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:5px 0">
+    <b style="min-width:130px">xAI API key</b>
+    <input type=password autocomplete=off spellcheck=false placeholder="${d.key_set?'saved — paste to replace':'xai-…'}" style="flex:1;min-width:200px">
+    <button class=ghost data-a=save>Save key</button>${d.key_set?'<button class=ghost data-a=remove>Remove</button>':''}</div>`);
+  const inp=kr.querySelector('input');
+  kr.querySelector('[data-a=save]').onclick=async()=>{if(!inp.value.trim())return;
+   const x=await apiPost('/api/secrets/save',{secrets:{XAI_API_KEY:inp.value.trim()}},'saving the key');
+   if(x){toast('xAI key saved — press Test to check it');inp.value='';drawGrok(true)}};
+  const rm=kr.querySelector('[data-a=remove]');
+  if(rm)rm.onclick=async()=>{if(!confirm('Remove the saved xAI key? Grok then uses its own sign-in.'))return;
+   await apiPost('/api/secrets/save',{secrets:{XAI_API_KEY:''}},'removing the key');drawGrok(true)};
+  host.appendChild(kr)};
+ drawGrok(false);
  const hidden=new Set();(h.providers||[]).forEach(p=>p.models.forEach(m=>{if(m.hidden)hidden.add('harness:'+p.id+'/'+m.id)}));
  const saveReg=async patch=>apiPost('/api/harness/save',patch,'saving models');
  (h.providers||[]).forEach(p=>{
@@ -3050,11 +3177,17 @@ async function claudePanel(){
    <div class=sec>While it answers</div>
    <button class=ghost id=cqctx ${d.running?'':'disabled'}>context usage</button>
    <button class=ghost id=cqmcp ${d.running?'':'disabled'}>MCP status</button>
+   <div class=sec>Claude Code tools</div>
+   <button class=ghost id=cq_mcps>MCP servers &amp; sign-in</button> <button class=ghost id=cq_reload>Reload plugins</button>
+   <button class=ghost id=cq_sub>Subagents</button> <button class=ghost id=cq_hooks>Hooks</button>
+   <button class=ghost id=cq_bg>Background sessions</button> <button class=ghost id=cq_keys>Shortcuts</button> <button class=ghost id=cq_cloud>Cloud &amp; PRs</button> <button class=ghost id=cq_opt>Options</button>
    <pre id=cqout style="display:none"></pre></div></div></div>`;
  if(d.resume){$('#cqres').textContent=d.resume;$('#cqcopy').onclick=()=>copy(d.resume)}
  $('#cqx').onclick=closeModal;
  const show=async sub=>{const r=await apiPost('/api/claude/control',{sid,subtype:sub},sub);const o=$('#cqout');
   o.style.display='';o.textContent=JSON.stringify(r,null,1).slice(0,6000)};
+ $('#cq_mcps').onclick=()=>openMcp();$('#cq_reload').onclick=()=>reloadPlugins();$('#cq_sub').onclick=()=>openSubagents();
+ $('#cq_hooks').onclick=()=>openHooks();$('#cq_bg').onclick=()=>openBackground();$('#cq_keys').onclick=()=>openKeys();$('#cq_cloud').onclick=()=>openCloud();$('#cq_opt').onclick=()=>openClaudeOptions();
  $('#cqctx').onclick=()=>show('get_context_usage');$('#cqmcp').onclick=()=>show('mcp_status');
  host.querySelector('.modal').onclick=e=>{if(e.target.classList.contains('modal'))closeModal()}}
 // Plan mode: it may read and think but change nothing, until switched off.
@@ -3458,16 +3591,17 @@ async function go(opts){
     if(away){
      if(m.k==='end')endP=m.p||{};
      else if(m.k==='error')errored=true;
-     else if(m.k==='tool')answer='';                 // the answer is the text after the last tools
+     else if(m.k==='tool'){answer='';actClear(sendSid);if(m.p&&m.p.id)actStart(sendSid,m.p.id,(TOOLVERB[toolName(m.p.name)]||toolName(m.p.name))+' '+toolTarget(m.p.name,m.p.args))}                 // the answer is the text after the last tools
+     else if(m.k==='tool_result'&&m.p&&m.p.id)actEnd(sendSid,m.p.id,m.p.ok!==false&&!m.p.stopped);
      else if(m.k==='content_delta')answer+=m.p;
-     else if(m.k==='approval_request')notify(sendSid,'Needs your approval',m.p.name||'');
-     else if(m.k==='question')notify(sendSid,'Orbit has a question',m.p.question||'');
+     else if(m.k==='approval_request'){notify(sendSid,'Needs your approval',m.p.name||'');actWait(sendSid,'Waiting for your approval: '+toolName(m.p.name||''))}
+     else if(m.k==='question'){notify(sendSid,'Orbit has a question',m.p.question||'');actWait(sendSid,'Waiting for your answer: '+String(m.p.question||'').slice(0,100))}
      else if(m.k==='goal_offer'){setGoalOffer(sendSid,m.p)}
      continue}
     // a finished call closes its row; the plan/diff/images branches below still run
     if(m.k==='tool_result'&&m.p&&m.p.id&&trows[m.p.id]){
-     finishTool(trows[m.p.id],m.p);groupTool(trows[m.p.id],0,true);statusSay('')}
-    if(m.k==='thinking_delta'||m.k==='content_delta')nextStep();
+     finishTool(trows[m.p.id],m.p);groupTool(trows[m.p.id],0,true);statusSay('');actEnd(sendSid,m.p.id,m.p.ok!==false&&!m.p.stopped)}
+    if(m.k==='thinking_delta'||m.k==='content_delta'){nextStep();actClear(sendSid)}
     if(m.k==='thinking_delta'){
      if(!thinking){                             // first reasoning token
       tThink=performance.now();a.think._at=clockTime();
@@ -3504,7 +3638,8 @@ async function go(opts){
        lastRender=performance.now();a.bub.innerHTML=md(answer);bottom()},80)}}
     else if(m.k==='tool'){
      {const d=toolName(m.p.name);
-      statusSay((TOOLVERB[d]||d)+' '+toolTarget(m.p.name,m.p.args).slice(0,40))}
+      statusSay((TOOLVERB[d]||d)+' '+toolTarget(m.p.name,m.p.args).slice(0,40));
+      actClear(sendSid);actStart(sendSid,m.p.id,(TOOLVERB[d]||d)+' '+toolTarget(m.p.name,m.p.args))}
      if(m.p.id){const r=toolRow(m.p);trows[m.p.id]=r;a.tools.appendChild(r);
       const ai=autoTags.findIndex(x=>x.name===m.p.name);
       if(ai>=0){const x=autoTags.splice(ai,1)[0];const tg=el('<span class=autotag>auto</span>');
@@ -3525,7 +3660,7 @@ async function go(opts){
     else if(m.k==='tool_summary'){toolSummaryLine(m.p&&m.p.ids,m.p&&m.p.text)}
     else if(m.k==='bgtask'){bgNote(sendSid,m.p)}
     else if(m.k==='subagent_done'){subagentDone(trows[m.p.parent],m.p.subagent);bottom()}
-    else if(m.k==='approval_request'){a.tools.appendChild(approvalBox(m.p));bottom();
+    else if(m.k==='approval_request'){a.tools.appendChild(approvalBox(m.p));bottom();actWait(sendSid,'Waiting for your approval: '+toolName(m.p.name||''));
      notify(sendSid,'Needs your approval',m.p.name+(m.p.reason?' — '+m.p.reason:''))}
     else if(m.k==='auto_approved'){
      // Claude Code does not stop to say so: the call's own line gets a small "auto" tag
@@ -3594,7 +3729,7 @@ async function go(opts){
         :`the server sleeps after ${(INFO.settings&&INFO.settings.idle_min)||20} min idle — `
          +`first message after that reloads ~15 GB of weights`}</div>`;
      bottom()}
-    else if(m.k==='question'){a.tools.appendChild(questionBox(m.p));bottom();
+    else if(m.k==='question'){a.tools.appendChild(questionBox(m.p));bottom();actWait(sendSid,'Waiting for your answer: '+String(m.p.question||'').slice(0,100));
      notify(sendSid,'Orbit has a question',m.p.question||'')}
     else if(m.k==='plan_nudge'||m.k==='fail_streak'||m.k==='ultrathink'){
      sysline(m.p.msg||m.k)}
@@ -3690,6 +3825,8 @@ async function go(opts){
     else if(m.k==='notice'){
      // Claude Code's hooks report on every step; they fold into one line per answer
      if(/^hook\s/i.test(m.p.msg||'')){hookNote(sendSid,m.p.msg);continue}
+     if(m.p.kind==='model_fallback'&&m.p.fallback){a.m.appendChild(fallbackCard(m.p.fallback,m.p.msg||'',true));bottom();
+      notify(sendSid,'Claude Code changed model',m.p.msg||'');continue}
      if(m.p.kind==='limit'){const b=el('<div class="injwarn limitnote"></div>');b.textContent='\u23f8 '+(m.p.msg||'');
       a.m.appendChild(b);bottom();notify(sendSid,'Usage limit',m.p.msg||'');continue}
      sysline(m.p.msg||'')}
@@ -3719,7 +3856,7 @@ async function go(opts){
   renderThink(a.think.querySelector('.body'),thinking,tmarks)}
  if(thinking&&!answer){a.think.classList.remove('live');thinkLabel(a,thoughtFor())}
  if(!answer)a.bub.textContent=lost?'(the connection dropped — following the answer again)'
-                              :(stoppedSid===sendSid)?'(stopped before it wrote anything)':'(no answer)';
+                              :(stoppedSid===sendSid&&!RUNNING.has(sendSid))?'(stopped before it wrote anything)':RUNNING.has(sendSid)?'(still working — following it)':'(no answer)';
  else {a.bub.innerHTML=md(answer);decorate(a.bub)}
  setTimeout(()=>recheckMissing(a.m),2500);          // files it said it would make, made since
  const took=endP&&endP.secs!=null?endP.secs:(performance.now()-t0)/1000;

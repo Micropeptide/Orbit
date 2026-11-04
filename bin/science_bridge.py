@@ -97,16 +97,16 @@ TOOLS = [
           {"thread": S("The thread name."), "wait_s": I("Seconds to wait (0 to 600).", minimum=0, maximum=MAX_WAIT_S)}, ["thread"]),
     _tool("orbit_threads", "Your conversations with Orbit, with how many unread messages each has.", {}),
     _tool("orbit_end_thread", "Close a conversation you are finished with.", {"thread": S("The thread name.")}, ["thread"]),
-    _tool("orbit_cluster_status", "A summary of the person's HPC jobs, grouped by job name: counts of pending, running, completed and failed, and which failed. Cheap; use it instead of reading logs. "
+    _tool("orbit_cluster_status", "A summary of the person's cluster jobs (HPC unless `cluster` says otherwise), grouped by job name: counts of pending, running, completed and failed, and which failed. Cheap; use it instead of reading logs. "
           "`match` limits it to job names containing that text (e.g. the prefix you gave a batch).",
-          {"match": S("Part of the job name; empty for everything."), "refresh": {"type": "boolean", "description": "Look at the cluster now instead of using the last look (at most once a minute)."}}),
+          {"cluster": S("Which cluster: hpc (the default), or another one Orbit watches, such as cassini."), "match": S("Part of the job name; empty for everything."), "refresh": {"type": "boolean", "description": "Look at the cluster now instead of using the last look (at most once a minute)."}}),
     _tool("orbit_cluster_wait", "Wait inside Orbit, at no cost to you, until no job whose name contains `match` is pending or running, or the time is up; then the same summary. Use this instead of polling. "
           "Set stop_on_failures to come back early as soon as that many jobs have failed, so you can react without waiting for the whole array.",
-          {"match": S("Part of the job name (required, so it waits for your batch and not for everything)."), "wait_s": I("Longest wait in seconds (0 to 600).", minimum=0, maximum=MAX_WAIT_S),
+          {"cluster": S("Which cluster: hpc (the default), or another one Orbit watches, such as cassini."), "match": S("Part of the job name (required, so it waits for your batch and not for everything)."), "wait_s": I("Longest wait in seconds (0 to 600).", minimum=0, maximum=MAX_WAIT_S),
            "stop_on_failures": I("Return early once this many matching jobs have failed (0 = never).", minimum=0, maximum=1000)}, ["match"]),
-    _tool("orbit_cluster_output", "The last lines of a running or just-finished HPC job's output file.", {"job": S("The job id, e.g. 123456 or 123456_7."), "lines": I("How many lines (10 to 400).", minimum=10, maximum=400)}, ["job"]),
+    _tool("orbit_cluster_output", "The last lines of a running or just-finished cluster job's output file (HPC unless `cluster` says otherwise).", {"cluster": S("Which cluster: hpc (the default), or another one Orbit watches, such as cassini."), "job": S("The job id, e.g. 123456 or 123456_7."), "lines": I("How many lines (10 to 400).", minimum=10, maximum=400)}, ["job"]),
     _tool("orbit_cluster_events", "What Orbit's cluster watcher noticed recently: jobs that finished or failed, with the cause it worked out. Cheaper than reading output files.",
-          {"minutes": I("How far back (default 120).", minimum=5, maximum=1440), "match": S("Part of the job name or text; empty for all.")}),
+          {"cluster": S("Which cluster: hpc (the default), or another one Orbit watches, such as cassini."), "minutes": I("How far back (default 120).", minimum=5, maximum=1440), "match": S("Part of the job name or text; empty for all.")}),
     _tool("orbit_notify", "Show the person a notice on their Mac and phone (for example when a long batch has finished).", {"title": S("Short title."), "text": S("The message.")}, ["title", "text"]),
     # -- Orbit itself: the person's own chats, Crew, shared projects, cluster models. Off until the person allows it for this app; every change waits for their yes in Orbit.
     _tool("orbit_chats", "List the person's own Orbit chats (id, title, model, size, how long ago). Titles only, no message text. Use the id with orbit_chat_read or orbit_chat_send. Needs the person to have allowed this app to act on Orbit.",
@@ -649,13 +649,20 @@ class Bridge:
     def t_orbit_cancel(self, a, c):
         j = self._mine(c, a.get("job")); self.cancel(j["id"]); return "stop requested"
 
-    def _cluster(self, match, refresh=False):
+    def _which(self, a):
+        """The cluster a call is about: nothing for the default (HPC), else the id the person set up (e.g. cassini)."""
+        c = a.get("cluster")
+        if c in (None, ""): return {}
+        if not isinstance(c, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,23}", c): raise BridgeError("cluster is an id such as hpc or cassini")
+        return {} if c == "hpc" else {"cluster": c}
+
+    def _cluster(self, match, refresh=False, **kw):
         if not isinstance(match, str) or len(match) > 80: raise BridgeError("match is part of a job name")
-        v = self.backend.cluster_view(match.strip(), bool(refresh))
+        v = self.backend.cluster_view(match.strip(), bool(refresh), **kw)
         return summarize_jobs(v.get("running"), v.get("recent"), match)
 
     def t_orbit_cluster_status(self, a, c):
-        return describe(self._cluster(a.get("match") or "", a.get("refresh") is True))
+        return describe(self._cluster(a.get("match") or "", a.get("refresh") is True, **self._which(a)))
 
     def t_orbit_cluster_wait(self, a, c):
         match = a.get("match")
@@ -663,7 +670,7 @@ class Bridge:
         end, first = self.now() + self._int(a.get("wait_s"), 0, min(MAX_WAIT_S, c.get("_max_wait", MAX_WAIT_S)), 300), True
         stop_at = self._int(a.get("stop_on_failures"), 0, 1000, 0)
         while True:
-            s = self._cluster(match, refresh=not first); first = False
+            s = self._cluster(match, refresh=not first, **self._which(a)); first = False
             if s["total"] and not s["active"]: return "All finished.\n" + describe(s)
             if stop_at and s["n_failed"] >= stop_at: return f"{s['n_failed']} jobs have failed; coming back early as you asked.\n" + describe(s)
             if self.now() >= end: return ("Still going after the wait; call again.\n" if s["total"] else "No job with that name yet.\n") + describe(s)
@@ -672,12 +679,12 @@ class Bridge:
     def t_orbit_cluster_output(self, a, c):
         jid = a.get("job")
         if not isinstance(jid, str) or not re.fullmatch(r"\d+(_\d+)?", jid): raise BridgeError("a job id like 123456 or 123456_7")
-        return self.backend.cluster_output(jid, self._int(a.get("lines"), 10, 400, 60))[:20_000]
+        return self.backend.cluster_output(jid, self._int(a.get("lines"), 10, 400, 60), **self._which(a))[:20_000]
 
     def t_orbit_cluster_events(self, a, c):
         m = a.get("match") or ""
         if not isinstance(m, str) or len(m) > 80: raise BridgeError("match is text")
-        rows = self.backend.cluster_events(self._int(a.get("minutes"), 5, 1440, 120))
+        rows = self.backend.cluster_events(self._int(a.get("minutes"), 5, 1440, 120), **self._which(a))
         rows = [r for r in rows if not m or m.lower() in (str(r.get("text")) + str(r.get("job"))).lower()][-40:]
         return "\n".join(f"{r.get('kind')}: {str(r.get('text'))[:200]}" + (f" — cause: {str(r['cause'])[:200]}" if r.get("cause") else "") for r in rows) or "Nothing noteworthy."
 

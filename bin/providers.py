@@ -156,6 +156,16 @@ CLI_BACKENDS = {
         "note": "Meta's coding agent. Install: curl -fsSL https://dev.meta.ai/install.sh | sh, then run muse once "
                 "to sign in (or save a Meta key in Settings)",
     },
+    # xAI's coding agent (Grok Build). Driven over ACP (`grok agent stdio`, bin/grok_acp.py) so a chat keeps
+    # its own Grok session. Signs in by browser (`grok login`) or reads XAI_API_KEY.
+    "grok-cli": {
+        "label": "Grok CLI", "bin": "grok",
+        "argv": ["agent", "stdio"], "acp": True,
+        "model_flag": "--model", "system_flag": None,
+        "models": [("", "Grok · its default model")],
+        "note": "xAI's Grok Build agent. Install: curl -fsSL https://x.ai/cli/install.sh | bash, then run grok once "
+                "to sign in (or save an xAI key in Settings)",
+    },
     "qwen-cli": {
         "label": "Qwen Code CLI", "bin": "qwen",
         "argv": ["-p"], "model_flag": "-m", "system_flag": None,
@@ -219,6 +229,9 @@ def _cli_routes(bid, b):
     elif bid == "agy-cli":
         seen = {r for r, _ in routes}
         routes += [(slug, f"Antigravity · {name}") for slug, name in agy_models() if slug not in seen]
+    elif bid == "grok-cli":
+        seen = {r for r, _ in routes}
+        routes += [(slug, f"Grok · {name}") for slug, name in grok_models() if slug not in seen]
     return routes
 
 
@@ -309,6 +322,100 @@ def muse_test(api_key="", timeout=120):
                            cwd=os.path.expanduser("~"))
     except subprocess.TimeoutExpired:
         return {"ok": False, "detail": f"no answer in {timeout}s: run muse in a terminal and sign in"}
+    except OSError as e:
+        return {"ok": False, "detail": str(e)}
+    said = (r.stdout or "").strip()
+    if r.returncode == 0 and said: return {"ok": True, "detail": "answering"}
+    return {"ok": False, "detail": (said or r.stderr or "no answer").strip()[-300:]}
+
+
+GROK_INSTALL = "curl -fsSL https://x.ai/cli/install.sh | bash"
+_GROK = {"at": 0.0, "version": None, "models_at": 0.0, "rows": []}
+GROK_FALLBACK = [("grok-build-0.1", "Grok Build 0.1")]
+
+
+def grok_status(fresh=False):
+    """Grok CLI on this Mac, for Settings: installed, its version, the commands. Never reads a credential."""
+    import subprocess, time
+    exe = which("grok")
+    if fresh or time.time() - _GROK["at"] > 600:
+        ver = None
+        if exe:
+            try:
+                r = subprocess.run([exe, "--no-auto-update", "version"], capture_output=True, text=True, timeout=15,
+                                   env=cli_env(exe), stdin=subprocess.DEVNULL)
+                out = (r.stdout or r.stderr).strip()
+                ver = out.splitlines()[0][:80] if out else None
+            except Exception:
+                ver = None
+        _GROK.update(at=time.time(), version=ver)
+    return {"installed": bool(exe), "path": exe, "version": _GROK["version"] if exe else None,
+            "install": GROK_INSTALL, "login": "grok", "docs": "https://docs.x.ai/build/overview",
+            "models": len(grok_models(max_age=0 if fresh else 3600)) if exe else 0}
+
+
+def parse_grok_models(out):
+    """[(slug, label)] from what `grok models` prints: JSON where it has it, else one model per line (the id
+    first, anything after it the label); headings, rules and prose are not models."""
+    out = (out or "").strip()
+    rows = []
+    if out[:1] in "[{":
+        try:
+            d = json.loads(out)
+            for m in (d if isinstance(d, list) else (d.get("models") or d.get("data") or [])):
+                if isinstance(m, str): rows.append((m, m))
+                elif isinstance(m, dict):
+                    slug = m.get("id") or m.get("slug") or m.get("name")
+                    if slug: rows.append((str(slug), str(m.get("displayName") or m.get("display_name") or m.get("label") or slug)))
+        except ValueError:
+            return []
+    else:
+        for line in out.splitlines():
+            line = line.strip().lstrip("*-• ").strip()
+            m = re.match(r"^(grok(?=[\w.\-]*[\d\-])[\w.\-]*)(?:\s+(.*))?$", line, re.I)
+            if m:
+                label = (m.group(2) or "").strip(" \t:|—–-()")
+                if label.lower() in ("default", "current", "selected"): label = m.group(1) + " (default)"
+                rows.append((m.group(1), label or m.group(1)))
+    seen, uniq = set(), []
+    for slug, label in rows:
+        if slug not in seen: seen.add(slug); uniq.append((slug, label))
+    return uniq
+
+
+def grok_models(max_age=3600):
+    """The models Grok offers this account, from `grok models`: [(slug, label)], kept for an hour. Falls back
+    to the one model the docs name when the CLI says nothing usable."""
+    import subprocess, time
+    if time.time() - _GROK["models_at"] < max_age and _GROK["rows"]: return list(_GROK["rows"])
+    exe = which("grok")
+    rows = []
+    if exe:
+        try:
+            r = subprocess.run([exe, "--no-auto-update", "models"], capture_output=True, text=True, timeout=30,
+                               env=cli_env(exe), stdin=subprocess.DEVNULL)
+            rows = parse_grok_models(r.stdout)
+        except Exception:
+            rows = []
+    rows = rows or (list(GROK_FALLBACK) if exe else [])
+    _GROK.update(models_at=time.time(), rows=rows)
+    return list(rows)
+
+
+def grok_test(api_key="", timeout=120):
+    """One tiny headless question, to see that Grok can answer: {"ok", "detail"}. Uses `api_key` (as
+    XAI_API_KEY) when given, else Grok's own sign-in."""
+    import subprocess
+    exe = which("grok")
+    if not exe: return {"ok": False, "detail": "not installed"}
+    env = cli_env(exe)
+    if api_key: env["XAI_API_KEY"] = api_key
+    try:
+        r = subprocess.run([exe, "--no-auto-update", "-p", "Reply with the single word OK.", "--output-format", "plain"],
+                           capture_output=True, text=True, timeout=timeout, env=env, stdin=subprocess.DEVNULL,
+                           cwd=os.path.expanduser("~"))
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "detail": f"no answer in {timeout}s: run grok in a terminal and sign in"}
     except OSError as e:
         return {"ok": False, "detail": str(e)}
     said = (r.stdout or "").strip()
@@ -562,6 +669,22 @@ def forget_cli_session(backend, session_id=None, before=None):
                             os.replace(tmp, jp)
                         except OSError:
                             pass
+    elif backend == "grok-cli":
+        exe = which("grok")
+        if exe and re.fullmatch(r"[0-9A-Za-z_\-]{8,64}", str(session_id or "")):
+            try:
+                subprocess.run([exe, "--no-auto-update", "sessions", "delete", str(session_id)], capture_output=True,
+                               timeout=60, stdin=subprocess.DEVNULL, env=cli_env(exe))
+                removed.append("grok session " + str(session_id))
+            except Exception:
+                pass
+            for pth in glob.glob(os.path.join(os.path.expanduser("~/.grok/sessions"), "**", f"*{session_id}*"), recursive=True):
+                try:
+                    if os.path.isdir(pth): shutil.rmtree(pth)
+                    else: os.remove(pth)
+                    removed.append(pth)
+                except OSError:
+                    pass
     elif backend == "opencode-cli":
         ids = {session_id} if session_id else set()
         if before is not None: ids |= (opencode_session_ids() - set(before))
@@ -671,6 +794,48 @@ def backend_source_ok(AG):
     return "muse-cli" in getattr(AG, "BACKEND_SOURCE", {})
 
 
+def _grok_dispatch(exe, system, prompt, resume_mk, AG, model, messages, emit, cancel, timeout, cwd, env_extra, temp,
+                   effort, read_only, autonomy):
+    """A Grok turn over ACP (bin/grok_acp.py). A chat that has a Grok session loads it and sends only what is
+    new; if that session is gone the whole conversation goes. A temporary chat's session is deleted after."""
+    import grok_acp
+    emit = emit or (lambda k, p: None)
+    env = {**cli_env(exe), **(env_extra or {})}
+    if not temp and resume_mk and resume_mk.get("cwd") and os.path.isdir(resume_mk["cwd"]): cwd = resume_mk["cwd"]
+    kw = dict(model=model if model and model != "default" else None, effort=effort, temp=temp, read_only=read_only,
+              autonomy=autonomy, env=env, emit=emit, cancel=cancel, timeout=timeout)
+    full = ((system + "\n\n" + prompt) if system else prompt)
+    got = None
+    try:
+        if resume_mk and not temp:
+            try:
+                got = grok_acp.run_turn(exe, _new_since_marker(AG, messages), cwd, resume=resume_mk["id"], **kw)
+            except grok_acp.GrokResumeError:
+                got = grok_acp.run_turn(exe, full, cwd, **kw)
+        else:
+            got = grok_acp.run_turn(exe, full, cwd, **kw)
+    except grok_acp.GrokError as e:
+        raise RuntimeError(str(e)) from None
+    msg = {"role": "assistant", "content": (got["text"] or "").strip() + ("\n\n_(stopped)_" if got.get("stopped") else "")}
+    if got.get("usage"): msg["usage"] = got["usage"]
+    if got.get("reasoning"): msg["reasoning_content"] = got["reasoning"]
+    if got.get("denied"):
+        how = ("Set this chat's autonomy to Auto or Full (Settings → Tools → Permissions, or the chat's own setting) and send it again."
+               if not read_only else "This chat is in Plan mode, which only reads; leave Plan mode to let it act.")
+        d = got["denied"]
+        emit("notice", {"msg": "Grok was not allowed to: " + "; ".join(f"`{x[:100]}`" for x in d[:3])
+                        + (f" (+{len(d) - 3} more)" if len(d) > 3 else "")
+                        + ". A headless run cannot ask you, so it refuses whatever needs a yes, and its answer may then be a guess. " + how,
+                        "kind": "permission"})
+        msg["denied"] = d[:10]
+    if temp:
+        if got.get("session"): forget_cli_session("grok-cli", got["session"])
+        return msg
+    if got.get("session") and AG is not None and "grok-cli" in getattr(AG, "BACKEND_SOURCE", {}):
+        msg["agent"] = {"source": AG.BACKEND_SOURCE["grok-cli"], "id": got["session"], "cwd": cwd or (resume_mk or {}).get("cwd") or ""}
+    return msg
+
+
 def agy_permission_flags(autonomy, read_only=False):
     """Antigravity's permission flags for a chat. A headless run (`agy -p`) cannot ask anyone, so
     whatever needs a yes is refused -- even `ls` on a folder outside its workspace, even with the
@@ -725,6 +890,9 @@ def _cli_stream_once(backend, model, messages, emit=None, cancel=None, timeout=9
     if backend == "muse-cli":
         return _muse_dispatch(exe, system, prompt, resume_mk, AG, model, messages, emit, cancel, timeout, cwd, env_extra,
                               temp, effort, read_only)
+    if backend == "grok-cli":
+        return _grok_dispatch(exe, system, prompt, resume_mk, AG, model, messages, emit, cancel, timeout, cwd, env_extra,
+                              temp, effort, read_only, autonomy)
     if resume_mk and backend in ("codex-cli", "opencode-cli", "agy-cli"):
         new = [m for m in AG.since_marker(messages) if m.get("role") in ("user", "assistant", "tool")]
         last = next((m for m in reversed(new) if m.get("role") == "user"), None) or \

@@ -26,7 +26,7 @@ data only) were checked on an iPhone 17 simulator paired with the live Mac, read
 | Chat list state marks (answering, waiting, new, queued, scheduled) | sidebar → Chats | Full | Chats tab → row marks and the status chips |
 | Chat row actions (rename, pin, tag, archive, project, export, delete) | right-click a row or its ⋯ | Full | Chats tab → row context menu and swipe actions |
 | Search everything, find in chat, jump to a message | ⌘P, ⌘F, ⌘G | Partial | Chats tab search (chat titles, message text, files); /find and /jump inside a chat; commands are not searched |
-| Projects (own instructions, folder, filing chats) | sidebar → Projects | Full | Chats → filter menu → Projects…, or row menu → Project |
+| Projects (own instructions, folder, filing chats) | sidebar → the heading above the chat list | Full | Chats → filter menu → Projects…, or row menu → Project |
 | Sessions from Claude Code, Codex and OpenCode | bottom of the sidebar chat list | Full | Chats tab → "From Claude Code / From Codex / From OpenCode" sections |
 | Home page under a new chat (what wants you, running, coming up, usage, allowances) | home page of a new chat | Full | new chat's home page in the Chats tab |
 | Sending: Enter, Shift+Enter, queue while answering, ⌘Enter to steer | message box | Full | message box: Send queues while it answers; hold Send or ⌘⇧↩ to steer |

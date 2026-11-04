@@ -31,6 +31,15 @@ BACKEND = "claude-qwen-cli"
 Q = None                       # qqcore, bound by qqcore itself (no import cycle)
 
 DEFAULTS = {
+    # Claude Code options Orbit now passes on (all off/empty = Claude's own behaviour)
+    "prompt_cache_ttl": "1h",       # how long Claude keeps the conversation so far warm between messages: "1h", "5m", or "" for Claude's own choice
+    "show_statusline": True,        # show the line your Claude Code statusLine command prints
+    "max_thinking_tokens": 0,       # cap how much Claude thinks per step (MAX_THINKING_TOKENS); 0 = Claude's own
+    "sandbox": False,               # run Bash inside Claude Code's sandbox (writes limited to the folder, no network by default)
+    "subagent_model": "",           # model for its subagents (Task tool): haiku, sonnet, opus or a model id
+    "max_budget_usd": 0,            # stop a run after this much spend (--max-budget-usd); 0 = no limit
+    "forward_subagent_text": False, # show what subagents say and think under their card (--forward-subagent-text)
+    "autocompact": "",              # "auto" or a token count: when Claude Code compacts (--autocompact)
     # Orbit's Claude Code mode is the claude-qwen CLI in a window: the same
     # command, your Claude setup (~/.claude) as is. The options below marked
     # "launcher" apply to the terminal command and to Orbit alike; the ones
@@ -197,6 +206,26 @@ def claude_account_for(sid=None, account=None):
     return CA.choose(Q.ROOT, secrets, pinned=pinned)
 
 
+def _subagent_model(env):
+    """Your own choice of model for Claude Code's subagents (Settings > Claude): a name Claude knows -- haiku, sonnet,
+    opus, or a full model id. Empty leaves it to the delegation setting below."""
+    try: m = str(cfg().get("subagent_model") or "").strip()
+    except Exception: m = ""
+    if m: env["CLAUDE_CODE_SUBAGENT_MODEL"] = m
+    # The conversation so far is kept warm on Claude's side between your messages, and a message after it has gone cold
+    # re-reads everything. Claude's own choice is an hour on a subscription and five minutes on an API key or another
+    # provider; asking for an hour everywhere means a reply after a coffee break is still cheap (an hour's cache costs a
+    # little more to write, and is written once).
+    try: ttl = str(cfg().get("prompt_cache_ttl") or "").strip()
+    except Exception: ttl = ""
+    if ttl in ("5m", "1h"):
+        env["CLAUDE_CODE_PROMPT_CACHE_TTL"] = ttl
+        env["CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL"] = ttl
+    try: t = int(cfg().get("max_thinking_tokens") or 0)
+    except (TypeError, ValueError): t = 0
+    if t > 0: env["MAX_THINKING_TOKENS"] = str(t)
+
+
 def _cheap_subagents(sid):
     """With delegation on, Claude Code's own subagents (its Task/Agent tool) run on the provider's small model."""
     try:
@@ -294,9 +323,10 @@ def harness_env(url, model, ctx, extra=None, small=None, auth=None):
     env["PATH"] = ":".join(p for p in paths if p)
     if url is None:
         # your Claude subscription: Claude Code signs in as it does in a terminal
-        env.update({"DISABLE_AUTOUPDATER": "1", "MCP_TOOL_TIMEOUT": "3600000", "BASH_DEFAULT_TIMEOUT_MS": "600000"})
+        env.update({"DISABLE_AUTOUPDATER": "1", "MCP_TOOL_TIMEOUT": "3600000"})
         if os.environ.get("ORBIT_CLAUDE_CONFIG_DIR"):
             env["CLAUDE_CONFIG_DIR"] = os.environ["ORBIT_CLAUDE_CONFIG_DIR"]
+        _subagent_model(env)
         env.update(extra or {})
         return env
     env.update({
@@ -320,11 +350,11 @@ def harness_env(url, model, ctx, extra=None, small=None, auth=None):
         "DISABLE_ERROR_REPORTING": "1",
         # a tool answered by Orbit may wait on your approval for minutes
         "MCP_TOOL_TIMEOUT": "3600000",
-        "BASH_DEFAULT_TIMEOUT_MS": "600000",
     })
     env.update(auth if auth is not None else {"ANTHROPIC_AUTH_TOKEN": "local-qwen"})
     if os.environ.get("ORBIT_CLAUDE_CONFIG_DIR"):
         env["CLAUDE_CONFIG_DIR"] = os.environ["ORBIT_CLAUDE_CONFIG_DIR"]
+    _subagent_model(env)
     env.update(extra or {})
     return env
 
@@ -355,7 +385,7 @@ def remote_target_env(target, env):
     import ssh_remote
     if target.get("subscription"):
         out = {k: v for k, v in (target.get("env") or {}).items()}
-        out.update({"DISABLE_AUTOUPDATER": "1", "MCP_TOOL_TIMEOUT": "3600000", "BASH_DEFAULT_TIMEOUT_MS": "600000"})
+        out.update({"DISABLE_AUTOUPDATER": "1", "MCP_TOOL_TIMEOUT": "3600000"})
         return out, None
     rport = ssh_remote.pick_port()
     provider = "local" if target.get("local") else target.get("provider")
@@ -720,6 +750,13 @@ def build_argv(c, *, session_id=None, resume=False, read_only=False, effort=None
     # identical system text across sessions and days: the local prompt cache keeps it
     if kind == "local":
         argv.append("--exclude-dynamic-system-prompt-sections")
+    # more of Claude Code's own options, each off until set
+    try:
+        if float(c.get("max_budget_usd") or 0) > 0: argv += ["--max-budget-usd", f"{float(c['max_budget_usd']):g}"]
+    except (TypeError, ValueError): pass
+    if c.get("forward_subagent_text"): argv.append("--forward-subagent-text")
+    ac = str(c.get("autocompact") or "").strip()
+    if ac and (ac == "auto" or ac.isdigit()): argv += ["--autocompact", ac]
     argv += [str(x) for x in (c.get("extra_args") or [])]
     return argv
 
@@ -790,6 +827,10 @@ def remote_delegation_files(host, rport, token, eagerness):
 def launcher_files(c, tag, skills=None, extra_servers=None, sid=None, temp=False):
     """--settings and --mcp-config files for one run (None where not needed)."""
     settings = {}
+    # Claude's newer models send their thinking back empty unless asked for a summary, so a chat that was thinking for a minute showed
+    # nothing at all but "deep in thought". Ask for the summaries: they stream in as the thinking goes on.
+    if c.get("thinking_summaries", True): settings["showThinkingSummaries"] = True
+    if c.get("sandbox"): settings["sandbox"] = {"enabled": True, "autoAllowBashIfSandboxed": True}
     if temp: settings["disableAllHooks"] = True        # plugin hooks (memory tools, loggers) would record the chat
     # A plugin's hooks expect that plugin's MCP tools to be there. Easy mode takes the
     # servers away, so the hooks go with them rather than firing at tools that are gone.
@@ -1195,6 +1236,9 @@ RUNS = {}            # Orbit chat id -> the Claude Code process answering in it
 BG_TASKS = {}        # orbit sid -> {task id: {"id", "kind", "description", "status", "since", "ended", "summary"}}
 _BG_LOCK = threading.Lock()
 
+ON_BG_DONE = None       # set by the server: called with (chat id, record) when a background task finishes
+
+
 def bg_task(sid, tid, **kw):
     """Record or update one background task of a chat; returns its record."""
     if not tid: return None
@@ -1208,20 +1252,51 @@ def bg_task(sid, tid, **kw):
         rec = tasks.setdefault(str(tid), {"id": str(tid), "kind": "task", "description": "",
                                           "status": "running", "since": time.time(), "ended": None})
         rec.update({k: v for k, v in kw.items() if v not in (None, "")})
+        rec["seen"] = time.time()
+        just_ended = False
         if rec["status"] not in ("running", "pending") and not rec.get("ended"):
-            rec["ended"] = time.time()
+            rec["ended"] = time.time(); just_ended = True
         # finished ones are kept a while so the list can say how they ended
         for k in [k for k, v in tasks.items() if v.get("ended") and time.time() - v["ended"] > 1800]:
             tasks.pop(k, None)
-        return dict(rec)
+        out = dict(rec)
+    if just_ended and ON_BG_DONE:
+        try: ON_BG_DONE(sid, out)
+        except Exception: pass
+    return out
+
+STALE_TASK_S = 25       # how long a task may go unheard-of, with no Claude Code there, before it is written off
+
+
+def _claude_alive(sid):
+    if sid in RUNS: return True
+    live = LIVE.get(sid)
+    try: return bool(live and live["proc"].poll() is None)
+    except Exception: return False
+
+
+def _reconcile_tasks(sid=None):
+    """A background task lives inside its chat's Claude Code. When that process is gone (it was closed, it crashed, the chat was
+    stopped) nothing will ever report the task ended, and it sat in the list as running for ever: it could not be stopped
+    (there was nothing to ask), and it held up every restart. Such a task is marked ended here."""
+    now = time.time()
+    with _BG_LOCK:
+        for k, tasks in BG_TASKS.items():
+            if sid not in (None, k) or _claude_alive(k): continue
+            for r in tasks.values():
+                if r.get("status") in ("running", "pending") and now - (r.get("seen") or r.get("since") or 0) > STALE_TASK_S:
+                    r.update(status="stopped", ended=now, note="its Claude Code was no longer running")
+
 
 def bg_tasks(sid=None):
     """Background tasks still running (and those ended in the last half hour), newest first."""
+    _reconcile_tasks(sid)
     with _BG_LOCK:
         rows = [dict(r, sid=s) for s, t in BG_TASKS.items() if sid in (None, s) for r in t.values()]
     return sorted(rows, key=lambda r: -(r.get("since") or 0))
 
 def bg_running(sid):
+    _reconcile_tasks(sid)
     with _BG_LOCK:
         return any(r["status"] in ("running", "pending") for r in (BG_TASKS.get(sid) or {}).values())
 
@@ -1403,7 +1478,9 @@ def stop_task(sid, tid):
     if r is None:                       # between answers: the kept process takes the request itself
         live = LIVE.get(sid)
         if not live or live["proc"].poll() is not None:
-            return {"error": "Claude Code is no longer running there"}
+            # nothing is running it any more, so there is nothing left to stop: say so and clear the entry
+            bg_task(sid, rec["id"], status="stopped")
+            return {"ok": True, "cleared": True, "note": "its Claude Code was no longer running, so it had already stopped"}
         try:
             with live["wlock"]:
                 live["proc"].stdin.write((json.dumps({"type": "control_request",
@@ -1411,9 +1488,14 @@ def stop_task(sid, tid):
                     "request": {"subtype": "stop_task", "task_id": rec["id"]}}) + "\n").encode())
                 live["proc"].stdin.flush()
         except (BrokenPipeError, OSError, ValueError):
-            return {"error": "Claude Code is no longer running there"}
+            bg_task(sid, rec["id"], status="stopped")
+            return {"ok": True, "cleared": True, "note": "its Claude Code was no longer running, so it had already stopped"}
     elif r.get("subtype") == "error" or r.get("error"):
-        return {"error": str(r.get("error") or "Claude Code could not stop it")[:200]}
+        why = str(r.get("error") or "Claude Code could not stop it")[:200]
+        if re.search(r"no such|not found|unknown task|already (ended|finished|stopped|completed)|not running", why, re.I):
+            bg_task(sid, rec["id"], status="stopped")            # it had ended on its own: the list was behind
+            return {"ok": True, "cleared": True, "note": "it had already ended"}
+        return {"error": why}
     bg_task(sid, rec["id"], status="stopped")
     return {"ok": True}
 
@@ -1874,6 +1956,9 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     T = q.TURN_CTX
     T.sid, T.project, T.read_only = sid, project, bool(read_only)
     T.changes = changes = []           # files this answer changes, shared with helper threads
+    adopting = user_content == ADOPT
+    if adopting and not (sid and sid in LIVE):
+        emit("done", None); return ""          # nothing left running to follow
     exe = which_claude()
     t_start = time.time()
     if not exe:
@@ -2096,8 +2181,10 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     mk["model"], mk["ctx_max"] = spec.get("id"), (q.chat_window(sid) or target["ctx"])
 
     now = time.time()
-    messages.append({"role": "user", "content": user_content, "t": now, "claude": dict(mk), **q.take_user_meta()})
-    umsg = messages[-1]
+    if adopting: umsg = {}                        # no message of yours: this answer began on its own
+    else:
+        messages.append({"role": "user", "content": user_content, "t": now, "claude": dict(mk), **q.take_user_meta()})
+        umsg = messages[-1]
     if sid: q.LAST_TURN.pop(sid, None)
 
     token = None
@@ -2301,8 +2388,9 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
     # what this Claude setup offers (slash commands with descriptions, agents, models)
     if not live:
         send({"type": "control_request", "request_id": "orbit-init", "request": {"subtype": "initialize"}})
-    send({"type": "user", "message": {"role": "user", "content": blocks},
-          "parent_tool_use_id": None, "session_id": mk["session"]})
+    if not adopting:
+        send({"type": "user", "message": {"role": "user", "content": blocks},
+              "parent_tool_use_id": None, "session_id": mk["session"]})
     pending = 1
     roots = [cwd, q.WORKSPACE]
     try:
@@ -2469,6 +2557,17 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                                         + int(u.get("cache_read_input_tokens") or 0)
                                         + int(u.get("cache_creation_input_tokens") or 0))
                     for b in msg.get("content") or []:
+                        # what the subagent says and thinks, when Claude Code is asked to forward it
+                        # (--forward-subagent-text): a line under its card, not counted as a tool call
+                        said = (b.get("text") if b.get("type") == "text" else b.get("thinking") if b.get("type") == "thinking" else "") or ""
+                        if said.strip():
+                            step = {"name": "Says" if b.get("type") == "text" else "Thinks",
+                                    "args": {"text": " ".join(said.split())[:300]}}
+                            sa["steps"].append(step); del sa["steps"][:-80]
+                            emit("subagent", {"parent": parent, "description": sa["description"], "type": sa["type"],
+                                              "name": step["name"], "args": step["args"], "tools": sa["tools"],
+                                              "tokens": sa["ctx"] + sa["out"], "secs": round(time.time() - sa["t0"], 1)})
+                            continue
                         if b.get("type") == "tool_use":
                             sa["tools"] += 1
                             step = {"name": b.get("name") or "tool", "args": _brief_args(b.get("input"))}
@@ -2706,6 +2805,16 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                     elif st == "task_notification" and (rec or {}).get("kind") != "agent":
                         msg = _system_notice(st, ev)
                         if msg: emit("notice", {"msg": msg, "kind": st})
+                elif st in ("model_fallback", "model_refusal_fallback", "model_consent_fallback") and fallback_info(st, ev):
+                    # Claude Code changed model by itself. Say so plainly, keep it in the chat, and label what it answers from now on
+                    # with the model that really answers (it used to say the one that was chosen)
+                    fb = fallback_info(st, ev); text = fallback_text(fb)
+                    emit("notice", {"msg": text, "kind": "model_fallback", "fallback": fb})
+                    messages.append({"role": "user", "content": text, "t": time.time(), "nudge": True, "notice": True, "fallback": fb})
+                    parts = label.split(" · ")
+                    label = " · ".join(parts[:1] + [f"{fb['to_label']} (fallback from {fb['from_label'].replace('Claude ', '', 1)})"] + parts[2:]) if len(parts) >= 3 else label
+                    emit("model", {"id": fb["to"], "label": label, "provider": "Claude Code", "fallback": fb})
+                    if cur is not None: cur["model"] = label
                 else:
                     msg = _system_notice(st, ev)
                     if msg: emit("notice", {"msg": msg, "kind": st})
@@ -2744,6 +2853,12 @@ def run_turn(messages, user_content, tools, emit=None, approve=None, cancel=None
                                            resumed=bool(resume))
                 except Exception: pass
                 note_context_window(sid, ev, model_hint=mk.get("model") if isinstance(mk, dict) else None)
+                # what this chat has cost so far, as Claude Code prices the session (list prices): the figure is the
+                # session's running total, so the latest one is the chat's
+                try:
+                    if sid and isinstance(ev.get("total_cost_usd"), (int, float)) and ev["total_cost_usd"] >= 0:
+                        set_chat_pref(sid, cost_usd=round(float(ev["total_cost_usd"]), 4))
+                except Exception: pass
                 if ev.get("is_error") and ev.get("subtype") not in ("success",):
                     result_err = ev.get("result") or _RESULT_ERRORS.get(ev.get("subtype")) or ev.get("subtype")
                 elif ev.get("subtype") in _RESULT_ERRORS:
@@ -2859,6 +2974,34 @@ _RESULT_ERRORS = {
 }
 
 
+_MODEL_ID = re.compile(r"^(?:claude-)?(opus|sonnet|haiku)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(?:\[1m\])?$")
+
+
+def pretty_model(mid):
+    """'claude-opus-4-8' -> 'Claude Opus 4.8' (and the id itself when it is not a Claude one)."""
+    m = _MODEL_ID.match(str(mid or "").strip())
+    return f"Claude {m[1].title()} {m[2]}" + (f".{m[3]}" if m[3] else "") if m else str(mid or "")
+
+
+def fallback_info(st, ev):
+    """What Claude Code says when it changes model by itself (its safeguards flagged the session and a lower model answers instead, or the
+    chosen model could not): which model, which one answered instead, why, and how far it reaches -> a dict, or None when it names no model."""
+    to, frm = ev.get("fallbackModel") or ev.get("fallback_model"), ev.get("originalModel") or ev.get("original_model")
+    if not to: return None
+    cat = str(ev.get("apiRefusalCategory") or "").strip()
+    return {"kind": st, "from": frm, "to": to, "from_label": pretty_model(frm), "to_label": pretty_model(to),
+            "category": cat, "trigger": ev.get("trigger") or "", "direction": ev.get("direction") or "", "scope": ev.get("scope") or "",
+            "more": "https://support.claude.com/en/articles/8106465" if ev.get("trigger") == "refusal" else ""}
+
+
+def fallback_text(f):
+    """The one line the chat shows for it."""
+    short = lambda s: s.replace("Claude ", "", 1)
+    why = ("its safeguards flagged this session" + (f" ({f['category']})" if f.get("category") else "")) if f.get("trigger") == "refusal" else "it could not answer"
+    return (f"{short(f['from_label'])} — {why}. Claude Code is answering with {short(f['to_label'])} instead"
+            + (" for the rest of this session" if f.get("scope") == "session" else "") + ".")
+
+
 def _system_notice(st, ev):
     """A line for the chat from one of Claude Code's other system events."""
     def g(*keys):
@@ -2962,6 +3105,10 @@ def close_live(sid=None, why=""):
         _live_saved()
 
 
+ADOPT = "\x00orbit-adopt\x00"        # run_turn(user_content=ADOPT): follow the answer a kept Claude Code started by itself
+ON_SELFDRIVE = None                  # set by the server: called with a chat id when its kept Claude Code starts answering unasked
+
+
 def watch_live():
     """Between answers, keep the background-task list current from a kept session's
     output: its task events are read where they wait for the next answer, not taken."""
@@ -2977,6 +3124,15 @@ def watch_live():
             # turn is writing now, and the process must not be closed under it
             if ev.get("type") in ("assistant", "stream_event", "user"): v["active_at"] = time.time()
             elif ev.get("type") == "result": v["active_at"] = 0
+            # An answer Claude Code starts by itself (a background task reported back) used to sit unread in this buffer
+            # until the next message, which then showed it all at once, and the chat read as idle meanwhile. Hand it to the
+            # server, which runs it as an ordinary answer: shown live, saved, and the chat marked as answering.
+            if (ev.get("type") in ("assistant", "stream_event") and not ev.get("parent_tool_use_id") and ON_SELFDRIVE
+                    and v.get("host") is None and time.time() - v.get("adopted_at", 0) > 5):
+                v["adopted_at"] = time.time()
+                try: ON_SELFDRIVE(k)
+                except Exception: pass
+                break
             if ev.get("type") == "assistant" and ev.get("parent_tool_use_id"):
                 # a background subagent's step, taken after its answer ended
                 steps = [{"name": b.get("name") or "tool", "args": _brief_args(b.get("input"))}
@@ -3580,6 +3736,16 @@ def import_session(orbit_sid):
     return orbit_sid
 
 
+_SYNC_SEEN = {}     # chat -> (chat file stamp, transcript path, its time): compared and nothing was new
+
+
+def _file_stamp(p):
+    try:
+        s = os.stat(p); return (s.st_mtime_ns, s.st_size)
+    except OSError:
+        return None
+
+
 def sync_session(orbit_sid, running=False):
     """A chat whose Claude session was continued somewhere else (a terminal):
     bring the new part in. True if the saved chat changed."""
@@ -3587,6 +3753,17 @@ def sync_session(orbit_sid, running=False):
     p = Q.session_path(orbit_sid)
     if not os.path.exists(p):
         return bool(import_session(orbit_sid))
+    # Looked at already and there was nothing new: opening a long chat parsed the whole chat file (and, if its transcript
+    # was newer, converted the whole transcript) every time just to find that out. Two stat calls say nothing has changed
+    # since; it is looked at again when the chat or its transcript does.
+    stamp = _file_stamp(p)
+    seen = _SYNC_SEEN.get(orbit_sid)
+    if stamp and seen and seen[0] == stamp:
+        if seen[1] is None: return False
+        try:
+            if os.path.getmtime(seen[1]) == seen[2]: return False
+        except OSError:
+            pass
     try:
         d = json.load(open(p))
     except Exception:
@@ -3594,14 +3771,19 @@ def sync_session(orbit_sid, running=False):
     if not isinstance(d, dict): return False
     msgs = d.get("messages") or []
     mk = marker_of(msgs)
-    if not mk: return False
+    if not mk:
+        if stamp: _SYNC_SEEN[orbit_sid] = (stamp, None, 0)
+        return False
     if mk.get("host"):
         _remote_sync_later(orbit_sid, mk, float(d.get("saved") or 0))
         return False
     path = jsonl_path(mk.get("session"), mk.get("cwd"))
     if not path: return False
     saved = float(d.get("saved") or 0)
-    if os.path.getmtime(path) <= saved + 2: return False
+    mtime = os.path.getmtime(path)
+    if mtime <= saved + 2:
+        if stamp: _SYNC_SEEN[orbit_sid] = (stamp, path, mtime)
+        return False
     # where this Claude session begins in the Orbit chat
     start = next((i for i, m in enumerate(msgs) if isinstance(m.get("claude"), dict)
                   and m["claude"].get("session") == mk["session"]), None)
@@ -3609,7 +3791,9 @@ def sync_session(orbit_sid, running=False):
     new, _title, cwd = convert(path)
     ours = [m for m in msgs[start:] if m.get("role") in ("user", "assistant")]
     theirs = [m for m in new if m.get("role") in ("user", "assistant")]
-    if len(theirs) <= len(ours): return False
+    if len(theirs) <= len(ours):
+        if stamp: _SYNC_SEEN[orbit_sid] = (stamp, path, mtime)
+        return False
     mk2 = {**mk, "cwd": cwd or mk.get("cwd")}
     for m in new:
         if m.get("role") == "user": m["claude"] = dict(mk2)
@@ -3833,8 +4017,8 @@ def read_claude_settings(scope="user", cwd=None):
         return {}
 
 
-def write_claude_settings(patch, scope="user", cwd=None):
-    """Merge a change into Claude's settings file (a key set to None is removed).
+def write_claude_settings(patch, scope="user", cwd=None, replace=False):
+    """Merge a change into Claude's settings file (a key set to None is removed); with `replace`, the patch is the whole new file.
     The previous file is kept in Orbit's config/claude/backups first."""
     path = claude_settings_path(scope, cwd)
     cur = read_claude_settings(scope, cwd)
@@ -3848,7 +4032,7 @@ def write_claude_settings(patch, scope="user", cwd=None):
             elif isinstance(v, dict) and isinstance(a.get(k), dict): merge(a[k], v)
             else: a[k] = v
         return a
-    new = merge(cur, patch or {})
+    new = dict(patch) if replace and isinstance(patch, dict) else merge(cur, patch or {})
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + f".{os.getpid()}.tmp"
     with open(tmp, "w") as fh:
